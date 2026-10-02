@@ -1,0 +1,114 @@
+name: xiaoqi_app
+description: Recovered from the 2026-10-02 Android debug APK
+publish_to: 'none'
+version: 1.0.0+5
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  archive: 4.2.0
+  audioplayers: 6.7.1
+  camera: 0.11.4
+  crypto: 3.0.7
+  cupertino_icons: 1.0.8
+  file_picker: 11.0.3
+  flutter_markdown: 0.7.7+1
+  flutter_math_fork: 0.7.4
+  flutter_quill: 11.5.0
+  flutter_svg: 2.3.0
+  gpt_markdown: 1.3.0
+  html: 0.15.6
+  http: 1.6.0
+  image: 4.9.1
+  image_picker: 1.2.2
+  livekit_client: 2.13.0
+  markdown: 7.3.1
+  meta: 1.17.0
+  mobile_scanner: 7.4.0
+  open_filex: 4.7.0
+  opencv_dart: 2.1.0
+  path: 1.9.1
+  path_provider: 2.1.5
+  pdfrx: 2.4.7
+  permission_handler: 11.4.0
+  phosphor_flutter: 2.1.0
+  photo_manager: 3.12.0
+  receive_sharing_intent: 1.8.1
+  record: 6.2.1
+  sensors_plus: 6.1.2
+  share_plus: 12.0.2
+  shared_preferences: 2.5.5
+  sherpa_onnx: 1.13.8
+  sqflite: 2.4.2+1
+  xml: 7.0.1
+  webview_flutter_android: 4.12.0
+  webview_flutter_platform_interface: 2.15.1
+  webview_flutter_wkwebview: 3.25.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
+    - assets/images/
+    - assets/icons/
+    - assets/icons/chat_note_editor/
+    - assets/icons/editor/
+    - assets/icons/note_format/
+    - assets/speech_models/
+    - assets/speech_models/paraformer-zh-small-2024-03-09/
+    - assets/speech_models/silero-vad-int8/
+  fonts:
+    - family: NotoSerifCJKSC
+      fonts:
+        - asset: assets/fonts/NotoSerifCJKsc-Regular.otf
+    - family: LXGWWenKai
+      fonts:
+        - asset: assets/fonts/LXGWWenKai-Regular.ttf
+    - family: NotoSansCJKSC
+      fonts:
+        - asset: assets/fonts/NotoSansCJKsc-Regular.otf
+    - family: MaShanZheng
+      fonts:
+        - asset: assets/fonts/MaShanZheng-Regular.ttf
+    - family: ZCOOLQingKeHuangYou
+      fonts:
+        - asset: assets/fonts/ZCOOLQingKeHuangYou-Regular.ttf
+    - family: ZCOOLXiaoWei
+      fonts:
+        - asset: assets/fonts/ZCOOLXiaoWei-Regular.ttf
+    - family: LongCang
+      fonts:
+        - asset: assets/fonts/LongCang-Regular.ttf
+dependency_overrides:
+  camera_platform_interface: 2.13.1
+  cross_file: 0.3.5+2
+  file_selector_linux: 0.9.4
+  file_selector_macos: 0.9.5
+  file_selector_windows: 0.9.3+5
+  image_picker_ios: 0.8.13+6
+  jni: 1.0.0
+  jni_flutter: 1.0.1
+  mime: 2.0.0
+  path_provider_linux: 2.2.1
+  path_provider_platform_interface: 2.1.2
+  permission_handler_platform_interface: 4.3.0
+  pub_semver: 2.2.0
+  shared_preferences_foundation: 2.5.6
+  stream_transform: 2.1.1
+  url_launcher_ios: 6.4.1
+  url_launcher_linux: 3.2.2
+  url_launcher_macos: 3.2.5
+  url_launcher_windows: 3.1.5
+  uuid: 4.5.3
+  vector_graphics: 1.2.2
+  vector_graphics_compiler: 1.2.6

@@ -1,0 +1,33 @@
+# 小七项目配置文件
+project:
+  name: "小七"
+  version: "V1.0"
+  description: "AI智能学习助手"
+  platforms: ["iOS", "Android"]
+  tech_stack: ["Flutter", "SQLite", "DeepSeek API"]
+  development_mode: "Vibe Coding (Claude Code + 扣子Agent团队)"
+
+agents:
+  - role: "product_manager"
+    bot_name: "小七PM"
+    uses: "harness/agents/product-manager.md"
+  - role: "tech_architect"
+    bot_name: "小七架构师"
+    uses: "harness/agents/tech-architect.md"
+  - role: "qa_planner"
+    bot_name: "小七QA"
+    uses: "harness/agents/qa-planner.md"
+  - role: "ui_designer"
+    bot_name: "小七UI"
+    uses: "harness/agents/ui-designer.md"
+
+rules:
+  - "harness/rules/coding-standards.md"
+  - "harness/rules/project-insights.md"
+
+templates:
+  - "harness/templates/task-spec-template.md"
+
+knowledge_base:
+  - "第七世界·未来宣言.docx"
+  - "小七App V1.0产品需求文档(修订版).docx"
