@@ -3,7 +3,7 @@
 ## 来源与许可
 
 - 创建图像、联网搜索、绘图和“管理我的能力”图标按用户提供的原型截图重绘为独立 SVG；图标统一使用 24×24 viewBox 与约 1.8px 描边，保留原型的轮廓、线宽和留白。
-- 技能 / 插件胶囊、创建菜单行、能力条目及输入 / 消息标签统一复用侧边栏扳手 SVG `assets/images/reading_sidebar_wrench.svg`；菜单条目与内联标签中的图标为 18 dp。
+- “创建技能 / 插件”功能行和底部技能胶囊保留拼图图标；已保存能力条目、输入标签和已发送消息标签复用侧边栏扳手 SVG `assets/images/reading_sidebar_wrench.svg`，菜单条目与内联标签中的扳手为 18 dp。
 - Google Material Symbols 与 Pinterest 搜索没有提供其余四个图标的匹配素材，因此按用户裁图重建；没有把截图裁片作为界面图标。
 - 菜单五项图标的独立 80×80 预览：[PNG 预览](skills-menu-prototype-icons-preview.png)、[HTML 预览](skills-menu-prototype-icons-preview.html)；其余图标总览：[skills-plugins-v1-icon-preview.svg](skills-plugins-v1-icon-preview.svg)。
 - 原能力标签书本与文档图标依据用户冻结原型中的小图标轮廓和颜色独立重建并保留；当前输入标签、技能 / 插件菜单条目和已发送消息统一复用侧边栏扳手图标。
@@ -18,8 +18,8 @@
 | assets/icons/capabilities/auto_stories.svg | auto_stories — [Google SVG](https://fonts.gstatic.com/s/i/materialiconsoutlined/auto_stories/v12/24px.svg) | 0 0 24 24 | 28–32 dp | 技能常态 | 技能分组行 |
 | assets/icons/capabilities/description.svg | description — [Google SVG](https://fonts.gstatic.com/s/i/materialiconsoutlined/description/v12/24px.svg) | 0 0 24 24 | 28–32 dp | 插件常态 | 插件分组行 |
 | assets/icons/capabilities/settings.svg | 原型截图 `codex-clipboard-fd6d7c19-42ad-4c0e-91dd-51bbcf0147cf.png`：八齿轮廓与空心圆心，按轮廓重绘 | 0 0 24 24 | 26 dp | 常态 | 管理我的能力入口 |
-| assets/images/reading_sidebar_wrench.svg | 侧边栏既有 Phosphor Icons regular Wrench，MIT — [Phosphor Icons](https://github.com/phosphor-icons/core) | 0 0 256 256 | 27 dp 侧栏 / 29 dp 创建入口 / 18 dp 菜单条目和内联标签 | 常态 | 技能 / 插件功能胶囊、创建入口、能力菜单条目、输入标签、已发送消息标签 |
-| assets/icons/capabilities/skill_plugin_capsule.svg | 原技能插件胶囊既有 Google Material Symbols `extension` 路径 — [Google SVG](https://fonts.gstatic.com/s/i/short-term/release/materialsymbolsoutlined/extension/default/24px.svg) | 0 -960 960 960 | 原 18–29 dp | 常态 | 历史素材保留，当前技能 / 插件入口未接入 |
+| assets/images/reading_sidebar_wrench.svg | 侧边栏既有 Phosphor Icons regular Wrench，MIT — [Phosphor Icons](https://github.com/phosphor-icons/core) | 0 0 256 256 | 27 dp 侧栏 / 18 dp 菜单条目和内联标签 | 常态 | 侧栏入口、已保存能力条目、输入标签、已发送消息标签 |
+| assets/icons/capabilities/skill_plugin_capsule.svg | 技能插件胶囊既有 Google Material Symbols `extension` 路径 — [Google SVG](https://fonts.gstatic.com/s/i/short-term/release/materialsymbolsoutlined/extension/default/24px.svg) | 0 -960 960 960 | 18 dp 胶囊 / 29 dp 创建入口 | 常态 | 技能 / 插件功能胶囊、“创建技能 / 插件”功能行 |
 | assets/icons/capabilities/apps.svg | apps — [Google SVG](https://fonts.gstatic.com/s/i/materialiconsoutlined/apps/v12/24px.svg) | 0 0 24 24 | 24–28 dp | 常态 | 阅读任务底部入口 |
 | assets/icons/capabilities/mcp_connector.svg | 依据冻结截图绘制的简线插头；Google Material Outlined 中未找到与此形状相符的连接器图标 | 0 0 24 24 | 24–28 dp | 常态 | MCP 连接器底部入口 |
 | assets/icons/capabilities/help_outline.svg | help_outline — [Google SVG](https://fonts.gstatic.com/s/i/materialiconsoutlined/help_outline/v12/24px.svg) | 0 0 24 24 | 18–20 dp | 常态 | 智能体式选择面板标题 |
@@ -39,4 +39,4 @@
 |---|---|---|---|---|
 | 用户冻结菜单截图（当前聊天附件） | [skills-plugins-v1-review.svg](skills-plugins-v1-review.svg)；第二张截图确认输入框上方轻量面板与黑白灰色调 | 0 0 1240 540 | 交互样稿已按确认稿调整；页面仍待同 viewport 视觉验收 | `SkillsPluginsComposerControls`、`_HomeComposer` |
 
-菜单五项图标均按 80×80 独立预览；功能菜单图标按 29 dp 显示，管理图标 26 dp。技能 / 插件胶囊、菜单入口、能力条目、输入标签和已发送消息标签统一使用侧边栏扳手图标；能力条目和内联标签中的扳手均为 18 dp。输入标签和消息气泡中的能力名称使用浅粉色强调，菜单标题保留原色。MCP 胶囊保持与阅读任务一致的点击反馈。创建图像、联网搜索、绘图图标已接入菜单；对应能力仍显示未开放反馈。冻结截图中的「Documents」「书本变童话」只是参考例子，不会写入默认数据。阅读任务胶囊及其 `apps.svg` 资产不在本次修改范围内。
+菜单五项图标均按 80×80 独立预览；功能菜单图标按 29 dp 显示，管理图标 26 dp。“创建技能 / 插件”功能行和底部胶囊保留拼图图标；已保存能力条目、输入标签和已发送消息标签使用侧边栏扳手图标，能力条目和内联标签中的扳手均为 18 dp。输入标签和消息气泡中的能力名称使用浅粉色强调，菜单标题保留原色。MCP 胶囊保持与阅读任务一致的点击反馈。创建图像、联网搜索、绘图图标已接入菜单；对应能力仍显示未开放反馈。冻结截图中的「Documents」「书本变童话」只是参考例子，不会写入默认数据。阅读任务胶囊及其 `apps.svg` 资产不在本次修改范围内。

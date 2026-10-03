@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import mimetypes
 import os
 import re
 import time
 import urllib.error
 import urllib.request
+import uuid
+from pathlib import PurePosixPath
 from typing import Any
 
 from .storage import CloudStore
@@ -15,6 +19,10 @@ from .storage import CloudStore
 _MAX_STEPS = 16
 _MAX_TOOL_OUTPUT = 128 * 1024
 _MAX_TRANSCRIPT = 3 * 1024 * 1024
+_MAX_ARTIFACTS = 10
+_MAX_ARTIFACT_SIZE = 10 * 1024 * 1024
+_MAX_ARTIFACT_TOTAL = 20 * 1024 * 1024
+_WORKER_LEASE_SECONDS = 300
 _SAFE_FILE = re.compile(r"^[A-Za-z0-9._/-]{1,240}$")
 
 _TOOLS = [
@@ -69,7 +77,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "execute_python",
-            "description": "在隔离的 E2B Python 沙箱运行需要真正计算、数据转换或脚本试用的代码。每个任务最多运行一次，默认断网；只有用户另行授权的域名才可联网。",
+            "description": "在隔离的 E2B Python 沙箱运行需要真正计算、数据转换或脚本试用的代码。每个任务最多运行一次，默认断网；只有用户另行授权的域名才可联网。需要交付的文件写到 /home/user/workspace/output，最多回传 10 个文件、单个 10 MB、总计 20 MB。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -90,6 +98,14 @@ _TOOLS = [
 
 
 class TaskCancelled(Exception):
+    pass
+
+
+class TaskNotOwned(Exception):
+    pass
+
+
+class TaskAlreadyRunning(Exception):
     pass
 
 
@@ -144,11 +160,20 @@ def _save_history(store: CloudStore, tenant: str, task_id: str, messages: list[d
     store.put_task_blob(key, raw)
     from .api import _mutate_task
 
-    _mutate_task(
-        tenant,
-        task_id,
-        lambda old: {**old, "transcript_blob_key": key, "updated_at": int(time.time())},
-    )
+    last_message = messages[-1] if messages else {}
+
+    def save(old: dict[str, Any]) -> dict[str, Any]:
+        updated = {**old, "transcript_blob_key": key, "updated_at": int(time.time())}
+        active = old.get("active_tool_call")
+        if (
+            isinstance(active, dict)
+            and last_message.get("role") == "tool"
+            and last_message.get("tool_call_id") == active.get("id")
+        ):
+            updated["active_tool_call"] = None
+        return updated
+
+    _mutate_task(tenant, task_id, save)
 
 
 def _task_state(store: CloudStore, tenant: str, task_id: str) -> dict[str, Any]:
@@ -171,13 +196,101 @@ def _emit(store: CloudStore, tenant: str, task_id: str, event: dict[str, Any]) -
     return _mutate_task(tenant, task_id, update).value
 
 
-def _ensure_active(store: CloudStore, tenant: str, task_id: str, attempt: int) -> dict[str, Any]:
+def _claim_task(
+    store: CloudStore, tenant: str, task_id: str, attempt: int, worker_id: str
+) -> bool:
+    from .api import _mutate_task
+
+    claimed = False
+    now = int(time.time())
+
+    def claim(old: dict[str, Any]) -> dict[str, Any]:
+        nonlocal claimed
+        if int(old.get("attempt", 0)) != attempt:
+            raise TaskNotOwned("stale task attempt")
+        if old.get("cancel_requested"):
+            events = list(old.get("events", []))
+            if old.get("status") != "cancelled":
+                events.append({"seq": int(events[-1].get("seq", -1)) + 1 if events else 0, "type": "status", "status": "cancelled", "created_at": now})
+            return {**old, "status": "cancelled", "worker_id": None, "worker_lease_until": 0, "events": events[-200:], "updated_at": now}
+        status = old.get("status")
+        if status in ("succeeded", "failed", "cancelled", "awaiting_network_permission"):
+            return old
+        if status == "running" and int(old.get("worker_lease_until", 0)) > now:
+            raise TaskAlreadyRunning(task_id)
+        active_call = old.get("active_tool_call")
+        if (
+            status == "running"
+            and int(old.get("worker_lease_until", 0)) <= now
+            and isinstance(active_call, dict)
+            and active_call.get("name") == "execute_python"
+        ):
+            error = "Python 执行中断，结果无法确认。为避免重复运行，请重新发起任务。"
+            events = list(old.get("events", []))
+            events.append({"seq": int(events[-1].get("seq", -1)) + 1 if events else 0, "type": "error", "status": "failed", "message": error, "created_at": now})
+            return {**old, "status": "failed", "error": error, "active_tool_call": None, "worker_id": None, "worker_lease_until": 0, "events": events[-200:], "updated_at": now}
+        claimed = True
+        return {**old, "status": "running", "worker_id": worker_id, "worker_lease_until": now + _WORKER_LEASE_SECONDS, "updated_at": now}
+
+    task = _mutate_task(tenant, task_id, claim).value
+    return claimed and task.get("worker_id") == worker_id
+
+
+def _ensure_active(
+    store: CloudStore,
+    tenant: str,
+    task_id: str,
+    attempt: int,
+    worker_id: str | None = None,
+) -> dict[str, Any]:
+    from .api import _mutate_task
+
     task = _task_state(store, tenant, task_id)
     if int(task.get("attempt", 0)) != attempt:
-        raise TaskCancelled("stale task attempt")
+        raise TaskNotOwned("stale task attempt")
+    if worker_id is not None and task.get("worker_id") != worker_id:
+        raise TaskNotOwned("worker lease was replaced")
     if task.get("cancel_requested"):
         raise TaskCancelled("task was cancelled")
-    return task
+    if worker_id is None:
+        return task
+    now = int(time.time())
+
+    def renew(old: dict[str, Any]) -> dict[str, Any]:
+        if old.get("worker_id") != worker_id or int(old.get("attempt", 0)) != attempt:
+            raise TaskNotOwned("worker lease was replaced")
+        if old.get("cancel_requested"):
+            raise TaskCancelled("task was cancelled")
+        return {**old, "worker_lease_until": now + _WORKER_LEASE_SECONDS, "updated_at": now}
+
+    return _mutate_task(tenant, task_id, renew).value
+
+
+def _mark_tool_started(
+    tenant: str, task_id: str, attempt: int, worker_id: str, call: dict[str, Any]
+) -> None:
+    from .api import _mutate_task
+
+    function = call.get("function") or {}
+    call_id = str(call.get("id") or uuid.uuid4().hex)
+    now = int(time.time())
+
+    def mark(old: dict[str, Any]) -> dict[str, Any]:
+        if old.get("worker_id") != worker_id or int(old.get("attempt", 0)) != attempt:
+            raise TaskNotOwned("worker lease was replaced")
+        if old.get("cancel_requested"):
+            raise TaskCancelled("task was cancelled")
+        return {
+            **old,
+            "active_tool_call": {
+                "id": call_id,
+                "name": str(function.get("name", "")),
+                "started_at": now,
+            },
+            "updated_at": now,
+        }
+
+    _mutate_task(tenant, task_id, mark)
 
 
 def _model_request(
@@ -278,6 +391,103 @@ def _safe_resource_path(path: str) -> str:
     return normalized
 
 
+def _persist_artifacts(
+    sandbox: Any,
+    store: CloudStore,
+    tenant: str,
+    task_id: str,
+    attempt: int | None,
+    worker_id: str | None,
+    execution: Any,
+) -> list[dict[str, Any]]:
+    output_root = "/home/user/workspace/output"
+    candidates: list[tuple[str, bytes]] = []
+    entries = sandbox.files.list(output_root, depth=6)
+    for entry in entries:
+        if getattr(getattr(entry, "type", None), "value", "") != "file":
+            continue
+        if getattr(entry, "symlink_target", None):
+            continue
+        path = str(getattr(entry, "path", ""))
+        prefix = output_root + "/"
+        if not path.startswith(prefix):
+            continue
+        relative = path[len(prefix):]
+        if not relative or any(part in ("", ".", "..") for part in PurePosixPath(relative).parts):
+            continue
+        name = PurePosixPath(relative).name
+        name = re.sub(r'[\\/\x00-\x1f<>:"|?*]', "_", name).strip(" .")[:120]
+        if not name:
+            continue
+        if int(getattr(entry, "size", 0) or 0) > _MAX_ARTIFACT_SIZE:
+            raise ValueError(f"产物 {name} 超过 10 MB")
+        data = bytes(sandbox.files.read(path, format="bytes"))
+        if len(encoded) > (_MAX_ARTIFACT_SIZE * 4 // 3 + 8):
+            raise ValueError("Python 返回的图片或 PDF 超过 10 MB")
+        if len(data) > _MAX_ARTIFACT_SIZE:
+            raise ValueError(f"产物 {name} 超过 10 MB")
+        candidates.append((name, data))
+        if len(candidates) > _MAX_ARTIFACTS:
+            raise ValueError("每个任务最多回传 10 个文件")
+
+    for index, result in enumerate(getattr(execution, "results", []) or [], start=1):
+        for field, extension, media_type in (("png", "png", "image/png"), ("jpeg", "jpg", "image/jpeg"), ("pdf", "pdf", "application/pdf")):
+            encoded = getattr(result, field, None)
+            if not isinstance(encoded, str) or not encoded:
+                continue
+            if encoded.startswith("data:"):
+                encoded = encoded.partition(",")[2]
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except ValueError as error:
+                raise ValueError("Python 返回的图片或 PDF 格式无效") from error
+            candidates.append((f"python-result-{index}.{extension}", data))
+            if len(candidates) > _MAX_ARTIFACTS:
+                raise ValueError("每个任务最多回传 10 个文件")
+
+    if sum(len(data) for _, data in candidates) > _MAX_ARTIFACT_TOTAL:
+        raise ValueError("本次任务产物总大小超过 20 MB")
+    if not candidates:
+        return []
+    if worker_id is not None and attempt is not None:
+        _ensure_active(store, tenant, task_id, attempt, worker_id)
+
+    archive_files: dict[str, bytes] = {}
+    artifacts = []
+    for index, (name, data) in enumerate(candidates):
+        archive_path = f"{index:02d}-{name}"
+        archive_files[archive_path] = data
+        artifacts.append({
+            "id": uuid.uuid4().hex,
+            "name": name,
+            "media_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "archive_path": archive_path,
+        })
+    object_key = f"tenants/{tenant}/tasks/{task_id}/artifacts/{uuid.uuid4().hex}.zip"
+    store.put_immutable(object_key, archive_files)
+    from .api import _mutate_task
+
+    now = int(time.time())
+
+    def save(old: dict[str, Any]) -> dict[str, Any]:
+        if (
+            old.get("cancel_requested")
+            or (worker_id is not None and old.get("worker_id") != worker_id)
+            or (attempt is not None and int(old.get("attempt", 0)) != attempt)
+        ):
+            raise TaskCancelled("task was cancelled before artifact commit")
+        current = list(old.get("artifacts", []))
+        saved = [{**item, "object_key": object_key} for item in artifacts]
+        return {**old, "artifacts": current + saved, "updated_at": now}
+
+    saved_task = _mutate_task(tenant, task_id, save).value
+    saved_artifacts = saved_task["artifacts"][-len(artifacts):]
+    _emit(store, tenant, task_id, {"type": "artifacts_ready", "artifacts": saved_artifacts})
+    return saved_artifacts
+
+
 def _execute_python(
     store: CloudStore,
     tenant: str,
@@ -285,6 +495,8 @@ def _execute_python(
     code: str,
     domains: list[str],
     task_request: dict[str, Any],
+    attempt: int | None = None,
+    worker_id: str | None = None,
 ) -> str:
     if len(code.encode("utf-8")) > 64 * 1024:
         raise ValueError("Python 脚本超过 64 KB")
@@ -336,6 +548,9 @@ def _execute_python(
                         path = _safe_resource_path(name)
                         sandbox.files.write(f"/home/user/workspace/skill/{path}", data)
 
+        sandbox.commands.run("mkdir -p /home/user/workspace/output")
+        if worker_id is not None and attempt is not None:
+            _ensure_active(store, tenant, task_id, attempt, worker_id)
         execution = sandbox.run_code(code, language="python", timeout=120)
         logs = execution.logs
         stdout = str(getattr(logs, "stdout", "") or "")
@@ -345,6 +560,12 @@ def _execute_python(
             text = getattr(item, "text", None)
             if text:
                 result_items.append(str(text))
+        artifacts = _persist_artifacts(sandbox, store, tenant, task_id, attempt, worker_id, execution)
+        execution_error = getattr(execution, "error", None)
+        if execution_error:
+            result_items.append(f"Python 执行失败：{getattr(execution_error, 'name', 'Error')}: {getattr(execution_error, 'value', '未知错误')}")
+        if artifacts:
+            result_items.append("已生成文件：" + ", ".join(item["name"] for item in artifacts))
         output = "\n".join(part for part in [stdout, stderr, *result_items] if part)
         return _clean_output(output or "Python 已执行，没有标准输出。")
     finally:
@@ -368,6 +589,8 @@ def _run_tool(
     task_request: dict[str, Any],
     call: dict[str, Any],
     authorized_domains: set[str],
+    attempt: int | None = None,
+    worker_id: str | None = None,
 ) -> str:
     function = call.get("function") or {}
     name = str(function.get("name", ""))
@@ -435,7 +658,7 @@ def _run_tool(
         from .api import _mutate_task
 
         _mutate_task(tenant, task_id, lambda old: {**old, "python_runs": int(old.get("python_runs", 0)) + 1, "updated_at": int(time.time())})
-        return _execute_python(store, tenant, task_id, str(arguments.get("code", "")), domains, task_request)
+        return _execute_python(store, tenant, task_id, str(arguments.get("code", "")), domains, task_request, attempt, worker_id)
 
     raise ValueError("工具未开放")
 
@@ -443,8 +666,25 @@ def _run_tool(
 def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None:
     from .api import _mutate_task
 
-    task = _ensure_active(store, tenant, task_id, attempt)
-    if task.get("status") == "awaiting_network_permission" and not task.get("authorized_network_domains"):
+    worker_id = uuid.uuid4().hex
+    try:
+        if not _claim_task(store, tenant, task_id, attempt, worker_id):
+            return
+    except TaskCancelled:
+        from .api import _mutate_task
+
+        _mutate_task(tenant, task_id, lambda old: {**old, "status": "cancelled", "worker_id": None, "worker_lease_until": 0, "updated_at": int(time.time())} if int(old.get("attempt", 0)) == attempt else old)
+        _emit(store, tenant, task_id, {"type": "status", "status": "cancelled"})
+        return
+    except TaskNotOwned:
+        return
+    try:
+        task = _ensure_active(store, tenant, task_id, attempt, worker_id)
+    except TaskNotOwned:
+        return
+    except TaskCancelled:
+        _mutate_task(tenant, task_id, lambda old: {**old, "status": "cancelled", "worker_id": None, "worker_lease_until": 0, "updated_at": int(time.time())} if int(old.get("attempt", 0)) == attempt and old.get("worker_id") == worker_id else old)
+        _emit(store, tenant, task_id, {"type": "status", "status": "cancelled"})
         return
     input_files = store.get_immutable(str(task["input_object_key"]))
     task_request = json.loads(input_files["input.json"].decode("utf-8"))
@@ -456,7 +696,8 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
         raise ValueError("任务中没有模型上下文")
 
     system_addition = (
-        "\n\n小栖工具规则：需要实际运行 Python 时调用 execute_python，不要只描述执行结果；"
+        "\n\n小栖工具规则：需要实际运行 Python 时调用 execute_python，不要只描述执行结果；需要交付的文件写到 /home/user/workspace/output；"
+        "如果 Python 工具返回‘执行失败’，必须明确告诉用户失败，不得描述成成功。"
         "联网默认关闭。确需联网时列出精确域名和用途，等待系统单独授权。"
         "创建或修改技能时，若目的不明确，直接在普通聊天回复中用一句简短纯文本问题澄清，不要返回结构化问题或选项面板；目的明确后将完整技能和资源写入 draft_workspace，读回最终 SKILL.md 后再依据该版本完成一次代表性试用。"
         "最终回复展示完整 SKILL.md、试用输入与实际结果；未执行的试用必须标为文字演示，不能声称已运行。"
@@ -472,7 +713,6 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
     elif not messages or messages[0].get("role") != "system":
         messages.insert(0, {"role": "system", "content": system_addition.strip()})
 
-    task = _mutate_task(tenant, task_id, lambda old: {**old, "status": "running", "updated_at": int(time.time())}).value
     _emit(store, tenant, task_id, {"type": "status", "status": "running"})
 
     try:
@@ -480,11 +720,12 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
         if pending_calls:
             authorized = set(_domain_list(task.get("authorized_network_domains", [])))
             for call in pending_calls:
-                _ensure_active(store, tenant, task_id, attempt)
+                _ensure_active(store, tenant, task_id, attempt, worker_id)
+                _mark_tool_started(tenant, task_id, attempt, worker_id, call)
                 try:
-                    output = _run_tool(store, tenant, task_id, task_request, call, authorized)
+                    output = _run_tool(store, tenant, task_id, task_request, call, authorized, attempt, worker_id)
                 except NetworkPermissionRequired as required:
-                    _mutate_task(tenant, task_id, lambda old: {**old, "status": "awaiting_network_permission", "pending_tool_calls": pending_calls, "requested_network_domains": required.domains, "network_purpose": required.purpose, "updated_at": int(time.time())})
+                    _mutate_task(tenant, task_id, lambda old: {**old, "status": "awaiting_network_permission", "pending_tool_calls": pending_calls, "active_tool_call": None, "worker_id": None, "worker_lease_until": 0, "requested_network_domains": required.domains, "network_purpose": required.purpose, "updated_at": int(time.time())})
                     _emit(store, tenant, task_id, {"type": "network_permission_required", "domains": required.domains, "purpose": required.purpose})
                     return
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": output})
@@ -492,42 +733,54 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
             _mutate_task(tenant, task_id, lambda old: {**old, "pending_tool_calls": [], "requested_network_domains": [], "network_purpose": None, "updated_at": int(time.time())})
 
         for step in range(_MAX_STEPS):
-            _ensure_active(store, tenant, task_id, attempt)
+            _ensure_active(store, tenant, task_id, attempt, worker_id)
             model_id = str(task_request.get("model_id", "deepseek-flash"))
             reasoning_level = str(task_request.get("reasoning_level", "medium"))
 
             def on_delta(text: str) -> None:
+                _ensure_active(store, tenant, task_id, attempt, worker_id)
                 _emit(store, tenant, task_id, {"type": "assistant_delta", "text": text})
 
             assistant = _model_request(model_id, reasoning_level, messages, on_delta)
-            _ensure_active(store, tenant, task_id, attempt)
+            _ensure_active(store, tenant, task_id, attempt, worker_id)
             assistant["role"] = "assistant"
             messages.append(assistant)
             _save_history(store, tenant, task_id, messages)
             calls = assistant.get("tool_calls") or []
             if not calls:
                 final_text = str(assistant.get("content", ""))
-                task = _mutate_task(tenant, task_id, lambda old: {**old, "status": "succeeded", "result": final_text, "draft": old.get("draft_files", {}).get("SKILL.md"), "updated_at": int(time.time())}).value
+
+                def complete(old: dict[str, Any]) -> dict[str, Any]:
+                    if old.get("worker_id") != worker_id or int(old.get("attempt", 0)) != attempt:
+                        raise TaskNotOwned("worker lease was replaced")
+                    if old.get("cancel_requested"):
+                        raise TaskCancelled("task was cancelled")
+                    return {**old, "status": "succeeded", "result": final_text, "draft": old.get("draft_files", {}).get("SKILL.md"), "worker_id": None, "worker_lease_until": 0, "active_tool_call": None, "updated_at": int(time.time())}
+
+                task = _mutate_task(tenant, task_id, complete).value
                 encoded_files = {
                     name: base64.b64encode(str(content).encode("utf-8")).decode("ascii")
                     for name, content in task.get("draft_files", {}).items()
                 }
-                _emit(store, tenant, task_id, {"type": "completed", "status": "succeeded", "text": final_text, "draft": task.get("draft"), "files": encoded_files})
+                _emit(store, tenant, task_id, {"type": "completed", "status": "succeeded", "text": final_text, "draft": task.get("draft"), "files": encoded_files, "artifacts": task.get("artifacts", [])})
                 return
 
             authorized = set(_domain_list(_task_state(store, tenant, task_id).get("authorized_network_domains", [])))
             for call_index, call in enumerate(calls):
-                _ensure_active(store, tenant, task_id, attempt)
+                _ensure_active(store, tenant, task_id, attempt, worker_id)
                 function_name = str((call.get("function") or {}).get("name", ""))
+                _mark_tool_started(tenant, task_id, attempt, worker_id, call)
                 _emit(store, tenant, task_id, {"type": "tool_started", "tool": function_name})
                 try:
-                    output = _run_tool(store, tenant, task_id, task_request, call, authorized)
+                    output = _run_tool(store, tenant, task_id, task_request, call, authorized, attempt, worker_id)
                 except NetworkPermissionRequired as required:
                     remaining = calls[call_index:]
-                    _mutate_task(tenant, task_id, lambda old: {**old, "status": "awaiting_network_permission", "pending_tool_calls": remaining, "requested_network_domains": required.domains, "network_purpose": required.purpose, "updated_at": int(time.time())})
+                    _mutate_task(tenant, task_id, lambda old: {**old, "status": "awaiting_network_permission", "pending_tool_calls": remaining, "active_tool_call": None, "worker_id": None, "worker_lease_until": 0, "requested_network_domains": required.domains, "network_purpose": required.purpose, "updated_at": int(time.time())})
                     _emit(store, tenant, task_id, {"type": "network_permission_required", "domains": required.domains, "purpose": required.purpose})
                     _save_history(store, tenant, task_id, messages)
                     return
+                except (TaskCancelled, TaskNotOwned):
+                    raise
                 except Exception as error:
                     output = json.dumps({"error": str(error)[:500]}, ensure_ascii=False)
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": _clean_output(output)})
@@ -535,8 +788,12 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
                 _emit(store, tenant, task_id, {"type": "tool_finished", "tool": function_name, "output": _clean_output(output)})
         raise RuntimeError("工具调用次数达到本次任务上限")
     except TaskCancelled:
-        _mutate_task(tenant, task_id, lambda old: {**old, "status": "cancelled", "sandbox_id": None, "updated_at": int(time.time())})
-        _emit(store, tenant, task_id, {"type": "status", "status": "cancelled"})
+        current = _task_state(store, tenant, task_id)
+        if int(current.get("attempt", 0)) == attempt and current.get("worker_id") == worker_id:
+            _mutate_task(tenant, task_id, lambda old: {**old, "status": "cancelled", "sandbox_id": None, "worker_id": None, "worker_lease_until": 0, "active_tool_call": None, "updated_at": int(time.time())})
+            _emit(store, tenant, task_id, {"type": "status", "status": "cancelled"})
+    except TaskNotOwned:
+        return
     except Exception as error:
-        _mutate_task(tenant, task_id, lambda old: {**old, "status": "failed", "error": str(error)[:500], "sandbox_id": None, "updated_at": int(time.time())})
+        _mutate_task(tenant, task_id, lambda old: {**old, "status": "failed", "error": str(error)[:500], "sandbox_id": None, "worker_id": None, "worker_lease_until": 0, "updated_at": int(time.time())})
         _emit(store, tenant, task_id, {"type": "error", "status": "failed", "message": str(error)[:500]})

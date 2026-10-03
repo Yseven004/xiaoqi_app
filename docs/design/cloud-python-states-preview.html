@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小栖云同步与 Python 状态预览</title>
+  <style>
+    :root { color-scheme: light; font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; color: #171717; background: #f7f7f6; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 36px 18px; }
+    .page { max-width: 860px; margin: 0 auto; }
+    h1 { margin: 0 0 7px; font-size: 22px; font-weight: 650; }
+    .subtitle { color: #777; font-size: 13px; margin-bottom: 24px; }
+    .chat { background: #fff; border: 1px solid #e8e8e6; border-radius: 20px; padding: 26px; box-shadow: 0 14px 40px #1717170b; }
+    .section { margin: 0 0 24px; }
+    .section:last-child { margin-bottom: 0; }
+    .label { margin: 0 0 11px; color: #858585; font-size: 12px; letter-spacing: .04em; }
+    .user { max-width: 72%; margin-left: auto; padding: 11px 15px; border-radius: 18px 18px 4px 18px; background: #f2f2f1; font-size: 14px; }
+    .assistant { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.65; }
+    .dot { width: 8px; height: 8px; margin-top: 8px; border-radius: 50%; background: #a5a5a3; flex: 0 0 auto; }
+    .muted { color: #777; }
+    .inline-panel { border: 1px solid #e6e6e4; border-radius: 14px; padding: 15px 16px; background: #fff; }
+    .panel-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
+    .panel-title img { width: 18px; height: 18px; }
+    .purpose { margin: 10px 0 9px; font-size: 13px; }
+    .domains { color: #656565; font-size: 12px; }
+    .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+    button { height: 36px; border: 1px solid #dededc; border-radius: 18px; padding: 0 14px; background: #fff; color: #242424; font: inherit; font-size: 12px; }
+    .primary { color: #fff; border-color: #252525; background: #252525; }
+    .files { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 9px; margin-top: 12px; }
+    .file { min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 11px; border: 1px solid #e9e9e7; border-radius: 12px; }
+    .file-icon { width: 32px; height: 36px; display: grid; place-items: center; border-radius: 8px; background: #f4f4f3; color: #484848; font-size: 9px; font-weight: 700; }
+    .file-info { min-width: 0; flex: 1; }
+    .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .file-size { margin-top: 3px; color: #888; font-size: 10px; }
+    .download { border: 0; background: transparent; padding: 4px; color: #555; font-size: 11px; }
+    .error { color: #555; }
+    .error strong { color: #222; font-weight: 600; }
+    .composer { margin-top: 22px; border: 1px solid #e5e5e3; border-radius: 18px; padding: 14px 16px; box-shadow: 0 5px 18px #17171708; }
+    .placeholder { color: #aaa; font-size: 14px; }
+    .composer-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
+    .sync { display: inline-flex; gap: 6px; align-items: center; color: #777; font-size: 11px; }
+    .sync img { width: 16px; height: 16px; }
+    .send { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 50%; background: #262626; color: white; font-size: 14px; }
+    @media (max-width: 560px) {
+      body { padding: 20px 10px; }
+      .chat { padding: 18px 14px; border-radius: 17px; }
+      .files { grid-template-columns: 1fr; }
+      .user { max-width: 90%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <h1>云同步与 Python 状态</h1>
+    <div class="subtitle">补充到现有聊天流程 · 黑白灰 · 轻量行内反馈</div>
+    <section class="chat" aria-label="对话状态示意">
+      <div class="section">
+        <div class="label">联网确认 · 仅在技能确实需要访问网站时出现</div>
+        <div class="user">帮我查这份表格里提到的几个网站，整理来源和结论。</div>
+        <div class="assistant" style="margin-top:14px"><span class="dot"></span><div>这一步需要访问下面的网站来核对来源。</div></div>
+        <div class="inline-panel" style="margin:12px 0 0 18px">
+          <div class="panel-title"><img src="../../assets/icons/capabilities/web_search.svg" alt="">联网访问确认</div>
+          <div class="purpose">用途：读取网页中的公开资料并核对表格条目</div>
+          <div class="domains">本次访问：<strong>example.org</strong>、<strong>docs.example.org</strong></div>
+          <div class="actions"><button>继续离线</button><button class="primary">允许本次访问</button></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="label">执行中 · 轻量状态，不打断阅读</div>
+        <div class="assistant"><span class="dot"></span><div><strong>正在整理表格</strong><div class="muted" style="font-size:12px">Python 正在安全环境中运行</div></div></div>
+      </div>
+
+      <div class="section">
+        <div class="label">完成 · 结果和文件留在对话中</div>
+        <div class="assistant"><span class="dot"></span><div style="width:100%">
+          已统计 128 条记录，按来源整理了摘要，并生成汇总表和图表。
+          <div class="files">
+            <div class="file"><div class="file-icon">CSV</div><div class="file-info"><div class="file-name">来源汇总.csv</div><div class="file-size">18 KB · 可下载</div></div><button class="download" aria-label="下载来源汇总.csv">下载</button></div>
+            <div class="file"><div class="file-icon">PNG</div><div class="file-info"><div class="file-name">来源分布.png</div><div class="file-size">246 KB · 可下载</div></div><button class="download" aria-label="下载来源分布.png">下载</button></div>
+          </div>
+        </div></div>
+      </div>
+
+      <div class="section">
+        <div class="label">失败 · 说明原因并保留原对话</div>
+        <div class="assistant error"><span class="dot"></span><div><strong>这次没有生成文件</strong><div class="muted">运行超时了。你可以缩小数据范围后重试。</div></div></div>
+      </div>
+
+      <div class="composer">
+        <div class="placeholder">发消息或按住说话</div>
+        <div class="composer-foot"><span class="sync"><img src="../../assets/icons/capabilities/cloud_done.svg" alt="">云端已同步</span><span class="send" aria-label="发送">↑</span></div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

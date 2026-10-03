@@ -257,12 +257,10 @@ class _SkillsPluginsComposerControlsState
   );
 
   Widget _icon(String name, {double size = 20}) => SvgPicture.asset(
-    name == 'skills_wrench'
-        ? 'assets/images/reading_sidebar_wrench.svg'
-        : 'assets/icons/capabilities/$name.svg',
+    'assets/icons/capabilities/$name.svg',
     width: size,
     height: size,
-    colorFilter: name == 'web_search' || name == 'skills_wrench'
+    colorFilter: name == 'web_search'
         ? null
         : const ColorFilter.mode(Color(0xFF202124), BlendMode.srcIn),
   );
@@ -274,9 +272,7 @@ class _SkillsPluginsComposerControlsState
     required VoidCallback onTap,
   }) => ComposerActionCapsule(
     label: label,
-    iconAsset: icon == 'skills_wrench'
-        ? 'assets/images/reading_sidebar_wrench.svg'
-        : 'assets/icons/capabilities/$icon.svg',
+    iconAsset: 'assets/icons/capabilities/$icon.svg',
     expanded: expanded,
     onTap: onTap,
   );
@@ -441,7 +437,7 @@ class _SkillsPluginsComposerControlsState
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _featureRow(
-            'skills_wrench',
+            'skill_plugin_capsule',
             '创建技能 / 插件',
             '创造有趣的技能和插件',
             () => _selectAction('create-skill', '创建技能 / 插件'),
@@ -792,7 +788,7 @@ class _SkillsPluginsComposerControlsState
                   onTapOutside: (_) => _closeMenu(),
                   child: _pill(
                     label: '技能 / 插件',
-                    icon: 'skills_wrench',
+                    icon: 'skill_plugin_capsule',
                     expanded: _open,
                     onTap: _toggleMenu,
                   ),

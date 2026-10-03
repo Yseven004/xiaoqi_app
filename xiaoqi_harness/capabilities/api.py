@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -13,7 +14,7 @@ import uuid
 from functools import wraps
 from typing import Any, Callable
 
-from flask import Blueprint, Response, g, jsonify, request
+from flask import Blueprint, Response, g, jsonify, request, send_file
 
 from .storage import CloudStore, ConfigurationError, RevisionConflict, StoredDocument
 
@@ -23,6 +24,7 @@ _store: CloudStore | None = None
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _MAX_SKILL_BYTES = 2 * 1024 * 1024
 _MAX_TASK_BYTES = 18 * 1024 * 1024
+_SAFE_ARTIFACT_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def store() -> CloudStore:
@@ -492,8 +494,13 @@ def create_agent_task() -> Any:
         task_id = str(body.get("task_id") or "task-" + uuid.uuid4().hex)
         task_id = _safe_id(task_id, "任务 ID")
         key = f"task/{g.tenant_id}/{task_id}"
+        request_hash = hashlib.sha256(
+            json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         existing = store().get(key)
         if existing is not None:
+            if existing.value.get("request_hash") != request_hash:
+                return _error("任务 ID 已用于另一份请求", 409)
             return jsonify({"task_id": task_id, "status": existing.value["status"], "deduplicated": True})
         if not isinstance(body.get("messages"), list):
             return _error("messages 必须是列表", 400)
@@ -502,6 +509,7 @@ def create_agent_task() -> Any:
         now = int(time.time())
         task = {
             "task_id": task_id,
+            "request_hash": request_hash,
             "tenant_id": g.tenant_id,
             "device_id": g.device_id,
             "status": "queued",
@@ -510,13 +518,20 @@ def create_agent_task() -> Any:
             "transcript_object_key": transcript_key,
             "events": [{"seq": 0, "type": "status", "status": "queued", "created_at": now}],
             "draft_files": {},
+            "artifacts": [],
             "cancel_requested": False,
             "authorized_network_domains": [],
             "requested_network_domains": [],
             "created_at": now,
             "updated_at": now,
         }
-        store().put(key, task, None)
+        try:
+            store().put(key, task, None)
+        except RevisionConflict:
+            existing = store().get(key)
+            if existing is not None and existing.value.get("request_hash") == request_hash:
+                return jsonify({"task_id": task_id, "status": existing.value["status"], "deduplicated": True})
+            return _error("任务 ID 已用于另一份请求", 409)
         try:
             _enqueue_task(g.tenant_id, task_id, 1)
         except Exception as error:
@@ -546,7 +561,7 @@ def get_agent_task(task_id: str) -> Any:
         if task is None:
             return _error("任务不存在", 404)
         value = task.value
-        return jsonify({"task_id": task_id, "status": value["status"], "attempt": value["attempt"], "error": value.get("error"), "draft": value.get("draft_files", {}).get("SKILL.md"), "requested_network_domains": value.get("requested_network_domains", []), "network_purpose": value.get("network_purpose"), "cloud_revision": task.revision})
+        return jsonify({"task_id": task_id, "status": value["status"], "attempt": value["attempt"], "error": value.get("error"), "result": value.get("result"), "draft": value.get("draft_files", {}).get("SKILL.md"), "artifacts": value.get("artifacts", []), "requested_network_domains": value.get("requested_network_domains", []), "network_purpose": value.get("network_purpose"), "cloud_revision": task.revision})
     except ConfigurationError as error:
         return _error(str(error), 503)
 
@@ -564,6 +579,39 @@ def get_agent_task_events(task_id: str) -> Any:
         return jsonify({"events": [event for event in value.get("events", []) if int(event.get("seq", 0)) > after], "status": value.get("status", "unknown")})
     except ConfigurationError as error:
         return _error(str(error), 503)
+
+
+@capabilities.get("/agent/tasks/<task_id>/artifacts/<artifact_id>")
+@_device_auth
+def download_agent_task_artifact(task_id: str, artifact_id: str) -> Any:
+    try:
+        task_id = _safe_id(task_id, "任务 ID")
+        artifact_id = _safe_id(artifact_id, "产物 ID")
+        task = store().get(f"task/{g.tenant_id}/{task_id}")
+        if task is None:
+            return _error("任务不存在", 404)
+        artifact = next(
+            (item for item in task.value.get("artifacts", []) if item.get("id") == artifact_id),
+            None,
+        )
+        if artifact is None:
+            return _error("文件不存在或已过期", 404)
+        files = store().get_immutable(str(artifact["object_key"]))
+        data = files.get(str(artifact["archive_path"]))
+        if data is None or hashlib.sha256(data).hexdigest() != artifact.get("sha256"):
+            return _error("文件校验失败", 410)
+        filename = _SAFE_ARTIFACT_NAME.sub("_", str(artifact.get("name") or "download"))[:120] or "download"
+        return send_file(
+            io.BytesIO(data),
+            mimetype=str(artifact.get("media_type") or "application/octet-stream"),
+            as_attachment=True,
+            download_name=filename,
+            max_age=0,
+        )
+    except ConfigurationError as error:
+        return _error(str(error), 503)
+    except Exception:
+        return _error("下载文件失败", 503)
 
 
 @capabilities.post("/agent/tasks/<task_id>/cancel")
@@ -681,7 +729,11 @@ def run_agent_task() -> Any:
 
         run_task(store(), tenant_id, task_id, attempt)
         return jsonify({"ok": True})
-    except Exception:
+    except Exception as error:
+        from .worker import TaskAlreadyRunning, TaskNotOwned
+
+        if isinstance(error, (TaskAlreadyRunning, TaskNotOwned)):
+            return jsonify({"ok": True, "duplicate": True})
         # Function Compute retries failed asynchronous invocations; task state
         # and the transcript are persisted by the worker before each tool call.
         return jsonify({"error": "task failed"}), 500
