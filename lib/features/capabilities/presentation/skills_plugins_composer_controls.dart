@@ -329,15 +329,19 @@ class _SkillsPluginsComposerControlsState
     ),
   );
 
-  Widget _recordRow(CapabilityRecord record, {required bool managing}) {
+  Widget _recordRow(
+    CapabilityRecord record, {
+    required bool managing,
+    bool skillSection = false,
+  }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 7),
       child: Row(
         children: [
           SvgPicture.asset(
             'assets/images/reading_sidebar_wrench.svg',
-            width: 18,
-            height: 18,
+            width: skillSection ? 22 : 18,
+            height: skillSection ? 22 : 18,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -354,10 +358,10 @@ class _SkillsPluginsComposerControlsState
                         record.name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 15),
+                        style: TextStyle(fontSize: skillSection ? 17 : 15),
                       ),
                     ),
-                    if (record.description.isNotEmpty) ...[
+                    if (!skillSection && record.description.isNotEmpty) ...[
                       const SizedBox(width: 8),
                       Flexible(
                         flex: 3,
@@ -463,8 +467,9 @@ class _SkillsPluginsComposerControlsState
           if (hasSavedCapabilities) ...[
             const Divider(height: 18, color: Color(0xFFE2E4E8)),
             if (skills.isNotEmpty) ...[
-              const _GroupLabel('技能'),
-              for (final record in skills) _recordRow(record, managing: false),
+              const _GroupLabel('技能', emphasized: true),
+              for (final record in skills)
+                _recordRow(record, managing: false, skillSection: true),
             ],
             if (plugins.isNotEmpty) ...[
               const _GroupLabel('插件'),
@@ -810,16 +815,20 @@ class _SkillsPluginsComposerControlsState
 }
 
 class _GroupLabel extends StatelessWidget {
-  const _GroupLabel(this.text);
+  const _GroupLabel(this.text, {this.emphasized = false});
 
   final String text;
+  final bool emphasized;
 
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(9, 12, 9, 3),
     child: Text(
       text,
-      style: const TextStyle(color: Color(0xFF727982), fontSize: 13),
+      style: TextStyle(
+        color: const Color(0xFF727982),
+        fontSize: emphasized ? 15 : 13,
+      ),
     ),
   );
 }
