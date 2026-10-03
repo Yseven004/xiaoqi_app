@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="815" viewBox="0 0 1160 815">
+  <rect width="1160" height="815" fill="#f7f8fa"/>
+  <text x="56" y="68" font-size="30" font-weight="700" fill="#202124" font-family="Arial,'Microsoft YaHei',sans-serif">小栖技能 / 插件 · 图标预览</text>
+  <text x="56" y="103" font-size="15" fill="#697386" font-family="Arial,'Microsoft YaHei',sans-serif">菜单五项主图标：按用户原型重绘为独立 SVG；其他管理图标保留原来源。所有图标以 64×64 预览</text>
+  <g font-family="Arial,'Microsoft YaHei',sans-serif" font-size="15" fill="#262a30" text-anchor="middle">
+    <g transform="translate(45 135)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/skill_plugin_capsule.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">创建技能 / 插件 · 与胶囊一致</text></g>
+    <g transform="translate(230 135)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/image.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">创建图像</text></g>
+    <g transform="translate(415 135)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/web_search.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">联网搜索</text></g>
+    <g transform="translate(600 135)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/brush.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">绘图</text></g>
+    <g transform="translate(785 135)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/auto_stories.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">示例技能图标</text></g>
+    <g transform="translate(970 135)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/description.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">示例插件图标</text></g>
+    <g transform="translate(45 300)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/settings.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">管理能力</text></g>
+    <g transform="translate(230 300)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/apps.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">阅读任务入口</text></g>
+    <g transform="translate(415 300)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/mcp_connector.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">MCP 连接器 · 自绘</text></g>
+    <g transform="translate(600 300)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/edit.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">修改 / 编辑</text></g>
+    <g transform="translate(785 300)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/delete.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">删除</text></g>
+    <g transform="translate(970 300)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/visibility.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">菜单展示开启</text></g>
+    <g transform="translate(230 465)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/visibility_off.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">菜单展示关闭</text></g>
+    <g transform="translate(415 465)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/cloud_upload.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">待同步</text></g>
+    <g transform="translate(600 465)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/cloud_done.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">已同步</text></g>
+    <g transform="translate(785 465)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/sync_problem.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">同步冲突</text></g>
+    <g transform="translate(45 630)"><rect width="170" height="150" rx="16" fill="#fff"/><image href="../../assets/icons/capabilities/help_outline.svg" x="53" y="22" width="64" height="64"/><text x="85" y="115">选择面板标题</text></g>
+  </g>
+</svg>

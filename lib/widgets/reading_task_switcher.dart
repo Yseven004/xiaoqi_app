@@ -14,7 +14,7 @@ const _taskMenuChromeHeight = 172.0;
 const _taskMenuMinHeight = _taskMenuChromeHeight + 52.0;
 const _taskBookRowHeight = 52.0;
 const _taskBookRowGap = 3.0;
-const _taskMenuMaxWidth = 270.0;
+const _taskMenuMaxWidth = 240.0;
 
 List<BookLibraryItem> _filterBooksByQuery(
   List<BookLibraryItem> books,

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="540" viewBox="0 0 1240 540">
+  <rect width="1240" height="540" fill="#fff"/>
+  <rect x="104" y="36" width="1104" height="359" rx="28" fill="#fff" stroke="#dedede"/>
+  <g fill="none" stroke="#777" stroke-width="1.8">
+    <circle cx="140" cy="93" r="9"/>
+    <path d="M137 91a3 3 0 1 1 5 2c-1.5 1-2 1.5-2 3m0 3v.2"/>
+    <path d="M1171 88l10 10m0-10l-10 10"/>
+  </g>
+  <text x="164" y="99" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="17" fill="#777">技能试用</text>
+  <text x="130" y="151" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="18" font-weight="600" fill="#171717">这版试用结果怎么样？选一个操作，或直接输入修改建议。</text>
+  <rect x="117" y="180" width="1078" height="48" rx="14" fill="#f3f3f3"/>
+  <g font-family="Arial,'Microsoft YaHei',sans-serif" font-size="16" fill="#1f1f1f">
+    <rect x="130" y="190" width="28" height="28" rx="7" fill="#f7f7f7" stroke="#d7d7d7"/>
+    <text x="144" y="210" text-anchor="middle" font-size="15" fill="#606060">1</text>
+    <text x="171" y="210">直接保存并在菜单中显示</text>
+    <path d="M1164 204h15m-6-6l6 6-6 6" fill="none" stroke="#888" stroke-width="1.6"/>
+    <rect x="130" y="241" width="28" height="28" rx="7" fill="#fff" stroke="#d7d7d7"/>
+    <text x="144" y="261" text-anchor="middle" font-size="15" fill="#606060">2</text>
+    <text x="171" y="261">修改后再看</text>
+    <rect x="130" y="292" width="28" height="28" rx="7" fill="#fff" stroke="#d7d7d7"/>
+    <text x="144" y="312" text-anchor="middle" font-size="15" fill="#606060">3</text>
+    <text x="171" y="312">先保存在草稿</text>
+  </g>
+  <path d="M120 331h1068" stroke="#ececec"/>
+  <g fill="none" stroke="#777" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M136 362l11-11 5 5-11 11-6 1z"/>
+    <path d="M1156 352v17m-5-13v9m10-9v9"/>
+  </g>
+  <text x="171" y="367" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="17" fill="#b5b5b5">或自行撰写修改建议</text>
+  <rect x="1042" y="346" width="67" height="39" rx="20" fill="#fff" stroke="#e0e0e0"/>
+  <text x="1075" y="372" text-anchor="middle" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="15" fill="#333">跳过</text>
+  <rect x="1119" y="346" width="68" height="39" rx="20" fill="#353535"/>
+  <text x="1153" y="372" text-anchor="middle" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="15" font-weight="600" fill="#fff">发送</text>
+  <rect x="103" y="418" width="1105" height="88" rx="28" fill="#fff" stroke="#ededed"/>
+  <circle cx="140" cy="461" r="17" fill="#fafafa" stroke="#f0f0f0"/>
+  <path d="M140 452v18m-9-9h18" stroke="#171717" stroke-width="2" stroke-linecap="round"/>
+  <text x="177" y="452" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="17" fill="#aaa">发消息或按住说话</text>
+  <rect x="814" y="463" width="183" height="31" rx="16" fill="#fff" stroke="#dedede"/>
+  <text x="905" y="484" text-anchor="middle" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="14" fill="#242424">DeepSeek · Flash　⌄</text>
+  <circle cx="1035" cy="478" r="16" fill="#fafafa"/>
+  <path d="M1035 469v18m-5-13v8m10-8v8" stroke="#333" stroke-width="1.7" stroke-linecap="round"/>
+  <circle cx="1170" cy="478" r="16" fill="#fafafa"/>
+  <path d="M1163 478l14-7-4 15-3-6z" fill="none" stroke="#333" stroke-width="1.6" stroke-linejoin="round"/>
+</svg>

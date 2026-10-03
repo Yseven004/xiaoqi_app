@@ -24,6 +24,7 @@ class AiConversationMessage {
     this.attachments = const [],
     this.isDeletedMarker = false,
     this.isIncomplete = false,
+    this.capabilityMetadata,
   }) : id = id ?? _newMessageId();
 
   final String id;
@@ -35,6 +36,7 @@ class AiConversationMessage {
   final List<HomeChatAttachment> attachments;
   final bool isDeletedMarker;
   final bool isIncomplete;
+  final Map<String, Object?>? capabilityMetadata;
 
   AiConversationMessage copyWith({
     String? id,
@@ -47,6 +49,8 @@ class AiConversationMessage {
     List<HomeChatAttachment>? attachments,
     bool? isDeletedMarker,
     bool? isIncomplete,
+    Map<String, Object?>? capabilityMetadata,
+    bool clearCapabilityMetadata = false,
   }) => AiConversationMessage(
     id: id ?? this.id,
     parentMessageId: clearParentMessageId
@@ -59,6 +63,9 @@ class AiConversationMessage {
     attachments: attachments ?? this.attachments,
     isDeletedMarker: isDeletedMarker ?? this.isDeletedMarker,
     isIncomplete: isIncomplete ?? this.isIncomplete,
+    capabilityMetadata: clearCapabilityMetadata
+        ? null
+        : capabilityMetadata ?? this.capabilityMetadata,
   );
 
   Map<String, Object?> toJson() => {
@@ -77,6 +84,7 @@ class AiConversationMessage {
         .toList(),
     'is_deleted_marker': isDeletedMarker,
     'is_incomplete': isIncomplete,
+    if (capabilityMetadata != null) 'capability_metadata': capabilityMetadata,
   };
 
   factory AiConversationMessage.fromJson(Object? raw) {
@@ -102,6 +110,9 @@ class AiConversationMessage {
           : const [],
       isDeletedMarker: raw['is_deleted_marker'] == true,
       isIncomplete: raw['is_incomplete'] == true,
+      capabilityMetadata: raw['capability_metadata'] is Map
+          ? Map<String, Object?>.from(raw['capability_metadata'] as Map)
+          : null,
     );
   }
 }
@@ -469,6 +480,7 @@ class AiConversationRecord {
                 (message) =>
                     message.isDeletedMarker ||
                     message.text.trim().isNotEmpty ||
+                    message.capabilityMetadata != null ||
                     message.attachments.isNotEmpty,
               )
               .toList(growable: false)
@@ -773,7 +785,8 @@ class AiConversationHistoryService {
         hadPrevious = _records.containsKey(record.id);
         previous = _records[record.id];
         previousSelection = _versionSelections[record.id];
-        selectionChanged = previous != null &&
+        selectionChanged =
+            previous != null &&
             !_sameSelections(
               previous!.selectedChildren,
               record.selectedChildren,
@@ -828,9 +841,7 @@ class AiConversationHistoryService {
   }
 
   /// Restores the most recently persisted selection after a write failure.
-  AiConversationRecord restoreVersionSelection(
-    AiConversationRecord record,
-  ) {
+  AiConversationRecord restoreVersionSelection(AiConversationRecord record) {
     final snapshot =
         _persistedVersionSelections[record.id] ??
         _versionSelectionFallbacks[record.id];
@@ -956,8 +967,7 @@ class AiConversationHistoryService {
     final saved = await _preferences!.setString(
       _versionSelectionStorageKey,
       jsonEncode({
-        for (final entry in snapshot.entries)
-          entry.key: entry.value.toJson(),
+        for (final entry in snapshot.entries) entry.key: entry.value.toJson(),
       }),
     );
     if (!saved) throw StateError('Could not save conversation version');
@@ -1152,9 +1162,7 @@ class AiConversationHistoryService {
 
     final activeIds = currentRecords.map((record) => record.id).toSet();
     _versionSelections.removeWhere((id, _) => !activeIds.contains(id));
-    _persistedVersionSelections.removeWhere(
-      (id, _) => !activeIds.contains(id),
-    );
+    _persistedVersionSelections.removeWhere((id, _) => !activeIds.contains(id));
     for (final record in currentRecords) {
       final persisted = _snapshotSelection(record);
       _persistedVersionSelections[record.id] = persisted;
@@ -1263,8 +1271,10 @@ class AiConversationHistoryService {
 }
 
 class _VersionSelectionSnapshot {
-  _VersionSelectionSnapshot(Map<String, String> selectedChildren, this.updatedAt)
-    : selectedChildren = Map<String, String>.unmodifiable(selectedChildren);
+  _VersionSelectionSnapshot(
+    Map<String, String> selectedChildren,
+    this.updatedAt,
+  ) : selectedChildren = Map<String, String>.unmodifiable(selectedChildren);
 
   final Map<String, String> selectedChildren;
   final DateTime updatedAt;

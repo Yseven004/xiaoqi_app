@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:ui' show FontFeature;
 import 'dart:math' show min, pi, sin;
 
 import 'package:flutter/foundation.dart'
@@ -24,10 +23,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../features/ai_study_annotation/data/ai_conversation_history.dart';
+import '../features/capabilities/data/capability_store.dart';
+import '../features/capabilities/data/capability_models.dart';
+import '../features/capabilities/data/capability_cloud_sync.dart';
+import '../features/capabilities/data/skill_creator_adapter.dart';
+import '../features/capabilities/presentation/capability_tag_text_controller.dart';
+import '../features/capabilities/presentation/skills_plugins_composer_controls.dart';
 import '../models/book_library_item.dart';
 import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
-import '../models/note.dart';
 import '../models/note_editor_result.dart';
 import '../models/notebook.dart';
 import '../services/book_library_service.dart';
@@ -206,7 +210,7 @@ ThemeData _buildHomeAssistantMarkdownTheme(ThemeData parentTheme) {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
-  final _composerController = TextEditingController();
+  final _composerController = CapabilityTagTextController();
   final _composerKey = GlobalKey<_HomeComposerState>();
   final _composerFocusNode = FocusNode();
   final _messagesScrollController = ScrollController();
@@ -218,7 +222,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _historyService = AiConversationHistoryService.instance;
   final _modelPreferences = HomeChatModelPreferences.instance;
   final _bookLibrary = BookLibraryService();
-  final _conversationDrafts = <String, TextEditingValue>{};
+  final _conversationDrafts = <String, CapabilityTextSnapshot>{};
   final _bookConversationFallbacks = <int, AiConversationRecord>{};
   final _attachmentReader = HomeChatAttachmentReader();
   final _messageEditAddedAttachments = <String, HomeChatAttachment>{};
@@ -274,8 +278,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _loadingRecentPhotos = false;
   bool _preparingAttachments = false;
   List<HomeChatAttachment> _attachments = const [];
+  Map<String, Object?>? _activeSkillWorkflow;
+  CapabilityDraft? _pendingSkillDraftReview;
+  String? _activeCapabilityTaskId;
   AiConversationMessage? _editingQuestion;
-  TextEditingValue? _composerValueBeforeMessageEdit;
+  CapabilityTextSnapshot? _composerValueBeforeMessageEdit;
   List<HomeChatAttachment>? _attachmentsBeforeMessageEdit;
   bool _composerWasExpandedBeforeMessageEdit = false;
   bool _composerWasFocusedBeforeMessageEdit = false;
@@ -292,6 +299,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _modelPreferences.defaultSelection.addListener(_onDefaultModelChanged);
     unawaited(_modelPreferences.load().catchError((_) {}));
     _conversation = AiConversationRecord.empty();
+    unawaited(_restorePendingSkillDraft());
+    unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
     _lastKeyboardInset = _currentKeyboardInset;
     _composerController.addListener(_cacheCurrentDraft);
     _composerFocusNode.addListener(_onComposerFocusChanged);
@@ -324,6 +333,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     unawaited(_cancelVoiceInput());
     _voiceSoundLevel.dispose();
     _activeRequest?.cancel();
+    final capabilityTaskId = _activeCapabilityTaskId;
+    if (capabilityTaskId != null) {
+      unawaited(
+        CapabilityCloudSync.instance
+            .cancelTask(capabilityTaskId)
+            .catchError((_) {}),
+      );
+    }
     unawaited(_sharedMediaSubscription?.cancel());
     if (!_savingMessageEdit) unawaited(_deleteMessageEditAttachments());
     _composerController.removeListener(_cacheCurrentDraft);
@@ -413,13 +430,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_editingQuestion != null) return;
     final conversationId = _conversation?.id;
     if (conversationId == null) return;
-    _conversationDrafts[conversationId] = _composerController.value;
+    _conversationDrafts[conversationId] = _composerController.snapshot();
   }
 
   void _restoreConversationDraft(AiConversationRecord conversation) {
     _abandonMessageEdit();
-    _composerController.value =
-        _conversationDrafts[conversation.id] ?? TextEditingValue.empty;
+    _composerController.restore(
+      _conversationDrafts[conversation.id] ??
+          CapabilityTextSnapshot(value: TextEditingValue.empty),
+    );
     _attachmentPanelOpen = false;
     _attachments = const [];
     unawaited(_loadAttachments(conversation.id));
@@ -704,7 +723,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         skipped += 1;
         continue;
       }
-      final id = DateTime.now().microsecondsSinceEpoch.toString() + '_$added';
+      final id = '${DateTime.now().microsecondsSinceEpoch}_$added';
       final safeName = picked.name.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
       final filePath = '${target.path}/${id}_$safeName';
       final file = File(filePath);
@@ -741,8 +760,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (mounted) setState(() {});
     if (editQuestionId == null) await _persistAttachments();
-    if (skipped > 0 && mounted)
+    if (skipped > 0 && mounted) {
       _showReplyError('已添加 $added 个，$skipped 个文件超出数量、大小或格式限制');
+    }
   }
 
   Future<void> _removeAttachment(HomeChatAttachment attachment) async {
@@ -1021,7 +1041,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     _messageEditAddedAttachments.clear();
-    _composerValueBeforeMessageEdit = _composerController.value;
+    _composerValueBeforeMessageEdit = _composerController.snapshot();
     _attachmentsBeforeMessageEdit = List<HomeChatAttachment>.of(_attachments);
     _composerWasExpandedBeforeMessageEdit = _composerExpanded;
     _composerWasFocusedBeforeMessageEdit = _composerFocusNode.hasFocus;
@@ -1030,9 +1050,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _attachments = List<HomeChatAttachment>.of(question.attachments);
       _attachmentPanelOpen = false;
       _attachmentPanelPending = false;
-      _composerController.value = TextEditingValue(
-        text: question.text,
-        selection: TextSelection.collapsed(offset: question.text.length),
+      _composerController.setMessage(
+        question.text,
+        question.capabilityMetadata,
       );
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1075,7 +1095,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _attachmentPanelOpen = false;
     _attachmentPanelPending = false;
     _setComposerExpanded(wasExpanded);
-    _composerController.value = previousValue ?? TextEditingValue.empty;
+    _composerController.restore(
+      previousValue ?? CapabilityTextSnapshot(value: TextEditingValue.empty),
+    );
     _attachments = previousAttachments ?? const [];
     if (keepAddedAttachments) {
       _messageEditAddedAttachments.clear();
@@ -1110,8 +1132,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final source = _editingQuestion;
     final current = _conversation;
     if (source == null || current == null) return;
-    final text = _composerController.text.trim();
-    if (text.isEmpty && _attachments.isEmpty) return;
+    final rawText = _composerController.messageText;
+    final text = rawText.trim();
+    final capabilityMetadata = _composerController.messageMetadata();
+    _normalizeCapabilityTextOffset(capabilityMetadata, rawText, text);
+    if (text.isEmpty && _attachments.isEmpty && capabilityMetadata == null) {
+      return;
+    }
     final selectedAttachments = List<HomeChatAttachment>.of(_attachments);
     setState(() => _savingMessageEdit = true);
     List<HomeChatAttachment> preparedAttachments;
@@ -1155,11 +1182,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         pageLabel: source.pageLabel,
         createdAt: now,
         attachments: preparedAttachments,
+        capabilityMetadata: capabilityMetadata,
       );
       final updated = latest
           .appendQuestionVersion(source.id, editedQuestion)
           .copyWith(
-            title: source.parentMessageId == null ? text : latest.title,
+            title: source.parentMessageId == null
+                ? (text.isEmpty
+                      ? (capabilityMetadata?['name']?.toString() ?? '能力任务')
+                      : text)
+                : latest.title,
             updatedAt: now,
             modelId: selection.model.id,
             reasoningLevel: selection.reasoningLevel.name,
@@ -1313,8 +1345,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _voicePanelVisible) {
       return;
     }
-    final text = _composerController.text.trim();
-    if (text.isEmpty && _attachments.isEmpty) return;
+    final rawText = _composerController.messageText;
+    final text = rawText.trim();
+    final selectedCapability = _composerController.messageMetadata();
+    _normalizeCapabilityTextOffset(selectedCapability, rawText, text);
+    final capabilityForMessage = selectedCapability ?? _activeSkillWorkflow;
+    if (text.isEmpty && _attachments.isEmpty && capabilityForMessage == null) {
+      return;
+    }
     setState(() {
       _isPreparingToSend = true;
       if (_attachments.isNotEmpty) _preparingAttachments = true;
@@ -1361,9 +1399,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       isUser: true,
       createdAt: now,
       attachments: preparedAttachments,
+      capabilityMetadata: capabilityForMessage == null
+          ? null
+          : Map<String, Object?>.from(capabilityForMessage),
     );
+    if (selectedCapability?['type'] == 'action' &&
+        (selectedCapability?['id'] == 'create-skill' ||
+            selectedCapability?['id'] == 'revise-skill')) {
+      _activeSkillWorkflow = Map<String, Object?>.from(selectedCapability!)
+        ..remove('composer_text_offset');
+    }
+    final capabilityTitle = capabilityForMessage == null
+        ? null
+        : capabilityForMessage['name']?.toString();
     final withUserMessage = current.copyWith(
-      title: current.title.trim().isEmpty ? text : current.title,
+      title: current.title.trim().isEmpty
+          ? (text.isEmpty ? capabilityTitle ?? '能力任务' : text)
+          : current.title,
       messages: [...current.messages, userMessage],
       updatedAt: now,
       modelId: selection.model.id,
@@ -1415,18 +1467,132 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _pendingReplyParentId = null;
       return;
     }
-    final request = AiService().startChatReply(
-      messages: aiMessages,
-      modelId: selection.model.id,
-      reasoningLevel: selection.reasoningLevel,
-    );
-    _activeRequest = request;
+    AiChatReplyRequest? request;
+    String? agentTaskId;
+    String? completedSkillDocument;
+    Map<String, dynamic>? completedSkillFiles;
 
     try {
-      await for (final chunk in request.chunks) {
+      final paired = await CapabilityCloudSync.instance.isPaired;
+      final hasSavedSkills = (await CapabilityStore.instance.list()).isNotEmpty;
+      final useAgent =
+          paired && (capabilityForMessage != null || hasSavedSkills);
+      if (useAgent) {
+        Map<String, Object?>? capabilityReference;
+        if (capabilityForMessage?['type'] == 'skill') {
+          capabilityReference = capabilityForMessage;
+        } else {
+          final targetId = capabilityForMessage?['target_id']?.toString();
+          if (targetId != null) {
+            final target = await CapabilityStore.instance.find(targetId);
+            final version = target?.currentVersion;
+            if (target != null && version != null) {
+              capabilityReference = {'id': target.id, 'version_id': version.id};
+            }
+          }
+        }
+        final materials = <Map<String, Object?>>[];
+        for (var index = 0; index < preparedAttachments.length; index++) {
+          final attachment = preparedAttachments[index];
+          if (attachment.extractedText.trim().isNotEmpty) {
+            materials.add({
+              'id': 'attachment-$index',
+              'name': attachment.name,
+              'text': attachment.extractedText,
+            });
+          }
+        }
+        final task = await CapabilityCloudSync.instance.createAgentTask(
+          messages: aiMessages,
+          modelId: selection.model.id,
+          reasoningLevel: selection.reasoningLevel.name,
+          capability: capabilityReference,
+          materials: materials,
+        );
+        agentTaskId = task['task_id']?.toString();
+        if (agentTaskId == null) throw const AiException('云端没有返回任务编号');
+        _activeCapabilityTaskId = agentTaskId;
+        await for (final event in CapabilityCloudSync.instance.watchTask(
+          agentTaskId,
+        )) {
+          if (!_isCurrentRequest(requestGeneration, conversationId)) return;
+          switch (event['type']) {
+            case 'assistant_delta':
+              _streamingReplyBuffer.write(event['text']?.toString() ?? '');
+              _scheduleStreamingReplyUpdate(requestGeneration, conversationId);
+              break;
+            case 'network_permission_required':
+              final domains = (event['domains'] as List? ?? const [])
+                  .map((value) => value.toString())
+                  .toList(growable: false);
+              final allow = await _confirmAgentNetworkAccess(
+                event['purpose']?.toString() ?? '脚本需要访问这些域名',
+                domains,
+              );
+              if (allow) {
+                await CapabilityCloudSync.instance.authorizeTaskDomains(
+                  agentTaskId,
+                  domains,
+                );
+              } else {
+                await CapabilityCloudSync.instance.cancelTask(agentTaskId);
+                throw const AiException('已取消这次联网执行');
+              }
+              break;
+            case 'completed':
+              completedSkillDocument = event['draft']?.toString();
+              completedSkillFiles = event['files'] is Map
+                  ? (event['files'] as Map).cast<String, dynamic>()
+                  : null;
+              break;
+            case 'error':
+              throw AiException(event['message']?.toString() ?? '技能任务失败，请稍后重试');
+          }
+        }
         if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-        _streamingReplyBuffer.write(chunk);
-        _scheduleStreamingReplyUpdate(requestGeneration, conversationId);
+        final streamed = _streamingReplyBuffer.toString();
+        if (completedSkillDocument != null &&
+            _activeSkillWorkflow != null &&
+            !(_extractSkillDocument(streamed)?.isNotEmpty ?? false)) {
+          _streamingReplyBuffer
+            ..write('\n\n## SKILL.md\n```markdown\n')
+            ..write(completedSkillDocument)
+            ..write('\n```');
+        }
+        if (completedSkillFiles != null && _activeSkillWorkflow != null) {
+          final existingReply = _streamingReplyBuffer.toString();
+          for (final entry in completedSkillFiles.entries) {
+            final path = entry.key;
+            if (path == 'SKILL.md' ||
+                RegExp(
+                  r'^##\s+' + RegExp.escape(path) + r'\s*$',
+                  multiLine: true,
+                ).hasMatch(existingReply)) {
+              continue;
+            }
+            try {
+              final resource = utf8.decode(
+                base64.decode(entry.value.toString()),
+              );
+              _streamingReplyBuffer
+                ..write('\n\n## $path\n```text\n')
+                ..write(resource)
+                ..write('\n```');
+            } catch (_) {}
+          }
+        }
+      } else {
+        request = AiService().startChatReply(
+          messages: aiMessages,
+          modelId: selection.model.id,
+          reasoningLevel: selection.reasoningLevel,
+        );
+        _activeRequest = request;
+        await for (final chunk in request.chunks) {
+          if (!_isCurrentRequest(requestGeneration, conversationId)) return;
+          _streamingReplyBuffer.write(chunk);
+          _scheduleStreamingReplyUpdate(requestGeneration, conversationId);
+        }
       }
       if (!_isCurrentRequest(requestGeneration, conversationId)) return;
       _flushStreamingReply(requestGeneration, conversationId);
@@ -1434,7 +1600,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (reply.trim().isEmpty) {
         throw const AiException('AI没有返回可用内容，请重试');
       }
-      await _appendAssistantReply(
+      final saved = await _appendAssistantReply(
         reply,
         parentMessageId: _pendingReplyParentId,
       );
@@ -1458,7 +1624,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         setState(() {
           _isGenerating = false;
         });
-        if (identical(_activeRequest, request)) _activeRequest = null;
+        if (request != null && identical(_activeRequest, request)) {
+          _activeRequest = null;
+        }
+        if (_activeCapabilityTaskId == agentTaskId) {
+          _activeCapabilityTaskId = null;
+        }
       }
       if (requestGeneration == _requestGeneration) {
         _pendingReplyParentId = null;
@@ -1466,26 +1637,82 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<bool> _confirmAgentNetworkAccess(
+    String purpose,
+    List<String> domains,
+  ) async {
+    if (!mounted || domains.isEmpty) return false;
+    return await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            backgroundColor: Colors.white,
+            title: const Text('允许本次脚本联网？'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(purpose),
+                const SizedBox(height: 12),
+                for (final domain in domains)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Text('• $domain'),
+                  ),
+                const SizedBox(height: 10),
+                const Text(
+                  '仅对此次任务开放以上域名。Python 执行本身不会额外询问。',
+                  style: TextStyle(color: Color(0xFF666666), fontSize: 13),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('保持断网'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('允许本次'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
   Future<List<Map<String, Object?>>> _buildAiMessages(
     List<AiConversationMessage> history,
   ) async {
     final aiMessages = <Map<String, Object?>>[];
+    final capabilityCatalog = await _capabilityCatalogPrompt(history);
+    if (capabilityCatalog.isNotEmpty) {
+      aiMessages.add({'role': 'system', 'content': capabilityCatalog});
+    }
+    final latestUserMessageId = history.reversed
+        .where((item) => item.isUser && !item.isDeletedMarker)
+        .firstOrNull
+        ?.id;
     for (final message in history.where((item) => !item.isDeletedMarker)) {
       final attachments = message.attachments;
+      final capabilityPrompt = message.id == latestUserMessageId
+          ? await _capabilityPromptFor(message)
+          : '';
+      final text = message.text.isEmpty && capabilityPrompt.isNotEmpty
+          ? capabilityPrompt.trim()
+          : message.text.isEmpty
+          ? '请概括附件内容与重点，并询问我接下来想了解什么。'
+          : capabilityPrompt.isEmpty
+          ? message.text
+          : '${message.text}\n\n$capabilityPrompt';
       if (attachments.isEmpty) {
         aiMessages.add({
           'role': message.isUser ? 'user' : 'assistant',
-          'content': message.text,
+          'content': text,
         });
         continue;
       }
       final content = <Map<String, Object?>>[
-        {
-          'type': 'text',
-          'text': message.text.isEmpty
-              ? '请概括附件内容与重点，并询问我接下来想了解什么。'
-              : message.text,
-        },
+        {'type': 'text', 'text': text},
       ];
       for (final attachment in attachments) {
         if (attachment.isImage) {
@@ -1532,10 +1759,278 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return aiMessages;
   }
 
+  Future<String> _capabilityCatalogPrompt(
+    List<AiConversationMessage> history,
+  ) async {
+    final skills = (await CapabilityStore.instance.list())
+        .where((record) => record.kind == CapabilityKind.skill)
+        .toList(growable: false);
+    if (skills.isEmpty) return '';
+    final recentUserText = history
+        .where((message) => message.isUser && !message.isDeletedMarker)
+        .toList(growable: false)
+        .reversed
+        .take(4)
+        .map((message) => message.text)
+        .join('\n')
+        .toLowerCase();
+    final selectedIds = history
+        .map((message) => message.capabilityMetadata?['id']?.toString())
+        .whereType<String>()
+        .toSet();
+    final relevant = <({CapabilityRecord record, int score})>[];
+    for (final record in skills) {
+      if (selectedIds.contains(record.id)) continue;
+      final source = '${record.name} ${record.description}'.toLowerCase();
+      final terms = RegExp(
+        r'[a-z0-9]{3,}|[\u4e00-\u9fff]{2,}',
+      ).allMatches(source).map((match) => match.group(0)!).toSet();
+      final score = terms.where((term) => recentUserText.contains(term)).length;
+      if (score > 0) relevant.add((record: record, score: score));
+    }
+    relevant.sort((a, b) => b.score.compareTo(a.score));
+    final buffer = StringBuffer('''
+小栖技能目录（包括用户隐藏在菜单中的技能）：
+根据名称与用途判断是否有适用技能。若有，优先使用其内容；用户明确选中的技能优先级最高。不要仅因它出现在目录中就强行套用。
+''');
+    for (final record in skills) {
+      buffer.writeln('- ${record.name}：${record.description}');
+    }
+    for (final match in relevant.take(1)) {
+      final version = match.record.currentVersion;
+      if (version == null) continue;
+      buffer.writeln('''
+自动发现的相关技能：${match.record.name}
+${version.content}''');
+    }
+    return buffer.toString().trim();
+  }
+
+  Future<String> _capabilityPromptFor(AiConversationMessage message) async {
+    final metadata = message.capabilityMetadata;
+    if (!message.isUser || metadata == null) return '';
+    final type = metadata['type']?.toString();
+    final id = metadata['id']?.toString();
+    final name = metadata['name']?.toString() ?? '技能';
+    if (type == 'action' && id == 'create-skill') {
+      return SkillCreatorAdapter.creationPrompt();
+    }
+    if (type == 'action' && id == 'revise-skill') {
+      final targetId = metadata['target_id']?.toString();
+      if (targetId == null) return '';
+      final draft = await CapabilityStore.instance.loadDraft(targetId);
+      final record = draft == null
+          ? await CapabilityStore.instance.find(targetId)
+          : null;
+      final oldContent = draft?.content ?? record?.currentVersion?.content;
+      if (oldContent == null) return '';
+      final guide = await SkillCreatorAdapter.creationPrompt();
+      return '''$guide
+
+[小栖技能修改]
+根据用户在当前消息中的建议修改下面的已生成草稿。保留原有技能意图，只调整相关部分。输出与创建流程相同的 `SKILL.md` 和代表性试用结果；再次生成后保留这份旧草稿，仍由用户决定保存。
+
+旧版 SKILL.md：
+```markdown
+$oldContent
+```''';
+    }
+    if (type == 'plugin') {
+      final description = metadata['description']?.toString().trim() ?? '';
+      return '''[用户选中的插件：$name]
+${description.isEmpty ? '' : '用途：$description\n'}
+请在本次消息中使用这项插件能力；如果用户只发送了标签，先询问希望完成的任务。''';
+    }
+    if (type != 'skill' || id == null) return '';
+    final record = await CapabilityStore.instance.find(id);
+    if (record == null) return '已选择技能“$name”，请结合当前对话处理；信息不足时先询问用途。';
+    final versionId = metadata['version_id']?.toString();
+    CapabilityVersion? version;
+    for (final item in record.versions) {
+      if (item.id == versionId) {
+        version = item;
+        break;
+      }
+    }
+    version ??= record.currentVersion;
+    if (version == null) {
+      return '已选择技能“$name”，请结合当前对话处理；如果没有明确任务，先询问用户想做什么。';
+    }
+    return '''[优先使用已选技能：$name]
+${record.description.isEmpty ? '' : '用途：${record.description}\n'}
+请结合当前对话执行；如果没有明确任务，先询问用户想做什么。
+${version.content}''';
+  }
+
+  Future<void> _restorePendingSkillDraft() async {
+    final drafts = await CapabilityStore.instance.drafts();
+    if (!mounted || drafts.isEmpty) return;
+    drafts.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    setState(() => _pendingSkillDraftReview = drafts.first);
+  }
+
+  String? _extractSkillDocument(String response) {
+    final headedBlock = RegExp(
+      r'##\s*(?:`?SKILL\.md`?|技能正文)\s*\r?\n+```(?:markdown|md)?\s*\r?\n([\s\S]*?)```',
+      caseSensitive: false,
+      dotAll: true,
+    ).firstMatch(response);
+    final blocks = <String>[
+      if (headedBlock != null) headedBlock.group(1)!,
+      ...RegExp(
+        r'```(?:markdown|md)?\s*\r?\n([\s\S]*?)```',
+        dotAll: true,
+      ).allMatches(response).map((match) => match.group(1)!),
+    ];
+    for (final block in blocks) {
+      final content = block.trim();
+      if (RegExp(
+            r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)',
+            dotAll: true,
+          ).hasMatch(content) &&
+          RegExp(r'^name:\s*\S', multiLine: true).hasMatch(content) &&
+          RegExp(r'^description:\s*\S', multiLine: true).hasMatch(content)) {
+        return content;
+      }
+    }
+    return null;
+  }
+
+  Map<String, String> _extractSkillFiles(String response) {
+    final files = <String, String>{};
+    final pattern = RegExp(
+      r'^##\s+(scripts|references|assets)/([^\s]+)\s*\r?\n```[^\r\n]*\r?\n([\s\S]*?)```',
+      multiLine: true,
+    );
+    for (final match in pattern.allMatches(response)) {
+      final directory = match.group(1)!;
+      final filename = match.group(2)!;
+      final path = '$directory/$filename';
+      if (path.contains('..') || path.startsWith('/') || path.contains('\\')) {
+        continue;
+      }
+      if (directory == 'scripts' && !filename.toLowerCase().endsWith('.py')) {
+        continue;
+      }
+      final value = match.group(3) ?? '';
+      files[path] = base64.encode(utf8.encode(value));
+    }
+    return files;
+  }
+
+  String _frontmatterValue(String content, String key) {
+    final match = RegExp(
+      '^${RegExp.escape(key)}:'
+      r'\s*(.*?)\s*$',
+      multiLine: true,
+    ).firstMatch(content);
+    if (match == null) return '';
+    var value = match.group(1)!.trim();
+    if (value.length >= 2 &&
+        ((value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.substring(1, value.length - 1);
+    }
+    return value;
+  }
+
+  Future<CapabilityDraft?> _skillDraftFromReply(
+    AiConversationMessage? parent,
+    String response,
+  ) async {
+    if (parent == null || parent.isIncomplete) return null;
+    final metadata = parent.capabilityMetadata;
+    if (metadata?['type'] != 'action') return null;
+    final actionId = metadata?['id']?.toString();
+    if (actionId != 'create-skill' && actionId != 'revise-skill') return null;
+    final content = _extractSkillDocument(response);
+    if (content == null) return null;
+    final targetId = metadata?['target_id']?.toString();
+    final previousDraft = targetId == null
+        ? null
+        : await CapabilityStore.instance.loadDraft(targetId);
+    final existingRecord = targetId == null
+        ? null
+        : await CapabilityStore.instance.find(targetId);
+    final previousContent =
+        previousDraft?.content ?? existingRecord?.currentVersion?.content;
+    final rawName = _frontmatterValue(content, 'name');
+    final description = _frontmatterValue(content, 'description');
+    if (rawName.length > 64 ||
+        !RegExp(r'^[a-z0-9]+(?:-[a-z0-9]+)*$').hasMatch(rawName) ||
+        description.isEmpty ||
+        description.length > 1024 ||
+        description.contains('<') ||
+        description.contains('>')) {
+      return null;
+    }
+    return CapabilityDraft(
+      id:
+          previousDraft?.id ??
+          existingRecord?.id ??
+          CapabilityStore.instance.newDraftId(),
+      name: rawName,
+      description: description,
+      content: content,
+      previousContent: previousContent,
+      userSuggestion: parent.text,
+      updatedAt: DateTime.now(),
+      files: _extractSkillFiles(response),
+    );
+  }
+
+  Future<void> _saveSkillDraft(CapabilityDraft draft, bool showInMenu) async {
+    final existing = await CapabilityStore.instance.find(draft.id);
+    await CapabilityStore.instance.commitDraft(
+      draft,
+      existingId: existing?.id,
+      showInMenu: showInMenu,
+    );
+    if (await CapabilityCloudSync.instance.isPaired) {
+      unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
+    }
+    if (!mounted) return;
+    setState(() => _pendingSkillDraftReview = null);
+  }
+
+  Future<void> _requestSkillDraftRevision(CapabilityDraft draft) async {
+    await CapabilityStore.instance.saveDraft(draft);
+    if (await CapabilityCloudSync.instance.isPaired) {
+      unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
+    }
+    if (!mounted) return;
+    setState(() {
+      _pendingSkillDraftReview = null;
+      _activeSkillWorkflow = null;
+      _composerController.insertCapability({
+        'type': 'action',
+        'id': 'revise-skill',
+        'target_id': draft.id,
+        'name': '修改技能：${draft.name}',
+      });
+    });
+    _composerFocusNode.requestFocus();
+  }
+
   bool _isCurrentRequest(int generation, String conversationId) =>
       mounted &&
       generation == _requestGeneration &&
       _conversation?.id == conversationId;
+
+  void _normalizeCapabilityTextOffset(
+    Map<String, Object?>? metadata,
+    String rawText,
+    String normalizedText,
+  ) {
+    if (metadata == null) return;
+    final offset = metadata['composer_text_offset'] is int
+        ? metadata['composer_text_offset'] as int
+        : 0;
+    final removedPrefix = rawText.length - rawText.trimLeft().length;
+    metadata['composer_text_offset'] = (offset - removedPrefix)
+        .clamp(0, normalizedText.length)
+        .toInt();
+  }
 
   void _scheduleStreamingReplyUpdate(int generation, String conversationId) {
     if (_streamingReply.value.isEmpty) {
@@ -1579,6 +2074,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final parentId = parentMessageId ?? current.messages.lastOrNull?.id;
     if (parentId == null) return false;
+    CapabilityDraft? skillDraft;
+    try {
+      skillDraft = await _skillDraftFromReply(
+        current.nodeById(parentId),
+        content,
+      );
+      if (skillDraft != null) {
+        await CapabilityStore.instance.saveDraft(skillDraft);
+        if (await CapabilityCloudSync.instance.isPaired) {
+          unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
+        }
+      }
+    } catch (_) {
+      // A malformed generated skill stays visible in chat but is not offered
+      // as a saveable draft.
+      skillDraft = null;
+    }
     final now = DateTime.now();
     final updated = current
         .appendAnswerVersion(
@@ -1607,6 +2119,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _messages
           ..clear()
           ..addAll(updated.messages);
+        if (skillDraft != null) {
+          _pendingSkillDraftReview = skillDraft;
+          _activeSkillWorkflow = null;
+        }
         _clearStreamingReply();
       });
     }
@@ -1690,12 +2206,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void _stopReply() {
     if (!_isGenerating) return;
     final request = _activeRequest;
+    final capabilityTaskId = _activeCapabilityTaskId;
     final conversationId = _conversation?.id;
     final replyParentId = _pendingReplyParentId;
     final continuationMessageId = _pendingContinuationMessageId;
     final stoppedGeneration = ++_requestGeneration;
     _activeRequest = null;
+    _activeCapabilityTaskId = null;
     request?.cancel();
+    if (capabilityTaskId != null) {
+      unawaited(
+        CapabilityCloudSync.instance
+            .cancelTask(capabilityTaskId)
+            .catchError((_) {}),
+      );
+    }
     _flushStreamingReply(_requestGeneration, conversationId ?? '');
     final partialReply = _streamingReplyBuffer.toString();
     unawaited(
@@ -2770,6 +3295,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     int? bookId,
     String bookName = '',
   }) async {
+    _activeSkillWorkflow = null;
+    _composerController.clearCapabilities();
+    _pendingSkillDraftReview = null;
     final generation = ++_readingTaskGeneration;
     if (_voicePanelVisible) await _cancelVoiceInput();
     if (!mounted || generation != _readingTaskGeneration) return;
@@ -3112,19 +3640,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         systemNavigationBarIconBrightness: Brightness.dark,
         systemNavigationBarDividerColor: Colors.transparent,
       ),
-      child: WillPopScope(
-        onWillPop: () async {
+      child: PopScope<void>(
+        canPop: !_voicePanelVisible && !_composerExpanded && !_spaceMenuOpen,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) return;
           if (_voicePanelVisible) {
-            await _cancelVoiceInput();
-            return false;
+            unawaited(_cancelVoiceInput());
+            return;
           }
           if (_composerExpanded) {
             _setComposerExpanded(false);
-            return false;
+            return;
           }
-          if (!_spaceMenuOpen) return true;
+          if (!_spaceMenuOpen) return;
           setState(() => _spaceMenuOpen = false);
-          return false;
         },
         child: Scaffold(
           backgroundColor: const Color(0xFFFDFDFD),
@@ -3254,6 +3783,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                             controller: _composerController,
                                             focusNode: _composerFocusNode,
                                             modelSelection: _selectedModel,
+                                            onCapabilitySelected: (capability) {
+                                              _activeSkillWorkflow = null;
+                                              _composerController
+                                                  .insertCapability(capability);
+                                              _composerFocusNode.unfocus();
+                                            },
+                                            pendingSkillDraftReview:
+                                                _pendingSkillDraftReview,
+                                            onSaveSkillDraft: _saveSkillDraft,
+                                            onReviseSkillDraft:
+                                                _requestSkillDraftRevision,
                                             onModelSelectionChanged:
                                                 _setSelectedModel,
                                             showReadingTasks:
@@ -3670,6 +4210,10 @@ class _HomeComposer extends StatefulWidget {
     required this.controller,
     required this.focusNode,
     required this.modelSelection,
+    required this.onCapabilitySelected,
+    required this.pendingSkillDraftReview,
+    required this.onSaveSkillDraft,
+    required this.onReviseSkillDraft,
     required this.onModelSelectionChanged,
     required this.showReadingTasks,
     required this.bookLibrary,
@@ -3712,6 +4256,11 @@ class _HomeComposer extends StatefulWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final HomeChatModelSelection modelSelection;
+  final ValueChanged<Map<String, Object?>> onCapabilitySelected;
+  final CapabilityDraft? pendingSkillDraftReview;
+  final Future<void> Function(CapabilityDraft draft, bool showInMenu)
+  onSaveSkillDraft;
+  final Future<void> Function(CapabilityDraft draft) onReviseSkillDraft;
   final ValueChanged<HomeChatModelSelection> onModelSelectionChanged;
   final bool showReadingTasks;
   final BookLibraryService bookLibrary;
@@ -4319,16 +4868,22 @@ class _HomeComposerState extends State<_HomeComposer> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (widget.showReadingTasks && !widget.expanded)
-          ReadingTaskSwitcher(
-            library: widget.bookLibrary,
-            composerFocusNode: widget.focusNode,
-            selectedBookId: widget.selectedBookId,
-            selectedBookName: widget.selectedBookName,
-            onSelectBook: widget.onSelectReadingBook,
-            onSearchFocusChanged: widget.onReadingTaskSearchFocusChanged,
-            onStartIndependent: widget.onStartIndependent,
-            onAddBook: widget.onAddReadingBook,
+        if (!widget.expanded)
+          SkillsPluginsComposerControls(
+            onCapabilitySelected: widget.onCapabilitySelected,
+            reviewDraft: widget.pendingSkillDraftReview,
+            onSaveReviewDraft: widget.onSaveSkillDraft,
+            onReviseReviewDraft: widget.onReviseSkillDraft,
+            leadingControl: ReadingTaskSwitcher(
+              library: widget.bookLibrary,
+              composerFocusNode: widget.focusNode,
+              selectedBookId: widget.selectedBookId,
+              selectedBookName: widget.selectedBookName,
+              onSelectBook: widget.onSelectReadingBook,
+              onSearchFocusChanged: widget.onReadingTaskSearchFocusChanged,
+              onStartIndependent: widget.onStartIndependent,
+              onAddBook: widget.onAddReadingBook,
+            ),
           ),
         ...children,
       ],
@@ -5031,7 +5586,6 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
         builder: (context) {
           final showSeparateStream =
               widget.isGenerating && widget.continuingReplyId == null;
-          final streamItemCount = showSeparateStream ? 1 : 0;
           final itemKeys = <Key>[const ValueKey<String>('ai-disclaimer')];
           for (final row in _messageRows) {
             itemKeys.add(
@@ -5223,7 +5777,8 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
             children: [
               if (message.attachments.isNotEmpty)
                 HomeChatMessageAttachments(attachments: message.attachments),
-              if (message.text.isNotEmpty) ...[
+              if (message.text.isNotEmpty ||
+                  message.capabilityMetadata != null) ...[
                 if (message.attachments.isNotEmpty) const SizedBox(height: 8),
                 DecoratedBox(
                   decoration: BoxDecoration(
@@ -5238,9 +5793,10 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                     child: _messageSelection(
                       message,
                       'user:${message.id}:${message.text.hashCode}',
-                      Text(
-                        message.text,
-                        style: const TextStyle(
+                      CapabilityMessageText(
+                        message: message.text,
+                        metadata: message.capabilityMetadata,
+                        textStyle: const TextStyle(
                           color: Color(0xFF24272C),
                           fontSize: 16,
                           height: 1.45,
@@ -5394,7 +5950,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
               ? [
                   InlinePattern(
                     pattern: _streamingReplyDotsPattern,
-                    builder: (context, _, __) => WidgetSpan(
+                    builder: (context, _, _) => WidgetSpan(
                       alignment: PlaceholderAlignment.middle,
                       child: Padding(
                         padding: const EdgeInsets.only(left: 4),

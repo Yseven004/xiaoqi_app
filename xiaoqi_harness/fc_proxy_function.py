@@ -3,8 +3,10 @@ import json
 import urllib.request
 import urllib.error
 from flask import Flask, request, jsonify
+from capabilities.api import capabilities as capabilities_blueprint
 
 app = Flask(__name__)
+app.register_blueprint(capabilities_blueprint)
 
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
 DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1/chat/completions'

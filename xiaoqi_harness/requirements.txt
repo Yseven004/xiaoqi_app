@@ -1,0 +1,5 @@
+Flask==3.1.2
+tablestore==6.4.8
+oss2==2.19.1
+e2b==2.52.0
+e2b-code-interpreter==2.10.1
