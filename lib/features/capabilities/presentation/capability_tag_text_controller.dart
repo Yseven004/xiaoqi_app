@@ -298,20 +298,14 @@ class CapabilityInlineTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final type = data['type']?.toString();
     final name = data['name']?.toString() ?? '能力';
-    final icon = switch (type) {
-      'skill' => 'capability_skill_book',
-      'plugin' => 'capability_plugin_document',
-      _ => 'extension',
-    };
     final inheritedStyle = textStyle ?? DefaultTextStyle.of(context).style;
     final tagContent = Row(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         SvgPicture.asset(
-          'assets/icons/capabilities/$icon.svg',
+          'assets/images/reading_sidebar_wrench.svg',
           width: 18,
           height: 18,
         ),
@@ -319,6 +313,7 @@ class CapabilityInlineTag extends StatelessWidget {
         Text(
           name,
           style: inheritedStyle.copyWith(
+            color: const Color(0xFFB54D76),
             fontSize: emphasize
                 ? (inheritedStyle.fontSize ?? 16)
                 : (inheritedStyle.fontSize ?? 16) - 1,
@@ -331,23 +326,26 @@ class CapabilityInlineTag extends StatelessWidget {
     );
     return Semantics(
       label: '$name，能力标签',
-      child: emphasize
-          ? Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(7),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Color(0x1A17212B),
-                    blurRadius: 6,
-                    offset: Offset(0, 2),
-                  ),
-                ],
-              ),
-              child: tagContent,
-            )
-          : tagContent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xEFFFFFFF), Color(0xBFFFFFFF)],
+          ),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Color(0xB3FFFFFF), width: 0.8),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0x1F202A44),
+              blurRadius: emphasize ? 8 : 6,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: tagContent,
+      ),
     );
   }
 }

@@ -257,10 +257,12 @@ class _SkillsPluginsComposerControlsState
   );
 
   Widget _icon(String name, {double size = 20}) => SvgPicture.asset(
-    'assets/icons/capabilities/$name.svg',
+    name == 'skills_wrench'
+        ? 'assets/images/reading_sidebar_wrench.svg'
+        : 'assets/icons/capabilities/$name.svg',
     width: size,
     height: size,
-    colorFilter: name == 'web_search'
+    colorFilter: name == 'web_search' || name == 'skills_wrench'
         ? null
         : const ColorFilter.mode(Color(0xFF202124), BlendMode.srcIn),
   );
@@ -272,7 +274,9 @@ class _SkillsPluginsComposerControlsState
     required VoidCallback onTap,
   }) => ComposerActionCapsule(
     label: label,
-    iconAsset: 'assets/icons/capabilities/$icon.svg',
+    iconAsset: icon == 'skills_wrench'
+        ? 'assets/images/reading_sidebar_wrench.svg'
+        : 'assets/icons/capabilities/$icon.svg',
     expanded: expanded,
     onTap: onTap,
   );
@@ -311,7 +315,8 @@ class _SkillsPluginsComposerControlsState
                     const SizedBox(height: 2),
                     Text(
                       description,
-                      maxLines: 2,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xFF758099),
                         fontSize: 13,
@@ -329,17 +334,14 @@ class _SkillsPluginsComposerControlsState
   );
 
   Widget _recordRow(CapabilityRecord record, {required bool managing}) {
-    final icon = record.kind == CapabilityKind.skill
-        ? 'capability_skill_book'
-        : 'capability_plugin_document';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 7),
       child: Row(
         children: [
           SvgPicture.asset(
-            'assets/icons/capabilities/$icon.svg',
-            width: 28,
-            height: 28,
+            'assets/images/reading_sidebar_wrench.svg',
+            width: 18,
+            height: 18,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -439,15 +441,15 @@ class _SkillsPluginsComposerControlsState
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _featureRow(
-            'skill_plugin_capsule',
+            'skills_wrench',
             '创建技能 / 插件',
-            '支持创造各种有意思的技能和插件',
+            '创造有趣的技能和插件',
             () => _selectAction('create-skill', '创建技能 / 插件'),
           ),
           _featureRow(
             'image',
             '创建图像',
-            '以图像形式描述和呈现任何内容',
+            '可视化呈现任何内容',
             () => _showStatus('图像能力入口已保留，尚未开放'),
           ),
           _featureRow(
@@ -459,7 +461,7 @@ class _SkillsPluginsComposerControlsState
           _featureRow(
             'brush',
             '绘图',
-            '以绘图形式更简单地表达想法',
+            '用绘图更直观地表达想法',
             () => _showStatus('绘图入口已保留，尚未开放'),
           ),
           if (hasSavedCapabilities) ...[
@@ -790,7 +792,7 @@ class _SkillsPluginsComposerControlsState
                   onTapOutside: (_) => _closeMenu(),
                   child: _pill(
                     label: '技能 / 插件',
-                    icon: 'skill_plugin_capsule',
+                    icon: 'skills_wrench',
                     expanded: _open,
                     onTap: _toggleMenu,
                   ),

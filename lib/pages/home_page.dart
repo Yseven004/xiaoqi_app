@@ -1462,7 +1462,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _isGenerating = false;
           _clearStreamingReply();
         });
-        _showReplyError('准备发送附件失败：$error');
+        _showReplyError('准备消息失败：$error');
       }
       _pendingReplyParentId = null;
       return;
@@ -1600,7 +1600,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (reply.trim().isEmpty) {
         throw const AiException('AI没有返回可用内容，请重试');
       }
-      final saved = await _appendAssistantReply(
+      await _appendAssistantReply(
         reply,
         parentMessageId: _pendingReplyParentId,
       );
@@ -1684,35 +1684,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     List<AiConversationMessage> history,
   ) async {
     final aiMessages = <Map<String, Object?>>[];
+    final systemInstructions = <String>[];
     final capabilityCatalog = await _capabilityCatalogPrompt(history);
     if (capabilityCatalog.isNotEmpty) {
-      aiMessages.add({'role': 'system', 'content': capabilityCatalog});
+      systemInstructions.add(capabilityCatalog);
     }
-    final latestUserMessageId = history.reversed
+    final latestUserMessage = history.reversed
         .where((item) => item.isUser && !item.isDeletedMarker)
-        .firstOrNull
-        ?.id;
+        .firstOrNull;
+    if (latestUserMessage != null) {
+      final capabilityPrompt = await _capabilityPromptFor(latestUserMessage);
+      if (capabilityPrompt.trim().isNotEmpty) {
+        systemInstructions.add(capabilityPrompt.trim());
+      }
+    }
+    if (systemInstructions.isNotEmpty) {
+      aiMessages.add({
+        'role': 'system',
+        'content': systemInstructions.join('\n\n'),
+      });
+    }
     for (final message in history.where((item) => !item.isDeletedMarker)) {
       final attachments = message.attachments;
-      final capabilityPrompt = message.id == latestUserMessageId
-          ? await _capabilityPromptFor(message)
-          : '';
-      final text = message.text.isEmpty && capabilityPrompt.isNotEmpty
-          ? capabilityPrompt.trim()
-          : message.text.isEmpty
-          ? '请概括附件内容与重点，并询问我接下来想了解什么。'
-          : capabilityPrompt.isEmpty
+      final emptyMessage = _emptyCapabilityIntent(message);
+      final text = message.text.isNotEmpty
           ? message.text
-          : '${message.text}\n\n$capabilityPrompt';
+          : emptyMessage.isNotEmpty
+          ? emptyMessage
+          : attachments.isEmpty
+          ? '请继续当前对话。'
+          : '请概括附件内容与重点，并询问我接下来想了解什么。';
+      final requestText = _messageTextWithCapabilityIntent(message, text);
       if (attachments.isEmpty) {
         aiMessages.add({
           'role': message.isUser ? 'user' : 'assistant',
-          'content': text,
+          'content': requestText,
         });
         continue;
       }
       final content = <Map<String, Object?>>[
-        {'type': 'text', 'text': text},
+        {'type': 'text', 'text': requestText},
       ];
       for (final attachment in attachments) {
         if (attachment.isImage) {
@@ -1841,25 +1852,60 @@ $oldContent
 ${description.isEmpty ? '' : '用途：$description\n'}
 请在本次消息中使用这项插件能力；如果用户只发送了标签，先询问希望完成的任务。''';
     }
-    if (type != 'skill' || id == null) return '';
+    if (type != 'skill') return '';
+    if (id == null) throw AiException('所选技能“$name”缺少有效标识，请重新选择。');
     final record = await CapabilityStore.instance.find(id);
-    if (record == null) return '已选择技能“$name”，请结合当前对话处理；信息不足时先询问用途。';
+    if (record == null || record.isDeleted) {
+      throw AiException('所选技能“$name”已不可用，请重新选择或检查技能列表。');
+    }
     final versionId = metadata['version_id']?.toString();
-    CapabilityVersion? version;
-    for (final item in record.versions) {
-      if (item.id == versionId) {
-        version = item;
-        break;
-      }
+    final version = versionId == null
+        ? record.currentVersion
+        : record.versions.where((item) => item.id == versionId).firstOrNull;
+    if (version == null || version.content.trim().isEmpty) {
+      throw AiException('所选技能“$name”的指定版本无法读取，请重新选择该技能。');
     }
-    version ??= record.currentVersion;
-    if (version == null) {
-      return '已选择技能“$name”，请结合当前对话处理；如果没有明确任务，先询问用户想做什么。';
-    }
-    return '''[优先使用已选技能：$name]
+    return '''[本轮明确信号：用户已选择并要求执行技能“$name”]
 ${record.description.isEmpty ? '' : '用途：${record.description}\n'}
-请结合当前对话执行；如果没有明确任务，先询问用户想做什么。
+将这次选择视为用户的明确执行指令。严格遵循下方技能正文处理本轮用户请求，直接给出技能规定的输出。
+不要先按普通聊天回答，也不要把应用技能变成可选建议，不能在结尾询问用户是否还想按该技能改写。
+只有用户消息本身缺少完成任务所必需的信息时才追问；技能不适用于请求时，简短说明原因。
+
+以下是本轮必须执行的完整技能正文：
 ${version.content}''';
+  }
+
+  String _messageTextWithCapabilityIntent(
+    AiConversationMessage message,
+    String text,
+  ) {
+    final metadata = message.capabilityMetadata;
+    if (!message.isUser || metadata?['type'] != 'skill') return text;
+    final name = metadata?['name']?.toString() ?? '已选技能';
+    return '''【本轮按已选技能“$name”执行】
+请直接完成以下请求：
+$text''';
+  }
+
+  String _emptyCapabilityIntent(AiConversationMessage message) {
+    final metadata = message.capabilityMetadata;
+    if (!message.isUser || metadata == null) return '';
+    final type = metadata['type']?.toString();
+    final id = metadata['id']?.toString();
+    final name = metadata['name']?.toString() ?? '技能';
+    if (type == 'action' && id == 'create-skill') {
+      return '我选择了“创建技能 / 插件”。请结合当前对话判断我想创建什么；信息不足时简短询问。';
+    }
+    if (type == 'action' && id == 'revise-skill') {
+      return '我选择修改技能“$name”，请结合当前对话中最新的修改建议处理。';
+    }
+    if (type == 'skill') {
+      return '我选择使用技能“$name”，请结合当前对话执行；没有明确任务时简短询问。';
+    }
+    if (type == 'plugin') {
+      return '我选择使用插件“$name”，请结合当前对话判断要完成的任务；信息不足时简短询问。';
+    }
+    return type == 'action' ? '我选择了“$name”，请结合当前对话继续。' : '';
   }
 
   Future<void> _restorePendingSkillDraft() async {
@@ -3407,6 +3453,7 @@ ${version.content}''';
         _space = _HomeSpace.reading;
         _conversation = conversation;
         _conversationPresentationRevision++;
+        _activeSkillWorkflow = null;
         _continuingReplyId = null;
         _pendingContinuationMessageId = null;
         _isContinuingReply = false;
@@ -3517,6 +3564,7 @@ ${version.content}''';
   }
 
   void _openConversationFromSidebar(AiConversationRecord record) {
+    _activeSkillWorkflow = null;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _readingTaskGeneration++;
     _dismissComposerFocus();
@@ -3575,6 +3623,7 @@ ${version.content}''';
     setState(() {
       _conversation = conversation;
       _conversationPresentationRevision++;
+      _activeSkillWorkflow = null;
       _continuingReplyId = null;
       _pendingContinuationMessageId = null;
       _isContinuingReply = false;

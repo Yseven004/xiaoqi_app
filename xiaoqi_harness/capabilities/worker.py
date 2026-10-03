@@ -456,10 +456,11 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
         raise ValueError("任务中没有模型上下文")
 
     system_addition = (
-        "\n\n小栖工具规则：需要实际运行 Python 时直接调用 execute_python，不要只描述执行结果；"
-        "联网默认关闭。若脚本确实需要联网，在工具参数里列出具体域名并说明用途，系统会单独请求用户授权。"
-        "创建技能时请将最终 SKILL.md 写入 draft_workspace，并在最终回复中展示代表性试用结果。"
-        "你只能修改临时草稿，不能声称已保存；正式保存由用户点击完成。"
+        "\n\n小栖工具规则：需要实际运行 Python 时调用 execute_python，不要只描述执行结果；"
+        "联网默认关闭。确需联网时列出精确域名和用途，等待系统单独授权。"
+        "创建或修改技能时，若目的不明确，直接在普通聊天回复中用一句简短纯文本问题澄清，不要返回结构化问题或选项面板；目的明确后将完整技能和资源写入 draft_workspace，读回最终 SKILL.md 后再依据该版本完成一次代表性试用。"
+        "最终回复展示完整 SKILL.md、试用输入与实际结果；未执行的试用必须标为文字演示，不能声称已运行。"
+        "草稿工作区不是正式保存；只有用户点击保存才创建正式版本。"
     )
     already_has_rules = bool(
         messages
