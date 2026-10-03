@@ -81,6 +81,23 @@ def _safe_id(value: Any, field: str = "id") -> str:
     return result
 
 
+def _public_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: artifact[key]
+        for key in ("id", "name", "media_type", "size", "sha256")
+        if key in artifact
+    }
+
+
+def _public_task_event(event: dict[str, Any]) -> dict[str, Any]:
+    result = dict(event)
+    if isinstance(result.get("artifacts"), list):
+        result["artifacts"] = [
+            _public_artifact(item) for item in result["artifacts"] if isinstance(item, dict)
+        ]
+    return result
+
+
 def _revision(document: StoredDocument | None) -> int | None:
     return document.revision if document is not None else None
 
@@ -561,7 +578,7 @@ def get_agent_task(task_id: str) -> Any:
         if task is None:
             return _error("任务不存在", 404)
         value = task.value
-        return jsonify({"task_id": task_id, "status": value["status"], "attempt": value["attempt"], "error": value.get("error"), "result": value.get("result"), "draft": value.get("draft_files", {}).get("SKILL.md"), "artifacts": value.get("artifacts", []), "requested_network_domains": value.get("requested_network_domains", []), "network_purpose": value.get("network_purpose"), "cloud_revision": task.revision})
+        return jsonify({"task_id": task_id, "status": value["status"], "attempt": value["attempt"], "error": value.get("error"), "result": value.get("result"), "draft": value.get("draft_files", {}).get("SKILL.md"), "artifacts": [_public_artifact(item) for item in value.get("artifacts", []) if isinstance(item, dict)], "requested_network_domains": value.get("requested_network_domains", []), "network_purpose": value.get("network_purpose"), "cloud_revision": task.revision})
     except ConfigurationError as error:
         return _error(str(error), 503)
 
@@ -576,7 +593,7 @@ def get_agent_task_events(task_id: str) -> Any:
         if task is None:
             return _error("任务不存在", 404)
         value = task.value
-        return jsonify({"events": [event for event in value.get("events", []) if int(event.get("seq", 0)) > after], "status": value.get("status", "unknown")})
+        return jsonify({"events": [_public_task_event(event) for event in value.get("events", []) if int(event.get("seq", 0)) > after], "status": value.get("status", "unknown")})
     except ConfigurationError as error:
         return _error(str(error), 503)
 
