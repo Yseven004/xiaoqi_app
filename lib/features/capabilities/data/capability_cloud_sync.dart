@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -249,33 +250,44 @@ class CapabilityCloudSync {
     required String modelId,
     required String reasoningLevel,
     required Map<String, Object?>? capability,
+    String? taskId,
     List<Map<String, Object?>> materials = const [],
   }) async {
     final token = await _requireToken();
-    final response = await _client
-        .post(
-          Uri.parse('$_baseUrl/agent/tasks'),
-          headers: _headers(token),
-          body: jsonEncode({
-            'task_id': newTaskId(),
-            'messages': messages,
-            'model_id': modelId,
-            'reasoning_level': reasoningLevel,
-            if (capability != null)
-              'capability': {
-                'id': capability['id'],
-                'version_id': capability['version_id'],
-              },
-            'materials': materials,
-          }),
-        )
-        .timeout(const Duration(seconds: 25));
+    final requestBody = jsonEncode({
+      'task_id': taskId ?? newTaskId(),
+      'messages': messages,
+      'model_id': modelId,
+      'reasoning_level': reasoningLevel,
+      if (capability != null)
+        'capability': {
+          'id': capability['id'],
+          'version_id': capability['version_id'],
+        },
+      'materials': materials,
+    });
+    late http.Response response;
+    try {
+      response = await _postAgentTask(token, requestBody);
+    } on TimeoutException {
+      response = await _postAgentTask(token, requestBody);
+    } on http.ClientException {
+      response = await _postAgentTask(token, requestBody);
+    }
     final decoded = _decode(response);
     if (response.statusCode != 202 && response.statusCode != 200) {
       throw StateError(_errorMessage(decoded, '技能任务无法启动'));
     }
     return decoded;
   }
+
+  Future<http.Response> _postAgentTask(String token, String body) => _client
+      .post(
+        Uri.parse('$_baseUrl/agent/tasks'),
+        headers: _headers(token),
+        body: body,
+      )
+      .timeout(const Duration(seconds: 25));
 
   Future<Map<String, dynamic>> getTask(String taskId) async {
     final token = await _requireToken();
@@ -298,6 +310,8 @@ class CapabilityCloudSync {
   Stream<Map<String, dynamic>> watchTask(String taskId) async* {
     var cursor = -1;
     final started = DateTime.now();
+    var completionReceived = false;
+    var errorReceived = false;
     while (DateTime.now().difference(started) < const Duration(minutes: 20)) {
       final response = await getTaskEvents(taskId, cursor);
       final events = response['events'];
@@ -305,6 +319,8 @@ class CapabilityCloudSync {
         for (final raw in events.whereType<Map>()) {
           final event = raw.cast<String, dynamic>();
           cursor = max(cursor, (event['seq'] as num?)?.toInt() ?? cursor);
+          if (event['type'] == 'completed') completionReceived = true;
+          if (event['type'] == 'error') errorReceived = true;
           yield event;
         }
       }
@@ -312,11 +328,44 @@ class CapabilityCloudSync {
       if (status == 'succeeded' ||
           status == 'failed' ||
           status == 'cancelled') {
+        if (!completionReceived && status == 'succeeded') {
+          final task = await getTask(taskId);
+          yield {
+            'type': 'completed',
+            'status': status,
+            'text': task['result'],
+            'draft': task['draft'],
+            'artifacts': task['artifacts'] ?? const [],
+          };
+        } else if (status == 'failed' && !errorReceived) {
+          final task = await getTask(taskId);
+          if (task['error'] != null) {
+            yield {'type': 'error', 'message': task['error']};
+          }
+        }
         return;
       }
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
     throw TimeoutException('技能任务等待超时，可稍后恢复。');
+  }
+
+  Future<Uint8List> downloadTaskArtifact(
+    String taskId,
+    String artifactId,
+  ) async {
+    final token = await _requireToken();
+    final response = await _client.get(
+      Uri.parse(
+        '$_baseUrl/agent/tasks/${Uri.encodeComponent(taskId)}/artifacts/${Uri.encodeComponent(artifactId)}',
+      ),
+      headers: _headers(token),
+    );
+    if (response.statusCode != 200) {
+      final decoded = _decode(response);
+      throw StateError(_errorMessage(decoded, '文件下载失败'));
+    }
+    return response.bodyBytes;
   }
 
   Future<void> cancelTask(String taskId) async {
