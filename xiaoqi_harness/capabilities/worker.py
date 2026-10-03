@@ -517,9 +517,13 @@ def _execute_python(
         from .api import _mutate_task
 
         _mutate_task(tenant, task_id, lambda old: {**old, "sandbox_id": sandbox.sandbox_id, "updated_at": int(time.time())})
+        if worker_id is not None and attempt is not None:
+            _ensure_active(store, tenant, task_id, attempt, worker_id)
 
         # Only explicitly attached materials are copied into this sandbox.
         for index, material in enumerate(task_request.get("materials", [])):
+            if worker_id is not None and attempt is not None:
+                _ensure_active(store, tenant, task_id, attempt, worker_id)
             if not isinstance(material, dict):
                 continue
             name = os.path.basename(str(material.get("name") or f"material-{index}.txt"))
@@ -545,6 +549,8 @@ def _execute_python(
                 if version:
                     files = store.get_immutable(version["artifact_key"])
                     for name, data in files.items():
+                        if worker_id is not None and attempt is not None:
+                            _ensure_active(store, tenant, task_id, attempt, worker_id)
                         path = _safe_resource_path(name)
                         sandbox.files.write(f"/home/user/workspace/skill/{path}", data)
 
@@ -569,15 +575,30 @@ def _execute_python(
         output = "\n".join(part for part in [stdout, stderr, *result_items] if part)
         return _clean_output(output or "Python 已执行，没有标准输出。")
     finally:
+        cleanup_failed = False
         if sandbox is not None:
             try:
                 sandbox.kill()
             except Exception:
-                pass
+                cleanup_failed = True
         from .api import _mutate_task
 
         try:
-            _mutate_task(tenant, task_id, lambda old: {**old, "sandbox_id": None, "updated_at": int(time.time())})
+            def update_cleanup(old: dict[str, Any]) -> dict[str, Any]:
+                if (
+                    int(old.get("attempt", 0)) != attempt
+                    or (worker_id is not None and old.get("worker_id") != worker_id)
+                ):
+                    return old
+                return {
+                    **old,
+                    "sandbox_id": old.get("sandbox_id") if cleanup_failed else None,
+                    "sandbox_cleanup_pending": cleanup_failed,
+                    "sandbox_cleanup_deadline": int(time.time()) + 300 if cleanup_failed else None,
+                    "updated_at": int(time.time()),
+                }
+
+            _mutate_task(tenant, task_id, update_cleanup)
         except Exception:
             pass
 
