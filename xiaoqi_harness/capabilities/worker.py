@@ -422,8 +422,6 @@ def _persist_artifacts(
         if int(getattr(entry, "size", 0) or 0) > _MAX_ARTIFACT_SIZE:
             raise ValueError(f"产物 {name} 超过 10 MB")
         data = bytes(sandbox.files.read(path, format="bytes"))
-        if len(encoded) > (_MAX_ARTIFACT_SIZE * 4 // 3 + 8):
-            raise ValueError("Python 返回的图片或 PDF 超过 10 MB")
         if len(data) > _MAX_ARTIFACT_SIZE:
             raise ValueError(f"产物 {name} 超过 10 MB")
         candidates.append((name, data))
@@ -437,6 +435,8 @@ def _persist_artifacts(
                 continue
             if encoded.startswith("data:"):
                 encoded = encoded.partition(",")[2]
+            if len(encoded) > (_MAX_ARTIFACT_SIZE * 4 // 3 + 8):
+                raise ValueError("Python 返回的图片或 PDF 超过 10 MB")
             try:
                 data = base64.b64decode(encoded, validate=True)
             except ValueError as error:
