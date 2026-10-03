@@ -1471,6 +1471,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     String? agentTaskId;
     String? completedSkillDocument;
     Map<String, dynamic>? completedSkillFiles;
+    List<Map<String, Object?>> completedArtifacts = const [];
 
     try {
       final paired = await CapabilityCloudSync.instance.isPaired;
@@ -1544,6 +1545,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               completedSkillFiles = event['files'] is Map
                   ? (event['files'] as Map).cast<String, dynamic>()
                   : null;
+              completedArtifacts = _taskArtifacts(event['artifacts']);
+              break;
+            case 'artifacts_ready':
+              completedArtifacts = _taskArtifacts(event['artifacts']);
               break;
             case 'error':
               throw AiException(event['message']?.toString() ?? '技能任务失败，请稍后重试');
@@ -1603,6 +1608,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _appendAssistantReply(
         reply,
         parentMessageId: _pendingReplyParentId,
+        outputArtifacts: completedArtifacts,
       );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -2106,10 +2112,18 @@ $text''';
     _streamingReply.value = '';
   }
 
+  List<Map<String, Object?>> _taskArtifacts(Object? value) => value is List
+      ? value
+            .whereType<Map>()
+            .map((item) => Map<String, Object?>.from(item))
+            .toList(growable: false)
+      : const [];
+
   Future<bool> _appendAssistantReply(
     String reply, {
     String? parentMessageId,
     bool isIncomplete = false,
+    List<Map<String, Object?>> outputArtifacts = const [],
   }) async {
     if (!mounted) return false;
     final content = reply.trimRight();
@@ -2147,6 +2161,7 @@ $text''';
             parentMessageId: parentId,
             createdAt: now,
             isIncomplete: isIncomplete,
+            outputArtifacts: outputArtifacts,
           ),
         )
         .copyWith(updatedAt: now);

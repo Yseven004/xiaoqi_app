@@ -25,6 +25,7 @@ class AiConversationMessage {
     this.isDeletedMarker = false,
     this.isIncomplete = false,
     this.capabilityMetadata,
+    this.outputArtifacts = const [],
   }) : id = id ?? _newMessageId();
 
   final String id;
@@ -37,6 +38,7 @@ class AiConversationMessage {
   final bool isDeletedMarker;
   final bool isIncomplete;
   final Map<String, Object?>? capabilityMetadata;
+  final List<Map<String, Object?>> outputArtifacts;
 
   AiConversationMessage copyWith({
     String? id,
@@ -51,6 +53,7 @@ class AiConversationMessage {
     bool? isIncomplete,
     Map<String, Object?>? capabilityMetadata,
     bool clearCapabilityMetadata = false,
+    List<Map<String, Object?>>? outputArtifacts,
   }) => AiConversationMessage(
     id: id ?? this.id,
     parentMessageId: clearParentMessageId
@@ -66,6 +69,7 @@ class AiConversationMessage {
     capabilityMetadata: clearCapabilityMetadata
         ? null
         : capabilityMetadata ?? this.capabilityMetadata,
+    outputArtifacts: outputArtifacts ?? this.outputArtifacts,
   );
 
   Map<String, Object?> toJson() => {
@@ -85,6 +89,7 @@ class AiConversationMessage {
     'is_deleted_marker': isDeletedMarker,
     'is_incomplete': isIncomplete,
     if (capabilityMetadata != null) 'capability_metadata': capabilityMetadata,
+    if (outputArtifacts.isNotEmpty) 'output_artifacts': outputArtifacts,
   };
 
   factory AiConversationMessage.fromJson(Object? raw) {
@@ -113,6 +118,12 @@ class AiConversationMessage {
       capabilityMetadata: raw['capability_metadata'] is Map
           ? Map<String, Object?>.from(raw['capability_metadata'] as Map)
           : null,
+      outputArtifacts: raw['output_artifacts'] is List
+          ? (raw['output_artifacts'] as List)
+                .whereType<Map>()
+                .map((item) => Map<String, Object?>.from(item))
+                .toList(growable: false)
+          : const [],
     );
   }
 }
