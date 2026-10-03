@@ -642,6 +642,8 @@ def cancel_agent_task(task_id: str) -> Any:
         def cancel(old: dict[str, Any]) -> dict[str, Any]:
             now = int(time.time())
             status = old.get("status")
+            if status in ("succeeded", "failed", "cancelled"):
+                return old
             terminal_now = status in ("queued", "awaiting_network_permission")
             events = list(old.get("events", []))
             if terminal_now:
@@ -656,12 +658,23 @@ def cancel_agent_task(task_id: str) -> Any:
 
         task = _mutate_task(g.tenant_id, task_id, cancel)
         sandbox_id = task.value.get("sandbox_id")
+        cleanup_ok = not sandbox_id
         if sandbox_id and os.environ.get("E2B_API_KEY"):
             try:
                 from e2b_code_interpreter import Sandbox
                 Sandbox.kill(str(sandbox_id), api_key=os.environ["E2B_API_KEY"])
+                cleanup_ok = True
             except Exception:
-                pass
+                cleanup_ok = False
+        if sandbox_id:
+            now = int(time.time())
+            task = _mutate_task(g.tenant_id, task_id, lambda old: {
+                **old,
+                "sandbox_id": None if cleanup_ok else sandbox_id,
+                "sandbox_cleanup_pending": not cleanup_ok,
+                "sandbox_cleanup_deadline": None if cleanup_ok else now + 300,
+                "updated_at": now,
+            } if old.get("sandbox_id") == sandbox_id else old)
         return jsonify({"task_id": task_id, "status": task.value.get("status")})
     except KeyError:
         return _error("任务不存在", 404)

@@ -228,7 +228,7 @@ def _claim_task(
             error = "Python 执行中断，结果无法确认。为避免重复运行，请重新发起任务。"
             events = list(old.get("events", []))
             events.append({"seq": int(events[-1].get("seq", -1)) + 1 if events else 0, "type": "error", "status": "failed", "message": error, "created_at": now})
-            return {**old, "status": "failed", "error": error, "active_tool_call": None, "worker_id": None, "worker_lease_until": 0, "events": events[-200:], "updated_at": now}
+            return {**old, "status": "failed", "error": error, "active_tool_call": None, "worker_id": None, "worker_lease_until": 0, "sandbox_cleanup_pending": bool(old.get("sandbox_id")), "sandbox_cleanup_deadline": now + 300 if old.get("sandbox_id") else None, "events": events[-200:], "updated_at": now}
         claimed = True
         return {**old, "status": "running", "worker_id": worker_id, "worker_lease_until": now + _WORKER_LEASE_SECONDS, "updated_at": now}
 
@@ -590,11 +590,12 @@ def _execute_python(
                     or (worker_id is not None and old.get("worker_id") != worker_id)
                 ):
                     return old
+                cleanup_pending = cleanup_failed and not old.get("cancel_requested")
                 return {
                     **old,
-                    "sandbox_id": old.get("sandbox_id") if cleanup_failed else None,
-                    "sandbox_cleanup_pending": cleanup_failed,
-                    "sandbox_cleanup_deadline": int(time.time()) + 300 if cleanup_failed else None,
+                    "sandbox_id": old.get("sandbox_id") if cleanup_pending else None,
+                    "sandbox_cleanup_pending": cleanup_pending,
+                    "sandbox_cleanup_deadline": int(time.time()) + 300 if cleanup_pending else None,
                     "updated_at": int(time.time()),
                 }
 
