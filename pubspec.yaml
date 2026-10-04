@@ -27,7 +27,6 @@ dependencies:
   http: 1.6.0
   image: 4.9.1
   image_picker: 1.2.2
-  livekit_client: 2.13.0
   markdown: 7.3.1
   meta: 1.17.0
   mobile_scanner: 7.4.0

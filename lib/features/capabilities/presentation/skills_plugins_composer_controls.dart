@@ -82,36 +82,19 @@ class _SkillsPluginsComposerControlsState
   }
 
   Future<void> _pairCloud() async {
-    final controller = TextEditingController();
-    final code = await showDialog<String>(
+    // The menu is rendered in an OverlayPortal. Remove it before pushing the
+    // dialog so its overlay and the dialog route cannot compete for elements
+    // while the text field opens the keyboard and relays out the page.
+    final closeOverlay = _open;
+    _closeMenu();
+    if (closeOverlay) await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+
+    String? code;
+    code = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.white,
-        title: const Text('连接云同步'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: '输入一次性配对码',
-            focusedBorder: UnderlineInputBorder(
-              borderSide: BorderSide(color: Color(0xFF444444)),
-            ),
-          ),
-          onSubmitted: (value) => Navigator.of(context).pop(value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('连接'),
-          ),
-        ],
-      ),
+      builder: (context) => const _CapabilityCloudPairDialog(),
     );
-    controller.dispose();
     if (code == null || code.trim().isEmpty) return;
     setState(() => _cloudBusy = true);
     try {
@@ -830,5 +813,51 @@ class _GroupLabel extends StatelessWidget {
         fontSize: emphasized ? 15 : 13,
       ),
     ),
+  );
+}
+
+class _CapabilityCloudPairDialog extends StatefulWidget {
+  const _CapabilityCloudPairDialog();
+
+  @override
+  State<_CapabilityCloudPairDialog> createState() =>
+      _CapabilityCloudPairDialogState();
+}
+
+class _CapabilityCloudPairDialogState
+    extends State<_CapabilityCloudPairDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    backgroundColor: Colors.white,
+    title: const Text('连接云同步'),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      decoration: const InputDecoration(
+        hintText: '输入一次性配对码',
+        focusedBorder: UnderlineInputBorder(
+          borderSide: BorderSide(color: Color(0xFF444444)),
+        ),
+      ),
+      onSubmitted: (value) => Navigator.of(context).pop(value),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('取消'),
+      ),
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(_controller.text),
+        child: const Text('连接'),
+      ),
+    ],
   );
 }

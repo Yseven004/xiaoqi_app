@@ -28,7 +28,6 @@ import '../features/ai_study_annotation/presentation/ai_conversation_panel.dart'
 import '../features/ai_study_annotation/data/ai_annotation_screenshot_capture.dart';
 import '../features/ai_study_annotation/domain/ai_annotation_source_attachment.dart';
 import '../features/ai_study_annotation/domain/ai_web_source.dart';
-import '../features/realtime_voice/realtime_voice.dart';
 import '../widgets/book_page_annotation_view.dart';
 import '../widgets/book_page_document_content.dart';
 import '../widgets/book_page_document_view.dart';
@@ -59,7 +58,6 @@ class BookPageEditPage extends StatefulWidget {
     this.pdfPageNumber,
     this.onPdfPageChanged,
     this.pdfPageLoader,
-    this.pdfTextLoader,
     this.pdfPaginationModeListenable,
   });
 
@@ -84,9 +82,6 @@ class BookPageEditPage extends StatefulWidget {
   final int? pdfPageNumber;
   final ValueChanged<int>? onPdfPageChanged;
   final Future<Note?> Function(int pageNumber)? pdfPageLoader;
-  /// Loads or creates the text layer only after a text-dependent action asks
-  /// for it. Ordinary PDF navigation must use [pdfPageLoader] alone.
-  final Future<Note?> Function(int pageNumber)? pdfTextLoader;
   final ValueListenable<ReaderPaginationMode>? pdfPaginationModeListenable;
 
   @override
@@ -431,7 +426,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
   int _pdfPageLoadToken = 0;
   final _pdfPageNoteCache = <int, Note>{};
   final _pdfPageLoadFutures = <int, Future<Note?>>{};
-  final _pdfTextLoadFutures = <int, Future<Note?>>{};
   final _annotationTools = PageAnnotationToolController();
   late final PageImageAssetStore _imageStore;
   late final AiAnnotationScreenshotCapture _laserScreenshotCapture;
@@ -439,13 +433,8 @@ class _BookPageEditPageState extends State<BookPageEditPage>
       AiAnnotationAttachmentTrayState();
   bool _catalogOpen = false;
   bool _laserPanelOpen = false;
-  RealtimeVoiceSession? _voiceSession;
-  String _voiceFocusQuote = '';
-  AiAnnotationSourceAnchor? _voiceFocusAnchor;
-  int _voiceContextVersion = 0;
   final _imageEditor = PageImageEditorController();
   bool _imageImportInProgress = false;
-  bool _pdfTextPreparing = false;
   final _managedImageAssets = <String>{};
   bool _drawingEditorActive = false;
   bool _drawingToolbarVisible = false;
@@ -570,12 +559,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
 
   @override
   void dispose() {
-    final voiceSession = _voiceSession;
-    _voiceSession = null;
-    if (voiceSession != null) {
-      unawaited(voiceSession.end());
-      voiceSession.dispose();
-    }
     _setDrawingPointerResampling(false);
     WidgetsBinding.instance.removeObserver(this);
     FocusManager.instance.removeListener(_onPrimaryFocusChanged);
@@ -1225,13 +1208,8 @@ class _BookPageEditPageState extends State<BookPageEditPage>
       _current = index;
       _resetHistory();
       _laserTrayState = AiAnnotationAttachmentTrayState();
-      _clearVoiceFocus();
       _laserPanelOpen = false;
     });
-    final voiceSession = _voiceSession;
-    if (voiceSession != null) {
-      unawaited(voiceSession.updateContext(_voiceSnapshot()));
-    }
   }
 
   int? get _activePdfDocumentPage =>
@@ -1247,7 +1225,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
     final pageCount = controller.isReady ? controller.pageCount : pageNumber;
     if (pageNumber > pageCount) return;
     _imageEditor.clearSelection();
-    _clearVoiceFocus();
     final request = ++_pdfPageLoadToken;
     _activePdfTextBlockIdListenable.value = null;
     final previousPage = _activePdfDocumentPage;
@@ -1323,13 +1300,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
       widget.onPdfPageChanged?.call(pageNumber);
     }
 
-    final voiceSession = _voiceSession;
-    // Start text-layer extraction as soon as the new page is known. The
-    // lightweight page note below keeps navigation responsive, while this
-    // future fills in the actual body for the already-running voice session.
-    final voiceTextFuture = voiceSession != null && widget.pdfTextLoader != null
-        ? _loadPdfPageNote(pageNumber, prepareText: true)
-        : null;
     final next = await _loadPdfPageNote(pageNumber);
     if (!mounted || request != _pdfPageLoadToken) return;
     final resolved = next ?? _pendingPdfPageNote(pageNumber);
@@ -1350,19 +1320,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
     _schedulePdfOverlayRefresh(controller);
     _pdfPageStateListenable.value = (current: pageNumber, total: _pdfPageCount);
     widget.onPdfPageChanged?.call(pageNumber);
-    if (voiceSession != null) {
-      // Publish the new page immediately so the agent stops using the old
-      // page, then publish the full text as soon as OCR/text extraction ends.
-      unawaited(voiceSession.updateContext(_voiceSnapshot()));
-      if (voiceTextFuture != null) {
-        unawaited(
-          _preparePdfTextPage(
-            showToast: false,
-            preparedLoad: voiceTextFuture,
-          ),
-        );
-      }
-    }
     if (showUnavailable && next == null) {
       AppToast.show(context, '该 PDF 页文字层暂不可用，仍可阅读和画笔批注');
     }
@@ -1389,16 +1346,10 @@ class _BookPageEditPageState extends State<BookPageEditPage>
     );
   }
 
-  Future<Note?> _loadPdfPageNote(
-    int pageNumber, {
-    bool prepareText = false,
-  }) {
+  Future<Note?> _loadPdfPageNote(int pageNumber) {
     final cached = _pdfPageNoteCache[pageNumber];
-    if (cached != null &&
-        (!prepareText || cached.sourceType != 'pdf_ocr_pending')) {
-      return Future.value(cached);
-    }
-    final futures = prepareText ? _pdfTextLoadFutures : _pdfPageLoadFutures;
+    if (cached != null) return Future.value(cached);
+    final futures = _pdfPageLoadFutures;
     final existing = futures[pageNumber];
     if (existing != null) {
       return existing.then((loaded) {
@@ -1407,7 +1358,7 @@ class _BookPageEditPageState extends State<BookPageEditPage>
         return _mergePdfPageAnnotations(loaded, latestCached ?? loaded);
       });
     }
-    final loader = prepareText ? widget.pdfTextLoader : widget.pdfPageLoader;
+    final loader = widget.pdfPageLoader;
     if (loader == null) return Future.value();
     final loadFuture = () async {
       try {
@@ -1433,112 +1384,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
     return future;
   }
 
-  Future<bool> _preparePdfTextPage({
-    bool showToast = true,
-    Future<Note?>? preparedLoad,
-  }) async {
-    if (_pdfTextPreparing || widget.pdfTextLoader == null) return false;
-    _pdfTextPreparing = true;
-    final preparingPage = _pdfPageNumber;
-    final request = _pdfPageLoadToken;
-    if (mounted && showToast) AppToast.show(context, '正在准备当前页文字');
-    try {
-      final loaded = await (preparedLoad ??
-          _loadPdfPageNote(preparingPage, prepareText: true));
-      if (!mounted || request != _pdfPageLoadToken) {
-        return false;
-      }
-      if (loaded == null) {
-        if (showToast) {
-          AppToast.show(context, '文字识别失败，可重试；仍可阅读和画笔批注');
-        }
-        return false;
-      }
-
-      _cachePdfPageNote(preparingPage, loaded);
-      final currentPageNumber = int.tryParse(_page.note.bookPage);
-      if (currentPageNumber != preparingPage) return false;
-
-      final hadUnsavedChanges =
-          _page.revision != _page.persistedRevision;
-      if (hadUnsavedChanges) await _saveDirty();
-      if (!mounted ||
-          request != _pdfPageLoadToken ||
-          _pdfPageNumber != preparingPage) {
-        return false;
-      }
-
-      final currentRevision = _page.revision;
-      final persistedRevision = _page.persistedRevision;
-      final shouldPersistLoadedNote =
-          hadUnsavedChanges ||
-          _page.note.id != null ||
-          loaded.sourceType != 'pdf_ocr_pending';
-      final documentJson = BookPageDocumentContent.documentFor(loaded).toJson();
-      final annotationJson = _page.annotations.toJson();
-      documentJson['annotations'] = annotationJson['annotations'];
-      documentJson['annotation_schema_version'] =
-          annotationJson['schema_version'];
-      documentJson['annotation_coordinate_space'] =
-          annotationJson['annotation_coordinate_space'];
-      final merged = loaded.copyWith(
-        id: _page.note.id,
-        annotationsJson: jsonEncode(documentJson),
-      );
-
-      _restoring = true;
-      _page.replaceNote(merged);
-      for (final controller in _page.blockControllers.values) {
-        controller.addListener(_onDraftChanged);
-      }
-      _restoring = false;
-      _pdfPageNoteCache[preparingPage] = merged;
-      _resetHistory();
-
-      if (shouldPersistLoadedNote) {
-        _page.revision = currentRevision + 1;
-        _page.persistedRevision = persistedRevision;
-        _hasUnsavedChanges = true;
-        _saveError = false;
-        if (mounted) setState(() => _saveState = _EditorSaveState.saving);
-        _saveTimer?.cancel();
-        _saveTimer = Timer(const Duration(milliseconds: 650), () {
-          unawaited(_saveDirty());
-        });
-      }
-      final hasText = loaded.sourceType != 'pdf_ocr_pending' ||
-          BookPageDocumentContent.documentFor(loaded)
-              .renderBlocks
-              .any((block) => block.readableText.trim().isNotEmpty);
-      _schedulePdfOverlayRefresh(_pdfViewerController!);
-      final voiceSession = _voiceSession;
-      if (voiceSession != null && _pdfPageNumber == preparingPage) {
-        // Replace the initial page-only snapshot with the newly available
-        // body immediately; the next user turn then sees the right page text.
-        unawaited(voiceSession.updateContext(_voiceSnapshot()));
-      }
-      if (mounted) {
-        if (showToast) {
-          AppToast.show(
-            context,
-            hasText
-                ? '当前页文字已准备完成'
-                : '文字识别失败，可重试；仍可阅读和画笔批注',
-          );
-        }
-      }
-      return hasText;
-    } catch (error) {
-      if (mounted && showToast) {
-        AppToast.show(context, '文字识别失败，可重试；仍可阅读和画笔批注');
-      }
-      debugPrint('[BookPageEdit] PDF 文字层准备失败: $error');
-      return false;
-    } finally {
-      _pdfTextPreparing = false;
-    }
-  }
-
   void _cachePdfPageNote(int pageNumber, Note note) {
     final normalized = _normalizePdfNoteForPage(note, pageNumber);
     _pdfPageNoteCache
@@ -1557,10 +1402,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
       _current = index;
       _resetHistory();
     });
-    final voiceSession = _voiceSession;
-    if (voiceSession != null) {
-      unawaited(voiceSession.updateContext(_voiceSnapshot()));
-    }
   }
 
   void _onPdfPageChanged(int? pageNumber) {
@@ -1906,101 +1747,11 @@ class _BookPageEditPageState extends State<BookPageEditPage>
     AppToast.show(context, '$feature功能暂未开放');
   }
 
-  void _clearVoiceFocus() {
-    _voiceFocusQuote = '';
-    _voiceFocusAnchor = null;
-  }
-
-  void _clearRealtimeVoiceFocus() {
-    if (_voiceFocusQuote.isEmpty && _voiceFocusAnchor == null) return;
-    setState(_clearVoiceFocus);
-    final voiceSession = _voiceSession;
-    if (voiceSession != null) {
-      unawaited(voiceSession.updateContext(_voiceSnapshot()));
-    }
-  }
-
-  VoiceContextSnapshot _voiceSnapshot() {
-    final note = _page.note;
-    final activeAttachment = _laserTrayState.activeAttachmentId == null
-        ? null
-        : _laserTrayState.attachments
-              .where((item) => item.id == _laserTrayState.activeAttachmentId)
-              .firstOrNull;
-    final draftBody = _page.hasUnsupportedLayout
-        ? _page.draftBodyText()
-        : _page.bodyController.text;
-    final pageText = [
-      _page.titleController.text.trim(),
-      draftBody,
-      // Keep a compatibility fallback for PDF/OCR notes whose structured
-      // blocks have not been materialized into editor controllers yet.
-      if (draftBody.trim().isEmpty) note.content.trim(),
-    ].where((part) => part.isNotEmpty).join('\n\n');
-    return VoiceContextSnapshot(
-      sourceId: (note.id ?? _current).toString(),
-      sourceType: note.sourceType,
-      pageAnchor: _pageLabel(_page),
-      selectedText: _voiceFocusQuote.isNotEmpty
-          ? _voiceFocusQuote
-          : activeAttachment?.quote ?? '',
-      pageText: pageText,
-      sourceLineage: {
-        'noteId': note.id,
-        'bookId': note.bookId ?? widget.bookId,
-        'bookName': note.bookName.isEmpty ? widget.bookName : note.bookName,
-        'page': note.bookPage,
-        'sourceType': note.sourceType,
-        'attachmentId': activeAttachment?.id,
-        'attachmentAnchor': activeAttachment?.anchor.toJson(),
-        'voiceFocusAnchor': _voiceFocusAnchor?.toJson(),
-      },
-      version: ++_voiceContextVersion,
-    );
-  }
-
-  Future<void> _openRealtimeVoice() async {
-    _dismissKeyboard();
-    if (!_laserPanelOpen && mounted) {
-      setState(() => _laserPanelOpen = true);
-    }
-    if (_voiceSession != null) return;
-    if (_isPdfEditor) {
-      // PDF pages initially use a lightweight pending note so navigation stays
-      // responsive. Materialize the current page's text layer before sending
-      // the first voice context; otherwise the agent can only see "PDF 第 N
-      // 页" even though the page visibly contains text.
-      await _preparePdfTextPage();
-      if (!mounted) return;
-    }
-    final session = LiveKitRealtimeVoiceSession();
-    if (!mounted) {
-      session.dispose();
-      return;
-    }
-    setState(() => _voiceSession = session);
-    unawaited(session.start(context: _voiceSnapshot()));
-  }
-
-  Future<void> _endRealtimeVoice() async {
-    final session = _voiceSession;
-    if (session == null) return;
-    await session.end();
-    if (!mounted) return;
-    setState(() {
-      _voiceSession = null;
-      _voiceFocusQuote = '';
-      _voiceFocusAnchor = null;
-      _laserPanelOpen = false;
-    });
-    session.dispose();
+  void _showRealtimeVoiceUnavailable() {
+    _showUnavailable('实时语音');
   }
 
   void _closeConversationPanel() {
-    if (_voiceSession != null) {
-      setState(() => _laserPanelOpen = false);
-      return;
-    }
     setState(() => _laserPanelOpen = false);
   }
 
@@ -2329,14 +2080,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
       AppToast.show(context, '圈选区域不在当前 PDF 页内，请在页内重试');
       return;
     }
-    if (_voiceSession != null) {
-      _setVoiceFocusFromSelection(
-        page: page,
-        matchingBlocks: matchingBlocks,
-        normalizedRect: pageBounds,
-      );
-      return;
-    }
     try {
       final capture = await _laserScreenshotCapture.captureAnalyzed(
         boundary: boundary,
@@ -2397,55 +2140,10 @@ class _BookPageEditPageState extends State<BookPageEditPage>
           isReviewOpen: false,
         );
       });
-      final voiceSession = _voiceSession;
-      if (voiceSession != null) {
-        unawaited(voiceSession.updateContext(_voiceSnapshot()));
-      }
       AppToast.show(context, quote.isEmpty ? '已圈选区域' : '已圈选文字');
     } catch (_) {
       if (mounted) AppToast.show(context, '圈选截图暂存失败，请重试');
     }
-  }
-
-  void _setVoiceFocusFromSelection({
-    required _BookPageDraft page,
-    required List<OcrBlock> matchingBlocks,
-    required Rect normalizedRect,
-  }) {
-    final block =
-        matchingBlocks
-            .where((candidate) => candidate.readableText.trim().isNotEmpty)
-            .firstOrNull ??
-        matchingBlocks.firstOrNull;
-    final quote = block?.readableText.trim() ?? '';
-    if (quote.isEmpty) {
-      AppToast.show(context, '圈选区域没有可读取文字');
-      return;
-    }
-    final anchor = AiAnnotationSourceAnchor(
-      pageNoteId: page.note.id,
-      documentHash: _documentFingerprint(page.document),
-      blockId: block?.id.toString() ?? 'page-region',
-      startOffset: 0,
-      endOffset: quote.length,
-      exactQuote: quote,
-      normalizedRect: [
-        normalizedRect.left,
-        normalizedRect.top,
-        normalizedRect.right,
-        normalizedRect.bottom,
-      ],
-      sourceType: AiAnnotationSourceType.pageText,
-    );
-    setState(() {
-      _voiceFocusQuote = quote;
-      _voiceFocusAnchor = anchor;
-    });
-    final voiceSession = _voiceSession;
-    if (voiceSession != null) {
-      unawaited(voiceSession.updateContext(_voiceSnapshot()));
-    }
-    AppToast.show(context, '已更新本次语音讨论的聚焦内容');
   }
 
   String _pageLabel(_BookPageDraft page) {
@@ -2632,7 +2330,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
         blockBounds.contains(selection.center) ||
         selection.contains(blockBounds.center);
     if (!centerMatches) return false;
-    final selectionArea = math.max(selection.width * selection.height, .000001);
     final blockArea = math.max(blockBounds.width * blockBounds.height, .000001);
     final overlapArea = intersection.width * intersection.height;
     return centerMatches || overlapArea / blockArea >= .18;
@@ -2789,7 +2486,7 @@ class _BookPageEditPageState extends State<BookPageEditPage>
                         onAi: (anchorContext) => _showAiMenu(anchorContext),
                         onImage: (anchorContext) => _insertImage(anchorContext),
                         imageBusy: _imageImportInProgress,
-                        onVoice: _openRealtimeVoice,
+                        onVoice: _showRealtimeVoiceUnavailable,
                         onPen: _toggleDrawingPalette,
                         onFinish: _finish,
                       ),
@@ -2841,7 +2538,7 @@ class _BookPageEditPageState extends State<BookPageEditPage>
                     : const SizedBox.shrink(),
               ),
             ),
-            if (!_laserPanelOpen && _voiceSession == null)
+            if (!_laserPanelOpen)
               Positioned(
                 top:
                     MediaQuery.viewPaddingOf(context).top +
@@ -2972,20 +2669,7 @@ class _BookPageEditPageState extends State<BookPageEditPage>
                   );
                 },
               ),
-            if (_voiceSession != null && !_laserPanelOpen)
-              Positioned(
-                top:
-                  MediaQuery.viewPaddingOf(context).top +
-                  _EditorToolbar.height +
-                  14,
-                right: 20,
-                child: _RealtimeVoiceStatusPill(
-                  session: _voiceSession!,
-                  onOpen: () => setState(() => _laserPanelOpen = true),
-                  onEnd: () => unawaited(_endRealtimeVoice()),
-                ),
-              ),
-            if (_laserPanelOpen || _voiceSession != null)
+            if (_laserPanelOpen)
               Positioned.fill(
                 child: Offstage(
                   offstage: !_laserPanelOpen,
@@ -2996,13 +2680,10 @@ class _BookPageEditPageState extends State<BookPageEditPage>
                     bookName: widget.bookName ?? _page.note.bookName,
                     pageLabel: _pageLabel(_page),
                     attachments: _laserTrayState.attachments,
-                    voiceSession: _voiceSession,
-                    onEndVoice: () => unawaited(_endRealtimeVoice()),
-                    onClearVoiceFocus: _clearRealtimeVoiceFocus,
                     onRemoveAttachment: _removeLaserAttachment,
                     onClose: _closeConversationPanel,
                     onSubmit: _submitConversation,
-                    onVoice: _openRealtimeVoice,
+                    onVoice: _showRealtimeVoiceUnavailable,
                     onSubmitWithWebSources: _submitConversationWithWebSources,
                   ),
                 ),
@@ -3016,96 +2697,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
 
 String _cleanEditorParagraph(String text) =>
     text.trim().replaceFirst(RegExp(r'^[\u3000 ]{1,2}'), '');
-
-class _RealtimeVoiceStatusPill extends StatelessWidget {
-  const _RealtimeVoiceStatusPill({
-    required this.session,
-    required this.onOpen,
-    required this.onEnd,
-  });
-
-  final RealtimeVoiceSession session;
-  final VoidCallback onOpen;
-  final VoidCallback onEnd;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: session,
-      builder: (context, _) {
-        final state = session.state;
-        final label = switch (state) {
-          RealtimeVoiceState.connecting => '正在连接语音…',
-          RealtimeVoiceState.listening => session.isMuted ? '已静音' : '正在聆听',
-          RealtimeVoiceState.thinking => '正在思考',
-          RealtimeVoiceState.speaking => '正在回答',
-          RealtimeVoiceState.reconnecting => '正在重连',
-          RealtimeVoiceState.ending => '正在结束',
-          RealtimeVoiceState.error => '语音连接失败',
-          RealtimeVoiceState.disconnected => '语音已结束',
-        };
-        return Material(
-          color: Colors.transparent,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: .94),
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(color: const Color(0xFFE2E5EA)),
-              boxShadow: const [
-                BoxShadow(
-                  color: Color(0x22000000),
-                  blurRadius: 12,
-                  offset: Offset(0, 3),
-                ),
-              ],
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                InkWell(
-                  onTap: onOpen,
-                  borderRadius: BorderRadius.circular(22),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: state == RealtimeVoiceState.error
-                                ? const Color(0xFFB44848)
-                                : const Color(0xFF287A55),
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 7),
-                        Text(label, style: const TextStyle(fontSize: 12)),
-                        const SizedBox(width: 4),
-                        const Icon(Icons.open_in_full, size: 16),
-                      ],
-                    ),
-                  ),
-                ),
-                IconButton(
-                  tooltip: '结束语音',
-                  onPressed: onEnd,
-                  icon: const Icon(Icons.call_end, size: 18),
-                  constraints: const BoxConstraints.tightFor(
-                    width: 40,
-                    height: 40,
-                  ),
-                  padding: EdgeInsets.zero,
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
 
 class _EditorToolbar extends StatelessWidget {
   static const height = 66.0;

@@ -53,7 +53,8 @@ class CloudStore:
             import oss2
             import tablestore
         except ImportError as error:
-            raise ConfigurationError("缺少云存储依赖，请安装 capabilities/requirements.txt") from error
+            missing_module = error.name or "未知模块"
+            raise ConfigurationError(f"云存储依赖加载失败：{missing_module}") from error
 
         access_key_id = os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"]
         access_key_secret = os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"]
@@ -69,7 +70,9 @@ class CloudStore:
             region=os.environ.get("OTS_REGION") or None,
         )
         self._bucket = oss2.Bucket(
-            oss2.Auth(access_key_id, access_key_secret, security_token),
+            oss2.StsAuth(access_key_id, access_key_secret, security_token)
+            if security_token
+            else oss2.Auth(access_key_id, access_key_secret),
             os.environ["OSS_ENDPOINT"],
             os.environ["OSS_BUCKET"],
             region=os.environ["OSS_REGION"],

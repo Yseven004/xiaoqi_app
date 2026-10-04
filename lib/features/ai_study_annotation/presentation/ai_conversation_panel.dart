@@ -10,7 +10,6 @@ import '../../../config/note_page_theme.dart';
 import '../data/ai_conversation_history.dart';
 import '../domain/ai_annotation_source_attachment.dart';
 import '../domain/ai_web_source.dart';
-import '../../realtime_voice/domain/realtime_voice_session.dart';
 import '../../../services/web_article_source_service.dart';
 import 'ai_annotation_attachment_tray.dart';
 import '../../../widgets/app_text_input_dialog.dart';
@@ -53,7 +52,7 @@ final _aiAnswerMarkdownStyle = MarkdownStyleSheet(
   ),
 );
 
-String _markdownForDisplay(String raw, {required bool streaming}) {
+String _markdownForDisplay(String raw) {
   var value = raw.replaceAll('\r\n', '\n');
 
   // Hide a formatting prefix while the model is still completing that line.
@@ -78,7 +77,7 @@ String _markdownForDisplay(String raw, {required bool streaming}) {
       value = value.replaceRange(index, index + delimiter.length, '');
     }
   }
-  return streaming ? '$value▌' : value;
+  return value;
 }
 
 /// The conversation surface used by the book editor.
@@ -93,9 +92,6 @@ class AiConversationPanel extends StatefulWidget {
     required this.onClose,
     this.onSubmit,
     this.onVoice,
-    this.voiceSession,
-    this.onEndVoice,
-    this.onClearVoiceFocus,
     this.bookId,
     this.bookName,
     this.pageLabel,
@@ -109,9 +105,6 @@ class AiConversationPanel extends StatefulWidget {
   final VoidCallback onClose;
   final ValueChanged<String>? onSubmit;
   final VoidCallback? onVoice;
-  final RealtimeVoiceSession? voiceSession;
-  final VoidCallback? onEndVoice;
-  final VoidCallback? onClearVoiceFocus;
   final int? bookId;
   final String? bookName;
   final String? pageLabel;
@@ -141,9 +134,6 @@ class _AiConversationPanelState extends State<AiConversationPanel> {
   bool _historyOpen = false;
   List<AiWebSource> _webSources = const [];
   bool _webSourceLoading = false;
-  RealtimeVoiceSession? _boundVoiceSession;
-  final _ingestedVoiceTranscriptKeys = <String>{};
-  final _voiceDraftTranscriptIndexes = <String, int>{};
 
   int _historyRequest = 0;
 
@@ -152,160 +142,14 @@ class _AiConversationPanelState extends State<AiConversationPanel> {
     super.initState();
     _historyService =
         widget.historyService ?? AiConversationHistoryService.instance;
-    _bindVoiceSession(widget.voiceSession);
     unawaited(_restoreLatestConversation());
   }
 
   @override
-  void didUpdateWidget(covariant AiConversationPanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.voiceSession, widget.voiceSession)) {
-      _bindVoiceSession(widget.voiceSession);
-    }
-  }
-
-  @override
   void dispose() {
-    _boundVoiceSession?.removeListener(_onVoiceSessionChanged);
     _composerController.dispose();
     _historySearchController.dispose();
     super.dispose();
-  }
-
-  void _bindVoiceSession(RealtimeVoiceSession? session) {
-    _boundVoiceSession?.removeListener(_onVoiceSessionChanged);
-    _boundVoiceSession = session;
-    _ingestedVoiceTranscriptKeys.clear();
-    _voiceDraftTranscriptIndexes.clear();
-    session?.addListener(_onVoiceSessionChanged);
-    _ingestVoiceTranscripts(session);
-  }
-
-  void _onVoiceSessionChanged() {
-    _ingestVoiceTranscripts(_boundVoiceSession);
-    if (mounted) setState(() {});
-  }
-
-  void _ingestVoiceTranscripts(RealtimeVoiceSession? session) {
-    if (session == null) return;
-    for (var index = 0; index < session.transcripts.length; index++) {
-      final transcript = session.transcripts[index];
-      if (transcript.speaker == VoiceSpeaker.system) continue;
-      if (transcript.text.trim().isEmpty) continue;
-      final turnKey =
-          transcript.turnId ?? 'legacy:$index:${transcript.speaker.name}';
-      if (!transcript.isFinal) {
-        if (transcript.speaker == VoiceSpeaker.assistant) {
-          _upsertVoiceAssistantDraft(turnKey, transcript);
-        }
-        continue;
-      }
-      final key = '$turnKey:final';
-      if (!_ingestedVoiceTranscriptKeys.add(key)) continue;
-      final now = transcript.createdAt;
-      final current =
-          _conversation ??
-          AiConversationRecord.empty(
-            bookId: widget.bookId,
-            bookName: widget.bookName ?? '',
-            pageLabel: widget.pageLabel ?? '',
-          );
-      final draftIndex = transcript.speaker == VoiceSpeaker.assistant
-          ? _voiceDraftTranscriptIndexes.remove(turnKey)
-          : null;
-      var messageText = transcript.text.trim();
-      if (draftIndex != null &&
-          draftIndex >= 0 &&
-          draftIndex < current.messages.length &&
-          !current.messages[draftIndex].isUser) {
-        messageText = _keepStreamingText(
-          current.messages[draftIndex].text,
-          messageText,
-        );
-      }
-      final nextMessage = AiConversationMessage(
-        text: messageText,
-        isUser: transcript.speaker == VoiceSpeaker.user,
-        pageLabel: widget.pageLabel ?? current.pageLabel,
-        createdAt: now,
-      );
-      final nextMessages = [...current.messages];
-      if (draftIndex != null &&
-          draftIndex >= 0 &&
-          draftIndex < nextMessages.length) {
-        nextMessages[draftIndex] = nextMessage;
-      } else {
-        nextMessages.add(nextMessage);
-      }
-      final updated = current.copyWith(
-        title:
-            current.title.trim().isEmpty &&
-                transcript.speaker == VoiceSpeaker.user
-            ? transcript.text.trim()
-            : current.title,
-        messages: nextMessages,
-        pageLabel: widget.pageLabel ?? current.pageLabel,
-        updatedAt: now,
-      );
-      _conversation = updated;
-      _messages
-        ..clear()
-        ..addAll(updated.messages);
-      unawaited(_saveConversation(updated));
-    }
-  }
-
-  void _upsertVoiceAssistantDraft(String turnKey, VoiceTranscript transcript) {
-    final current =
-        _conversation ??
-        AiConversationRecord.empty(
-          bookId: widget.bookId,
-          bookName: widget.bookName ?? '',
-          pageLabel: widget.pageLabel ?? '',
-        );
-    final now = transcript.createdAt;
-    final message = AiConversationMessage(
-      text: transcript.text,
-      isUser: false,
-      pageLabel: widget.pageLabel ?? current.pageLabel,
-      createdAt: now,
-    );
-    final draftIndex = _voiceDraftTranscriptIndexes[turnKey];
-    final nextMessages = [...current.messages];
-    if (draftIndex != null &&
-        draftIndex >= 0 &&
-        draftIndex < nextMessages.length &&
-        !nextMessages[draftIndex].isUser) {
-      nextMessages[draftIndex] = message;
-    } else {
-      _voiceDraftTranscriptIndexes[turnKey] = nextMessages.length;
-      nextMessages.add(message);
-    }
-    _conversation = current.copyWith(
-      messages: nextMessages,
-      pageLabel: widget.pageLabel ?? current.pageLabel,
-      updatedAt: now,
-    );
-    _messages
-      ..clear()
-      ..addAll(nextMessages);
-  }
-
-  String _keepStreamingText(String previous, String incoming) {
-    if (incoming.length >= previous.length && incoming.startsWith(previous)) {
-      return incoming;
-    }
-    if (previous.startsWith(incoming)) return previous;
-    return previous;
-  }
-
-  int? get _streamingVoiceMessageIndex {
-    if (_voiceDraftTranscriptIndexes.isEmpty) return null;
-    final indexes = _voiceDraftTranscriptIndexes.values
-        .where((index) => index >= 0 && index < _messages.length)
-        .toList(growable: false);
-    if (indexes.isEmpty) return null;
-    return indexes.reduce(math.max);
   }
 
   Future<void> _submit() async {
@@ -372,8 +216,6 @@ class _AiConversationPanelState extends State<AiConversationPanel> {
         pageLabel: widget.pageLabel ?? '',
       );
       _messages.clear();
-      _voiceDraftTranscriptIndexes.clear();
-      _ingestedVoiceTranscriptKeys.clear();
       _webSources = const [];
       _historyOpen = false;
       _historySelectionMode = false;
@@ -392,8 +234,6 @@ class _AiConversationPanelState extends State<AiConversationPanel> {
       _messages
         ..clear()
         ..addAll(conversation.messages);
-      _voiceDraftTranscriptIndexes.clear();
-      _ingestedVoiceTranscriptKeys.clear();
       _webSources = conversation.webSources;
     });
   }
@@ -703,7 +543,6 @@ class _AiConversationPanelState extends State<AiConversationPanel> {
                 historyOpen: _historyOpen,
                 annotationCount: widget.annotationCount,
                 messages: _messages,
-                streamingMessageIndex: _streamingVoiceMessageIndex,
                 history: _history,
                 historyQuery: _historyQuery,
                 historyAllBooks: _historyAllBooks,
@@ -712,7 +551,6 @@ class _AiConversationPanelState extends State<AiConversationPanel> {
                 historySelectionMode: _historySelectionMode,
                 selectedHistoryIds: _selectedHistoryIds,
                 attachments: widget.attachments,
-                voiceSession: widget.voiceSession,
                 webSources: _webSources,
                 webSourceLoading: _webSourceLoading,
                 onRemoveWebSource: _removeWebSource,
@@ -724,8 +562,6 @@ class _AiConversationPanelState extends State<AiConversationPanel> {
                 onClose: widget.onClose,
                 onSubmit: _submit,
                 onVoice: widget.onVoice,
-                onEndVoice: widget.onEndVoice,
-                onClearVoiceFocus: widget.onClearVoiceFocus,
                 onNewConversation: _startNewConversation,
                 onRestoreConversation: _restoreConversation,
                 onTogglePinned: _togglePinned,
@@ -764,7 +600,6 @@ class _PanelSurface extends StatelessWidget {
     required this.historyOpen,
     required this.annotationCount,
     required this.messages,
-    this.streamingMessageIndex,
     required this.history,
     required this.historyQuery,
     required this.historyAllBooks,
@@ -773,7 +608,6 @@ class _PanelSurface extends StatelessWidget {
     required this.historySelectionMode,
     required this.selectedHistoryIds,
     required this.attachments,
-    this.voiceSession,
     required this.webSources,
     required this.webSourceLoading,
     required this.onRemoveWebSource,
@@ -785,8 +619,6 @@ class _PanelSurface extends StatelessWidget {
     required this.onClose,
     required this.onSubmit,
     this.onVoice,
-    this.onEndVoice,
-    this.onClearVoiceFocus,
     required this.onNewConversation,
     required this.onRestoreConversation,
     required this.onTogglePinned,
@@ -806,7 +638,6 @@ class _PanelSurface extends StatelessWidget {
   final bool historyOpen;
   final int annotationCount;
   final List<AiConversationMessage> messages;
-  final int? streamingMessageIndex;
   final List<AiConversationRecord> history;
   final String historyQuery;
   final bool historyAllBooks;
@@ -815,7 +646,6 @@ class _PanelSurface extends StatelessWidget {
   final bool historySelectionMode;
   final Set<String> selectedHistoryIds;
   final List<AiAnnotationSourceAttachment> attachments;
-  final RealtimeVoiceSession? voiceSession;
   final List<AiWebSource> webSources;
   final bool webSourceLoading;
   final ValueChanged<String> onRemoveWebSource;
@@ -827,8 +657,6 @@ class _PanelSurface extends StatelessWidget {
   final VoidCallback onClose;
   final VoidCallback onSubmit;
   final VoidCallback? onVoice;
-  final VoidCallback? onEndVoice;
-  final VoidCallback? onClearVoiceFocus;
   final VoidCallback onNewConversation;
   final ValueChanged<AiConversationRecord> onRestoreConversation;
   final ValueChanged<AiConversationRecord> onTogglePinned;
@@ -883,11 +711,7 @@ class _PanelSurface extends StatelessWidget {
                         child: _ConversationBody(
                           annotationCount: annotationCount,
                           messages: messages,
-                          streamingMessageIndex: streamingMessageIndex,
                           attachments: attachments,
-                          voiceSession: voiceSession,
-                          onEndVoice: onEndVoice,
-                          onClearVoiceFocus: onClearVoiceFocus,
                           webSources: webSources,
                           onRemoveWebSource: onRemoveWebSource,
                           onRemoveAttachment: onRemoveAttachment,
@@ -1084,11 +908,7 @@ class _ConversationBody extends StatelessWidget {
   const _ConversationBody({
     required this.annotationCount,
     required this.messages,
-    this.streamingMessageIndex,
     required this.attachments,
-    this.voiceSession,
-    this.onEndVoice,
-    this.onClearVoiceFocus,
     required this.webSources,
     required this.onRemoveWebSource,
     required this.onRemoveAttachment,
@@ -1097,11 +917,7 @@ class _ConversationBody extends StatelessWidget {
 
   final int annotationCount;
   final List<AiConversationMessage> messages;
-  final int? streamingMessageIndex;
   final List<AiAnnotationSourceAttachment> attachments;
-  final RealtimeVoiceSession? voiceSession;
-  final VoidCallback? onEndVoice;
-  final VoidCallback? onClearVoiceFocus;
   final List<AiWebSource> webSources;
   final ValueChanged<String> onRemoveWebSource;
   final ValueChanged<String>? onRemoveAttachment;
@@ -1121,14 +937,6 @@ class _ConversationBody extends StatelessWidget {
       return ListView(
         padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
         children: [
-          if (voiceSession != null) ...[
-            _VoiceConversationSection(
-              session: voiceSession!,
-              onEndVoice: onEndVoice,
-              onClearVoiceFocus: onClearVoiceFocus,
-            ),
-            const SizedBox(height: 18),
-          ],
           if (attachments.isNotEmpty) ...[
             _sourceSummary(),
             const SizedBox(height: 22),
@@ -1168,7 +976,6 @@ class _ConversationBody extends StatelessWidget {
               if (index > 0) const SizedBox(height: 18),
               _MessageView(
                 message: messages[index],
-                streaming: index == streamingMessageIndex,
               ),
             ],
         ],
@@ -1177,184 +984,13 @@ class _ConversationBody extends StatelessWidget {
 
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(18, 18, 18, 20),
-      itemCount: messages.length + (voiceSession == null ? 0 : 1),
+      itemCount: messages.length,
       separatorBuilder: (_, _) => const SizedBox(height: 18),
       itemBuilder: (context, index) {
-        if (voiceSession != null && index == 0) {
-          return _VoiceConversationSection(
-            session: voiceSession!,
-            onEndVoice: onEndVoice,
-            onClearVoiceFocus: onClearVoiceFocus,
-          );
-        }
-        final messageIndex = voiceSession == null ? index : index - 1;
         return _MessageView(
-          message: messages[messageIndex],
-          streaming: messageIndex == streamingMessageIndex,
+          message: messages[index],
         );
       },
-    );
-  }
-}
-
-class _VoiceConversationSection extends StatelessWidget {
-  const _VoiceConversationSection({
-    required this.session,
-    this.onEndVoice,
-    this.onClearVoiceFocus,
-  });
-
-  final RealtimeVoiceSession session;
-  final VoidCallback? onEndVoice;
-  final VoidCallback? onClearVoiceFocus;
-
-  @override
-  Widget build(BuildContext context) {
-    final state = session.state;
-    final label = switch (state) {
-      RealtimeVoiceState.connecting => '正在连接实时语音…',
-      RealtimeVoiceState.listening => '正在聆听，你可以直接说话',
-      RealtimeVoiceState.thinking => '小七正在整理当前页…',
-      RealtimeVoiceState.speaking => '小七正在讲解，可随时打断',
-      RealtimeVoiceState.reconnecting => '网络波动，正在重连…',
-      RealtimeVoiceState.ending => '正在结束本次会话…',
-      RealtimeVoiceState.error => session.errorMessage ?? '连接失败，请重试',
-      RealtimeVoiceState.disconnected => '语音已结束',
-    };
-    final color = switch (state) {
-      RealtimeVoiceState.error => const Color(0xFFB44848),
-      RealtimeVoiceState.speaking => NotePageTheme.ochre,
-      RealtimeVoiceState.thinking => const Color(0xFF4F67A8),
-      _ => const Color(0xFF287A55),
-    };
-    VoiceTranscript? interim;
-    for (final item in session.transcripts.reversed) {
-      if (item.speaker == VoiceSpeaker.user && !item.isFinal) {
-        interim = item;
-      }
-      if (interim != null) break;
-    }
-    final focus = session.context?.selectedText.trim() ?? '';
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: .09),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: color.withValues(alpha: .20)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: color,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    label,
-                    style: TextStyle(color: color, fontSize: 13),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 2),
-            Align(
-              alignment: Alignment.centerRight,
-              child: Wrap(
-                spacing: 2,
-                children: [
-                  if (state == RealtimeVoiceState.speaking)
-                    TextButton(
-                      onPressed: () => unawaited(session.interrupt()),
-                      child: const Text('打断'),
-                    ),
-                  if (state == RealtimeVoiceState.error &&
-                      session.context != null)
-                    TextButton(
-                      onPressed: () =>
-                          unawaited(session.start(context: session.context!)),
-                      child: const Text('重试'),
-                    ),
-                  TextButton(
-                    onPressed: session.state == RealtimeVoiceState.disconnected
-                        ? null
-                        : () async {
-                            if (session.isMuted) {
-                              await session.unmute();
-                            } else {
-                              await session.mute();
-                            }
-                          },
-                    child: Text(session.isMuted ? '取消静音' : '静音'),
-                  ),
-                  TextButton(onPressed: onEndVoice, child: const Text('结束')),
-                ],
-              ),
-            ),
-            if (focus.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: .82),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 7,
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '聚焦：${focus.replaceAll(RegExp(r'\s+'), ' ').trim()}',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: NotePageTheme.ink,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: '清除聚焦内容',
-                        onPressed: onClearVoiceFocus,
-                        icon: const Icon(Icons.close, size: 16),
-                        constraints: const BoxConstraints.tightFor(
-                          width: 32,
-                          height: 32,
-                        ),
-                        padding: EdgeInsets.zero,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-            if (interim?.text.trim().isNotEmpty == true) ...[
-              const SizedBox(height: 8),
-              Text(
-                interim!.text,
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: NotePageTheme.ink,
-                  fontSize: 14,
-                  height: 1.4,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
     );
   }
 }
@@ -1437,10 +1073,9 @@ class _ConversationSourceSummary extends StatelessWidget {
 }
 
 class _MessageView extends StatelessWidget {
-  const _MessageView({required this.message, this.streaming = false});
+  const _MessageView({required this.message});
 
   final AiConversationMessage message;
-  final bool streaming;
 
   @override
   Widget build(BuildContext context) {
@@ -1490,13 +1125,11 @@ class _MessageView extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               MathMarkdown(
-                data: _markdownForDisplay(message.text, streaming: streaming),
+                data: _markdownForDisplay(message.text),
                 styleSheet: _aiAnswerMarkdownStyle,
               ),
-              if (!streaming) ...[
-                const SizedBox(height: 8),
-                const _AnswerActions(),
-              ],
+              const SizedBox(height: 8),
+              const _AnswerActions(),
             ],
           ),
         ),
