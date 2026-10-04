@@ -3817,17 +3817,28 @@ $text''';
                               ValueListenableBuilder<bool>(
                                 valueListenable: _keyboardInsetsChanging,
                                 builder: (context, keyboardInsetsChanging, _) {
-                                  return AnimatedSize(
-                                    duration:
-                                        _composerSizeTransitioning &&
-                                            !keyboardInsetsChanging
-                                        ? const Duration(milliseconds: 220)
-                                        // Duration.zero can synchronously re-dirty
-                                        // RenderAnimatedSize during performLayout.
-                                        : const Duration(milliseconds: 1),
-                                    curve: Curves.easeInOutCubic,
-                                    alignment: Alignment.bottomCenter,
-                                    child: ConstrainedBox(
+                                  final keyboardVisible =
+                                      MediaQuery.viewInsetsOf(context).bottom >
+                                      0;
+                                  Widget animateComposer(Widget child) {
+                                    if (keyboardInsetsChanging ||
+                                        (expanded && keyboardVisible)) {
+                                      return child;
+                                    }
+                                    return AnimatedSize(
+                                      duration: _composerSizeTransitioning
+                                          ? const Duration(milliseconds: 220)
+                                          // Duration.zero can synchronously
+                                          // re-dirty RenderAnimatedSize.
+                                          : const Duration(milliseconds: 1),
+                                      curve: Curves.easeInOutCubic,
+                                      alignment: Alignment.bottomCenter,
+                                      child: child,
+                                    );
+                                  }
+
+                                  return animateComposer(
+                                    ConstrainedBox(
                                       constraints: BoxConstraints(
                                         maxHeight: expanded
                                             ? constraints.maxHeight
@@ -4886,7 +4897,7 @@ class _HomeComposerState extends State<_HomeComposer> {
       ),
     );
     final children = <Widget>[
-      composerCard,
+      if (widget.expanded) Expanded(child: composerCard) else composerCard,
       if (widget.preparingAttachments)
         const Padding(
           padding: EdgeInsets.fromLTRB(14, 4, 14, 8),
@@ -4930,7 +4941,7 @@ class _HomeComposerState extends State<_HomeComposer> {
     ];
     final composer = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
+      mainAxisSize: widget.expanded ? MainAxisSize.max : MainAxisSize.min,
       children: [
         if (!widget.expanded)
           SkillsPluginsComposerControls(
