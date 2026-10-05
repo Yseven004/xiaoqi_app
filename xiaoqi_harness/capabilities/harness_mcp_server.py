@@ -176,39 +176,58 @@ def create_server(task: XiaoqiToolServer) -> MCPServer:
 
     @server.tool(
         name="read_task_material",
-        description="读取本次任务明确附带的资料文本。只能使用资料 ID。",
+        description="按资料 ID 读取本次任务附带的文字资料。长资料分段读取：offset 为从 0 开始的字符位置，limit 每次最多 20000。",
     )
-    def read_task_material(material_id: str) -> str:
-        return task.invoke("read_task_material", {"material_id": material_id})
+    def read_task_material(
+        material_id: str,
+        offset: int = 0,
+        limit: int = 20000,
+    ) -> str:
+        return task.invoke(
+            "read_task_material",
+            {"material_id": material_id, "offset": offset, "limit": limit},
+        )
 
     @server.tool(
         name="read_skill_resource",
-        description="读取已授权技能版本中的一个资源文件。",
+        description="读取已授权技能版本中的一个资源文件。长文件按字符 offset 分段读取，每次最多 20000 个字符。",
     )
-    def read_skill_resource(capability_id: str, version_id: str, path: str) -> str:
+    def read_skill_resource(
+        capability_id: str,
+        version_id: str,
+        path: str,
+        offset: int = 0,
+        limit: int = 20000,
+    ) -> str:
         return task.invoke(
             "read_skill_resource",
             {
                 "capability_id": capability_id,
                 "version_id": version_id,
                 "path": path,
+                "offset": offset,
+                "limit": limit,
             },
         )
 
     @server.tool(
         name="draft_workspace",
-        description="列出、读取或写入当前任务的临时草稿文件；不会直接保存正式技能。",
+        description="列出、读取或写入当前任务的临时草稿文件；读取长文件时按字符 offset 分段，每次最多 20000 个字符。草稿不会直接保存为正式技能。",
     )
     def draft_workspace(
         action: Literal["list", "read", "write"],
         path: str = "SKILL.md",
         content: str = "",
+        offset: int = 0,
+        limit: int = 20000,
     ) -> str:
         arguments: dict[str, Any] = {"action": action}
         if action != "list":
             arguments["path"] = path
         if action == "write":
             arguments["content"] = content
+        if action == "read":
+            arguments.update({"offset": offset, "limit": limit})
         return task.invoke("draft_workspace", arguments)
 
     @server.tool(

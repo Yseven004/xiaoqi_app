@@ -18,6 +18,7 @@ from .storage import CloudStore
 
 _MAX_STEPS = 16
 _MAX_TOOL_OUTPUT = 128 * 1024
+_MAX_TOOL_READ_CHARS = 20_000
 _MAX_TRANSCRIPT = 3 * 1024 * 1024
 _MAX_ARTIFACTS = 10
 _MAX_ARTIFACT_SIZE = 10 * 1024 * 1024
@@ -33,7 +34,15 @@ _TOOLS = [
             "description": "读取本次任务明确附带的资料文本。只能使用资料 ID，不得读取其他账户或设备文件。",
             "parameters": {
                 "type": "object",
-                "properties": {"material_id": {"type": "string"}},
+                "properties": {
+                    "material_id": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_TOOL_READ_CHARS,
+                    },
+                },
                 "required": ["material_id"],
                 "additionalProperties": False,
             },
@@ -50,6 +59,12 @@ _TOOLS = [
                     "capability_id": {"type": "string"},
                     "version_id": {"type": "string"},
                     "path": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_TOOL_READ_CHARS,
+                    },
                 },
                 "required": ["capability_id", "version_id", "path"],
                 "additionalProperties": False,
@@ -67,6 +82,12 @@ _TOOLS = [
                     "action": {"type": "string", "enum": ["list", "read", "write"]},
                     "path": {"type": "string"},
                     "content": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_TOOL_READ_CHARS,
+                    },
                 },
                 "required": ["action"],
                 "additionalProperties": False,
@@ -127,6 +148,23 @@ def _clean_output(value: Any) -> str:
     if len(encoded) > _MAX_TOOL_OUTPUT:
         text = encoded[:_MAX_TOOL_OUTPUT].decode("utf-8", errors="ignore") + "\n[输出已截断]"
     return text
+
+
+def _read_text_chunk(text: str, offset: Any, limit: Any) -> str:
+    if type(offset) is not int or offset < 0:
+        raise ValueError("资料读取 offset 必须是非负整数")
+    if type(limit) is not int or limit < 1:
+        raise ValueError("资料读取 limit 必须是正整数")
+    if offset > len(text):
+        raise ValueError("资料读取 offset 超出文本长度")
+
+    end = min(len(text), offset + min(limit, _MAX_TOOL_READ_CHARS))
+    if offset == 0 and end == len(text):
+        return text
+    continuation = (
+        f"继续读取请使用 offset={end}。" if end < len(text) else "已到末尾。"
+    )
+    return f"[全文共 {len(text)} 个字符，当前 {offset}–{end}。{continuation}]\n{text[offset:end]}"
 
 
 def _domain_list(value: Any) -> list[str]:
@@ -345,6 +383,7 @@ def _xiaoqi_system_instructions() -> str:
         "\n\n小栖工具规则：需要实际运行 Python 时调用 execute_python，不要只描述执行结果；需要交付的文件写到 /home/user/workspace/output；"
         "如果 Python 工具返回‘执行失败’，必须明确告诉用户失败，不得描述成成功。"
         "联网默认关闭。确需联网时列出精确域名和用途，等待系统单独授权。"
+        "附件、技能资源和草稿可用对应工具完整读取；长文本按工具提示的 offset 分段读取，直到到达末尾。"
         "创建或修改技能时，若目的不明确，直接在普通聊天回复中用一句简短纯文本问题澄清，不要返回结构化问题或选项面板；目的明确后将完整技能和资源写入 draft_workspace，读回最终 SKILL.md 后再依据该版本完成一次代表性试用。"
         "最终回复展示完整 SKILL.md、试用输入与实际结果；未执行的试用必须标为文字演示，不能声称已运行。"
         "草稿工作区不是正式保存；只有用户点击保存才创建正式版本。"
@@ -749,7 +788,16 @@ def _run_tool(
         material_id = str(arguments.get("material_id", ""))
         for material in task_request.get("materials", []):
             if isinstance(material, dict) and str(material.get("id", "")) == material_id:
-                return _clean_output(material.get("text") or "[该资料只提供了二进制附件]")
+                text = str(material.get("text") or "")
+                if not text:
+                    return "[该资料只提供了二进制附件]"
+                return _clean_output(
+                    _read_text_chunk(
+                        text,
+                        arguments.get("offset", 0),
+                        arguments.get("limit", _MAX_TOOL_READ_CHARS),
+                    )
+                )
         raise ValueError("该资料不在本次任务授权范围内")
 
     if name == "read_skill_resource":
@@ -765,7 +813,13 @@ def _run_tool(
         files = store.get_immutable(version["artifact_key"])
         if path not in files:
             raise ValueError("技能版本中没有这个资源")
-        return _clean_output(files[path].decode("utf-8", errors="replace"))
+        return _clean_output(
+            _read_text_chunk(
+                files[path].decode("utf-8", errors="replace"),
+                arguments.get("offset", 0),
+                arguments.get("limit", _MAX_TOOL_READ_CHARS),
+            )
+        )
 
     if name == "draft_workspace":
         action = arguments.get("action")
@@ -777,7 +831,13 @@ def _run_tool(
         if action == "read":
             if path not in files:
                 raise ValueError("草稿文件不存在")
-            return _clean_output(files[path])
+            return _clean_output(
+                _read_text_chunk(
+                    files[path],
+                    arguments.get("offset", 0),
+                    arguments.get("limit", _MAX_TOOL_READ_CHARS),
+                )
+            )
         if action == "write":
             if path != "SKILL.md" and not path.startswith(("scripts/", "references/", "assets/")):
                 raise ValueError("草稿资源只能放在 scripts、references 或 assets 目录")
