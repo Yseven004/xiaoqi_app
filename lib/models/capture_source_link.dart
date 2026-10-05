@@ -5,8 +5,6 @@ import 'note.dart';
 
 enum CapturePlacementKind { unlinked, replacePdfPage, relatedFlowPosition }
 
-enum BookImageImportAction { capture, upload }
-
 enum CaptureInputKind { camera, gallery, legacyUnknown }
 
 extension CaptureInputKindLabels on CaptureInputKind {

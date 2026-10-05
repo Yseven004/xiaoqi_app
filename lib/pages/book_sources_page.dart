@@ -16,9 +16,8 @@ import '../services/pdf_catalog_service.dart';
 import '../services/source_document_loader.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/book_paper_background.dart';
-import 'book_source_edit_page.dart';
 
-enum _SourceAction { edit, move, share, remove, deleteFile }
+enum _SourceAction { move, share, remove, deleteFile }
 
 class BookSourcesPage extends StatefulWidget {
   const BookSourcesPage({
@@ -26,15 +25,11 @@ class BookSourcesPage extends StatefulWidget {
     required this.bookId,
     required this.bookTitle,
     required this.bookLibraryService,
-    this.onOpenCatalog,
-    this.onOpenSourceCatalog,
   });
 
   final int bookId;
   final String bookTitle;
   final BookLibraryService bookLibraryService;
-  final Future<void> Function()? onOpenCatalog;
-  final Future<void> Function(BookSourceRecord source)? onOpenSourceCatalog;
 
   @override
   State<BookSourcesPage> createState() => _BookSourcesPageState();
@@ -93,7 +88,7 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
       return;
     }
     if (source.isPrimary) {
-      _showMessage('当前正文已经是这份资料');
+      _showMessage('这份资料已是主资料');
       return;
     }
     try {
@@ -102,9 +97,9 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
         bookId: widget.bookId,
       );
       await _loadSources();
-      if (mounted) _showMessage('已切换当前正文：${source.displayName}');
+      if (mounted) _showMessage('已设为主资料：${source.displayName}');
     } catch (error) {
-      if (mounted) _showMessage('切换正文失败：$error');
+      if (mounted) _showMessage('切换主资料失败：$error');
     }
   }
 
@@ -185,39 +180,10 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
             source: source,
             bookLibraryService: widget.bookLibraryService,
           )
-        : _PdfSourceReaderPage(
-            source: source,
-            onOpenCatalog: widget.onOpenSourceCatalog == null
-                ? widget.onOpenCatalog
-                : () => widget.onOpenSourceCatalog!(source),
-          );
+        : _PdfSourceReaderPage(source: source);
     await Navigator.of(
       context,
     ).push<void>(MaterialPageRoute(builder: (_) => reader));
-  }
-
-  Future<void> _openEditor(BookSourceRecord source) async {
-    if (!SourceDocumentLoader.isStructuredFormat(source.format)) {
-      _showMessage('PDF 资料暂时只支持阅读，编辑请先使用结构化资料');
-      return;
-    }
-    await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        builder: (_) => BookSourceEditPage(
-          source: source,
-          bookLibraryService: widget.bookLibraryService,
-        ),
-      ),
-    );
-    if (mounted) await _loadSources();
-  }
-
-  VoidCallback _openCatalogForSource(BookSourceRecord source) {
-    final openSourceCatalog = widget.onOpenSourceCatalog;
-    if (openSourceCatalog != null) return () => openSourceCatalog(source);
-    final openCatalog = widget.onOpenCatalog;
-    if (openCatalog != null) return openCatalog;
-    return () => _openSource(source);
   }
 
   Future<void> _handleSourceAction(
@@ -225,9 +191,6 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
     _SourceAction action,
   ) async {
     switch (action) {
-      case _SourceAction.edit:
-        await _openEditor(source);
-        return;
       case _SourceAction.move:
         await _moveOrShareSource(source, move: true);
       case _SourceAction.share:
@@ -491,9 +454,6 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
         return _SourceCard(
           source: source,
           onTap: () => _openSource(source),
-          // 资料编辑只从正文工作台进入，资料列表不分散编辑入口。
-          onEdit: null,
-          onCatalog: _openCatalogForSource(source),
           onSelectSource: () => _setPrimarySource(source),
           onAction: (action) => _handleSourceAction(source, action),
         );
@@ -505,16 +465,12 @@ class _SourceCard extends StatelessWidget {
   const _SourceCard({
     required this.source,
     required this.onTap,
-    required this.onEdit,
-    required this.onCatalog,
     required this.onSelectSource,
     required this.onAction,
   });
 
   final BookSourceRecord source;
   final VoidCallback onTap;
-  final VoidCallback? onEdit;
-  final VoidCallback onCatalog;
   final VoidCallback onSelectSource;
   final ValueChanged<_SourceAction> onAction;
 
@@ -541,7 +497,7 @@ class _SourceCard extends StatelessWidget {
                       const SizedBox(height: 4),
                       Text(
                         source.isPrimary
-                            ? '当前正文 · ${_formatBytes(source.fileSize)} · ${_statusLabel(source.status)}'
+                            ? '主资料 · ${_formatBytes(source.fileSize)} · ${_statusLabel(source.status)}'
                             : '${_formatBytes(source.fileSize)} · ${_statusLabel(source.status)}',
                         style: const TextStyle(
                           color: BookFlowTheme.detailPrimary,
@@ -568,18 +524,9 @@ class _SourceCard extends StatelessWidget {
                 PopupMenuButton<_SourceAction>(
                   tooltip: '资料操作',
                   onSelected: (action) {
-                    if (action == _SourceAction.edit) {
-                      onEdit?.call();
-                    } else {
-                      onAction(action);
-                    }
+                    onAction(action);
                   },
                   itemBuilder: (_) => [
-                    if (onEdit != null)
-                      const PopupMenuItem(
-                        value: _SourceAction.edit,
-                        child: Text('编辑资料'),
-                      ),
                     const PopupMenuItem(
                       value: _SourceAction.move,
                       child: Text('移动到其他书籍'),
@@ -627,18 +574,6 @@ class _SourceCard extends StatelessWidget {
                 Wrap(
                   spacing: 8,
                   children: [
-                    if (onEdit != null)
-                      TextButton.icon(
-                        onPressed: onEdit,
-                        icon: const Icon(Icons.edit_outlined, size: 18),
-                        label: const Text('编辑资料'),
-                        style: TextButton.styleFrom(
-                          foregroundColor: BookFlowTheme.detailPrimary,
-                          padding: EdgeInsets.zero,
-                          minimumSize: const Size(0, 44),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                      ),
                     TextButton.icon(
                       onPressed: onSelectSource,
                       icon: Icon(
@@ -650,22 +585,7 @@ class _SourceCard extends StatelessWidget {
                             ? const Color(0xFF2F8F55)
                             : null,
                       ),
-                      label: Text(source.isPrimary ? '当前正文' : '切换到正文'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: BookFlowTheme.inkSecondary,
-                        padding: EdgeInsets.zero,
-                        minimumSize: const Size(0, 44),
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                    ),
-                    TextButton.icon(
-                      onPressed: onCatalog,
-                      icon: const Icon(Icons.list_alt_rounded, size: 18),
-                      label: Text(
-                        SourceDocumentLoader.isStructuredFormat(source.format)
-                            ? '章节目录'
-                            : '资料目录',
-                      ),
+                      label: Text(source.isPrimary ? '主资料' : '设为主资料'),
                       style: TextButton.styleFrom(
                         foregroundColor: BookFlowTheme.inkSecondary,
                         padding: EdgeInsets.zero,
@@ -795,10 +715,9 @@ class _SourcesIconButton extends StatelessWidget {
 }
 
 class _PdfSourceReaderPage extends StatefulWidget {
-  const _PdfSourceReaderPage({required this.source, this.onOpenCatalog});
+  const _PdfSourceReaderPage({required this.source});
 
   final BookSourceRecord source;
-  final Future<void> Function()? onOpenCatalog;
 
   @override
   State<_PdfSourceReaderPage> createState() => _PdfSourceReaderPageState();
@@ -871,16 +790,6 @@ class _PdfSourceReaderPageState extends State<_PdfSourceReaderPage> {
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
             child: Row(
               children: [
-                TextButton.icon(
-                  onPressed: widget.onOpenCatalog == null
-                      ? () => _showMessage('请从书籍详情进入正文查看章节目录')
-                      : () => widget.onOpenCatalog!(),
-                  icon: const Icon(Icons.list_alt_rounded, size: 19),
-                  label: const Text('资料目录'),
-                  style: TextButton.styleFrom(
-                    foregroundColor: BookFlowTheme.detailPrimary,
-                  ),
-                ),
                 const Spacer(),
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
@@ -894,9 +803,6 @@ class _PdfSourceReaderPageState extends State<_PdfSourceReaderPage> {
     ),
   );
 
-  void _showMessage(String message) {
-    AppToast.show(context, message);
-  }
 }
 
 class EpubSourceReaderPage extends StatefulWidget {

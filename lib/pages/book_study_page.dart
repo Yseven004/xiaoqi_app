@@ -9,7 +9,6 @@ import '../models/book_category.dart';
 import '../models/book_library_item.dart';
 import '../models/book_recognition.dart';
 import '../models/book_source.dart';
-import '../models/capture_source_link.dart';
 import '../models/note.dart';
 import '../services/book_library_service.dart';
 import '../utils/book_cover_palette.dart';
@@ -21,7 +20,6 @@ import '../widgets/book_metadata_form_sheet.dart';
 import '../widgets/book_paper_background.dart';
 import 'ai_note_detail_page.dart';
 import 'book_page_reader_page.dart';
-import 'book_body_workspace_page.dart';
 import 'book_sources_page.dart';
 import 'note_editor_page.dart';
 import 'photo_note_detail_page.dart';
@@ -31,23 +29,12 @@ class BookStudyPage extends StatefulWidget {
     super.key,
     required this.bookId,
     required this.onBack,
-    required this.onCapturePages,
-    required this.onCreateTextNote,
-    this.imageRecognitionVersion,
     this.bookLibraryService,
-    this.initialChapterTitle,
   });
 
   final int bookId;
   final VoidCallback onBack;
-  final Future<void> Function(
-    BookLibraryItem item,
-    BookImageImportAction action,
-  ) onCapturePages;
-  final Future<void> Function(BookLibraryItem item) onCreateTextNote;
-  final ValueNotifier<int>? imageRecognitionVersion;
   final BookLibraryService? bookLibraryService;
-  final String? initialChapterTitle;
 
   @override
   State<BookStudyPage> createState() => _BookStudyPageState();
@@ -60,8 +47,6 @@ class _BookStudyPageState extends State<BookStudyPage> {
   List<BookSourceRecord> _sources = const [];
   List<BookCategory> _categories = const [];
   bool _loading = true;
-  bool _creating = false;
-  bool _initialChapterOpened = false;
   bool _showAllNotes = false;
   String? _error;
 
@@ -97,48 +82,12 @@ class _BookStudyPageState extends State<BookStudyPage> {
         _loading = false;
         _error = null;
       });
-      if (!_initialChapterOpened &&
-          widget.initialChapterTitle?.trim().isNotEmpty == true) {
-        _initialChapterOpened = true;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-            unawaited(
-              _openBodyWorkspace(
-                item,
-                initialChapterTitle: widget.initialChapterTitle,
-              ),
-            );
-          }
-        });
-      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _loading = false;
         _error = '本书资料暂时无法加载：$error';
       });
-    }
-  }
-
-  Future<void> _createNote() async {
-    final item = _item;
-    if (item == null || _creating) return;
-    setState(() => _creating = true);
-    try {
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute(
-          builder: (_) => BookBodyWorkspacePage(
-            item: item,
-            bookLibraryService: _library,
-            onCapturePages: widget.onCapturePages,
-            onCreateTextNote: widget.onCreateTextNote,
-            imageRecognitionVersion: widget.imageRecognitionVersion,
-          ),
-        ),
-      );
-      await _load();
-    } finally {
-      if (mounted) setState(() => _creating = false);
     }
   }
 
@@ -151,30 +100,6 @@ class _BookStudyPageState extends State<BookStudyPage> {
           bookId: widget.bookId,
           bookTitle: item.book.title,
           bookLibraryService: _library,
-          onOpenCatalog: () => _openBodyWorkspace(item),
-          onOpenSourceCatalog: (source) =>
-              _openBodyWorkspace(item, initialSourceId: source.id),
-        ),
-      ),
-    );
-    if (mounted) await _load();
-  }
-
-  Future<void> _openBodyWorkspace(
-    BookLibraryItem item, {
-    int? initialSourceId,
-    String? initialChapterTitle,
-  }) async {
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute(
-        builder: (_) => BookBodyWorkspacePage(
-          item: item,
-          bookLibraryService: _library,
-          onCapturePages: widget.onCapturePages,
-          onCreateTextNote: widget.onCreateTextNote,
-          imageRecognitionVersion: widget.imageRecognitionVersion,
-          initialSourceId: initialSourceId,
-          initialChapterTitle: initialChapterTitle,
         ),
       ),
     );
@@ -785,42 +710,6 @@ class _BookStudyPageState extends State<BookStudyPage> {
               const SizedBox(height: 14),
               _OptionalAssociationCard(onTap: _showAssociationInfo),
               const SizedBox(height: 26),
-              DecoratedBox(
-                decoration: const BoxDecoration(
-                  borderRadius: BorderRadius.all(Radius.circular(12)),
-                  boxShadow: BookFlowTheme.buttonShadow,
-                ),
-                child: FilledButton.icon(
-                  onPressed: _creating ? null : _createNote,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: BookFlowTheme.detailPrimary,
-                    foregroundColor: Colors.white,
-                    disabledBackgroundColor: BookFlowTheme.detailPrimary
-                        .withValues(alpha: .35),
-                    minimumSize: const Size.fromHeight(52),
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    textStyle: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  icon: _creating
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Icon(Icons.edit_outlined, size: 21),
-                  label: Text(_creating ? '正在打开…' : '进入正文'),
-                ),
-              ),
-              const SizedBox(height: 26),
               Row(
                 children: [
                   const Expanded(
@@ -1274,196 +1163,6 @@ class _RoundIconButton extends StatelessWidget {
   );
 }
 
-enum _BookNoteAction { capture, text }
-
-class _CreateNoteChoiceSheet extends StatelessWidget {
-  const _CreateNoteChoiceSheet({
-    required this.bookTitle,
-    required this.onSelected,
-    required this.onCancel,
-  });
-
-  final String bookTitle;
-  final ValueChanged<_BookNoteAction> onSelected;
-  final VoidCallback onCancel;
-
-  @override
-  Widget build(BuildContext context) => SafeArea(
-    top: false,
-    child: Material(
-      color: Colors.white,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 22, 20, 10),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 88,
-              height: 6,
-              decoration: BoxDecoration(
-                color: const Color(0xFFB5BCBC),
-                borderRadius: BorderRadius.circular(99),
-              ),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              '为《$bookTitle》新建笔记',
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Color(0xFF151918),
-                fontSize: 16,
-                height: 1.3,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 18),
-            _CreateNoteChoiceCard(
-              icon: PhosphorIcons.camera(PhosphorIconsStyle.fill),
-              title: '拍摄书页',
-              recommended: true,
-              onTap: () => onSelected(_BookNoteAction.capture),
-            ),
-            const SizedBox(height: 10),
-            _CreateNoteChoiceCard(
-              icon: PhosphorIcons.pencilSimple(PhosphorIconsStyle.fill),
-              title: '新建文字笔记',
-              onTap: () => onSelected(_BookNoteAction.text),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              '新笔记将自动归入这本书',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Color(0xFF778080),
-                fontSize: 14,
-                height: 1.3,
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-            const SizedBox(height: 18),
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: TextButton(
-                onPressed: onCancel,
-                style: TextButton.styleFrom(
-                  backgroundColor: const Color(0xFFF1F5F6),
-                  foregroundColor: const Color(0xFF141918),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(17),
-                  ),
-                  textStyle: const TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                child: const Text('取消'),
-              ),
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
-class _CreateNoteChoiceCard extends StatelessWidget {
-  const _CreateNoteChoiceCard({
-    required this.icon,
-    required this.title,
-    required this.onTap,
-    this.recommended = false,
-  });
-
-  final IconData icon;
-  final String title;
-  final VoidCallback onTap;
-  final bool recommended;
-
-  @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.white,
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(19),
-      side: const BorderSide(color: Color(0xFFE0E6E5), width: 1),
-    ),
-    clipBehavior: Clip.antiAlias,
-    child: InkWell(
-      onTap: onTap,
-      child: SizedBox(
-        height: 72,
-        child: Row(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(5),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: const Color(0xFFEAF5F3),
-                  borderRadius: BorderRadius.circular(13),
-                ),
-                child: SizedBox(
-                  width: 58,
-                  height: 58,
-                  child: Icon(
-                    icon,
-                    color: BookFlowTheme.detailPrimary,
-                    size: 28,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 9),
-            Expanded(
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Color(0xFF101514),
-                  fontSize: 16,
-                  height: 1.2,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            if (recommended)
-              Container(
-                margin: const EdgeInsets.only(right: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 11),
-                height: 28,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFFD735),
-                  borderRadius: BorderRadius.circular(22),
-                ),
-                child: const Text(
-                  '推荐',
-                  style: TextStyle(
-                    color: Color(0xFF161713),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.only(right: 11),
-              child: Icon(
-                PhosphorIcons.caretRight(PhosphorIconsStyle.regular),
-                color: const Color(0xFF1A201E),
-                size: 20,
-              ),
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
 class _BookStats extends StatelessWidget {
   const _BookStats({
     required this.item,
@@ -1766,7 +1465,7 @@ class _EmptyNotes extends StatelessWidget {
           ),
         ),
         SizedBox(height: 4),
-        Text('从书页开始，积累这本书的学习内容。', style: BookFlowTheme.caption),
+        Text('关联到这本书的笔记会显示在这里。', style: BookFlowTheme.caption),
       ],
     ),
   );

@@ -3539,11 +3539,9 @@ $text''';
                 Navigator.of(dialogContext).pop();
                 unawaited(_openBookFromSidebar(item));
               },
-              onOpenChapter: (item, entry) {
+              onOpenChapter: (item, _) {
                 Navigator.of(dialogContext).pop();
-                unawaited(
-                  _openBookFromSidebar(item, chapterTitle: entry.title),
-                );
+                unawaited(_openBookFromSidebar(item));
               },
               onOpenConversation: (record) {
                 _openConversationFromSidebar(record);
@@ -3666,10 +3664,7 @@ $text''';
     });
   }
 
-  Future<void> _openBookFromSidebar(
-    BookLibraryItem item, {
-    String? chapterTitle,
-  }) async {
+  Future<void> _openBookFromSidebar(BookLibraryItem item) async {
     final bookId = item.book.id;
     if (bookId == null) return;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
@@ -3678,7 +3673,6 @@ $text''';
       MaterialPageRoute(
         builder: (_) => BookLearningShellPage(
           initialBookId: bookId,
-          initialChapterTitle: chapterTitle,
         ),
       ),
     );
