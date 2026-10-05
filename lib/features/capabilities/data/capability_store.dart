@@ -12,6 +12,8 @@ class CapabilityStore {
 
   static const _recordsKey = 'xiaoqi_capabilities_v1';
   static const _draftsKey = 'xiaoqi_capability_drafts_v1';
+  static const _draftDeletionQueueKey = 'xiaoqi_capability_draft_deletions_v1';
+  static const _deletedDraftIdsKey = 'xiaoqi_capability_deleted_draft_ids_v1';
   final Random _random = Random.secure();
 
   Future<List<CapabilityRecord>> list({bool includeDeleted = false}) async {
@@ -37,9 +39,10 @@ class CapabilityStore {
 
   Future<List<CapabilityDraft>> drafts() async {
     final prefs = await SharedPreferences.getInstance();
-    return _decodeDrafts(
-      prefs.getString(_draftsKey),
-    ).values.toList(growable: false);
+    final deletedIds = await deletedDraftIds();
+    return _decodeDrafts(prefs.getString(_draftsKey)).values
+        .where((draft) => !deletedIds.contains(draft.id))
+        .toList(growable: false);
   }
 
   String newDraftId() => _newId('draft');
@@ -52,12 +55,14 @@ class CapabilityStore {
   }
 
   Future<CapabilityDraft?> loadDraft(String id) async {
+    if (await isDraftDeleted(id)) return null;
     final prefs = await SharedPreferences.getInstance();
     final drafts = _decodeDrafts(prefs.getString(_draftsKey));
     return drafts[id];
   }
 
   Future<void> saveDraft(CapabilityDraft draft) async {
+    if (await isDraftDeleted(draft.id)) return;
     final prefs = await SharedPreferences.getInstance();
     final drafts = _decodeDrafts(prefs.getString(_draftsKey));
     drafts[draft.id] = draft;
@@ -76,22 +81,107 @@ class CapabilityStore {
     );
   }
 
-  Future<void> markDraftSynced(String id, int cloudRevision) async {
+  Future<Set<String>> deletedDraftIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_deletedDraftIdsKey);
+    if (raw == null || raw.isEmpty) return <String>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return <String>{};
+      return decoded.map((item) => item.toString()).toSet();
+    } catch (_) {
+      return <String>{};
+    }
+  }
+
+  Future<bool> isDraftDeleted(String id) async =>
+      (await deletedDraftIds()).contains(id);
+
+  Future<List<Map<String, Object?>>> pendingDraftDeletions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_draftDeletionQueueKey);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .whereType<Map>()
+          .map((item) => Map<String, Object?>.from(item))
+          .toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> queueDraftDeletion({
+    required String id,
+    required int cloudRevision,
+    required String accountEmail,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = accountEmail.trim().toLowerCase();
+    final queue = (await pendingDraftDeletions())
+        .where(
+          (item) =>
+              item['id']?.toString() != id ||
+              item['account_email']?.toString() != email,
+        )
+        .toList();
+    queue.add({
+      'id': id,
+      'account_email': email,
+      'cloud_revision': cloudRevision,
+    });
+    await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
+    final deletedIds = await deletedDraftIds();
+    deletedIds.add(id);
+    await prefs.setString(_deletedDraftIdsKey, jsonEncode(deletedIds.toList()));
+    await discardDraft(id);
+  }
+
+  Future<void> rememberRemoteDraftDeletion(
+    String id, {
+    String? accountEmail,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final deletedIds = await deletedDraftIds();
+    deletedIds.add(id);
+    await prefs.setString(_deletedDraftIdsKey, jsonEncode(deletedIds.toList()));
+    if (accountEmail != null) {
+      final queue = (await pendingDraftDeletions())
+          .where((item) => item['id']?.toString() != id)
+          .toList();
+      await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
+    }
+    await discardDraft(id);
+  }
+
+  Future<void> completeDraftDeletion(String id, String accountEmail) async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = accountEmail.trim().toLowerCase();
+    final queue = (await pendingDraftDeletions())
+        .where(
+          (item) =>
+              item['id']?.toString() != id ||
+              item['account_email']?.toString() != email,
+        )
+        .toList();
+    await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
+  }
+
+  Future<void> markDraftSynced(
+    String id,
+    int cloudRevision, {
+    String? accountEmail,
+  }) async {
+    if (await isDraftDeleted(id)) return;
     final prefs = await SharedPreferences.getInstance();
     final drafts = _decodeDrafts(prefs.getString(_draftsKey));
     final draft = drafts[id];
     if (draft == null) return;
-    drafts[id] = CapabilityDraft(
-      id: draft.id,
-      kind: draft.kind,
-      name: draft.name,
-      description: draft.description,
-      content: draft.content,
-      previousContent: draft.previousContent,
-      userSuggestion: draft.userSuggestion,
-      updatedAt: draft.updatedAt,
-      files: draft.files,
+    drafts[id] = draft.copyWith(
       cloudRevision: cloudRevision,
+      cloudOwnerEmail: accountEmail ?? draft.cloudOwnerEmail,
     );
     await prefs.setString(
       _draftsKey,

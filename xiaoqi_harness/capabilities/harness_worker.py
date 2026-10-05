@@ -70,6 +70,11 @@ def _write_profile_patch(
 ) -> None:
     disabled = "\n".join(f"- id: {tool}\n  disabled: true" for tool in _DISABLED_TOOLS)
     is_mimo = model_id.startswith("mimo")
+    context_window = (
+        1_000_000
+        if model_id in {"deepseek-flash", "mimo-v2.6-flash"}
+        else 65_536
+    )
     if is_mimo:
         reasoning = "off" if reasoning_level == "low" else "high"
     else:
@@ -120,7 +125,7 @@ def _write_profile_patch(
                 "        models:",
                 f"        - id: {_yaml_scalar(model_id)}",
                 "          name: Xiaoqi model",
-                "          contextWindow: 65536",
+                f"          contextWindow: {context_window}",
                 "          maxTokens: 8192",
                 *model_capabilities,
                 "- id: acp",

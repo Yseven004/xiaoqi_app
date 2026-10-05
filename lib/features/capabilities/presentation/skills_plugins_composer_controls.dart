@@ -16,6 +16,8 @@ class SkillsPluginsComposerControls extends StatefulWidget {
     required this.onCapabilitySelected,
     required this.onSaveReviewDraft,
     required this.onReviseReviewDraft,
+    required this.onDismissReviewDraft,
+    required this.onDeleteReviewDraft,
     this.onSignOut,
     this.reviewDraft,
     this.leadingControl,
@@ -27,6 +29,8 @@ class SkillsPluginsComposerControls extends StatefulWidget {
   final Future<void> Function(CapabilityDraft draft, bool showInMenu)
   onSaveReviewDraft;
   final Future<void> Function(CapabilityDraft draft) onReviseReviewDraft;
+  final VoidCallback onDismissReviewDraft;
+  final Future<void> Function(CapabilityDraft draft) onDeleteReviewDraft;
   final VoidCallback? onSignOut;
   final Widget? leadingControl;
 
@@ -46,6 +50,7 @@ class _SkillsPluginsComposerControlsState
   List<CapabilityDraft> _drafts = const [];
   String? _pendingDeleteId;
   bool _savingDraft = false;
+  bool _deletingDraft = false;
   bool _cloudBusy = false;
   bool _signedIn = false;
   bool _showDraftInMenu = true;
@@ -608,7 +613,7 @@ class _SkillsPluginsComposerControlsState
             ),
             IconButton(
               tooltip: '稍后处理',
-              onPressed: () => _showStatus('草稿已保留，可稍后继续处理'),
+              onPressed: widget.onDismissReviewDraft,
               icon: const Icon(Icons.close, size: 19, color: Color(0xFF777777)),
               constraints: const BoxConstraints.tightFor(width: 40, height: 40),
               padding: EdgeInsets.zero,
@@ -708,6 +713,31 @@ class _SkillsPluginsComposerControlsState
               child: const Text('修改后再看'),
             ),
           ],
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: _savingDraft || _deletingDraft
+                ? null
+                : () async {
+                    setState(() => _deletingDraft = true);
+                    try {
+                      await widget.onDeleteReviewDraft(draft);
+                      if (mounted) _showStatus('草稿已删除');
+                      await _refresh();
+                    } catch (error) {
+                      if (mounted) _showStatus('删除失败：$error');
+                    } finally {
+                      if (mounted) setState(() => _deletingDraft = false);
+                    }
+                  },
+            icon: const Icon(Icons.delete_outline, size: 18),
+            label: const Text('删除草稿'),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFFB3261E),
+              minimumSize: const Size(100, 40),
+            ),
+          ),
         ),
       ],
     ),

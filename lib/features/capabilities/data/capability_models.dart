@@ -176,6 +176,8 @@ class CapabilityDraft {
     this.userSuggestion = '',
     this.files = const {},
     this.cloudRevision = 0,
+    this.cloudOwnerEmail,
+    this.targetCapabilityId,
   });
 
   final String id;
@@ -188,8 +190,36 @@ class CapabilityDraft {
   final DateTime updatedAt;
   final Map<String, String> files;
   final int cloudRevision;
+  final String? cloudOwnerEmail;
+  final String? targetCapabilityId;
 
-  Map<String, Object?> toJson() => {
+  CapabilityDraft copyWith({
+    String? name,
+    String? description,
+    String? content,
+    String? previousContent,
+    String? userSuggestion,
+    DateTime? updatedAt,
+    Map<String, String>? files,
+    int? cloudRevision,
+    String? cloudOwnerEmail,
+    String? targetCapabilityId,
+  }) => CapabilityDraft(
+    id: id,
+    kind: kind,
+    name: name ?? this.name,
+    description: description ?? this.description,
+    content: content ?? this.content,
+    previousContent: previousContent ?? this.previousContent,
+    userSuggestion: userSuggestion ?? this.userSuggestion,
+    updatedAt: updatedAt ?? this.updatedAt,
+    files: files ?? this.files,
+    cloudRevision: cloudRevision ?? this.cloudRevision,
+    cloudOwnerEmail: cloudOwnerEmail ?? this.cloudOwnerEmail,
+    targetCapabilityId: targetCapabilityId ?? this.targetCapabilityId,
+  );
+
+  Map<String, Object?> toJson({bool includeLocalMetadata = true}) => {
     'id': id,
     'kind': kind.name,
     'name': name,
@@ -200,6 +230,9 @@ class CapabilityDraft {
     'updated_at': updatedAt.toIso8601String(),
     'files': files,
     'cloud_revision': cloudRevision,
+    if (targetCapabilityId != null) 'target_capability_id': targetCapabilityId,
+    if (includeLocalMetadata && cloudOwnerEmail != null)
+      'cloud_owner_email': cloudOwnerEmail,
   };
 
   factory CapabilityDraft.fromJson(Object? raw) {
@@ -224,6 +257,8 @@ class CapabilityDraft {
             )
           : const {},
       cloudRevision: (raw['cloud_revision'] as num?)?.toInt() ?? 0,
+      cloudOwnerEmail: raw['cloud_owner_email']?.toString(),
+      targetCapabilityId: raw['target_capability_id']?.toString(),
     );
   }
 }

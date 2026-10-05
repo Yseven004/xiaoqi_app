@@ -200,6 +200,8 @@ B 阶段不得跳过 A 阶段直接改正式业务流程。若只运行独立官
 - 2026-10-05 已将 API 包部署到 `xiaoqi_capability_api`，将 Harness worker 包部署到 `xiaoqi_sandbox`，并附加兼容 `custom.debian11` 的运行层版本 4；保留 worker 原有 Python310 与 Flask 层，未触碰 `xiaoqi-isbn-proxy`。API `/health` 返回 200；worker 通过 Bearer 入口到达应用（无健康路由的探测返回预期 404）。
 - 已发现 API 与 worker 的内部令牌原先不匹配 FC Bearer 触发器；现已轮换并同步到 API、worker 与触发器，旧触发器令牌已停用。
 - 用户已在 `xiaoqi_sandbox` 设置 `DEEPSEEK_API_KEY`。API 的 `CAPABILITY_HARNESS_TENANTS=personal` 已启用并读取确认；Worker 新增传递当前 Python 模块搜索路径给 MCP 子进程，所有其他函数环境变量保持不变。诊断期间启用了 ACP 子进程标准错误日志，便于排查启动问题。
+- 2026-10-05 15:32 UTC 已更新杭州 `xiaoqi_sandbox`：部署当前 Harness worker 包（37,384 字节，FC 返回 checksum `4370183395833616526`），并新增云端 `MIMO_API_KEY`。该值与本机忽略文件中的 MiMo 密钥一致；原有 `DEEPSEEK_API_KEY` 和内部任务令牌仍在。部署包为 `deepseek-flash`、`mimo-v2.6-flash` 声明 1,000,000-token 上下文，单次生成上限仍为 8,192 tokens。用同一 MiMo 密钥直连 `mimo-v2.6-flash` 做最小在线调用，成功返回 `OK`（2 个输出 token）；尚未做手机到 Agent worker 的端到端验收。
+- 检查到发布版普通聊天备用代理 `ApiConfig.fcBaseUrl` 指向的旧 `deepseek-proxy-...fcapp.run` 子域名返回 HTTP 400 `InvalidArgument`（子域名无效）。本次修复的是个人账号 Agent worker 的 MiMo 配置；`flutter run` 调试模式从本机私有配置直连模型，不走这个旧备用代理。发布版普通聊天代理仍需单独恢复并做访问鉴权设计。
 - 真实试跑中先后修复三项故障：MCP 子进程缺少 `PYTHONPATH`；Windows 打包把 Linux `dsh` shebang 写成 CRLF；E2B `2.52.0` 请求不兼容的 `POST /v2/sandboxes`（杭州 Agent Sandbox 返回 405）。现依阿里云接入文档将 E2B 固定到 `2.31.0` / `2.8.1`；个人账号 smoke task 已调用 Python 并成功交付 CSV。
 - 用户已为临时部署用户添加 `log:GetLogStoreLogs` 授权；该授权已用于读取 `default-logs` 并定位 Harness 与 E2B 故障。
 - 当前 Harness 路由仅包含 `personal`，未扩大到其他租户。仍待验证联网授权与恢复、资料/技能读取、草稿编辑、会话快照恢复、取消与 E2B 清理、旧路径兼容和目标设备验收；这些项目完成前不扩大白名单，也不移除旧运行时。工作区多处文件已有用户未提交修改，已保留。

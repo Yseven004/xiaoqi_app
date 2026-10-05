@@ -31,7 +31,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "read_task_material",
-            "description": "读取本次任务明确附带的资料文本。只能使用资料 ID，不得读取其他账户或设备文件。",
+            "description": "读取本次任务明确附带的资料文本。只能使用资料 ID，不得读取其他账户或设备文件。长资料按字符 offset 分段读取，limit 每次最多 20000。具体问题只读相关片段；用户要求总结或分析附件时，覆盖全文并逐段保留简短要点。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -52,7 +52,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "read_skill_resource",
-            "description": "读取已授权技能版本中的一个资源文件。",
+            "description": "读取已授权技能版本中的一个资源文件。长文件按字符 offset 分段读取，limit 每次最多 20000；按返回的下一 offset 继续直到末尾。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -75,7 +75,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "draft_workspace",
-            "description": "列出、读取或写入当前任务的临时草稿文件。只能改临时区，不会直接保存正式技能。",
+            "description": "列出、读取或写入当前任务的临时草稿文件。读取长文件时按字符 offset 分段，limit 每次最多 20000；按返回的下一 offset 继续直到末尾。只能改临时区，不会直接保存正式技能。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1034,5 +1034,32 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
     except TaskNotOwned:
         return
     except Exception as error:
-        _mutate_task(tenant, task_id, lambda old: {**old, "status": "failed", "error": str(error)[:500], "sandbox_id": None, "worker_id": None, "worker_lease_until": 0, "updated_at": int(time.time())})
-        _emit(store, tenant, task_id, {"type": "error", "status": "failed", "message": str(error)[:500]})
+        now = int(time.time())
+        owned = False
+        cancelled = False
+
+        def finish_error(old: dict[str, Any]) -> dict[str, Any]:
+            nonlocal owned, cancelled
+            if (
+                int(old.get("attempt", 0)) != attempt
+                or old.get("worker_id") != worker_id
+            ):
+                return old
+            owned = True
+            cancelled = bool(old.get("cancel_requested"))
+            return {
+                **old,
+                "status": "cancelled" if cancelled else "failed",
+                "error": None if cancelled else str(error)[:500],
+                "worker_id": None,
+                "worker_lease_until": 0,
+                "active_tool_call": None,
+                "updated_at": now,
+            }
+
+        _mutate_task(tenant, task_id, finish_error)
+        if owned:
+            if cancelled:
+                _emit(store, tenant, task_id, {"type": "status", "status": "cancelled"})
+            else:
+                _emit(store, tenant, task_id, {"type": "error", "status": "failed", "message": str(error)[:500]})

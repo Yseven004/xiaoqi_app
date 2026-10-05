@@ -176,7 +176,7 @@ def create_server(task: XiaoqiToolServer) -> MCPServer:
 
     @server.tool(
         name="read_task_material",
-        description="按资料 ID 读取本次任务附带的文字资料。长资料分段读取：offset 为从 0 开始的字符位置，limit 每次最多 20000。",
+        description="按资料 ID 读取本次任务附带的文字资料。长资料按字符 offset 分段读取，limit 每次最多 20000。具体问题只读相关片段；用户要求总结或分析附件时，覆盖全文并逐段保留简短要点。",
     )
     def read_task_material(
         material_id: str,

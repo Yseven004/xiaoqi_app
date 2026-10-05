@@ -20,6 +20,7 @@ class CapabilityCloudSync {
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
   final http.Client _client = http.Client();
   Future<void>? _syncing;
+  bool _syncAgain = false;
 
   String get _baseUrl =>
       ApiConfig.capabilitiesBaseUrl.replaceFirst(RegExp(r'/$'), '');
@@ -131,13 +132,45 @@ class CapabilityCloudSync {
   }
 
   Future<void> syncNow() {
-    return _syncing ??= _sync().whenComplete(() => _syncing = null);
+    final active = _syncing;
+    if (active != null) {
+      _syncAgain = true;
+      return active;
+    }
+    final operation = _syncPendingRequests();
+    _syncing = operation.whenComplete(() => _syncing = null);
+    return _syncing!;
+  }
+
+  Future<void> _syncPendingRequests() async {
+    do {
+      _syncAgain = false;
+      await _sync();
+    } while (_syncAgain);
   }
 
   Future<void> _sync() async {
     final token = await _secureStorage.read(key: _tokenKey);
     if (token == null || token.isEmpty) throw StateError('请先登录个人账号');
     final store = CapabilityStore.instance;
+    final accountEmail = (await signedInEmail)?.trim().toLowerCase() ?? '';
+    for (final deletion in await store.pendingDraftDeletions()) {
+      final ownerEmail = deletion['account_email']?.toString() ?? '';
+      if (ownerEmail.isNotEmpty && ownerEmail != accountEmail) continue;
+      final id = deletion['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      final response = await _client
+          .delete(
+            Uri.parse('$_baseUrl/drafts/${Uri.encodeComponent(id)}'),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError(_errorMessage(_decode(response), '草稿删除同步失败'));
+      }
+      await store.completeDraftDeletion(id, ownerEmail);
+    }
+
     for (final record in await store.list(includeDeleted: true)) {
       if (record.syncState == CapabilitySyncState.synced ||
           record.syncState == CapabilitySyncState.conflict) {
@@ -178,12 +211,16 @@ class CapabilityCloudSync {
     }
 
     for (final draft in await store.drafts()) {
+      if (draft.cloudOwnerEmail != null &&
+          draft.cloudOwnerEmail!.trim().toLowerCase() != accountEmail) {
+        continue;
+      }
       final response = await _client
           .put(
             Uri.parse('$_baseUrl/drafts'),
             headers: _headers(token),
             body: jsonEncode({
-              'draft': draft.toJson(),
+              'draft': draft.toJson(includeLocalMetadata: false),
               'expected_revision': draft.cloudRevision,
             }),
           )
@@ -194,6 +231,13 @@ class CapabilityCloudSync {
             ? (decoded['error'] as Map)['current']
             : null;
         if (remote is Map) {
+          if (remote['deleted_at'] != null) {
+            await store.rememberRemoteDraftDeletion(
+              draft.id,
+              accountEmail: accountEmail,
+            );
+            continue;
+          }
           await _saveDraftConflict(store, draft, remote);
           await store.discardDraft(draft.id);
         }
@@ -201,15 +245,17 @@ class CapabilityCloudSync {
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw StateError(
-          _errorMessage(
-            decoded,
-            '草稿同步失败',
-            statusCode: response.statusCode,
-          ),
+          _errorMessage(decoded, '草稿同步失败', statusCode: response.statusCode),
         );
       }
       final revision = (decoded['cloud_revision'] as num?)?.toInt();
-      if (revision != null) await store.markDraftSynced(draft.id, revision);
+      if (revision != null) {
+        await store.markDraftSynced(
+          draft.id,
+          revision,
+          accountEmail: accountEmail.isEmpty ? null : accountEmail,
+        );
+      }
     }
 
     final response = await _client
@@ -241,8 +287,22 @@ class CapabilityCloudSync {
         draftDecoded['items'] is List) {
       final localIds = (await store.drafts()).map((draft) => draft.id).toSet();
       for (final raw in (draftDecoded['items'] as List).whereType<Map>()) {
-        if (localIds.contains(raw['id']?.toString())) continue;
-        await store.saveDraft(CapabilityDraft.fromJson(raw));
+        final id = raw['id']?.toString();
+        if (id == null || id.isEmpty) continue;
+        if (raw['deleted_at'] != null) {
+          await store.rememberRemoteDraftDeletion(
+            id,
+            accountEmail: accountEmail,
+          );
+          continue;
+        }
+        if (await store.isDraftDeleted(id)) continue;
+        if (localIds.contains(id)) continue;
+        await store.saveDraft(
+          CapabilityDraft.fromJson(raw).copyWith(
+            cloudOwnerEmail: accountEmail.isEmpty ? null : accountEmail,
+          ),
+        );
       }
     }
   }
@@ -398,9 +458,11 @@ class CapabilityCloudSync {
         }
       }
       final status = response['status']?.toString();
-      if (status == 'succeeded' ||
-          status == 'failed' ||
-          status == 'cancelled') {
+      final cleanupPending = response['sandbox_cleanup_pending'] == true;
+      if (!cleanupPending &&
+          (status == 'succeeded' ||
+              status == 'failed' ||
+              status == 'cancelled')) {
         if (!completionReceived && status == 'succeeded') {
           final task = await getTask(taskId);
           yield {
@@ -442,13 +504,47 @@ class CapabilityCloudSync {
     return response.bodyBytes;
   }
 
-  Future<void> cancelTask(String taskId) async {
+  Future<String?> cancelTask(String taskId) async {
     final token = await _requireToken();
-    final response = await _client.post(
-      Uri.parse('$_baseUrl/agent/tasks/$taskId/cancel'),
-      headers: _headers(token),
-    );
-    _checked(response);
+    final response = await _client
+        .post(
+          Uri.parse('$_baseUrl/agent/tasks/$taskId/cancel'),
+          headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 20));
+    final decoded = _decode(response);
+    final accepted =
+        (response.statusCode >= 200 && response.statusCode < 300) ||
+        decoded['cancel_requested'] == true;
+    if (!accepted) {
+      throw StateError(_errorMessage(decoded, '云端任务停止失败'));
+    }
+
+    var cursor = -1;
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    var status = decoded['status']?.toString();
+    var cleanupPending = decoded['sandbox_cleanup_pending'] == true;
+    bool isTerminal(String? value) =>
+        value == 'cancelled' || value == 'succeeded' || value == 'failed';
+    while ((!isTerminal(status) || cleanupPending) &&
+        DateTime.now().isBefore(deadline)) {
+      final state = await getTaskEvents(
+        taskId,
+        cursor,
+      ).timeout(const Duration(seconds: 20));
+      final events = state['events'];
+      if (events is List) {
+        for (final raw in events.whereType<Map>()) {
+          cursor = max(cursor, (raw['seq'] as num?)?.toInt() ?? cursor);
+        }
+      }
+      status = state['status']?.toString();
+      cleanupPending = state['sandbox_cleanup_pending'] == true;
+      if (!isTerminal(status) || cleanupPending) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    }
+    return isTerminal(status) && !cleanupPending ? status : null;
   }
 
   Future<void> authorizeTaskDomains(String taskId, List<String> domains) async {

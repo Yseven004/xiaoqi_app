@@ -289,12 +289,14 @@ class CapabilityInlineTag extends StatelessWidget {
     required this.data,
     this.textStyle,
     this.emphasize = false,
+    this.onTap,
     super.key,
   });
 
   final Map<String, Object?> data;
   final TextStyle? textStyle;
   final bool emphasize;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -324,28 +326,37 @@ class CapabilityInlineTag extends StatelessWidget {
         const SizedBox(width: 6),
       ],
     );
+    final tag = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xEFFFFFFF), Color(0xBFFFFFFF)],
+        ),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Color(0xB3FFFFFF), width: 0.8),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0x1F202A44),
+            blurRadius: emphasize ? 8 : 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: tagContent,
+    );
     return Semantics(
       label: '$name，能力标签',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xEFFFFFFF), Color(0xBFFFFFFF)],
-          ),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Color(0xB3FFFFFF), width: 0.8),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0x1F202A44),
-              blurRadius: emphasize ? 8 : 6,
-              offset: const Offset(0, 2),
+      button: onTap != null,
+      onTap: onTap,
+      child: onTap == null
+          ? tag
+          : GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onTap,
+              child: tag,
             ),
-          ],
-        ),
-        child: tagContent,
-      ),
     );
   }
 }

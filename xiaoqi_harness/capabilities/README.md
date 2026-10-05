@@ -47,7 +47,8 @@ The API function also needs `CAPABILITY_ADMIN_TOKEN`,
 `CAPABILITY_TASK_INTERNAL_TOKEN`, `CAPABILITY_TASK_FUNCTION_URL` (ending in
 `/v1/internal/agent/tasks/run`), `CAPABILITY_TASK_CANCEL_FUNCTION_URL` (ending
 in `/v1/internal/agent/tasks/cancel`), and `DEEPSEEK_API_KEY` for the existing
-chat proxy.
+chat proxy. The model-aware chat proxy also needs `MIMO_API_KEY` so requests for
+MiMo models use Xiaomi's API instead of being sent to DeepSeek.
 
 For personal account email login, configure these additional values on the API
 Function Compute function. Do not put the QQ Mail authorization code in Flutter
@@ -66,9 +67,17 @@ The app requests a short-lived email code at `/v1/auth/email/start` and signs in
 at `/v1/auth/email/verify`. A successful session uses the existing `personal`
 tenant and capability storage. The new app flow does not require pairing codes.
 
-The worker function needs the same `CAPABILITY_TASK_INTERNAL_TOKEN`, model
-provider keys (`DEEPSEEK_API_KEY`, `MIMO_API_KEY`), and the Alibaba Agent
-Sandbox settings below. Keep the Sandbox API Key on this worker function only.
+The worker function needs the same `CAPABILITY_TASK_INTERNAL_TOKEN` and model
+provider keys (`DEEPSEEK_API_KEY`, `MIMO_API_KEY`), plus the Alibaba Agent
+Sandbox settings below. Configure both model keys on the API and worker
+functions; keep the Sandbox API Key on the worker function only.
+
+The Harness profiles use a 1,000,000-token context window for both
+`deepseek-flash` and `mimo-v2.6-flash`. The current Agent profile limits each
+model response to 8,192 tokens. Model specifications were checked against the
+[DeepSeek model documentation](https://api-docs.deepseek.com/quick_start/pricing/)
+and [Xiaomi MiMo-V2.6-Flash documentation](https://mimo.mi.com/models/zh-CN/mimo-v2.6-flash)
+on 2026-10-05.
 
 On the API function, Harness routing is opt-in per tenant through `CAPABILITY_HARNESS_TENANTS`, a
 comma-separated list of tenant IDs. Leave it empty to keep all new tasks on the

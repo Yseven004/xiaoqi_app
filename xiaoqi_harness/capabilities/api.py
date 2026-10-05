@@ -765,6 +765,18 @@ def drafts() -> Any:
         current = store().get(key)
         expected = body.get("expected_revision")
         expected = int(expected) if expected is not None else None
+        if current is not None and current.value.get("deleted_at") is not None:
+            current_draft = {
+                **current.value,
+                "cloud_revision": current.revision,
+            }
+            return jsonify({
+                "error": {
+                    "message": "云端草稿已删除",
+                    "current": current_draft,
+                    "cloud_revision": current.revision,
+                }
+            }), 409
         draft["cloud_revision"] = (current.revision + 1) if current else 1
         if current is None and expected not in (None, 0):
             raise RevisionConflict(draft_id)
@@ -780,6 +792,31 @@ def drafts() -> Any:
         return _error(str(error), 503)
     except Exception:
         return _error("同步草稿失败", 503)
+
+
+@capabilities.delete("/drafts/<draft_id>")
+@_device_auth
+def delete_draft(draft_id: str) -> Any:
+    try:
+        safe_id = _safe_id(draft_id, "草稿 ID")
+        key = f"draft/{g.tenant_id}/{safe_id}"
+        current = store().get(key)
+        if current is not None and current.value.get("deleted_at") is not None:
+            return jsonify({"ok": True, "cloud_revision": current.revision})
+        revision = current.revision + 1 if current is not None else 1
+        tombstone = {
+            "id": safe_id,
+            "deleted_at": str(time.time()),
+            "cloud_revision": revision,
+        }
+        saved = store().put(key, tombstone, _revision(current))
+        return jsonify({"ok": True, "cloud_revision": saved.revision})
+    except RevisionConflict:
+        return _error("云端草稿已变化，请重试删除", 409)
+    except ConfigurationError as error:
+        return _error(str(error), 503)
+    except Exception:
+        return _error("删除云端草稿失败", 503)
 
 
 @capabilities.post("/agent/tasks")
@@ -879,10 +916,110 @@ def get_agent_task_events(task_id: str) -> Any:
         task = store().get(f"task/{g.tenant_id}/{task_id}")
         if task is None:
             return _error("任务不存在", 404)
-        value = task.value
-        return jsonify({"events": [_public_task_event(event, task_id) for event in value.get("events", []) if int(event.get("seq", 0)) > after], "status": value.get("status", "unknown")})
+        value = _retry_pending_task_sandbox_cleanup(
+            g.tenant_id, task_id, task.value
+        )
+        return jsonify({
+            "events": [
+                _public_task_event(event, task_id)
+                for event in value.get("events", [])
+                if int(event.get("seq", 0)) > after
+            ],
+            "status": value.get("status", "unknown"),
+            "sandbox_cleanup_pending": bool(value.get("sandbox_cleanup_pending")),
+        })
     except ConfigurationError as error:
         return _error(str(error), 503)
+
+
+def _kill_task_sandbox(sandbox_id: str) -> bool:
+    cancel_url = os.environ.get("CAPABILITY_TASK_CANCEL_FUNCTION_URL", "").strip()
+    internal_token = os.environ.get("CAPABILITY_TASK_INTERNAL_TOKEN", "")
+    if not cancel_url or len(internal_token) < 32:
+        return False
+
+    payload = json.dumps({"sandbox_id": sandbox_id}).encode("utf-8")
+    for cleanup_attempt in range(2):
+        try:
+            req = urllib.request.Request(
+                cancel_url,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {internal_token}",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=8) as response:
+                if 200 <= response.status < 300:
+                    return True
+        except Exception:
+            pass
+        if cleanup_attempt == 0:
+            time.sleep(0.2)
+    return False
+
+
+def _retry_pending_task_sandbox_cleanup(
+    tenant: str, task_id: str, current: dict[str, Any]
+) -> dict[str, Any]:
+    sandbox_id = current.get("sandbox_id")
+    checked_at = int(time.time())
+    if (
+        not current.get("sandbox_cleanup_pending")
+        or not sandbox_id
+        or int(current.get("sandbox_cleanup_retry_at") or 0) > checked_at
+    ):
+        return current
+
+    cleanup_ok = _kill_task_sandbox(str(sandbox_id))
+    now = int(time.time())
+
+    def update(old: dict[str, Any]) -> dict[str, Any]:
+        if (
+            old.get("sandbox_id") != sandbox_id
+            or not old.get("sandbox_cleanup_pending")
+        ):
+            return old
+        if not cleanup_ok:
+            return {
+                **old,
+                "sandbox_cleanup_retry_at": now + 5,
+                "updated_at": now,
+            }
+
+        events = list(old.get("events", []))
+        worker_is_active = bool(
+            old.get("worker_id")
+            and int(old.get("worker_lease_until") or 0) > now
+        )
+        finish_cancel = (
+            old.get("cancel_requested")
+            and old.get("status") == "cancelling"
+            and not worker_is_active
+        )
+        if finish_cancel and old.get("status") != "cancelled":
+            events.append({
+                "seq": int(events[-1].get("seq", -1)) + 1 if events else 0,
+                "type": "status",
+                "status": "cancelled",
+                "created_at": now,
+            })
+        return {
+            **old,
+            "sandbox_id": None,
+            "sandbox_cleanup_pending": False,
+            "sandbox_cleanup_retry_at": None,
+            "sandbox_cleanup_deadline": None,
+            "status": "cancelled" if finish_cancel else old.get("status"),
+            "worker_id": None if finish_cancel else old.get("worker_id"),
+            "worker_lease_until": 0 if finish_cancel else old.get("worker_lease_until", 0),
+            "active_tool_call": None if finish_cancel else old.get("active_tool_call"),
+            "events": events[-200:],
+            "updated_at": now,
+        }
+
+    return _mutate_task(tenant, task_id, update).value
 
 
 @capabilities.get("/agent/tasks/<task_id>/artifacts/<artifact_id>")
@@ -943,39 +1080,26 @@ def cancel_agent_task(task_id: str) -> Any:
         task = _mutate_task(g.tenant_id, task_id, cancel)
         sandbox_id = task.value.get("sandbox_id")
         cleanup_ok = not sandbox_id
-        cancel_url = os.environ.get("CAPABILITY_TASK_CANCEL_FUNCTION_URL", "").strip()
-        internal_token = os.environ.get("CAPABILITY_TASK_INTERNAL_TOKEN", "")
-        if sandbox_id and cancel_url and len(internal_token) >= 32:
-            payload = json.dumps({"sandbox_id": sandbox_id}).encode("utf-8")
-            for cleanup_attempt in range(2):
-                try:
-                    req = urllib.request.Request(
-                        cancel_url,
-                        data=payload,
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {internal_token}",
-                        },
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=8) as response:
-                        cleanup_ok = 200 <= response.status < 300
-                except Exception:
-                    cleanup_ok = False
-                if cleanup_ok or cleanup_attempt == 1:
-                    break
-                time.sleep(0.2)
+        if sandbox_id:
+            cleanup_ok = _kill_task_sandbox(str(sandbox_id))
         if sandbox_id:
             now = int(time.time())
             task = _mutate_task(g.tenant_id, task_id, lambda old: {
                 **old,
                 "sandbox_id": None if cleanup_ok else sandbox_id,
                 "sandbox_cleanup_pending": not cleanup_ok,
+                "sandbox_cleanup_retry_at": None if cleanup_ok else now + 5,
                 "sandbox_cleanup_deadline": None if cleanup_ok else now + 300,
                 "updated_at": now,
             } if old.get("sandbox_id") == sandbox_id else old)
             if not cleanup_ok and task.value.get("sandbox_id") == sandbox_id:
-                return _error("任务已请求停止，但沙箱清理未确认", 503)
+                return jsonify({
+                    "error": "任务已请求停止，但沙箱清理未确认",
+                    "task_id": task_id,
+                    "status": task.value.get("status"),
+                    "cancel_requested": bool(task.value.get("cancel_requested")),
+                    "sandbox_cleanup_pending": True,
+                }), 503
         return jsonify({"task_id": task_id, "status": task.value.get("status")})
     except KeyError:
         return _error("任务不存在", 404)
