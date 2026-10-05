@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import io
 import json
 import os
 import re
 import secrets
+import smtplib
 import time
 import urllib.error
 import urllib.request
 import uuid
+from email.message import EmailMessage
 from functools import wraps
 from typing import Any, Callable
 
-from flask import Blueprint, Response, g, jsonify, request, send_file
+from flask import Blueprint, Response, current_app, g, jsonify, request, send_file
 
 from .storage import CloudStore, ConfigurationError, RevisionConflict, StoredDocument
 
@@ -25,6 +28,36 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _MAX_SKILL_BYTES = 2 * 1024 * 1024
 _MAX_TASK_BYTES = 18 * 1024 * 1024
 _SAFE_ARTIFACT_NAME = re.compile(r"[^A-Za-z0-9._-]")
+_EMAIL_ADDRESS = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_AUTH_CODE_TTL_SECONDS = 600
+_AUTH_CODE_RESEND_SECONDS = 60
+_AUTH_CODE_MAX_SENDS_PER_HOUR = 5
+_AUTH_CODE_MAX_ATTEMPTS = 5
+
+
+def _agent_runtime_for_task(tenant_id: str, task_request: dict[str, Any]) -> str:
+    tenants = {
+        item.strip()
+        for item in os.environ.get("CAPABILITY_HARNESS_TENANTS", "").split(",")
+        if item.strip()
+    }
+    if tenant_id not in tenants:
+        return "legacy"
+    model_id = str(task_request.get("model_id", "deepseek-flash")).lower()
+    has_images = _contains_image_input(task_request.get("messages"))
+    if has_images and model_id != "deepseek-flash":
+        return "legacy"
+    return "deepseek-harness"
+
+
+def _contains_image_input(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_contains_image_input(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if value.get("type") in ("image", "image_url", "input_image") or "image_url" in value:
+        return True
+    return any(_contains_image_input(item) for item in value.values())
 
 
 def store() -> CloudStore:
@@ -54,10 +87,10 @@ def _device_auth(handler: Callable[..., Any]) -> Callable[..., Any]:
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         authorization = request.headers.get("Authorization", "")
         if not authorization.startswith("Bearer "):
-            return _error("设备尚未配对", 401)
+            return _error("尚未登录个人账号", 401)
         token = authorization[7:].strip()
         if len(token) < 24:
-            return _error("设备凭证无效", 401)
+            return _error("登录凭证无效，请重新登录", 401)
         try:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
             device = store().get(f"device/{token_hash}")
@@ -66,9 +99,10 @@ def _device_auth(handler: Callable[..., Any]) -> Callable[..., Any]:
         except Exception:
             return _error("暂时无法读取设备凭证", 503)
         if device is None or device.value.get("revoked_at"):
-            return _error("设备凭证已撤销，请重新配对", 401)
+            return _error("个人账号会话已退出，请重新登录", 401)
         g.tenant_id = str(device.value["tenant_id"])
         g.device_id = str(device.value["device_id"])
+        g.device_record = device.value
         return handler(*args, **kwargs)
 
     return wrapped
@@ -362,6 +396,248 @@ def exchange_pairing_code() -> Any:
         return _error("配对失败，请重新生成配对码", 500)
 
 
+def _normalized_email(value: Any) -> str:
+    email = str(value or "").strip().lower()
+    if len(email) > 254 or not _EMAIL_ADDRESS.fullmatch(email):
+        raise ValueError("邮箱地址格式无效")
+    return email
+
+
+def _email_auth_config() -> tuple[str, str, str, int, str, str]:
+    owner_email = os.environ.get("CAPABILITY_OWNER_EMAIL", "").strip().lower()
+    smtp_host = os.environ.get("CAPABILITY_SMTP_HOST", "smtp.qq.com").strip()
+    smtp_username = os.environ.get("CAPABILITY_SMTP_USERNAME", "").strip()
+    smtp_password = os.environ.get("CAPABILITY_SMTP_PASSWORD", "")
+    pepper = os.environ.get("CAPABILITY_AUTH_CODE_PEPPER", "")
+    try:
+        smtp_port = int(os.environ.get("CAPABILITY_SMTP_PORT", "465"))
+    except ValueError as error:
+        raise ConfigurationError("登录服务暂未配置") from error
+    if (
+        not _EMAIL_ADDRESS.fullmatch(owner_email)
+        or not smtp_host
+        or not smtp_username
+        or not smtp_password
+        or len(pepper) < 32
+        or not (1 <= smtp_port <= 65535)
+    ):
+        raise ConfigurationError("登录服务暂未配置")
+    return owner_email, smtp_host, smtp_username, smtp_port, smtp_password, pepper
+
+
+def _auth_code_key(email: str) -> str:
+    return "auth-code/" + hashlib.sha256(email.encode("utf-8")).hexdigest()
+
+
+def _auth_code_digest(email: str, code: str, pepper: str) -> str:
+    message = f"{email}:{code}".encode("utf-8")
+    return hmac.new(pepper.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def _send_email_login_code(
+    email: str,
+    code: str,
+    *,
+    smtp_host: str,
+    smtp_username: str,
+    smtp_port: int,
+    smtp_password: str,
+) -> None:
+    message = EmailMessage()
+    message["Subject"] = "小七登录验证码"
+    message["From"] = smtp_username
+    message["To"] = email
+    message.set_content(f"你的小七登录验证码是：{code}\n验证码 10 分钟内有效，请勿转发给他人。")
+    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=12) as client:
+        client.login(smtp_username, smtp_password)
+        client.send_message(message)
+
+
+def _generic_email_code_response() -> Any:
+    return jsonify({"ok": True, "message": "如果该邮箱已获准登录，验证码会发送到邮箱"}), 202
+
+
+@capabilities.post("/auth/email/start")
+def start_email_login() -> Any:
+    try:
+        body = _json_body(1024)
+        email = _normalized_email(body.get("email"))
+        owner_email, smtp_host, smtp_username, smtp_port, smtp_password, pepper = (
+            _email_auth_config()
+        )
+        if not hmac.compare_digest(email, owner_email):
+            return _generic_email_code_response()
+
+        now = int(time.time())
+        key = _auth_code_key(email)
+        current = store().get(key)
+        send_times = [
+            int(value)
+            for value in (current.value.get("send_times", []) if current else [])
+            if now - int(value) < 3600
+        ]
+        if current and (
+            now - int(current.value.get("sent_at", 0)) < _AUTH_CODE_RESEND_SECONDS
+            or len(send_times) >= _AUTH_CODE_MAX_SENDS_PER_HOUR
+        ):
+            return _generic_email_code_response()
+
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        challenge = {
+            "email": email,
+            "code_hash": _auth_code_digest(email, code, pepper),
+            "expires_at": now + _AUTH_CODE_TTL_SECONDS,
+            "sent_at": now,
+            "send_times": (send_times + [now])[-_AUTH_CODE_MAX_SENDS_PER_HOUR:],
+            "attempts": 0,
+            "consumed": False,
+        }
+        saved = store().put(key, challenge, current.revision if current else None)
+        try:
+            _send_email_login_code(
+                email,
+                code,
+                smtp_host=smtp_host,
+                smtp_username=smtp_username,
+                smtp_port=smtp_port,
+                smtp_password=smtp_password,
+            )
+        except Exception:
+            try:
+                store().put(
+                    key,
+                    {**challenge, "consumed": True},
+                    saved.revision,
+                )
+            except Exception:
+                pass
+            current_app.logger.warning("Email login code delivery failed")
+            return _generic_email_code_response()
+        return _generic_email_code_response()
+    except ValueError as error:
+        return _error(str(error), 400)
+    except ConfigurationError:
+        return _error("登录服务暂不可用", 503)
+    except RevisionConflict:
+        return _generic_email_code_response()
+    except Exception:
+        return _error("登录服务暂不可用", 503)
+
+
+@capabilities.post("/auth/email/verify")
+def verify_email_login() -> Any:
+    token = ""
+    token_hash = ""
+    try:
+        body = _json_body(1024)
+        email = _normalized_email(body.get("email"))
+        code = str(body.get("code", "")).strip()
+        owner_email, _, _, _, _, pepper = _email_auth_config()
+        if not hmac.compare_digest(email, owner_email) or not re.fullmatch(r"\d{6}", code):
+            return _error("验证码无效或已过期", 401)
+
+        key = _auth_code_key(email)
+        challenge = store().get(key)
+        now = int(time.time())
+        if (
+            challenge is None
+            or challenge.value.get("consumed")
+            or int(challenge.value.get("expires_at", 0)) < now
+            or int(challenge.value.get("attempts", 0)) >= _AUTH_CODE_MAX_ATTEMPTS
+            or not hmac.compare_digest(
+                str(challenge.value.get("code_hash", "")),
+                _auth_code_digest(email, code, pepper),
+            )
+        ):
+            if challenge and not challenge.value.get("consumed"):
+                attempts = int(challenge.value.get("attempts", 0)) + 1
+                try:
+                    store().put(
+                        key,
+                        {
+                            **challenge.value,
+                            "attempts": attempts,
+                            "consumed": attempts >= _AUTH_CODE_MAX_ATTEMPTS,
+                        },
+                        challenge.revision,
+                    )
+                except RevisionConflict:
+                    pass
+            return _error("验证码无效或已过期", 401)
+
+        token = secrets.token_urlsafe(36)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        device_id = "device-" + uuid.uuid4().hex
+        device_key = f"device/{token_hash}"
+        store().put(
+            device_key,
+            {
+                "tenant_id": "personal",
+                "device_id": device_id,
+                "auth_method": "email",
+                "account_email": email,
+                "created_at": now,
+                "revoked_at": None,
+            },
+            None,
+        )
+        try:
+            store().put(
+                key,
+                {**challenge.value, "consumed": True, "consumed_at": now},
+                challenge.revision,
+            )
+        except RevisionConflict:
+            issued = store().get(device_key)
+            if issued:
+                store().put(
+                    device_key,
+                    {**issued.value, "revoked_at": now},
+                    issued.revision,
+                )
+            return _error("验证码已使用，请重新获取", 409)
+        return jsonify({"access_token": token, "device_id": device_id, "email": email}), 201
+    except ValueError as error:
+        return _error(str(error), 400)
+    except ConfigurationError:
+        return _error("登录服务暂不可用", 503)
+    except Exception:
+        if token_hash:
+            try:
+                issued = store().get(f"device/{token_hash}")
+                if issued:
+                    store().put(
+                        f"device/{token_hash}",
+                        {**issued.value, "revoked_at": int(time.time())},
+                        issued.revision,
+                    )
+            except Exception:
+                pass
+        return _error("登录失败，请重新获取验证码", 503)
+
+
+@capabilities.get("/auth/me")
+@_device_auth
+def get_email_session() -> Any:
+    if g.device_record.get("auth_method") != "email":
+        return _error("请先使用个人邮箱登录", 401)
+    return jsonify(
+        {
+            "authenticated": True,
+            "email": g.device_record.get("account_email", ""),
+            "tenant_id": g.tenant_id,
+        }
+    )
+
+
+@capabilities.delete("/auth/session")
+@_device_auth
+def revoke_email_session() -> Any:
+    if g.device_record.get("auth_method") != "email":
+        return _error("会话无效", 401)
+    return revoke_device()
+
+
 @capabilities.delete("/devices/me")
 @_device_auth
 def revoke_device() -> Any:
@@ -527,11 +803,14 @@ def create_agent_task() -> Any:
         transcript_key = f"tenants/{g.tenant_id}/tasks/{task_id}/input.json"
         store().put_immutable(transcript_key, {"input.json": json.dumps(body, ensure_ascii=False).encode("utf-8")})
         now = int(time.time())
+        runtime = _agent_runtime_for_task(g.tenant_id, body)
         task = {
             "task_id": task_id,
             "request_hash": request_hash,
             "tenant_id": g.tenant_id,
             "device_id": g.device_id,
+            "runtime": runtime,
+            "runtime_version": "0.1.5rc1" if runtime == "deepseek-harness" else "legacy",
             "status": "queued",
             "attempt": 1,
             "input_object_key": transcript_key,
@@ -581,7 +860,12 @@ def get_agent_task(task_id: str) -> Any:
         if task is None:
             return _error("任务不存在", 404)
         value = task.value
-        return jsonify({"task_id": task_id, "status": value["status"], "attempt": value["attempt"], "error": value.get("error"), "result": value.get("result"), "draft": value.get("draft_files", {}).get("SKILL.md"), "artifacts": [_public_artifact(item, task_id) for item in value.get("artifacts", []) if isinstance(item, dict)], "requested_network_domains": value.get("requested_network_domains", []), "network_purpose": value.get("network_purpose"), "cloud_revision": task.revision})
+        draft_files = value.get("draft_files", {})
+        encoded_files = {
+            name: base64.b64encode(str(content).encode("utf-8")).decode("ascii")
+            for name, content in draft_files.items()
+        }
+        return jsonify({"task_id": task_id, "status": value["status"], "attempt": value["attempt"], "error": value.get("error"), "result": value.get("result"), "draft": draft_files.get("SKILL.md"), "files": encoded_files, "artifacts": [_public_artifact(item, task_id) for item in value.get("artifacts", []) if isinstance(item, dict)], "requested_network_domains": value.get("requested_network_domains", []), "network_purpose": value.get("network_purpose"), "cloud_revision": task.revision})
     except ConfigurationError as error:
         return _error(str(error), 503)
 
@@ -659,13 +943,28 @@ def cancel_agent_task(task_id: str) -> Any:
         task = _mutate_task(g.tenant_id, task_id, cancel)
         sandbox_id = task.value.get("sandbox_id")
         cleanup_ok = not sandbox_id
-        if sandbox_id and os.environ.get("E2B_API_KEY"):
-            try:
-                from e2b_code_interpreter import Sandbox
-                Sandbox.kill(str(sandbox_id), api_key=os.environ["E2B_API_KEY"])
-                cleanup_ok = True
-            except Exception:
-                cleanup_ok = False
+        cancel_url = os.environ.get("CAPABILITY_TASK_CANCEL_FUNCTION_URL", "").strip()
+        internal_token = os.environ.get("CAPABILITY_TASK_INTERNAL_TOKEN", "")
+        if sandbox_id and cancel_url and len(internal_token) >= 32:
+            payload = json.dumps({"sandbox_id": sandbox_id}).encode("utf-8")
+            for cleanup_attempt in range(2):
+                try:
+                    req = urllib.request.Request(
+                        cancel_url,
+                        data=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {internal_token}",
+                        },
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=8) as response:
+                        cleanup_ok = 200 <= response.status < 300
+                except Exception:
+                    cleanup_ok = False
+                if cleanup_ok or cleanup_attempt == 1:
+                    break
+                time.sleep(0.2)
         if sandbox_id:
             now = int(time.time())
             task = _mutate_task(g.tenant_id, task_id, lambda old: {
@@ -675,6 +974,8 @@ def cancel_agent_task(task_id: str) -> Any:
                 "sandbox_cleanup_deadline": None if cleanup_ok else now + 300,
                 "updated_at": now,
             } if old.get("sandbox_id") == sandbox_id else old)
+            if not cleanup_ok and task.value.get("sandbox_id") == sandbox_id:
+                return _error("任务已请求停止，但沙箱清理未确认", 503)
         return jsonify({"task_id": task_id, "status": task.value.get("status")})
     except KeyError:
         return _error("任务不存在", 404)
@@ -745,28 +1046,3 @@ def resume_agent_task(task_id: str) -> Any:
         return _error(str(error), 503)
     except Exception:
         return _error("恢复任务失败", 503)
-
-
-@capabilities.post("/internal/agent/tasks/run")
-def run_agent_task() -> Any:
-    expected = os.environ.get("CAPABILITY_TASK_INTERNAL_TOKEN", "")
-    supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
-    if len(expected) < 32 or not secrets.compare_digest(supplied, expected):
-        return _error("not found", 404)
-    try:
-        body = _json_body(1024)
-        tenant_id = _safe_id(body.get("tenant_id"), "测试身份")
-        task_id = _safe_id(body.get("task_id"), "任务 ID")
-        attempt = int(body.get("attempt", 0))
-        from .worker import run_task
-
-        run_task(store(), tenant_id, task_id, attempt)
-        return jsonify({"ok": True})
-    except Exception as error:
-        from .worker import TaskAlreadyRunning, TaskNotOwned
-
-        if isinstance(error, (TaskAlreadyRunning, TaskNotOwned)):
-            return jsonify({"ok": True, "duplicate": True})
-        # Function Compute retries failed asynchronous invocations; task state
-        # and the transcript are persisted by the worker before each tool call.
-        return jsonify({"error": "task failed"}), 500

@@ -293,11 +293,90 @@ def _mark_tool_started(
     _mutate_task(tenant, task_id, mark)
 
 
+def _last_user_text(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            return "\n".join(parts)
+        return ""
+    return ""
+
+
+def _requires_python_execution(messages: list[dict[str, Any]]) -> bool:
+    text = _last_user_text(messages).lower()
+    if not re.search(r"python|蟒蛇", text):
+        return False
+    if re.search(r"(?:不要|不必|无需|不需要|禁止).{0,24}(?:调用|执行|运行).{0,24}python", text):
+        return False
+    explicit_run = re.search(
+        r"(?:真实|实际|必须|请|务必).{0,24}(?:调用|执行|运行).{0,24}python"
+        r"|(?:调用|执行|运行).{0,24}python"
+        r"|python.{0,24}(?:真实|实际).{0,8}(?:运行|执行)"
+        r"|(?:用|使用).{0,8}python.{0,20}(?:计算|生成|写入|导出)",
+        text,
+    )
+    return explicit_run is not None
+
+
+def _requested_python_output_names(messages: list[dict[str, Any]]) -> set[str]:
+    text = _last_user_text(messages)
+    paths = re.findall(
+        r"/home/user/workspace/output/([^\s`\"'<>，。;；)）]+)", text
+    )
+    return {
+        PurePosixPath(path.rstrip(".,，。;；:：")).name
+        for path in paths
+        if path.rstrip(".,，。;；:：")
+    }
+
+
+def _xiaoqi_system_instructions() -> str:
+    return (
+        "\n\n小栖工具规则：需要实际运行 Python 时调用 execute_python，不要只描述执行结果；需要交付的文件写到 /home/user/workspace/output；"
+        "如果 Python 工具返回‘执行失败’，必须明确告诉用户失败，不得描述成成功。"
+        "联网默认关闭。确需联网时列出精确域名和用途，等待系统单独授权。"
+        "创建或修改技能时，若目的不明确，直接在普通聊天回复中用一句简短纯文本问题澄清，不要返回结构化问题或选项面板；目的明确后将完整技能和资源写入 draft_workspace，读回最终 SKILL.md 后再依据该版本完成一次代表性试用。"
+        "最终回复展示完整 SKILL.md、试用输入与实际结果；未执行的试用必须标为文字演示，不能声称已运行。"
+        "草稿工作区不是正式保存；只有用户点击保存才创建正式版本。"
+    )
+
+
+def _validate_python_requirements(
+    task: dict[str, Any], messages: list[dict[str, Any]]
+) -> None:
+    if not _requires_python_execution(messages):
+        return
+    if not task.get("python_succeeded"):
+        raise RuntimeError("本次请求要求真实运行 Python，但执行未成功")
+    required_files = _requested_python_output_names(messages)
+    artifact_names = {
+        str(item.get("name", ""))
+        for item in task.get("artifacts", [])
+        if isinstance(item, dict)
+    }
+    missing_files = sorted(required_files - artifact_names)
+    if missing_files:
+        raise RuntimeError(
+            "Python 已运行，但未生成要求的文件：" + ", ".join(missing_files)
+        )
+
+
 def _model_request(
     model_id: str,
     reasoning_level: str,
     messages: list[dict[str, Any]],
     on_delta: Any,
+    required_tool: str | None = None,
 ) -> dict[str, Any]:
     is_mimo = model_id.startswith("mimo")
     key = os.environ.get("MIMO_API_KEY" if is_mimo else "DEEPSEEK_API_KEY", "")
@@ -315,10 +394,26 @@ def _model_request(
         "tool_choice": "auto",
         "stream": True,
     }
+    if required_tool:
+        payload["tool_choice"] = {
+            "type": "function",
+            "function": {"name": required_tool},
+        }
     if is_mimo:
-        payload["thinking"] = {"type": "disabled" if reasoning_level == "low" else "enabled"}
+        payload["thinking"] = {
+            "type": "disabled"
+            if required_tool or reasoning_level == "low"
+            else "enabled"
+        }
     else:
-        payload["reasoning_effort"] = {"low": "low", "medium": "high", "high": "max"}.get(reasoning_level, "high")
+        if required_tool:
+            payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["reasoning_effort"] = {
+                "low": "low",
+                "medium": "high",
+                "high": "max",
+            }.get(reasoning_level, "high")
     req = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -500,20 +595,35 @@ def _execute_python(
 ) -> str:
     if len(code.encode("utf-8")) > 64 * 1024:
         raise ValueError("Python 脚本超过 64 KB")
-    if not os.environ.get("E2B_API_KEY"):
-        raise RuntimeError("E2B 尚未配置，纯文字能力仍可继续使用")
+    sandbox_connection = {
+        "api_key": os.environ.get("E2B_API_KEY", "").strip(),
+        "api_url": os.environ.get("E2B_API_URL", "").strip(),
+        "domain": os.environ.get("E2B_DOMAIN", "").strip(),
+    }
+    missing = [name for name, value in sandbox_connection.items() if not value]
+    if missing:
+        print(
+            f"AGENT_PYTHON_EXECUTION task_id={task_id} status=config_missing "
+            f"missing={','.join(missing)}",
+            flush=True,
+        )
+        raise RuntimeError(
+            f"阿里云 Agent Sandbox 未配置：{', '.join(missing)}；纯文字能力仍可继续使用"
+        )
     from e2b_code_interpreter import Sandbox
 
     sandbox = None
     try:
         sandbox_options: dict[str, Any] = {
             "timeout": 300,
-            "allow_internet_access": bool(domains),
+            "allow_internet_access": False,
+            "network": {
+                "allow_out": domains,
+                "deny_out": ["0.0.0.0/0"],
+            },
             "metadata": {"xiaoqi_task_id": task_id},
         }
-        if domains:
-            sandbox_options["network"] = {"allow_out": domains}
-        sandbox = Sandbox.create(api_key=os.environ["E2B_API_KEY"], **sandbox_options)
+        sandbox = Sandbox.create(**sandbox_connection, **sandbox_options)
         from .api import _mutate_task
 
         _mutate_task(tenant, task_id, lambda old: {**old, "sandbox_id": sandbox.sandbox_id, "updated_at": int(time.time())})
@@ -569,10 +679,24 @@ def _execute_python(
         artifacts = _persist_artifacts(sandbox, store, tenant, task_id, attempt, worker_id, execution)
         execution_error = getattr(execution, "error", None)
         if execution_error:
-            result_items.append(f"Python 执行失败：{getattr(execution_error, 'name', 'Error')}: {getattr(execution_error, 'value', '未知错误')}")
+            raise RuntimeError(
+                "Python 执行失败："
+                f"{getattr(execution_error, 'name', 'Error')}: "
+                f"{getattr(execution_error, 'value', '未知错误')}"
+            )
         if artifacts:
             result_items.append("已生成文件：" + ", ".join(item["name"] for item in artifacts))
         output = "\n".join(part for part in [stdout, stderr, *result_items] if part)
+        _mutate_task(
+            tenant,
+            task_id,
+            lambda old: {**old, "python_succeeded": True, "updated_at": int(time.time())},
+        )
+        print(
+            f"AGENT_PYTHON_EXECUTION task_id={task_id} status=ok "
+            f"artifacts={len(artifacts)}",
+            flush=True,
+        )
         return _clean_output(output or "Python 已执行，没有标准输出。")
     finally:
         cleanup_failed = False
@@ -590,7 +714,7 @@ def _execute_python(
                     or (worker_id is not None and old.get("worker_id") != worker_id)
                 ):
                     return old
-                cleanup_pending = cleanup_failed and not old.get("cancel_requested")
+                cleanup_pending = cleanup_failed
                 return {
                     **old,
                     "sandbox_id": old.get("sandbox_id") if cleanup_pending else None,
@@ -716,15 +840,9 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
         messages = list(task_request.get("messages", []))
     if not isinstance(messages, list) or not messages:
         raise ValueError("任务中没有模型上下文")
+    python_required = _requires_python_execution(messages)
 
-    system_addition = (
-        "\n\n小栖工具规则：需要实际运行 Python 时调用 execute_python，不要只描述执行结果；需要交付的文件写到 /home/user/workspace/output；"
-        "如果 Python 工具返回‘执行失败’，必须明确告诉用户失败，不得描述成成功。"
-        "联网默认关闭。确需联网时列出精确域名和用途，等待系统单独授权。"
-        "创建或修改技能时，若目的不明确，直接在普通聊天回复中用一句简短纯文本问题澄清，不要返回结构化问题或选项面板；目的明确后将完整技能和资源写入 draft_workspace，读回最终 SKILL.md 后再依据该版本完成一次代表性试用。"
-        "最终回复展示完整 SKILL.md、试用输入与实际结果；未执行的试用必须标为文字演示，不能声称已运行。"
-        "草稿工作区不是正式保存；只有用户点击保存才创建正式版本。"
-    )
+    system_addition = _xiaoqi_system_instructions()
     already_has_rules = bool(
         messages
         and messages[0].get("role") == "system"
@@ -738,6 +856,12 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
     _emit(store, tenant, task_id, {"type": "status", "status": "running"})
 
     try:
+        if task.get("runtime") == "deepseek-harness":
+            from .harness_worker import run_task as run_harness_task
+
+            run_harness_task(store, tenant, task_id, attempt, worker_id, task)
+            return
+
         pending_calls = list(task.get("pending_tool_calls", []))
         if pending_calls:
             authorized = set(_domain_list(task.get("authorized_network_domains", [])))
@@ -763,7 +887,26 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
                 _ensure_active(store, tenant, task_id, attempt, worker_id)
                 _emit(store, tenant, task_id, {"type": "assistant_delta", "text": text})
 
-            assistant = _model_request(model_id, reasoning_level, messages, on_delta)
+            current_task = _task_state(store, tenant, task_id)
+            required_tool = (
+                "execute_python"
+                if python_required and int(current_task.get("python_runs", 0)) == 0
+                else None
+            )
+            if required_tool:
+                print(
+                    f"AGENT_TOOL_REQUIRED task_id={task_id} tool={required_tool}",
+                    flush=True,
+                )
+                assistant = _model_request(
+                    model_id,
+                    reasoning_level,
+                    messages,
+                    on_delta,
+                    required_tool=required_tool,
+                )
+            else:
+                assistant = _model_request(model_id, reasoning_level, messages, on_delta)
             _ensure_active(store, tenant, task_id, attempt, worker_id)
             assistant["role"] = "assistant"
             messages.append(assistant)
@@ -771,6 +914,9 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
             calls = assistant.get("tool_calls") or []
             if not calls:
                 final_text = str(assistant.get("content", ""))
+                _validate_python_requirements(
+                    _task_state(store, tenant, task_id), messages
+                )
 
                 def complete(old: dict[str, Any]) -> dict[str, Any]:
                     if old.get("worker_id") != worker_id or int(old.get("attempt", 0)) != attempt:
@@ -793,6 +939,11 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
                 function_name = str((call.get("function") or {}).get("name", ""))
                 _mark_tool_started(tenant, task_id, attempt, worker_id, call)
                 _emit(store, tenant, task_id, {"type": "tool_started", "tool": function_name})
+                print(
+                    f"AGENT_TOOL_STARTED task_id={task_id} tool={function_name}",
+                    flush=True,
+                )
+                tool_failed = False
                 try:
                     output = _run_tool(store, tenant, task_id, task_request, call, authorized, attempt, worker_id)
                 except NetworkPermissionRequired as required:
@@ -804,10 +955,16 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
                 except (TaskCancelled, TaskNotOwned):
                     raise
                 except Exception as error:
+                    tool_failed = True
                     output = json.dumps({"error": str(error)[:500]}, ensure_ascii=False)
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": _clean_output(output)})
                 _save_history(store, tenant, task_id, messages)
                 _emit(store, tenant, task_id, {"type": "tool_finished", "tool": function_name, "output": _clean_output(output)})
+                print(
+                    f"AGENT_TOOL_FINISHED task_id={task_id} tool={function_name} "
+                    f"status={'failed' if tool_failed else 'ok'}",
+                    flush=True,
+                )
         raise RuntimeError("工具调用次数达到本次任务上限")
     except TaskCancelled:
         current = _task_state(store, tenant, task_id)

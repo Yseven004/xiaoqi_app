@@ -58,3 +58,7 @@ app.*.map.json
 **/.kotlin/
 **/build/
 **/Generated.xcconfig
+
+# Local deployment artifacts and upload checkpoints
+.ossutil_checkpoint/
+xiaoqi_harness/deploy/**/*.zip

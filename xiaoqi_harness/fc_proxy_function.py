@@ -43,7 +43,10 @@ def proxy():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok'})
+    return jsonify({
+        'status': 'ok',
+        'release_id': os.environ.get('CAPABILITY_API_RELEASE_ID', 'unversioned'),
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)

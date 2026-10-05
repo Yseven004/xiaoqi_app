@@ -344,22 +344,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
         bookName: selected.book.title,
       );
       widget.onConversationChanged?.call(
-        AiConversationRecord(
-          id: record.id,
-          title: record.title,
-          messages: record.messages,
-          nodes: record.nodes,
-          selectedChildren: record.selectedChildren,
-          createdAt: record.createdAt,
-          updatedAt: record.updatedAt,
-          bookId: selected.book.id,
-          bookName: selected.book.title,
-          pageLabel: record.pageLabel,
-          isPinned: record.isPinned,
-          webSources: record.webSources,
-          modelId: record.modelId,
-          reasoningLevel: record.reasoningLevel,
-        ),
+        await _history.get(record.id) ?? record,
       );
       await _load();
     } catch (error) {
@@ -396,20 +381,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     try {
       await _history.detachFromBook(record.id);
       widget.onConversationChanged?.call(
-        AiConversationRecord(
-          id: record.id,
-          title: record.title,
-          messages: record.messages,
-          nodes: record.nodes,
-          selectedChildren: record.selectedChildren,
-          createdAt: record.createdAt,
-          updatedAt: record.updatedAt,
-          pageLabel: record.pageLabel,
-          isPinned: record.isPinned,
-          webSources: record.webSources,
-          modelId: record.modelId,
-          reasoningLevel: record.reasoningLevel,
-        ),
+        await _history.get(record.id) ?? record,
       );
       await _load();
     } catch (error) {
@@ -721,7 +693,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     try {
       await _history.rename(record.id, normalized);
       widget.onConversationChanged?.call(
-        record.copyWith(title: normalized, updatedAt: DateTime.now()),
+        await _history.get(record.id) ?? record,
       );
       await _load();
     } catch (error) {

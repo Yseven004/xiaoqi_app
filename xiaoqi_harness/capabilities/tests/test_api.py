@@ -81,6 +81,82 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_explicit_python_requests_require_execution_and_requested_file() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": "必须真实调用 Python，生成 /home/user/workspace/output/result.csv",
+        }
+    ]
+
+    assert worker._requires_python_execution(messages)
+    assert worker._requested_python_output_names(messages) == {"result.csv"}
+    assert not worker._requires_python_execution(
+        [{"role": "user", "content": "不要运行 Python，只写示例脚本。"}]
+    )
+
+    with pytest.raises(RuntimeError, match="要求真实运行 Python"):
+        worker._validate_python_requirements({}, messages)
+
+    with pytest.raises(RuntimeError, match="未生成要求的文件：result.csv"):
+        worker._validate_python_requirements(
+            {
+                "python_succeeded": True,
+                "artifacts": [{"name": "other.csv"}],
+            },
+            messages,
+        )
+
+    worker._validate_python_requirements(
+        {
+            "python_succeeded": True,
+            "artifacts": [{"name": "result.csv"}],
+        },
+        messages,
+    )
+
+
+def test_model_request_can_force_a_named_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class JsonResponse:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"choices": [{"message": {"content": ""}}]}
+            ).encode()
+
+    def fake_urlopen(request: Any, timeout: int) -> JsonResponse:
+        captured.update(json.loads(request.data.decode()))
+        assert timeout == 100
+        return JsonResponse()
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(worker.urllib.request, "urlopen", fake_urlopen)
+
+    worker._model_request(
+        "deepseek-flash",
+        "high",
+        [],
+        lambda _text: None,
+        required_tool="execute_python",
+    )
+
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "execute_python"},
+    }
+    assert captured["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in captured
+
+
 def _record(
     content: str = "---\nname: sample\ndescription: Example skill\n---\n\n# Instructions\n\nFollow the example.\n",
     **updates: Any,
@@ -234,6 +310,216 @@ def test_task_cancellation_marks_queued_task_terminal(client: tuple[Any, MemoryS
     assert task.value["cancel_requested"] is True
 
 
+def test_running_task_cancellation_retries_transient_sandbox_cleanup_failure(
+    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, memory = client
+    token = _paired_device(memory)
+    memory.put(
+        "task/personal/task-test",
+        {
+            "task_id": "task-test",
+            "status": "running",
+            "attempt": 1,
+            "events": [{"seq": 0, "type": "status", "status": "running"}],
+            "cancel_requested": False,
+            "sandbox_id": "sandbox-test",
+        },
+        None,
+    )
+    monkeypatch.setenv("CAPABILITY_TASK_CANCEL_FUNCTION_URL", "https://worker.test/cancel")
+    monkeypatch.setenv("CAPABILITY_TASK_INTERNAL_TOKEN", "x" * 32)
+
+    calls = 0
+
+    class WorkerResponse:
+        status = 200
+
+        def __enter__(self) -> WorkerResponse:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+    def fail_once(_request: Any, timeout: int) -> WorkerResponse:
+        nonlocal calls
+        assert timeout == 8
+        calls += 1
+        if calls == 1:
+            raise OSError("temporary worker connection failure")
+        return WorkerResponse()
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", fail_once)
+
+    response = http.post("/v1/agent/tasks/task-test/cancel", headers=_auth(token))
+
+    assert calls == 2
+    assert response.status_code == 200
+    task = memory.get("task/personal/task-test")
+    assert task is not None
+    assert task.value["status"] == "cancelling"
+    assert task.value["sandbox_id"] is None
+    assert task.value["sandbox_cleanup_pending"] is False
+
+
+def test_running_task_cancellation_reports_unconfirmed_sandbox_cleanup(
+    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, memory = client
+    token = _paired_device(memory)
+    memory.put(
+        "task/personal/task-test",
+        {
+            "task_id": "task-test",
+            "status": "running",
+            "attempt": 1,
+            "events": [{"seq": 0, "type": "status", "status": "running"}],
+            "cancel_requested": False,
+            "sandbox_id": "sandbox-test",
+        },
+        None,
+    )
+    monkeypatch.setenv("CAPABILITY_TASK_CANCEL_FUNCTION_URL", "https://worker.test/cancel")
+    monkeypatch.setenv("CAPABILITY_TASK_INTERNAL_TOKEN", "x" * 32)
+
+    calls = 0
+
+    def always_fail(_request: Any, timeout: int) -> Any:
+        nonlocal calls
+        assert timeout == 8
+        calls += 1
+        raise OSError("worker remains unavailable")
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", always_fail)
+
+    response = http.post("/v1/agent/tasks/task-test/cancel", headers=_auth(token))
+
+    assert calls == 2
+    assert response.status_code == 503
+    task = memory.get("task/personal/task-test")
+    assert task is not None
+    assert task.value["status"] == "cancelling"
+    assert task.value["sandbox_id"] == "sandbox-test"
+    assert task.value["sandbox_cleanup_pending"] is True
+
+
+def test_new_task_runtime_is_selected_by_server_tenant_allowlist(
+    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, memory = client
+    token = _paired_device(memory)
+    monkeypatch.setenv("CAPABILITY_HARNESS_TENANTS", "other-tenant,personal")
+    monkeypatch.setattr(api, "_enqueue_task", lambda *_: None)
+
+    response = http.post(
+        "/v1/agent/tasks",
+        headers=_auth(token),
+        json={"task_id": "task-harness", "runtime": "legacy", "messages": [{"role": "user", "content": "Hi"}]},
+    )
+
+    assert response.status_code == 202
+    task = memory.get("task/personal/task-harness")
+    assert task is not None
+    assert task.value["runtime"] == "deepseek-harness"
+    assert task.value["runtime_version"] == "0.1.5rc1"
+
+
+def test_mimo_text_task_uses_harness_after_compatibility_is_configured(
+    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, memory = client
+    token = _paired_device(memory)
+    monkeypatch.setenv("CAPABILITY_HARNESS_TENANTS", "personal")
+    monkeypatch.setattr(api, "_enqueue_task", lambda *_: None)
+
+    response = http.post(
+        "/v1/agent/tasks",
+        headers=_auth(token),
+        json={
+            "task_id": "task-mimo",
+            "model_id": "mimo-v2.6-flash",
+            "messages": [{"role": "user", "content": "Hi"}],
+        },
+    )
+
+    assert response.status_code == 202
+    task = memory.get("task/personal/task-mimo")
+    assert task is not None
+    assert task.value["runtime"] == "deepseek-harness"
+
+
+def test_deepseek_flash_image_uses_harness_and_other_vision_routes_stay_legacy(
+    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, memory = client
+    token = _paired_device(memory)
+    monkeypatch.setenv("CAPABILITY_HARNESS_TENANTS", "personal")
+    monkeypatch.setattr(api, "_enqueue_task", lambda *_: None)
+
+    response = http.post(
+        "/v1/agent/tasks",
+        headers=_auth(token),
+        json={
+            "task_id": "task-image",
+            "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}]}],
+        },
+    )
+
+    assert response.status_code == 202
+    task = memory.get("task/personal/task-image")
+    assert task is not None
+    assert task.value["runtime"] == "deepseek-harness"
+
+
+def test_mimo_image_task_stays_legacy_until_its_vision_route_is_verified(
+    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, memory = client
+    token = _paired_device(memory)
+    monkeypatch.setenv("CAPABILITY_HARNESS_TENANTS", "personal")
+    monkeypatch.setattr(api, "_enqueue_task", lambda *_: None)
+
+    response = http.post(
+        "/v1/agent/tasks",
+        headers=_auth(token),
+        json={
+            "task_id": "task-mimo-image",
+            "model_id": "mimo-v2.6-flash",
+            "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}]}],
+        },
+    )
+
+    assert response.status_code == 202
+    task = memory.get("task/personal/task-mimo-image")
+    assert task is not None
+    assert task.value["runtime"] == "legacy"
+
+
+def test_worker_dispatches_harness_tasks_to_the_harness_runner(
+    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, memory = client
+    input_key = "tenants/personal/tasks/task-harness/input.json"
+    memory.put_immutable(
+        input_key,
+        {"input.json": json.dumps({"messages": [{"role": "user", "content": "Hi"}]}).encode()},
+    )
+    task = {"input_object_key": input_key, "runtime": "deepseek-harness"}
+    called: list[tuple[Any, ...]] = []
+    from xiaoqi_harness.capabilities import harness_worker
+
+    monkeypatch.setattr(worker, "_claim_task", lambda *_: True)
+    monkeypatch.setattr(worker, "_ensure_active", lambda *_: task)
+    monkeypatch.setattr(worker, "_emit", lambda *_: None)
+    monkeypatch.setattr(harness_worker, "run_task", lambda *args: called.append(args))
+
+    worker.run_task(memory, "personal", "task-harness", 1)
+
+    assert len(called) == 1
+    assert called[0][1:4] == ("personal", "task-harness", 1)
+    assert called[0][-1] == task
+
+
 def test_network_authorization_only_accepts_requested_exact_domains(
     client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -384,8 +670,20 @@ def test_cancel_during_model_request_discards_late_result(
     assert task.value.get("result") is None
 
 
+@pytest.mark.parametrize(
+    ("cancel_during_cleanup", "kill_fails", "expected_sandbox_id", "expected_cleanup_pending"),
+    [
+        (False, False, None, False),
+        (True, True, "sandbox-test", True),
+    ],
+)
 def test_python_execution_uses_isolated_sandbox_and_cleans_it_up(
-    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+    client: tuple[Any, MemoryStore],
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_during_cleanup: bool,
+    kill_fails: bool,
+    expected_sandbox_id: str | None,
+    expected_cleanup_pending: bool,
 ) -> None:
     _, memory = client
     memory.put(
@@ -419,9 +717,19 @@ def test_python_execution_uses_isolated_sandbox_and_cleans_it_up(
         def write(self, path: str, content: bytes) -> None:
             writes.append((path, content))
 
+        def list(self, _path: str, *, depth: int) -> list[Any]:
+            assert depth == 6
+            return []
+
     class FakeSandbox:
         sandbox_id = "sandbox-test"
         files = FakeFiles()
+
+        class Commands:
+            def run(self, command: str) -> None:
+                assert command == "mkdir -p /home/user/workspace/output"
+
+        commands = Commands()
 
         @classmethod
         def create(cls, **kwargs: Any) -> "FakeSandbox":
@@ -443,11 +751,21 @@ def test_python_execution_uses_isolated_sandbox_and_cleans_it_up(
 
         def kill(self) -> None:
             state["killed"] = True
+            if cancel_during_cleanup:
+                api._mutate_task(
+                    "personal",
+                    "task-test",
+                    lambda old: {**old, "status": "cancelling", "cancel_requested": True},
+                )
+            if kill_fails:
+                raise OSError("sandbox cleanup failed")
 
     fake_module = ModuleType("e2b_code_interpreter")
     fake_module.Sandbox = FakeSandbox  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "e2b_code_interpreter", fake_module)
     monkeypatch.setenv("E2B_API_KEY", "e2b-test-key")
+    monkeypatch.setenv("E2B_API_URL", "https://api.cn-hangzhou.sandbox.aliyuncs.com")
+    monkeypatch.setenv("E2B_DOMAIN", "cn-hangzhou.sandbox.aliyuncs.com")
 
     output = worker._execute_python(
         memory,
@@ -459,14 +777,25 @@ def test_python_execution_uses_isolated_sandbox_and_cleans_it_up(
             "materials": [{"name": "notes.txt", "text": "task material"}],
             "capability": {"id": "sample-skill", "version_id": "version-1"},
         },
+        attempt=1,
     )
 
     assert output == "ok"
+    assert options["api_key"] == "e2b-test-key"
+    assert options["api_url"] == "https://api.cn-hangzhou.sandbox.aliyuncs.com"
+    assert options["domain"] == "cn-hangzhou.sandbox.aliyuncs.com"
     assert options["allow_internet_access"] is False
-    assert "network" not in options
+    assert options["network"] == {
+        "allow_out": [],
+        "deny_out": ["0.0.0.0/0"],
+    }
     assert options["timeout"] == 300
     assert state["killed"] is True
     assert ("/home/user/workspace/materials/0-notes.txt", b"task material") in writes
     assert ("/home/user/workspace/skill/scripts/run.py", b"print('skill')") in writes
     task = memory.get("task/personal/task-test")
-    assert task is not None and task.value["sandbox_id"] is None
+    assert task is not None and task.value["sandbox_id"] == expected_sandbox_id
+    assert task.value["sandbox_cleanup_pending"] is expected_cleanup_pending
+    if expected_cleanup_pending:
+        assert task.value["sandbox_cleanup_deadline"] is not None
+    assert task.value["python_succeeded"] is True

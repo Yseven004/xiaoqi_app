@@ -1,5 +1,8 @@
 Flask==3.1.2
 tablestore==6.4.8
 oss2==2.19.1
-e2b==2.52.0
-e2b-code-interpreter==2.10.1
+e2b==2.31.0
+e2b-code-interpreter==2.8.1
+deepseek-harness-sdk==0.1.5rc1
+agent-client-protocol==1.0.0rc2
+mcp==2.3.0

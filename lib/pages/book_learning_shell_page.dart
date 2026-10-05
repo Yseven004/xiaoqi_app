@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../config/api_config.dart';
 import '../config/book_flow_theme.dart';
+import '../models/book_source.dart';
 import '../plugins/book_metadata/book_metadata_plugin.dart';
 import '../models/book_recognition.dart';
 import '../services/book_library_service.dart';

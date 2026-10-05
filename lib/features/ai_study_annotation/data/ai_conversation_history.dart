@@ -26,6 +26,7 @@ class AiConversationMessage {
     this.isIncomplete = false,
     this.capabilityMetadata,
     this.outputArtifacts = const [],
+    this.agentTaskId,
   }) : id = id ?? _newMessageId();
 
   final String id;
@@ -39,6 +40,7 @@ class AiConversationMessage {
   final bool isIncomplete;
   final Map<String, Object?>? capabilityMetadata;
   final List<Map<String, Object?>> outputArtifacts;
+  final String? agentTaskId;
 
   AiConversationMessage copyWith({
     String? id,
@@ -54,6 +56,8 @@ class AiConversationMessage {
     Map<String, Object?>? capabilityMetadata,
     bool clearCapabilityMetadata = false,
     List<Map<String, Object?>>? outputArtifacts,
+    String? agentTaskId,
+    bool clearAgentTaskId = false,
   }) => AiConversationMessage(
     id: id ?? this.id,
     parentMessageId: clearParentMessageId
@@ -70,6 +74,7 @@ class AiConversationMessage {
         ? null
         : capabilityMetadata ?? this.capabilityMetadata,
     outputArtifacts: outputArtifacts ?? this.outputArtifacts,
+    agentTaskId: clearAgentTaskId ? null : agentTaskId ?? this.agentTaskId,
   );
 
   Map<String, Object?> toJson() => {
@@ -90,6 +95,7 @@ class AiConversationMessage {
     'is_incomplete': isIncomplete,
     if (capabilityMetadata != null) 'capability_metadata': capabilityMetadata,
     if (outputArtifacts.isNotEmpty) 'output_artifacts': outputArtifacts,
+    if (agentTaskId != null) 'agent_task_id': agentTaskId,
   };
 
   factory AiConversationMessage.fromJson(Object? raw) {
@@ -124,6 +130,7 @@ class AiConversationMessage {
                 .map((item) => Map<String, Object?>.from(item))
                 .toList(growable: false)
           : const [],
+      agentTaskId: raw['agent_task_id']?.toString(),
     );
   }
 }
@@ -159,6 +166,7 @@ class AiConversationRecord {
     this.webSources = const [],
     this.modelId,
     this.reasoningLevel,
+    this.titleRevision = -1,
   }) : nodes = nodes == null
            ? List<AiConversationMessage>.unmodifiable(
                _linearizeMessages(messages),
@@ -182,6 +190,10 @@ class AiConversationRecord {
   final List<AiWebSource> webSources;
   final String? modelId;
   final String? reasoningLevel;
+
+  /// -1 marks records saved before automatic titles, 0 is eligible,
+  /// 1 is an attempted title request, and 2+ is a finalized title.
+  final int titleRevision;
 
   late final Map<String, AiConversationMessage> _nodesById = {
     for (final node in nodes) node.id: node,
@@ -465,6 +477,7 @@ class AiConversationRecord {
     int? bookId,
     String bookName = '',
     String pageLabel = '',
+    bool enableAutoTitle = false,
   }) {
     final now = DateTime.now();
     return AiConversationRecord(
@@ -477,6 +490,7 @@ class AiConversationRecord {
       bookName: bookName,
       pageLabel: pageLabel,
       webSources: const [],
+      titleRevision: enableAutoTitle ? 0 : -1,
     );
   }
 
@@ -492,6 +506,8 @@ class AiConversationRecord {
                     message.isDeletedMarker ||
                     message.text.trim().isNotEmpty ||
                     message.capabilityMetadata != null ||
+                    message.agentTaskId != null ||
+                    message.outputArtifacts.isNotEmpty ||
                     message.attachments.isNotEmpty,
               )
               .toList(growable: false)
@@ -533,6 +549,9 @@ class AiConversationRecord {
           : const [],
       modelId: raw['model_id']?.toString(),
       reasoningLevel: raw['reasoning_level']?.toString(),
+      titleRevision: raw['title_revision'] is int
+          ? raw['title_revision'] as int
+          : -1,
     );
   }
 
@@ -547,6 +566,7 @@ class AiConversationRecord {
     String? reasoningLevel,
     List<AiConversationMessage>? nodes,
     Map<String, String>? selectedChildren,
+    int? titleRevision,
   }) {
     final updatedNodes =
         nodes ?? (messages == null ? this.nodes : _mergeVisiblePath(messages));
@@ -570,6 +590,7 @@ class AiConversationRecord {
       webSources: webSources ?? this.webSources,
       modelId: modelId ?? this.modelId,
       reasoningLevel: reasoningLevel ?? this.reasoningLevel,
+      titleRevision: titleRevision ?? this.titleRevision,
     );
   }
 
@@ -589,6 +610,7 @@ class AiConversationRecord {
     'web_sources': webSources.map((source) => source.toJson()).toList(),
     'model_id': modelId,
     'reasoning_level': reasoningLevel,
+    'title_revision': titleRevision,
   };
 
   String get displayTitle {
@@ -762,6 +784,14 @@ class AiConversationHistoryService {
     return result;
   }
 
+  Future<AiConversationRecord?> get(String id) async {
+    await _ensureLoaded();
+    final pendingWrite = _writeQueue;
+    if (pendingWrite != null) await pendingWrite;
+    final record = _records[id];
+    return record == null ? null : _applyVersionSelection(record);
+  }
+
   Future<AiConversationRecord?> latestForBook({
     int? bookId,
     String bookName = '',
@@ -876,14 +906,87 @@ class AiConversationHistoryService {
 
   void _synchronizeSelectionForStructuralWrite(AiConversationRecord record) {
     final previous = _records[record.id];
+    final next =
+        previous != null && previous.titleRevision > record.titleRevision
+        ? record.copyWith(
+            title: previous.title,
+            titleRevision: previous.titleRevision,
+          )
+        : record;
     if (previous != null &&
-        !_sameSelections(previous.selectedChildren, record.selectedChildren)) {
+        !_sameSelections(previous.selectedChildren, next.selectedChildren)) {
       // Structural actions can deliberately move a branch selection, such as
       // appending a new reply or removing the selected version. Let that
       // current tree replace the older browsing override.
-      _versionSelections[record.id] = _snapshotSelection(record);
+      _versionSelections[record.id] = _snapshotSelection(next);
     }
-    _records[record.id] = _applyVersionSelection(record);
+    _records[record.id] = _applyVersionSelection(next);
+  }
+
+  /// Marks one newly-created conversation as having started its title attempt.
+  /// The title check and state transition share the serialized storage queue.
+  Future<AiConversationRecord?> beginAutoTitleGeneration(
+    String id, {
+    required String expectedTitle,
+  }) async {
+    await _ensureLoaded();
+    AiConversationRecord? previous;
+    AiConversationRecord? updated;
+    await _enqueueMutation(
+      apply: () {
+        final record = _records[id];
+        if (record == null ||
+            record.titleRevision != 0 ||
+            record.title != expectedTitle) {
+          return false;
+        }
+        previous = record;
+        updated = record.copyWith(titleRevision: 1);
+        _records[id] = updated!;
+        return true;
+      },
+      rollback: () {
+        if (previous != null && identical(_records[id], updated)) {
+          _records[id] = previous!;
+        }
+      },
+      throwOnFailure: true,
+    );
+    return updated;
+  }
+
+  /// Completes an automatic title only while the attempt still owns the title.
+  Future<AiConversationRecord?> completeAutoTitleGeneration(
+    String id, {
+    required String expectedTitle,
+    required String title,
+  }) async {
+    await _ensureLoaded();
+    final normalizedTitle = title.trim();
+    if (normalizedTitle.isEmpty) return null;
+    AiConversationRecord? previous;
+    AiConversationRecord? updated;
+    await _enqueueMutation(
+      apply: () {
+        final record = _records[id];
+        if (record == null ||
+            record.titleRevision != 1 ||
+            record.title != expectedTitle) {
+          return false;
+        }
+        previous = record;
+        updated = record.copyWith(title: normalizedTitle, titleRevision: 2);
+        _records[id] = updated!;
+        return true;
+      },
+      rollback: () {
+        if (previous != null && identical(_records[id], updated)) {
+          _records[id] = previous!;
+        }
+      },
+      throwOnFailure: true,
+    );
+    return updated;
   }
 
   bool _sameSelections(Map<String, String> first, Map<String, String> second) {
@@ -1031,6 +1134,7 @@ class AiConversationHistoryService {
           webSources: record.webSources,
           modelId: record.modelId,
           reasoningLevel: record.reasoningLevel,
+          titleRevision: record.titleRevision,
         );
         _records[id] = updated!;
         return true;
@@ -1071,6 +1175,7 @@ class AiConversationHistoryService {
           webSources: record.webSources,
           modelId: record.modelId,
           reasoningLevel: record.reasoningLevel,
+          titleRevision: record.titleRevision,
         );
         _records[id] = updated!;
         return true;
@@ -1098,6 +1203,9 @@ class AiConversationHistoryService {
         updated = record.copyWith(
           title: normalizedTitle,
           updatedAt: DateTime.now(),
+          titleRevision: record.titleRevision < 1
+              ? 2
+              : record.titleRevision + 1,
         );
         _records[id] = updated!;
         return true;

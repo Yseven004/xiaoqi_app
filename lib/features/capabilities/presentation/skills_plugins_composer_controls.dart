@@ -16,6 +16,7 @@ class SkillsPluginsComposerControls extends StatefulWidget {
     required this.onCapabilitySelected,
     required this.onSaveReviewDraft,
     required this.onReviseReviewDraft,
+    this.onSignOut,
     this.reviewDraft,
     this.leadingControl,
     super.key,
@@ -26,6 +27,7 @@ class SkillsPluginsComposerControls extends StatefulWidget {
   final Future<void> Function(CapabilityDraft draft, bool showInMenu)
   onSaveReviewDraft;
   final Future<void> Function(CapabilityDraft draft) onReviseReviewDraft;
+  final VoidCallback? onSignOut;
   final Widget? leadingControl;
 
   @override
@@ -45,7 +47,7 @@ class _SkillsPluginsComposerControlsState
   String? _pendingDeleteId;
   bool _savingDraft = false;
   bool _cloudBusy = false;
-  bool _cloudPaired = false;
+  bool _signedIn = false;
   bool _showDraftInMenu = true;
   String? _reviewDraftId;
 
@@ -77,58 +79,20 @@ class _SkillsPluginsComposerControlsState
   }
 
   Future<void> _refreshCloudState() async {
-    final paired = await CapabilityCloudSync.instance.isPaired;
-    if (mounted) setState(() => _cloudPaired = paired);
+    final signedIn = await CapabilityCloudSync.instance.hasEmailSession;
+    if (mounted) setState(() => _signedIn = signedIn);
   }
 
-  Future<void> _pairCloud() async {
-    // The menu is rendered in an OverlayPortal. Remove it before pushing the
-    // dialog so its overlay and the dialog route cannot compete for elements
-    // while the text field opens the keyboard and relays out the page.
-    final closeOverlay = _open;
-    _closeMenu();
-    if (closeOverlay) await WidgetsBinding.instance.endOfFrame;
-    if (!mounted) return;
-
-    String? code;
-    code = await showDialog<String>(
-      context: context,
-      builder: (context) => const _CapabilityCloudPairDialog(),
-    );
-    if (code == null || code.trim().isEmpty) return;
+  Future<void> _signOut() async {
     setState(() => _cloudBusy = true);
     try {
-      await CapabilityCloudSync.instance.pair(code);
-      if (mounted) _showStatus('设备已配对，技能与草稿已开始同步');
+      await CapabilityCloudSync.instance.signOut();
+      widget.onSignOut?.call();
     } catch (error) {
-      if (mounted) {
-        _showStatus('本机内容仍已保留；云同步暂不可用：$error');
-      }
+      if (mounted) _showStatus('退出登录失败：$error');
     } finally {
-      await _refreshCloudState();
-      await _refresh();
       if (mounted) setState(() => _cloudBusy = false);
     }
-  }
-
-  Future<void> _syncCloud() async {
-    setState(() => _cloudBusy = true);
-    try {
-      await CapabilityCloudSync.instance.syncNow();
-      if (mounted) _showStatus('云端同步完成');
-    } catch (error) {
-      if (mounted) _showStatus('本机更改已保留，等待云端同步：$error');
-    } finally {
-      await _refreshCloudState();
-      await _refresh();
-      if (mounted) setState(() => _cloudBusy = false);
-    }
-  }
-
-  Future<void> _unpairCloud() async {
-    await CapabilityCloudSync.instance.unpair();
-    await _refreshCloudState();
-    if (mounted) _showStatus('此设备的云凭证已撤销');
   }
 
   void _selectAction(String id, String label, {String? targetId}) {
@@ -188,7 +152,7 @@ class _SkillsPluginsComposerControlsState
     }
     await _store.markDeleted(record.id);
     try {
-      if (await CapabilityCloudSync.instance.isPaired) {
+      if (await CapabilityCloudSync.instance.hasEmailSession) {
         await CapabilityCloudSync.instance.syncNow();
       }
     } catch (_) {}
@@ -200,7 +164,7 @@ class _SkillsPluginsComposerControlsState
   Future<void> _toggleVisibility(CapabilityRecord record) async {
     await _store.setMenuVisibility(record.id, !record.showInMenu);
     try {
-      if (await CapabilityCloudSync.instance.isPaired) {
+      if (await CapabilityCloudSync.instance.hasEmailSession) {
         await CapabilityCloudSync.instance.syncNow();
       }
     } catch (_) {}
@@ -518,7 +482,7 @@ class _SkillsPluginsComposerControlsState
               children: [
                 Expanded(
                   child: Text(
-                    _cloudPaired ? '已连接个人云同步' : '仅保存在本机',
+                    _signedIn ? '已登录个人账号（自动同步）' : '未登录个人账号',
                     style: const TextStyle(
                       color: Color(0xFF777777),
                       fontSize: 13,
@@ -526,18 +490,14 @@ class _SkillsPluginsComposerControlsState
                   ),
                 ),
                 if (_cloudBusy)
-                  const Text('同步中…', style: TextStyle(fontSize: 13))
-                else
+                  const Text('处理中…', style: TextStyle(fontSize: 13))
+                else if (!_signedIn)
                   TextButton(
-                    onPressed: _cloudPaired ? _syncCloud : _pairCloud,
-                    child: Text(_cloudPaired ? '立即同步' : '连接云同步'),
+                    onPressed: widget.onSignOut,
+                    child: const Text('去登录'),
                   ),
-                if (_cloudPaired)
-                  IconButton(
-                    tooltip: '撤销本设备配对',
-                    onPressed: _unpairCloud,
-                    icon: _icon('delete', size: 18),
-                  ),
+                if (_signedIn)
+                  TextButton(onPressed: _signOut, child: const Text('退出')),
               ],
             ),
           ),
@@ -813,51 +773,5 @@ class _GroupLabel extends StatelessWidget {
         fontSize: emphasized ? 15 : 13,
       ),
     ),
-  );
-}
-
-class _CapabilityCloudPairDialog extends StatefulWidget {
-  const _CapabilityCloudPairDialog();
-
-  @override
-  State<_CapabilityCloudPairDialog> createState() =>
-      _CapabilityCloudPairDialogState();
-}
-
-class _CapabilityCloudPairDialogState
-    extends State<_CapabilityCloudPairDialog> {
-  final _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    backgroundColor: Colors.white,
-    title: const Text('连接云同步'),
-    content: TextField(
-      controller: _controller,
-      autofocus: true,
-      decoration: const InputDecoration(
-        hintText: '输入一次性配对码',
-        focusedBorder: UnderlineInputBorder(
-          borderSide: BorderSide(color: Color(0xFF444444)),
-        ),
-      ),
-      onSubmitted: (value) => Navigator.of(context).pop(value),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.of(context).pop(),
-        child: const Text('取消'),
-      ),
-      TextButton(
-        onPressed: () => Navigator.of(context).pop(_controller.text),
-        child: const Text('连接'),
-      ),
-    ],
   );
 }

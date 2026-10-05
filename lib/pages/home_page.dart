@@ -53,7 +53,9 @@ import 'book_learning_shell_page.dart';
 
 /// 极简聊天首页：空间切换、会话消息和键盘跟随输入区。
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({this.onSignOut, super.key});
+
+  final VoidCallback? onSignOut;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -281,6 +283,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, Object?>? _activeSkillWorkflow;
   CapabilityDraft? _pendingSkillDraftReview;
   String? _activeCapabilityTaskId;
+  final Set<String> _pendingCapabilityTaskCreationIds = <String>{};
+  final Set<String> _cancelCapabilityTaskAfterCreateIds = <String>{};
   AiConversationMessage? _editingQuestion;
   CapabilityTextSnapshot? _composerValueBeforeMessageEdit;
   List<HomeChatAttachment>? _attachmentsBeforeMessageEdit;
@@ -298,15 +302,38 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _modelPreferences.defaultSelection.addListener(_onDefaultModelChanged);
     unawaited(_modelPreferences.load().catchError((_) {}));
-    _conversation = AiConversationRecord.empty();
+    _conversation = AiConversationRecord.empty(enableAutoTitle: true);
     unawaited(_restorePendingSkillDraft());
-    unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
+    unawaited(_syncCapabilitiesAtStartup());
     _lastKeyboardInset = _currentKeyboardInset;
     _composerController.addListener(_cacheCurrentDraft);
     _composerFocusNode.addListener(_onComposerFocusChanged);
     _messagesScrollController.addListener(_onMessagesScrolled);
     _listenForSharedMedia();
     _scheduleSpeechModelPreparation();
+  }
+
+  Future<void> _syncCapabilitiesAtStartup() async {
+    try {
+      await CapabilityCloudSync.instance.syncNow();
+    } catch (error) {
+      if (!mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          final reason = error.toString().replaceFirst('Bad state: ', '');
+          AppToast.show(context, '登录成功；本机内容已保留，云同步失败：$reason');
+        }
+      });
+    }
+  }
+
+  Future<void> _retryCapabilitySyncOnResume() async {
+    if (!await CapabilityCloudSync.instance.hasEmailSession) return;
+    try {
+      await CapabilityCloudSync.instance.syncNow();
+    } catch (_) {
+      // Startup already reports the failure; retry quietly when the app resumes.
+    }
   }
 
   @override
@@ -333,14 +360,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     unawaited(_cancelVoiceInput());
     _voiceSoundLevel.dispose();
     _activeRequest?.cancel();
-    final capabilityTaskId = _activeCapabilityTaskId;
-    if (capabilityTaskId != null) {
-      unawaited(
-        CapabilityCloudSync.instance
-            .cancelTask(capabilityTaskId)
-            .catchError((_) {}),
-      );
-    }
     unawaited(_sharedMediaSubscription?.cancel());
     if (!_savingMessageEdit) unawaited(_deleteMessageEditAttachments());
     _composerController.removeListener(_cacheCurrentDraft);
@@ -360,6 +379,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (state == AppLifecycleState.resumed) {
       _scheduleSpeechModelPreparation();
+      unawaited(_retryCapabilitySyncOnResume());
     }
   }
 
@@ -1000,7 +1020,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _setSelectedModel(HomeChatModelSelection selection) {
     if (_isDeletingReply || _savingMessageEdit) return;
-    final current = _conversation ?? AiConversationRecord.empty();
+    final current =
+        _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
     final previous = _selectionFor(current);
     if (previous.model.id == selection.model.id &&
         previous.reasoningLevel == selection.reasoningLevel) {
@@ -1184,14 +1205,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         attachments: preparedAttachments,
         capabilityMetadata: capabilityMetadata,
       );
+      final updateRootTitle =
+          source.parentMessageId == null && latest.titleRevision < 2;
       final updated = latest
           .appendQuestionVersion(source.id, editedQuestion)
           .copyWith(
-            title: source.parentMessageId == null
+            title: updateRootTitle
                 ? (text.isEmpty
                       ? (capabilityMetadata?['name']?.toString() ?? '能力任务')
                       : text)
                 : latest.title,
+            titleRevision: updateRootTitle && latest.titleRevision == 1
+                ? 2
+                : latest.titleRevision,
             updatedAt: now,
             modelId: selection.model.id,
             reasoningLevel: selection.reasoningLevel.name,
@@ -1391,7 +1417,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _dismissComposerFocus();
     _setComposerExpanded(false);
 
-    final current = _conversation ?? AiConversationRecord.empty();
+    final current =
+        _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
     final selection = _selectionFor(current);
     final now = DateTime.now();
     final userMessage = AiConversationMessage(
@@ -1451,7 +1478,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _composerController.clear();
     unawaited(_persistAttachments());
     _scrollToLatest();
-    unawaited(_historyService.save(withUserMessage));
+    try {
+      await _historyService.saveTransactional(withUserMessage);
+    } catch (error) {
+      if (_isCurrentRequest(requestGeneration, conversationId)) {
+        setState(() {
+          _isGenerating = false;
+          _clearStreamingReply();
+        });
+        _showReplyError('会话保存失败，云端任务未启动：$error');
+      }
+      _pendingReplyParentId = null;
+      return;
+    }
+    if (!_isCurrentRequest(requestGeneration, conversationId)) return;
 
     late final List<Map<String, Object?>> aiMessages;
     try {
@@ -1474,11 +1514,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     List<Map<String, Object?>> completedArtifacts = const [];
 
     try {
-      final paired = await CapabilityCloudSync.instance.isPaired;
-      final hasSavedSkills = (await CapabilityStore.instance.list()).isNotEmpty;
-      final useAgent =
-          paired && (capabilityForMessage != null || hasSavedSkills);
+      final useAgent = await CapabilityCloudSync.instance.hasEmailSession;
       if (useAgent) {
+        final taskId = CapabilityCloudSync.newTaskId();
+        agentTaskId = taskId;
+        await _persistCapabilityTaskId(conversationId, userMessage.id, taskId);
+        if (!_isCurrentRequest(requestGeneration, conversationId)) return;
         Map<String, Object?>? capabilityReference;
         if (capabilityForMessage?['type'] == 'skill') {
           capabilityReference = capabilityForMessage;
@@ -1503,18 +1544,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             });
           }
         }
-        final task = await CapabilityCloudSync.instance.createAgentTask(
-          messages: aiMessages,
-          modelId: selection.model.id,
-          reasoningLevel: selection.reasoningLevel.name,
-          capability: capabilityReference,
-          materials: materials,
-        );
-        agentTaskId = task['task_id']?.toString();
-        if (agentTaskId == null) throw const AiException('云端没有返回任务编号');
-        _activeCapabilityTaskId = agentTaskId;
+        Map<String, dynamic> task;
+        _pendingCapabilityTaskCreationIds.add(taskId);
+        try {
+          task = await CapabilityCloudSync.instance.createAgentTask(
+            taskId: taskId,
+            messages: aiMessages,
+            modelId: selection.model.id,
+            reasoningLevel: selection.reasoningLevel.name,
+            capability: capabilityReference,
+            materials: materials,
+          );
+        } finally {
+          _pendingCapabilityTaskCreationIds.remove(taskId);
+        }
+        if (task['task_id']?.toString() != taskId) {
+          throw const AiException('云端返回的任务编号与本地记录不一致');
+        }
+        if (_cancelCapabilityTaskAfterCreateIds.remove(taskId)) {
+          await CapabilityCloudSync.instance.cancelTask(taskId);
+          return;
+        }
+        if (!_isCurrentRequest(requestGeneration, conversationId)) return;
+        _activeCapabilityTaskId = taskId;
         await for (final event in CapabilityCloudSync.instance.watchTask(
-          agentTaskId,
+          taskId,
         )) {
           if (!_isCurrentRequest(requestGeneration, conversationId)) return;
           switch (event['type']) {
@@ -1532,11 +1586,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               );
               if (allow) {
                 await CapabilityCloudSync.instance.authorizeTaskDomains(
-                  agentTaskId,
+                  taskId,
                   domains,
                 );
               } else {
-                await CapabilityCloudSync.instance.cancelTask(agentTaskId);
+                await CapabilityCloudSync.instance.cancelTask(taskId);
                 throw const AiException('已取消这次联网执行');
               }
               break;
@@ -1626,6 +1680,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _showReplyError('回复失败，请稍后重试');
       }
     } finally {
+      if (agentTaskId != null &&
+          _cancelCapabilityTaskAfterCreateIds.remove(agentTaskId)) {
+        unawaited(
+          CapabilityCloudSync.instance
+              .cancelTask(agentTaskId)
+              .catchError((_) {}),
+        );
+      }
       if (mounted && requestGeneration == _requestGeneration) {
         setState(() {
           _isGenerating = false;
@@ -2038,7 +2100,7 @@ $text''';
       existingId: existing?.id,
       showInMenu: showInMenu,
     );
-    if (await CapabilityCloudSync.instance.isPaired) {
+    if (await CapabilityCloudSync.instance.hasEmailSession) {
       unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
     }
     if (!mounted) return;
@@ -2047,7 +2109,7 @@ $text''';
 
   Future<void> _requestSkillDraftRevision(CapabilityDraft draft) async {
     await CapabilityStore.instance.saveDraft(draft);
-    if (await CapabilityCloudSync.instance.isPaired) {
+    if (await CapabilityCloudSync.instance.hasEmailSession) {
       unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
     }
     if (!mounted) return;
@@ -2112,6 +2174,216 @@ $text''';
     _streamingReply.value = '';
   }
 
+  Future<void> _persistCapabilityTaskId(
+    String conversationId,
+    String messageId,
+    String taskId,
+  ) async {
+    final current =
+        await _historyService.get(conversationId) ??
+        (_conversation?.id == conversationId ? _conversation : null);
+    if (current == null) throw StateError('会话已不存在');
+    var found = false;
+    final updated = current.copyWith(
+      nodes: current.nodes
+          .map((node) {
+            if (node.id != messageId) return node;
+            found = true;
+            return node.copyWith(agentTaskId: taskId);
+          })
+          .toList(growable: false),
+      updatedAt: DateTime.now(),
+    );
+    if (!found) throw StateError('找不到对应的任务消息');
+    await _historyService.saveTransactional(updated);
+    if (mounted && _conversation?.id == conversationId) {
+      setState(() {
+        _conversation = updated;
+        _messages
+          ..clear()
+          ..addAll(updated.messages);
+      });
+    }
+    final bookId = updated.bookId;
+    if (bookId != null) _bookConversationFallbacks[bookId] = updated;
+  }
+
+  Future<void> _clearCapabilityTaskId(
+    String conversationId,
+    String messageId,
+    String taskId,
+  ) async {
+    final current = await _historyService.get(conversationId);
+    if (current == null) return;
+    var changed = false;
+    final updated = current.copyWith(
+      nodes: current.nodes
+          .map((node) {
+            if (node.id != messageId || node.agentTaskId != taskId) {
+              return node;
+            }
+            changed = true;
+            return node.copyWith(clearAgentTaskId: true);
+          })
+          .toList(growable: false),
+      updatedAt: DateTime.now(),
+    );
+    if (!changed) return;
+    await _historyService.saveTransactional(updated);
+    if (mounted && _conversation?.id == conversationId) {
+      setState(() {
+        _conversation = updated;
+        _messages
+          ..clear()
+          ..addAll(updated.messages);
+      });
+    }
+    final bookId = updated.bookId;
+    if (bookId != null) _bookConversationFallbacks[bookId] = updated;
+  }
+
+  AiConversationMessage? _pendingCapabilityTask(AiConversationRecord record) {
+    for (final message in record.messages.reversed) {
+      if (!message.isUser ||
+          message.isDeletedMarker ||
+          message.agentTaskId == null) {
+        continue;
+      }
+      final hasAnswer = record.nodes.any(
+        (node) =>
+            node.parentMessageId == message.id &&
+            !node.isUser &&
+            !node.isDeletedMarker &&
+            node.text.trim().isNotEmpty,
+      );
+      if (!hasAnswer) return message;
+    }
+    return null;
+  }
+
+  void _resumePendingCapabilityTask(AiConversationRecord record) {
+    final message = _pendingCapabilityTask(record);
+    final taskId = message?.agentTaskId;
+    if (message == null || taskId == null) return;
+    if (_isGenerating && _activeCapabilityTaskId == taskId) return;
+
+    final generation = ++_requestGeneration;
+    _pendingReplyParentId = message.id;
+    _pendingContinuationMessageId = null;
+    _continuingReplyId = null;
+    _isContinuingReply = false;
+    _activeCapabilityTaskId = taskId;
+    _clearStreamingReply();
+    setState(() => _isGenerating = true);
+    unawaited(
+      _watchRestoredCapabilityTask(
+        taskId: taskId,
+        messageId: message.id,
+        conversationId: record.id,
+        generation: generation,
+      ),
+    );
+  }
+
+  Future<void> _watchRestoredCapabilityTask({
+    required String taskId,
+    required String messageId,
+    required String conversationId,
+    required int generation,
+  }) async {
+    List<Map<String, Object?>> artifacts = const [];
+    String? completedText;
+    var cancelled = false;
+    try {
+      await for (final event in CapabilityCloudSync.instance.watchTask(
+        taskId,
+      )) {
+        if (!_isCurrentRequest(generation, conversationId)) return;
+        switch (event['type']) {
+          case 'assistant_delta':
+            _streamingReplyBuffer.write(event['text']?.toString() ?? '');
+            _scheduleStreamingReplyUpdate(generation, conversationId);
+            break;
+          case 'network_permission_required':
+            final domains = (event['domains'] as List? ?? const [])
+                .map((value) => value.toString())
+                .toList(growable: false);
+            final allow = await _confirmAgentNetworkAccess(
+              event['purpose']?.toString() ?? '脚本需要访问这些域名',
+              domains,
+            );
+            if (!_isCurrentRequest(generation, conversationId)) return;
+            if (allow) {
+              await CapabilityCloudSync.instance.authorizeTaskDomains(
+                taskId,
+                domains,
+              );
+            } else {
+              await CapabilityCloudSync.instance.cancelTask(taskId);
+              cancelled = true;
+            }
+            break;
+          case 'completed':
+            completedText = event['text']?.toString();
+            artifacts = _taskArtifacts(event['artifacts']);
+            break;
+          case 'artifacts_ready':
+            artifacts = _taskArtifacts(event['artifacts']);
+            break;
+          case 'status':
+            cancelled = event['status']?.toString() == 'cancelled';
+            break;
+          case 'error':
+            throw AiException(event['message']?.toString() ?? '技能任务失败');
+        }
+      }
+
+      if (!_isCurrentRequest(generation, conversationId)) return;
+      if (cancelled) {
+        await _clearCapabilityTaskId(conversationId, messageId, taskId);
+        return;
+      }
+      final result = completedText ?? _streamingReplyBuffer.toString();
+      if (result.trim().isEmpty) {
+        throw const AiException('任务已结束，但没有返回可恢复的结果');
+      }
+      _streamingReplyBuffer
+        ..clear()
+        ..write(result);
+      _flushStreamingReply(generation, conversationId);
+      await _appendAssistantReply(
+        result,
+        parentMessageId: messageId,
+        outputArtifacts: artifacts,
+      );
+    } on TimeoutException {
+      if (_isCurrentRequest(generation, conversationId)) {
+        _showReplyError('任务仍在云端执行，稍后重新打开会话即可接回');
+      }
+    } on AiException catch (error) {
+      if (_isCurrentRequest(generation, conversationId)) {
+        _clearStreamingReply();
+        _showReplyError(error.message);
+      }
+      await _clearCapabilityTaskId(conversationId, messageId, taskId);
+    } catch (error) {
+      if (_isCurrentRequest(generation, conversationId)) {
+        _clearStreamingReply();
+        _showReplyError('恢复云端任务失败：$error');
+      }
+      await _clearCapabilityTaskId(conversationId, messageId, taskId);
+    } finally {
+      if (mounted && generation == _requestGeneration) {
+        setState(() => _isGenerating = false);
+        if (_activeCapabilityTaskId == taskId) {
+          _activeCapabilityTaskId = null;
+        }
+        _pendingReplyParentId = null;
+        _clearStreamingReply();
+      }
+    }
+  }
+
   List<Map<String, Object?>> _taskArtifacts(Object? value) => value is List
       ? value
             .whereType<Map>()
@@ -2142,7 +2414,7 @@ $text''';
       );
       if (skillDraft != null) {
         await CapabilityStore.instance.saveDraft(skillDraft);
-        if (await CapabilityCloudSync.instance.isPaired) {
+        if (await CapabilityCloudSync.instance.hasEmailSession) {
           unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
         }
       }
@@ -2194,6 +2466,9 @@ $text''';
             : null);
     if (bookId != null) {
       _bookConversationFallbacks[bookId] = updated;
+    }
+    if (!isIncomplete) {
+      _maybeGenerateConversationTitle(updated, parentId, content);
     }
     if (mounted && _conversation?.id == current.id && shouldFollow) {
       _scrollToLatest();
@@ -2248,10 +2523,79 @@ $text''';
     }
     final bookId = updated.bookId;
     if (bookId != null) _bookConversationFallbacks[bookId] = updated;
+    if (answer.isIncomplete && !isIncomplete) {
+      _maybeGenerateConversationTitle(updated, answer.parentMessageId, content);
+    }
     if (mounted && _conversation?.id == current.id && shouldFollow) {
       _scrollToLatest();
     }
     return true;
+  }
+
+  void _maybeGenerateConversationTitle(
+    AiConversationRecord record,
+    String? parentMessageId,
+    String answer,
+  ) {
+    if (record.titleRevision != 0 || parentMessageId == null) return;
+    final firstQuestion = record.nodes
+        .where(
+          (message) =>
+              message.isUser &&
+              !message.isDeletedMarker &&
+              message.parentMessageId == null,
+        )
+        .firstOrNull;
+    if (firstQuestion == null || firstQuestion.id != parentMessageId) return;
+    unawaited(_generateConversationTitle(record, firstQuestion, answer));
+  }
+
+  Future<void> _generateConversationTitle(
+    AiConversationRecord record,
+    AiConversationMessage question,
+    String answer,
+  ) async {
+    final expectedTitle = record.title;
+    try {
+      final started = await _historyService.beginAutoTitleGeneration(
+        record.id,
+        expectedTitle: expectedTitle,
+      );
+      if (started == null) return;
+      final title = await AiService().generateConversationTitle(
+        userMessage: question.text.trim().isNotEmpty
+            ? question.text
+            : question.capabilityMetadata?['name']?.toString() ?? '能力任务',
+        assistantMessage: answer,
+        modelId:
+            record.modelId ??
+            started.modelId ??
+            HomeChatModelOption.deepSeek.id,
+      );
+      if (title == null) return;
+      final titled = await _historyService.completeAutoTitleGeneration(
+        record.id,
+        expectedTitle: expectedTitle,
+        title: title,
+      );
+      if (titled == null) return;
+
+      final visible = _conversation;
+      if (mounted && visible?.id == record.id) {
+        final current = visible!.copyWith(
+          title: titled.title,
+          titleRevision: titled.titleRevision,
+        );
+        setState(() => _conversation = current);
+        final bookId = current.bookId;
+        if (bookId != null) _bookConversationFallbacks[bookId] = current;
+      } else {
+        final bookId = titled.bookId;
+        if (bookId != null) _bookConversationFallbacks[bookId] = titled;
+      }
+    } catch (_) {
+      // Title generation is best-effort and must not affect the saved reply.
+    }
   }
 
   void _clearEmptyStoppedReply() {
@@ -2267,15 +2611,22 @@ $text''';
   void _stopReply() {
     if (!_isGenerating) return;
     final request = _activeRequest;
-    final capabilityTaskId = _activeCapabilityTaskId;
     final conversationId = _conversation?.id;
     final replyParentId = _pendingReplyParentId;
+    final pendingMessage = replyParentId == null
+        ? null
+        : _conversation?.nodeById(replyParentId);
+    final capabilityTaskId =
+        _activeCapabilityTaskId ?? pendingMessage?.agentTaskId;
     final continuationMessageId = _pendingContinuationMessageId;
     final stoppedGeneration = ++_requestGeneration;
     _activeRequest = null;
     _activeCapabilityTaskId = null;
     request?.cancel();
     if (capabilityTaskId != null) {
+      if (_pendingCapabilityTaskCreationIds.contains(capabilityTaskId)) {
+        _cancelCapabilityTaskAfterCreateIds.add(capabilityTaskId);
+      }
       unawaited(
         CapabilityCloudSync.instance
             .cancelTask(capabilityTaskId)
@@ -2293,6 +2644,35 @@ $text''';
         stoppedGeneration: stoppedGeneration,
       ),
     );
+  }
+
+  void _detachReply() {
+    if (_activeCapabilityTaskId == null && _activeRequest != null) {
+      _stopReply();
+      return;
+    }
+    if (!_isGenerating &&
+        _activeRequest == null &&
+        _activeCapabilityTaskId == null) {
+      return;
+    }
+    _requestGeneration++;
+    _activeRequest?.cancel();
+    _activeRequest = null;
+    _activeCapabilityTaskId = null;
+    _pendingReplyParentId = null;
+    _pendingContinuationMessageId = null;
+    _continuingReplyId = null;
+    _isContinuingReply = false;
+    _clearStreamingReply();
+    if (mounted) {
+      setState(() {
+        _isGenerating = false;
+        _messages
+          ..clear()
+          ..addAll(_conversation?.messages ?? const []);
+      });
+    }
   }
 
   Future<void> _finishStoppedReply(
@@ -3363,12 +3743,13 @@ $text''';
     if (_voicePanelVisible) await _cancelVoiceInput();
     if (!mounted || generation != _readingTaskGeneration) return;
     _dismissComposerFocus();
-    _stopReply();
+    _detachReply();
     _clearEmptyStoppedReply();
     _setComposerExpanded(false);
     final conversation = AiConversationRecord.empty(
       bookId: bookId,
       bookName: bookName,
+      enableAutoTitle: true,
     );
     _clearEmptyStoppedReply();
     setState(() {
@@ -3434,19 +3815,22 @@ $text''';
 
     _dismissComposerFocus();
     _setComposerExpanded(false);
-    _stopReply();
+    _detachReply();
     try {
       await _bookLibrary.setBookInReadingSpace(bookId, true);
       final currentConversation = _conversation;
-      if (currentConversation?.bookId == bookId ||
-          (currentConversation?.bookId == null &&
-              currentConversation?.bookName.trim() == item.book.title.trim())) {
+      if (currentConversation != null &&
+          (currentConversation.bookId == bookId ||
+              (currentConversation.bookId == null &&
+                  currentConversation.bookName.trim() ==
+                      item.book.title.trim()))) {
         setState(() {
           _space = _HomeSpace.reading;
           _selectedReadingTaskBookId = bookId;
           _selectedReadingTaskBookName = item.book.title;
           _spaceMenuOpen = false;
         });
+        _resumePendingCapabilityTask(currentConversation);
         return;
       }
 
@@ -3461,6 +3845,7 @@ $text''';
                 AiConversationRecord.empty(
                   bookId: bookId,
                   bookName: item.book.title,
+                  enableAutoTitle: true,
                 );
       _clearEmptyStoppedReply();
       _bookConversationFallbacks[bookId] = conversation;
@@ -3484,6 +3869,7 @@ $text''';
         _spaceMenuOpen = false;
       });
       _restoreConversationDraft(conversation);
+      _resumePendingCapabilityTask(conversation);
       _scrollToLatest(immediate: true);
     } catch (_) {
       if (mounted && generation == _readingTaskGeneration) {
@@ -3581,7 +3967,7 @@ $text''';
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _readingTaskGeneration++;
     _dismissComposerFocus();
-    _stopReply();
+    _detachReply();
     _clearEmptyStoppedReply();
     setState(() {
       _space = _HomeSpace.reading;
@@ -3600,21 +3986,47 @@ $text''';
       _spaceMenuOpen = false;
     });
     _restoreConversationDraft(record);
+    _resumePendingCapabilityTask(record);
     _scrollToLatest(immediate: true);
   }
 
   void _cancelReplyBeforeConversationDelete(AiConversationRecord record) {
-    if (_conversation?.id != record.id || _activeRequest == null) return;
+    final pendingTaskIds = record.nodes
+        .where((message) => message.isUser && message.agentTaskId != null)
+        .where(
+          (message) => !record.nodes.any(
+            (node) =>
+                node.parentMessageId == message.id &&
+                !node.isUser &&
+                !node.isDeletedMarker &&
+                node.text.trim().isNotEmpty,
+          ),
+        )
+        .map((message) => message.agentTaskId!)
+        .toSet();
+    for (final taskId in pendingTaskIds) {
+      if (_pendingCapabilityTaskCreationIds.contains(taskId)) {
+        _cancelCapabilityTaskAfterCreateIds.add(taskId);
+      }
+      unawaited(
+        CapabilityCloudSync.instance.cancelTask(taskId).catchError((_) {}),
+      );
+    }
+    if (_conversation?.id != record.id) return;
     _requestGeneration++;
-    _activeRequest!.cancel();
+    _activeRequest?.cancel();
     _activeRequest = null;
-    setState(() {
-      _isGenerating = false;
-      _continuingReplyId = null;
-      _pendingContinuationMessageId = null;
-      _isContinuingReply = false;
-      _clearStreamingReply();
-    });
+    _activeCapabilityTaskId = null;
+    _pendingReplyParentId = null;
+    _pendingContinuationMessageId = null;
+    _continuingReplyId = null;
+    _isContinuingReply = false;
+    _clearStreamingReply();
+    if (mounted) {
+      setState(() {
+        _isGenerating = false;
+      });
+    }
   }
 
   void _clearDeletedConversation(AiConversationRecord record) {
@@ -3632,6 +4044,7 @@ $text''';
     final conversation = AiConversationRecord.empty(
       bookId: bookId,
       bookName: bookName,
+      enableAutoTitle: true,
     );
     setState(() {
       _conversation = conversation;
@@ -3671,9 +4084,7 @@ $text''';
     _dismissComposerFocus();
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
-        builder: (_) => BookLearningShellPage(
-          initialBookId: bookId,
-        ),
+        builder: (_) => BookLearningShellPage(initialBookId: bookId),
       ),
     );
     if (!mounted) return;
@@ -3765,7 +4176,9 @@ $text''';
                                     : _ConversationMessages(
                                         record:
                                             _conversation ??
-                                            AiConversationRecord.empty(),
+                                            AiConversationRecord.empty(
+                                              enableAutoTitle: true,
+                                            ),
                                         presentationRevision:
                                             _conversationPresentationRevision,
                                         messages: _messages,
@@ -3849,6 +4262,7 @@ $text''';
                                           ),
                                           child: _HomeComposer(
                                             key: _composerKey,
+                                            onSignOut: widget.onSignOut,
                                             controller: _composerController,
                                             focusNode: _composerFocusNode,
                                             modelSelection: _selectedModel,
@@ -4276,6 +4690,7 @@ class _SpaceMenuItem extends StatelessWidget {
 class _HomeComposer extends StatefulWidget {
   const _HomeComposer({
     super.key,
+    this.onSignOut,
     required this.controller,
     required this.focusNode,
     required this.modelSelection,
@@ -4322,6 +4737,7 @@ class _HomeComposer extends StatefulWidget {
     required this.onVoiceLongPressCancel,
   });
 
+  final VoidCallback? onSignOut;
   final TextEditingController controller;
   final FocusNode focusNode;
   final HomeChatModelSelection modelSelection;
@@ -4939,6 +5355,7 @@ class _HomeComposerState extends State<_HomeComposer> {
       children: [
         if (!widget.expanded)
           SkillsPluginsComposerControls(
+            onSignOut: widget.onSignOut,
             onCapabilitySelected: widget.onCapabilitySelected,
             reviewDraft: widget.pendingSkillDraftReview,
             onSaveReviewDraft: widget.onSaveSkillDraft,

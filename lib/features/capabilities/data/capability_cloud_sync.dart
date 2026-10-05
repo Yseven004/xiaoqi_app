@@ -15,6 +15,8 @@ class CapabilityCloudSync {
 
   static final instance = CapabilityCloudSync._();
   static const _tokenKey = 'xiaoqi.capabilities.device_token.v1';
+  static const _authMethodKey = 'xiaoqi.auth.method.v1';
+  static const _emailKey = 'xiaoqi.auth.email.v1';
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
   final http.Client _client = http.Client();
   Future<void>? _syncing;
@@ -22,45 +24,110 @@ class CapabilityCloudSync {
   String get _baseUrl =>
       ApiConfig.capabilitiesBaseUrl.replaceFirst(RegExp(r'/$'), '');
 
-  Future<bool> get isPaired async =>
-      (await _secureStorage.read(key: _tokenKey))?.isNotEmpty == true;
+  Future<bool> get hasEmailSession => hasLocalEmailSession;
 
-  Future<void> pair(String code) async {
+  Future<bool> get hasLocalEmailSession async {
+    final method = await _secureStorage.read(key: _authMethodKey);
+    final token = await _secureStorage.read(key: _tokenKey);
+    return method == 'email' && token?.isNotEmpty == true;
+  }
+
+  Future<String?> get signedInEmail => _secureStorage.read(key: _emailKey);
+
+  Future<void> requestEmailLoginCode(String email) async {
     final response = await _client
         .post(
-          Uri.parse('$_baseUrl/pair'),
+          Uri.parse('$_baseUrl/auth/email/start'),
           headers: const {'Content-Type': 'application/json'},
-          body: jsonEncode({'code': code.trim()}),
+          body: jsonEncode({'email': email.trim()}),
         )
-        .timeout(const Duration(seconds: 15));
+        .timeout(const Duration(seconds: 20));
     final decoded = _decode(response);
-    final token = decoded['access_token']?.toString();
-    if (response.statusCode != 201 || token == null || token.length < 24) {
-      throw StateError(_errorMessage(decoded, '配对失败'));
-    }
-    await _secureStorage.write(key: _tokenKey, value: token);
-    try {
-      await syncNow();
-    } catch (error) {
-      throw StateError('设备已连接，首次同步未完成：$error');
+    if (response.statusCode != 202) {
+      throw StateError(_errorMessage(decoded, '验证码暂时发送失败，请稍后重试'));
     }
   }
 
-  Future<void> unpair() async {
-    final token = await _secureStorage.read(key: _tokenKey);
-    if (token != null) {
-      final response = await _client
-          .delete(Uri.parse('$_baseUrl/devices/me'), headers: _headers(token))
-          .timeout(const Duration(seconds: 15));
-      if (response.statusCode >= 500 || response.statusCode == 429) {
-        throw StateError(_errorMessage(_decode(response), '设备撤销失败'));
-      }
-      if (response.statusCode != 401 &&
-          (response.statusCode < 200 || response.statusCode >= 300)) {
-        throw StateError(_errorMessage(_decode(response), '设备撤销失败'));
+  Future<String> signInWithEmailCode({
+    required String email,
+    required String code,
+  }) async {
+    final previousToken = await _secureStorage.read(key: _tokenKey);
+    final response = await _client
+        .post(
+          Uri.parse('$_baseUrl/auth/email/verify'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({'email': email.trim(), 'code': code.trim()}),
+        )
+        .timeout(const Duration(seconds: 20));
+    final decoded = _decode(response);
+    final token = decoded['access_token']?.toString();
+    if (response.statusCode != 201 || token == null || token.length < 24) {
+      throw StateError(_errorMessage(decoded, '验证码无效或已过期'));
+    }
+
+    await _secureStorage.write(key: _tokenKey, value: token);
+    await _secureStorage.write(key: _authMethodKey, value: 'email');
+    await _secureStorage.write(
+      key: _emailKey,
+      value: decoded['email']?.toString() ?? email.trim(),
+    );
+
+    if (previousToken != null &&
+        previousToken.isNotEmpty &&
+        previousToken != token) {
+      try {
+        await _client
+            .delete(
+              Uri.parse('$_baseUrl/devices/me'),
+              headers: _headers(previousToken),
+            )
+            .timeout(const Duration(seconds: 8));
+      } catch (_) {
+        // The email session is already valid; cleanup of an older paired token
+        // must not block sign-in or the user's local content.
       }
     }
+    return decoded['email']?.toString() ?? email.trim();
+  }
+
+  Future<bool> validateEmailSession() async {
+    if (!await hasLocalEmailSession) return false;
+    final token = await _secureStorage.read(key: _tokenKey);
+    if (token == null || token.isEmpty) return false;
+    final response = await _client
+        .get(Uri.parse('$_baseUrl/auth/me'), headers: _headers(token))
+        .timeout(const Duration(seconds: 8));
+    if (response.statusCode == 200) return true;
+    if (response.statusCode == 401) {
+      await _clearLocalSession();
+      return false;
+    }
+    final decoded = _decode(response);
+    throw StateError(_errorMessage(decoded, '登录状态暂时无法验证'));
+  }
+
+  Future<void> signOut() async {
+    final token = await _secureStorage.read(key: _tokenKey);
+    if (token != null && token.isNotEmpty) {
+      final response = await _client
+          .delete(Uri.parse('$_baseUrl/auth/session'), headers: _headers(token))
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode == 401) {
+        await _clearLocalSession();
+        return;
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError(_errorMessage(_decode(response), '退出登录失败'));
+      }
+    }
+    await _clearLocalSession();
+  }
+
+  Future<void> _clearLocalSession() async {
     await _secureStorage.delete(key: _tokenKey);
+    await _secureStorage.delete(key: _authMethodKey);
+    await _secureStorage.delete(key: _emailKey);
   }
 
   Future<void> syncNow() {
@@ -69,7 +136,7 @@ class CapabilityCloudSync {
 
   Future<void> _sync() async {
     final token = await _secureStorage.read(key: _tokenKey);
-    if (token == null || token.isEmpty) throw StateError('尚未连接云同步');
+    if (token == null || token.isEmpty) throw StateError('请先登录个人账号');
     final store = CapabilityStore.instance;
     for (final record in await store.list(includeDeleted: true)) {
       if (record.syncState == CapabilitySyncState.synced ||
@@ -133,7 +200,13 @@ class CapabilityCloudSync {
         continue;
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError(_errorMessage(decoded, '草稿同步失败'));
+        throw StateError(
+          _errorMessage(
+            decoded,
+            '草稿同步失败',
+            statusCode: response.statusCode,
+          ),
+        );
       }
       final revision = (decoded['cloud_revision'] as num?)?.toInt();
       if (revision != null) await store.markDraftSynced(draft.id, revision);
@@ -335,6 +408,7 @@ class CapabilityCloudSync {
             'status': status,
             'text': task['result'],
             'draft': task['draft'],
+            'files': task['files'],
             'artifacts': task['artifacts'] ?? const [],
           };
         } else if (status == 'failed' && !errorReceived) {
@@ -398,7 +472,7 @@ class CapabilityCloudSync {
 
   Future<String> _requireToken() async {
     final token = await _secureStorage.read(key: _tokenKey);
-    if (token == null || token.isEmpty) throw StateError('请先连接云同步');
+    if (token == null || token.isEmpty) throw StateError('请先登录个人账号');
     return token;
   }
 
@@ -430,8 +504,21 @@ class CapabilityCloudSync {
     return value.cast<String, dynamic>();
   }
 
-  String _errorMessage(Map<String, dynamic> value, String fallback) {
+  String _errorMessage(
+    Map<String, dynamic> value,
+    String fallback, {
+    int? statusCode,
+  }) {
     final error = value['error'];
-    return error is Map ? error['message']?.toString() ?? fallback : fallback;
+    String? message;
+    if (error is Map) {
+      message = error['message']?.toString();
+    } else if (error is String) {
+      message = error;
+    } else {
+      message = value['message']?.toString() ?? value['Message']?.toString();
+    }
+    if (message != null && message.trim().isNotEmpty) return message.trim();
+    return statusCode == null ? fallback : '$fallback（HTTP $statusCode）';
   }
 }
