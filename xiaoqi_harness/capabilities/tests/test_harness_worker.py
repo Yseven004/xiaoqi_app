@@ -45,6 +45,20 @@ def test_session_prompt_rejects_remote_images() -> None:
         )
 
 
+def test_mimo_profile_advertises_image_input(tmp_path) -> None:
+    profile = tmp_path / "profile.yaml"
+
+    harness_worker._write_profile_patch(
+        profile,
+        "mimo-v2.6-flash",
+        "https://api.xiaomimimo.com/v1",
+        "Use tools safely.",
+        "medium",
+    )
+
+    assert "input: [text, image]" in profile.read_text(encoding="utf-8")
+
+
 def test_snapshot_round_trip_keeps_only_runtime_session_data(tmp_path) -> None:
     home = tmp_path / "home"
     (home / "sessions").mkdir(parents=True)

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "7e395364-6e25-4741-bf49-8e43d116ce4f",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-account-data-20261006-184755\\candidate.json",
+  "output": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-account-data-20261006-184755\\xiaoqi-account-data.html",
+  "specification": {
+    "sha256": "a6bd65e97fafa1a54a133bf94eb69c80a9c2d1f78a7ee2af08697f9ccbe8a623",
+    "bytes": 4822
+  },
+  "artifact": {
+    "sha256": "b3621a4ec25dba6034d34e68e0a79aee942781fd4963e01b05fdd181e9a8cb5a",
+    "bytes": 762979
+  }
+}

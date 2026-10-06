@@ -90,7 +90,9 @@ def _write_profile_patch(
             )
         )
     model_capabilities = [
-        "          input: [text, image]" if model_id == "deepseek-flash" else "          input: [text]",
+        "          input: [text, image]"
+        if model_id in {"deepseek-flash", "mimo-v2.6-flash"}
+        else "          input: [text]",
     ]
     if is_mimo:
         model_capabilities.extend(

@@ -7,8 +7,6 @@ import mimetypes
 import os
 import re
 import time
-import urllib.error
-import urllib.request
 import uuid
 from pathlib import PurePosixPath
 from typing import Any
@@ -16,7 +14,6 @@ from typing import Any
 from .storage import CloudStore
 
 
-_MAX_STEPS = 16
 _MAX_TOOL_OUTPUT = 128 * 1024
 _MAX_TOOL_READ_CHARS = 20_000
 _MAX_TRANSCRIPT = 3 * 1024 * 1024
@@ -26,96 +23,6 @@ _MAX_ARTIFACT_TOTAL = 20 * 1024 * 1024
 _WORKER_LEASE_SECONDS = 300
 _SAFE_FILE = re.compile(r"^[A-Za-z0-9._/-]{1,240}$")
 
-_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_task_material",
-            "description": "读取本次任务明确附带的资料文本。只能使用资料 ID，不得读取其他账户或设备文件。长资料按字符 offset 分段读取，limit 每次最多 20000。具体问题只读相关片段；用户要求总结或分析附件时，覆盖全文并逐段保留简短要点。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "material_id": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 0},
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": _MAX_TOOL_READ_CHARS,
-                    },
-                },
-                "required": ["material_id"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_skill_resource",
-            "description": "读取已授权技能版本中的一个资源文件。长文件按字符 offset 分段读取，limit 每次最多 20000；按返回的下一 offset 继续直到末尾。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "capability_id": {"type": "string"},
-                    "version_id": {"type": "string"},
-                    "path": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 0},
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": _MAX_TOOL_READ_CHARS,
-                    },
-                },
-                "required": ["capability_id", "version_id", "path"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "draft_workspace",
-            "description": "列出、读取或写入当前任务的临时草稿文件。读取长文件时按字符 offset 分段，limit 每次最多 20000；按返回的下一 offset 继续直到末尾。只能改临时区，不会直接保存正式技能。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["list", "read", "write"]},
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 0},
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": _MAX_TOOL_READ_CHARS,
-                    },
-                },
-                "required": ["action"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_python",
-            "description": "在隔离的 E2B Python 沙箱运行需要真正计算、数据转换或脚本试用的代码。每个任务最多运行一次，默认断网；只有用户另行授权的域名才可联网。需要交付的文件写到 /home/user/workspace/output，最多回传 10 个文件、单个 10 MB、总计 20 MB。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {"type": "string"},
-                    "network_domains": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "确需联网时列出精确域名；未列出时保持断网。",
-                    },
-                    "network_purpose": {"type": "string"},
-                },
-                "required": ["code"],
-                "additionalProperties": False,
-            },
-        },
-    },
-]
 
 
 class TaskCancelled(Exception):
@@ -180,38 +87,6 @@ def _domain_list(value: Any) -> list[str]:
         domains.append(domain)
     return sorted(set(domains))
 
-
-def _read_history(store: CloudStore, task: dict[str, Any]) -> list[dict[str, Any]] | None:
-    key = task.get("transcript_blob_key")
-    if not key:
-        return None
-    raw = store.get_task_blob(str(key))
-    value = json.loads(raw.decode("utf-8"))
-    return value if isinstance(value, list) else None
-
-
-def _save_history(store: CloudStore, tenant: str, task_id: str, messages: list[dict[str, Any]]) -> None:
-    raw = json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if len(raw) > _MAX_TRANSCRIPT:
-        raise ValueError("任务对话超过恢复上限")
-    key = f"tenants/{tenant}/tasks/{task_id}/transcript.json"
-    store.put_task_blob(key, raw)
-    from .api import _mutate_task
-
-    last_message = messages[-1] if messages else {}
-
-    def save(old: dict[str, Any]) -> dict[str, Any]:
-        updated = {**old, "transcript_blob_key": key, "updated_at": int(time.time())}
-        active = old.get("active_tool_call")
-        if (
-            isinstance(active, dict)
-            and last_message.get("role") == "tool"
-            and last_message.get("tool_call_id") == active.get("id")
-        ):
-            updated["active_tool_call"] = None
-        return updated
-
-    _mutate_task(tenant, task_id, save)
 
 
 def _task_state(store: CloudStore, tenant: str, task_id: str) -> dict[str, Any]:
@@ -409,113 +284,6 @@ def _validate_python_requirements(
             "Python 已运行，但未生成要求的文件：" + ", ".join(missing_files)
         )
 
-
-def _model_request(
-    model_id: str,
-    reasoning_level: str,
-    messages: list[dict[str, Any]],
-    on_delta: Any,
-    required_tool: str | None = None,
-) -> dict[str, Any]:
-    is_mimo = model_id.startswith("mimo")
-    key = os.environ.get("MIMO_API_KEY" if is_mimo else "DEEPSEEK_API_KEY", "")
-    if not key:
-        raise RuntimeError("所选模型的服务端密钥尚未配置")
-    url = (
-        "https://api.xiaomimimo.com/v1/chat/completions"
-        if is_mimo
-        else "https://api.deepseek.com/chat/completions"
-    )
-    payload: dict[str, Any] = {
-        "model": model_id,
-        "messages": messages,
-        "tools": _TOOLS,
-        "tool_choice": "auto",
-        "stream": True,
-    }
-    if required_tool:
-        payload["tool_choice"] = {
-            "type": "function",
-            "function": {"name": required_tool},
-        }
-    if is_mimo:
-        payload["thinking"] = {
-            "type": "disabled"
-            if required_tool or reasoning_level == "low"
-            else "enabled"
-        }
-    else:
-        if required_tool:
-            payload["thinking"] = {"type": "disabled"}
-        else:
-            payload["reasoning_effort"] = {
-                "low": "low",
-                "medium": "high",
-                "high": "max",
-            }.get(reasoning_level, "high")
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "text/event-stream"},
-        method="POST",
-    )
-    content: list[str] = []
-    reasoning: list[str] = []
-    tools: dict[int, dict[str, Any]] = {}
-    pending_text = ""
-    try:
-        response = urllib.request.urlopen(req, timeout=100)
-    except urllib.error.HTTPError as error:
-        error.read(4096)
-        raise RuntimeError(f"模型服务暂不可用（HTTP {error.code}）") from error
-    with response:
-        if "text/event-stream" not in response.headers.get("Content-Type", ""):
-            decoded = json.loads(response.read().decode("utf-8"))
-            message = decoded["choices"][0]["message"]
-            if message.get("content"):
-                on_delta(message["content"])
-            return message
-        for line in response:
-            line = line.decode("utf-8", errors="ignore").strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                event = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            choices = event.get("choices") or []
-            if not choices:
-                continue
-            delta = choices[0].get("delta") or {}
-            text = delta.get("content")
-            if isinstance(text, str) and text:
-                content.append(text)
-                pending_text += text
-                if len(pending_text) >= 240:
-                    on_delta(pending_text)
-                    pending_text = ""
-            thought = delta.get("reasoning_content")
-            if isinstance(thought, str) and thought:
-                reasoning.append(thought)
-            for item in delta.get("tool_calls") or []:
-                index = int(item.get("index", 0))
-                call = tools.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                if item.get("id"):
-                    call["id"] = item["id"]
-                function = item.get("function") or {}
-                call["function"]["name"] += function.get("name", "")
-                call["function"]["arguments"] += function.get("arguments", "")
-    if pending_text:
-        on_delta(pending_text)
-    result: dict[str, Any] = {"role": "assistant", "content": "".join(content)}
-    if reasoning:
-        result["reasoning_content"] = "".join(reasoning)
-    if tools:
-        result["tool_calls"] = [tools[index] for index in sorted(tools)]
-    return result
 
 
 def _safe_resource_path(path: str) -> str:
@@ -877,13 +645,12 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
         if not _claim_task(store, tenant, task_id, attempt, worker_id):
             return
     except TaskCancelled:
-        from .api import _mutate_task
-
         _mutate_task(tenant, task_id, lambda old: {**old, "status": "cancelled", "worker_id": None, "worker_lease_until": 0, "updated_at": int(time.time())} if int(old.get("attempt", 0)) == attempt else old)
         _emit(store, tenant, task_id, {"type": "status", "status": "cancelled"})
         return
     except TaskNotOwned:
         return
+
     try:
         task = _ensure_active(store, tenant, task_id, attempt, worker_id)
     except TaskNotOwned:
@@ -892,140 +659,14 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
         _mutate_task(tenant, task_id, lambda old: {**old, "status": "cancelled", "worker_id": None, "worker_lease_until": 0, "updated_at": int(time.time())} if int(old.get("attempt", 0)) == attempt and old.get("worker_id") == worker_id else old)
         _emit(store, tenant, task_id, {"type": "status", "status": "cancelled"})
         return
-    input_files = store.get_immutable(str(task["input_object_key"]))
-    task_request = json.loads(input_files["input.json"].decode("utf-8"))
-    if task.get("transcript_blob_key"):
-        messages = _read_history(store, task) or []
-    else:
-        messages = list(task_request.get("messages", []))
-    if not isinstance(messages, list) or not messages:
-        raise ValueError("任务中没有模型上下文")
-    python_required = _requires_python_execution(messages)
-
-    system_addition = _xiaoqi_system_instructions()
-    already_has_rules = bool(
-        messages
-        and messages[0].get("role") == "system"
-        and "小栖工具规则" in str(messages[0].get("content", ""))
-    )
-    if messages and messages[0].get("role") == "system" and not already_has_rules:
-        messages[0] = {**messages[0], "content": str(messages[0].get("content", "")) + system_addition}
-    elif not messages or messages[0].get("role") != "system":
-        messages.insert(0, {"role": "system", "content": system_addition.strip()})
 
     _emit(store, tenant, task_id, {"type": "status", "status": "running"})
-
     try:
-        if task.get("runtime") == "deepseek-harness":
-            from .harness_worker import run_task as run_harness_task
+        if task.get("runtime") != "deepseek-harness":
+            raise ValueError("不支持的任务运行时")
+        from .harness_worker import run_task as run_harness_task
 
-            run_harness_task(store, tenant, task_id, attempt, worker_id, task)
-            return
-
-        pending_calls = list(task.get("pending_tool_calls", []))
-        if pending_calls:
-            authorized = set(_domain_list(task.get("authorized_network_domains", [])))
-            for call in pending_calls:
-                _ensure_active(store, tenant, task_id, attempt, worker_id)
-                _mark_tool_started(tenant, task_id, attempt, worker_id, call)
-                try:
-                    output = _run_tool(store, tenant, task_id, task_request, call, authorized, attempt, worker_id)
-                except NetworkPermissionRequired as required:
-                    _mutate_task(tenant, task_id, lambda old: {**old, "status": "awaiting_network_permission", "pending_tool_calls": pending_calls, "active_tool_call": None, "worker_id": None, "worker_lease_until": 0, "requested_network_domains": required.domains, "network_purpose": required.purpose, "updated_at": int(time.time())})
-                    _emit(store, tenant, task_id, {"type": "network_permission_required", "domains": required.domains, "purpose": required.purpose})
-                    return
-                messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": output})
-                _save_history(store, tenant, task_id, messages)
-            _mutate_task(tenant, task_id, lambda old: {**old, "pending_tool_calls": [], "requested_network_domains": [], "network_purpose": None, "updated_at": int(time.time())})
-
-        for step in range(_MAX_STEPS):
-            _ensure_active(store, tenant, task_id, attempt, worker_id)
-            model_id = str(task_request.get("model_id", "deepseek-flash"))
-            reasoning_level = str(task_request.get("reasoning_level", "medium"))
-
-            def on_delta(text: str) -> None:
-                _ensure_active(store, tenant, task_id, attempt, worker_id)
-                _emit(store, tenant, task_id, {"type": "assistant_delta", "text": text})
-
-            current_task = _task_state(store, tenant, task_id)
-            required_tool = (
-                "execute_python"
-                if python_required and int(current_task.get("python_runs", 0)) == 0
-                else None
-            )
-            if required_tool:
-                print(
-                    f"AGENT_TOOL_REQUIRED task_id={task_id} tool={required_tool}",
-                    flush=True,
-                )
-                assistant = _model_request(
-                    model_id,
-                    reasoning_level,
-                    messages,
-                    on_delta,
-                    required_tool=required_tool,
-                )
-            else:
-                assistant = _model_request(model_id, reasoning_level, messages, on_delta)
-            _ensure_active(store, tenant, task_id, attempt, worker_id)
-            assistant["role"] = "assistant"
-            messages.append(assistant)
-            _save_history(store, tenant, task_id, messages)
-            calls = assistant.get("tool_calls") or []
-            if not calls:
-                final_text = str(assistant.get("content", ""))
-                _validate_python_requirements(
-                    _task_state(store, tenant, task_id), messages
-                )
-
-                def complete(old: dict[str, Any]) -> dict[str, Any]:
-                    if old.get("worker_id") != worker_id or int(old.get("attempt", 0)) != attempt:
-                        raise TaskNotOwned("worker lease was replaced")
-                    if old.get("cancel_requested"):
-                        raise TaskCancelled("task was cancelled")
-                    return {**old, "status": "succeeded", "result": final_text, "draft": old.get("draft_files", {}).get("SKILL.md"), "worker_id": None, "worker_lease_until": 0, "active_tool_call": None, "updated_at": int(time.time())}
-
-                task = _mutate_task(tenant, task_id, complete).value
-                encoded_files = {
-                    name: base64.b64encode(str(content).encode("utf-8")).decode("ascii")
-                    for name, content in task.get("draft_files", {}).items()
-                }
-                _emit(store, tenant, task_id, {"type": "completed", "status": "succeeded", "text": final_text, "draft": task.get("draft"), "files": encoded_files, "artifacts": task.get("artifacts", [])})
-                return
-
-            authorized = set(_domain_list(_task_state(store, tenant, task_id).get("authorized_network_domains", [])))
-            for call_index, call in enumerate(calls):
-                _ensure_active(store, tenant, task_id, attempt, worker_id)
-                function_name = str((call.get("function") or {}).get("name", ""))
-                _mark_tool_started(tenant, task_id, attempt, worker_id, call)
-                _emit(store, tenant, task_id, {"type": "tool_started", "tool": function_name})
-                print(
-                    f"AGENT_TOOL_STARTED task_id={task_id} tool={function_name}",
-                    flush=True,
-                )
-                tool_failed = False
-                try:
-                    output = _run_tool(store, tenant, task_id, task_request, call, authorized, attempt, worker_id)
-                except NetworkPermissionRequired as required:
-                    remaining = calls[call_index:]
-                    _mutate_task(tenant, task_id, lambda old: {**old, "status": "awaiting_network_permission", "pending_tool_calls": remaining, "active_tool_call": None, "worker_id": None, "worker_lease_until": 0, "requested_network_domains": required.domains, "network_purpose": required.purpose, "updated_at": int(time.time())})
-                    _emit(store, tenant, task_id, {"type": "network_permission_required", "domains": required.domains, "purpose": required.purpose})
-                    _save_history(store, tenant, task_id, messages)
-                    return
-                except (TaskCancelled, TaskNotOwned):
-                    raise
-                except Exception as error:
-                    tool_failed = True
-                    output = json.dumps({"error": str(error)[:500]}, ensure_ascii=False)
-                messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": _clean_output(output)})
-                _save_history(store, tenant, task_id, messages)
-                _emit(store, tenant, task_id, {"type": "tool_finished", "tool": function_name, "output": _clean_output(output)})
-                print(
-                    f"AGENT_TOOL_FINISHED task_id={task_id} tool={function_name} "
-                    f"status={'failed' if tool_failed else 'ok'}",
-                    flush=True,
-                )
-        raise RuntimeError("工具调用次数达到本次任务上限")
+        run_harness_task(store, tenant, task_id, attempt, worker_id, task)
     except TaskCancelled:
         current = _task_state(store, tenant, task_id)
         if int(current.get("attempt", 0)) == attempt and current.get("worker_id") == worker_id:
@@ -1040,10 +681,7 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int) -> None
 
         def finish_error(old: dict[str, Any]) -> dict[str, Any]:
             nonlocal owned, cancelled
-            if (
-                int(old.get("attempt", 0)) != attempt
-                or old.get("worker_id") != worker_id
-            ):
+            if int(old.get("attempt", 0)) != attempt or old.get("worker_id") != worker_id:
                 return old
             owned = True
             cancelled = bool(old.get("cancel_requested"))

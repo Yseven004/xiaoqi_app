@@ -48,14 +48,13 @@ import '../widgets/home_chat_model_selector.dart';
 import '../widgets/message_selection_action_card.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/add_chat_note_sheet.dart';
+import 'email_login_page.dart';
 import 'note_editor_page.dart';
 import 'book_learning_shell_page.dart';
 
 /// 极简聊天首页：空间切换、会话消息和键盘跟随输入区。
 class HomePage extends StatefulWidget {
-  const HomePage({this.onSignOut, super.key});
-
-  final VoidCallback? onSignOut;
+  const HomePage({super.key});
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -256,7 +255,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _conversationPresentationRevision = 0;
   int? _selectedReadingTaskBookId;
   String _selectedReadingTaskBookName = '';
-  AiChatReplyRequest? _activeRequest;
   String? _pendingReplyParentId;
   String? _pendingContinuationMessageId;
   String? _continuingReplyId;
@@ -283,6 +281,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, Object?>? _activeSkillWorkflow;
   CapabilityDraft? _pendingSkillDraftReview;
   String? _activeCapabilityTaskId;
+  bool _emailSignedIn = false;
+  bool _openingEmailLogin = false;
   final Set<String> _pendingCapabilityTaskCreationIds = <String>{};
   final Set<String> _cancelCapabilityTaskAfterCreateIds = <String>{};
   AiConversationMessage? _editingQuestion;
@@ -303,6 +303,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _modelPreferences.defaultSelection.addListener(_onDefaultModelChanged);
     unawaited(_modelPreferences.load().catchError((_) {}));
     _conversation = AiConversationRecord.empty(enableAutoTitle: true);
+    unawaited(_refreshEmailSession());
     unawaited(_syncCapabilitiesAtStartup());
     _lastKeyboardInset = _currentKeyboardInset;
     _composerController.addListener(_cacheCurrentDraft);
@@ -310,6 +311,41 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _messagesScrollController.addListener(_onMessagesScrolled);
     _listenForSharedMedia();
     _scheduleSpeechModelPreparation();
+  }
+
+  Future<void> _refreshEmailSession() async {
+    final signedIn = await CapabilityCloudSync.instance.hasEmailSession;
+    if (mounted) setState(() => _emailSignedIn = signedIn);
+  }
+
+  Future<bool> _openEmailLogin() async {
+    if (_openingEmailLogin) return false;
+    _openingEmailLogin = true;
+    try {
+      final authenticated = await Navigator.of(context).push<bool>(
+        MaterialPageRoute<bool>(
+          builder: (loginContext) => EmailLoginPage(
+            onAuthenticated: () => Navigator.of(loginContext).pop(true),
+          ),
+        ),
+      );
+      if (authenticated == true && mounted) {
+        setState(() => _emailSignedIn = true);
+        final conversation = _conversation;
+        if (conversation != null) {
+          unawaited(_resumePendingCapabilityTask(conversation));
+        }
+      }
+      return authenticated == true;
+    } finally {
+      _openingEmailLogin = false;
+    }
+  }
+
+  Future<bool> _ensureEmailSessionForChat() async {
+    if (await CapabilityCloudSync.instance.hasEmailSession) return true;
+    await _openEmailLogin();
+    return false;
   }
 
   Future<void> _syncCapabilitiesAtStartup() async {
@@ -358,7 +394,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _keyboardInsetsChanging.dispose();
     unawaited(_cancelVoiceInput());
     _voiceSoundLevel.dispose();
-    _activeRequest?.cancel();
     unawaited(_sharedMediaSubscription?.cancel());
     if (!_savingMessageEdit) unawaited(_deleteMessageEditAttachments());
     _composerController.removeListener(_cacheCurrentDraft);
@@ -1159,6 +1194,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (text.isEmpty && _attachments.isEmpty && capabilityMetadata == null) {
       return;
     }
+    if (!await _ensureEmailSessionForChat()) return;
     final selectedAttachments = List<HomeChatAttachment>.of(_attachments);
     setState(() => _savingMessageEdit = true);
     List<HomeChatAttachment> preparedAttachments;
@@ -1276,25 +1312,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         return;
       }
       if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-      final request = AiService().startChatReply(
-        messages: aiMessages,
-        modelId: selection.model.id,
-        reasoningLevel: selection.reasoningLevel,
-      );
-      _activeRequest = request;
       try {
-        await for (final chunk in request.chunks) {
-          if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-          _streamingReplyBuffer.write(chunk);
-          _scheduleStreamingReplyUpdate(requestGeneration, conversationId);
+        final taskReply = await _runAgentTaskReply(
+          generation: requestGeneration,
+          conversationId: conversationId,
+          question: editedQuestion,
+          history: updated.messages,
+          aiMessages: aiMessages,
+          modelId: selection.model.id,
+          reasoningLevel: selection.reasoningLevel.name,
+        );
+        if (taskReply == null ||
+            !_isCurrentRequest(requestGeneration, conversationId)) {
+          return;
         }
-        if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-        _flushStreamingReply(requestGeneration, conversationId);
-        final reply = _streamingReplyBuffer.toString().trimRight();
-        if (reply.trim().isEmpty) {
-          throw const AiException('AI没有返回可用内容，请重试');
-        }
-        await _appendAssistantReply(reply, parentMessageId: editedQuestion.id);
+        await _appendAssistantReply(
+          taskReply.reply,
+          parentMessageId: editedQuestion.id,
+          agentTaskId: taskReply.taskId,
+          outputArtifacts: taskReply.artifacts,
+        );
       } on TimeoutException {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
           _clearStreamingReply();
@@ -1315,7 +1352,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           setState(() {
             _isGenerating = false;
           });
-          if (identical(_activeRequest, request)) _activeRequest = null;
         }
         if (requestGeneration == _requestGeneration) {
           _pendingReplyParentId = null;
@@ -1378,6 +1414,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (text.isEmpty && _attachments.isEmpty && capabilityForMessage == null) {
       return;
     }
+    if (!await _ensureEmailSessionForChat()) return;
     setState(() {
       _isPreparingToSend = true;
       if (_attachments.isNotEmpty) _preparingAttachments = true;
@@ -1506,170 +1543,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _pendingReplyParentId = null;
       return;
     }
-    AiChatReplyRequest? request;
     String? agentTaskId;
-    String? completedSkillDocument;
-    Map<String, dynamic>? completedSkillFiles;
-    List<Map<String, Object?>> completedArtifacts = const [];
-
     try {
-      final useAgent = await CapabilityCloudSync.instance.hasEmailSession;
-      if (useAgent) {
-        final taskId = CapabilityCloudSync.newTaskId();
-        agentTaskId = taskId;
-        await _persistCapabilityTaskId(conversationId, userMessage.id, taskId);
-        if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-        Map<String, Object?>? capabilityReference;
-        if (capabilityForMessage?['type'] == 'skill') {
-          capabilityReference = capabilityForMessage;
-        } else {
-          final targetId = capabilityForMessage?['target_id']?.toString();
-          if (targetId != null) {
-            final target = await CapabilityStore.instance.find(targetId);
-            final version = target?.currentVersion;
-            if (target != null && version != null) {
-              capabilityReference = {'id': target.id, 'version_id': version.id};
-            }
-          }
-        }
-        final materialsById = <String, Map<String, Object?>>{};
-        for (final historyMessage in withUserMessage.messages) {
-          if (historyMessage.isDeletedMarker) continue;
-          for (final attachment in historyMessage.attachments) {
-            final extractedText = attachment.extractedText.trim().isNotEmpty
-                ? attachment.extractedText
-                : attachment.isImage
-                ? ''
-                : (await _attachmentReader.read(attachment)).join('\r\n\r\n');
-            if (extractedText.trim().isEmpty) continue;
-            materialsById[attachment.id] = {
-              'id': attachment.id,
-              'name': attachment.name,
-              'text': extractedText,
-            };
-          }
-        }
-        final materials = materialsById.values.toList(growable: false);
-        final taskMessages = _agentTaskMessages(aiMessages, materials);
-        Map<String, dynamic> task;
-        _pendingCapabilityTaskCreationIds.add(taskId);
-        try {
-          task = await CapabilityCloudSync.instance.createAgentTask(
-            taskId: taskId,
-            messages: taskMessages,
-            modelId: selection.model.id,
-            reasoningLevel: selection.reasoningLevel.name,
-            capability: capabilityReference,
-            materials: materials,
-          );
-        } finally {
-          _pendingCapabilityTaskCreationIds.remove(taskId);
-        }
-        if (task['task_id']?.toString() != taskId) {
-          throw const AiException('云端返回的任务编号与本地记录不一致');
-        }
-        if (_cancelCapabilityTaskAfterCreateIds.remove(taskId)) {
-          await _cancelStoppedCapabilityTask(taskId);
-          return;
-        }
-        if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-        _activeCapabilityTaskId = taskId;
-        await for (final event in CapabilityCloudSync.instance.watchTask(
-          taskId,
-        )) {
-          if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-          switch (event['type']) {
-            case 'assistant_delta':
-              _streamingReplyBuffer.write(event['text']?.toString() ?? '');
-              _scheduleStreamingReplyUpdate(requestGeneration, conversationId);
-              break;
-            case 'network_permission_required':
-              final domains = (event['domains'] as List? ?? const [])
-                  .map((value) => value.toString())
-                  .toList(growable: false);
-              final allow = await _confirmAgentNetworkAccess(
-                event['purpose']?.toString() ?? '脚本需要访问这些域名',
-                domains,
-              );
-              if (allow) {
-                await CapabilityCloudSync.instance.authorizeTaskDomains(
-                  taskId,
-                  domains,
-                );
-              } else {
-                await CapabilityCloudSync.instance.cancelTask(taskId);
-                throw const AiException('已取消这次联网执行');
-              }
-              break;
-            case 'completed':
-              completedSkillDocument = event['draft']?.toString();
-              completedSkillFiles = event['files'] is Map
-                  ? (event['files'] as Map).cast<String, dynamic>()
-                  : null;
-              completedArtifacts = _taskArtifacts(event['artifacts']);
-              break;
-            case 'artifacts_ready':
-              completedArtifacts = _taskArtifacts(event['artifacts']);
-              break;
-            case 'error':
-              throw AiException(event['message']?.toString() ?? '技能任务失败，请稍后重试');
-          }
-        }
-        if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-        final streamed = _streamingReplyBuffer.toString();
-        if (completedSkillDocument != null &&
-            _activeSkillWorkflow != null &&
-            !(_extractSkillDocument(streamed)?.isNotEmpty ?? false)) {
-          _streamingReplyBuffer
-            ..write('\n\n## SKILL.md\n```markdown\n')
-            ..write(completedSkillDocument)
-            ..write('\n```');
-        }
-        if (completedSkillFiles != null && _activeSkillWorkflow != null) {
-          final existingReply = _streamingReplyBuffer.toString();
-          for (final entry in completedSkillFiles.entries) {
-            final path = entry.key;
-            if (path == 'SKILL.md' ||
-                RegExp(
-                  r'^##\s+' + RegExp.escape(path) + r'\s*$',
-                  multiLine: true,
-                ).hasMatch(existingReply)) {
-              continue;
-            }
-            try {
-              final resource = utf8.decode(
-                base64.decode(entry.value.toString()),
-              );
-              _streamingReplyBuffer
-                ..write('\n\n## $path\n```text\n')
-                ..write(resource)
-                ..write('\n```');
-            } catch (_) {}
-          }
-        }
-      } else {
-        request = AiService().startChatReply(
-          messages: aiMessages,
-          modelId: selection.model.id,
-          reasoningLevel: selection.reasoningLevel,
-        );
-        _activeRequest = request;
-        await for (final chunk in request.chunks) {
-          if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-          _streamingReplyBuffer.write(chunk);
-          _scheduleStreamingReplyUpdate(requestGeneration, conversationId);
-        }
+      final taskReply = await _runAgentTaskReply(
+        generation: requestGeneration,
+        conversationId: conversationId,
+        question: userMessage,
+        history: withUserMessage.messages,
+        aiMessages: aiMessages,
+        modelId: selection.model.id,
+        reasoningLevel: selection.reasoningLevel.name,
+      );
+      if (taskReply == null ||
+          !_isCurrentRequest(requestGeneration, conversationId)) {
+        return;
       }
-      if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-      _flushStreamingReply(requestGeneration, conversationId);
-      final reply = _streamingReplyBuffer.toString().trimRight();
-      if (reply.trim().isEmpty) {
-        throw const AiException('AI没有返回可用内容，请重试');
-      }
+      agentTaskId = taskReply.taskId;
       await _appendAssistantReply(
-        reply,
+        taskReply.reply,
         parentMessageId: _pendingReplyParentId,
-        outputArtifacts: completedArtifacts,
+        agentTaskId: taskReply.taskId,
+        outputArtifacts: taskReply.artifacts,
       );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -1687,17 +1581,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _showReplyError('回复失败，请稍后重试');
       }
     } finally {
-      if (agentTaskId != null &&
-          _cancelCapabilityTaskAfterCreateIds.remove(agentTaskId)) {
-        unawaited(_cancelStoppedCapabilityTask(agentTaskId));
-      }
       if (mounted && requestGeneration == _requestGeneration) {
         setState(() {
           _isGenerating = false;
         });
-        if (request != null && identical(_activeRequest, request)) {
-          _activeRequest = null;
-        }
         if (_activeCapabilityTaskId == agentTaskId) {
           _activeCapabilityTaskId = null;
         }
@@ -1910,6 +1797,206 @@ $materialIndex
       system['content'] = '${system['content'] ?? ''}\n\n$instructions';
     }
     return taskMessages;
+  }
+
+  Future<List<Map<String, Object?>>> _agentTaskMaterials(
+    List<AiConversationMessage> messages,
+  ) async {
+    final materialsById = <String, Map<String, Object?>>{};
+    for (final message in messages) {
+      if (message.isDeletedMarker) continue;
+      for (final attachment in message.attachments) {
+        final extractedText = attachment.extractedText.trim().isNotEmpty
+            ? attachment.extractedText
+            : attachment.isImage
+            ? ''
+            : (await _attachmentReader.read(attachment)).join('\r\n\r\n');
+        if (extractedText.trim().isEmpty) continue;
+        materialsById[attachment.id] = {
+          'id': attachment.id,
+          'name': attachment.name,
+          'text': extractedText,
+        };
+      }
+    }
+    return materialsById.values.toList(growable: false);
+  }
+
+  Future<Map<String, Object?>?> _agentTaskCapability(
+    AiConversationMessage question,
+  ) async {
+    final metadata = question.capabilityMetadata;
+    if (metadata?['type'] == 'skill') {
+      return Map<String, Object?>.from(metadata!);
+    }
+    final targetId = metadata?['target_id']?.toString();
+    if (targetId == null) return null;
+    final target = await CapabilityStore.instance.find(targetId);
+    final version = target?.currentVersion;
+    if (target == null || version == null) return null;
+    return {'id': target.id, 'version_id': version.id};
+  }
+
+  Future<({String taskId, String reply, List<Map<String, Object?>> artifacts})?>
+  _runAgentTaskReply({
+    required int generation,
+    required String conversationId,
+    required AiConversationMessage question,
+    required List<AiConversationMessage> history,
+    required List<Map<String, Object?>> aiMessages,
+    required String modelId,
+    required String reasoningLevel,
+  }) async {
+    final materials = await _agentTaskMaterials(history);
+    final taskMessages = _agentTaskMessages(aiMessages, materials);
+    final capability = await _agentTaskCapability(question);
+    if (!_isCurrentRequest(generation, conversationId)) return null;
+
+    final taskId = CapabilityCloudSync.newTaskId();
+    await _persistCapabilityTaskId(conversationId, question.id, taskId);
+    if (!_isCurrentRequest(generation, conversationId)) {
+      await _clearCapabilityTaskId(conversationId, question.id, taskId);
+      return null;
+    }
+    Map<String, dynamic> task;
+    _pendingCapabilityTaskCreationIds.add(taskId);
+    try {
+      task = await CapabilityCloudSync.instance.createAgentTask(
+        taskId: taskId,
+        messages: taskMessages,
+        modelId: modelId,
+        reasoningLevel: reasoningLevel,
+        capability: capability,
+        materials: materials,
+      );
+    } finally {
+      _pendingCapabilityTaskCreationIds.remove(taskId);
+    }
+    if (_cancelCapabilityTaskAfterCreateIds.remove(taskId)) {
+      await _cancelStoppedCapabilityTask(taskId);
+      await _clearCapabilityTaskId(conversationId, question.id, taskId);
+      return null;
+    }
+    if (task['task_id']?.toString() != taskId) {
+      await _clearCapabilityTaskId(conversationId, question.id, taskId);
+      throw const AiException('云端返回的任务编号与本地记录不一致');
+    }
+    if (!_isCurrentRequest(generation, conversationId)) return null;
+    _activeCapabilityTaskId = taskId;
+
+    var terminalFailure = false;
+    var cancelled = false;
+    String? completedText;
+    String? completedSkillDocument;
+    Map<String, dynamic>? completedSkillFiles;
+    List<Map<String, Object?>> artifacts = const [];
+    try {
+      await for (final event in CapabilityCloudSync.instance.watchTask(
+        taskId,
+      )) {
+        if (!_isCurrentRequest(generation, conversationId)) return null;
+        switch (event['type']) {
+          case 'assistant_delta':
+            _streamingReplyBuffer.write(event['text']?.toString() ?? '');
+            _scheduleStreamingReplyUpdate(generation, conversationId);
+            break;
+          case 'network_permission_required':
+            final domains = (event['domains'] as List? ?? const [])
+                .map((value) => value.toString())
+                .toList(growable: false);
+            final allow = await _confirmAgentNetworkAccess(
+              event['purpose']?.toString() ?? '脚本需要访问这些域名',
+              domains,
+            );
+            if (!_isCurrentRequest(generation, conversationId)) return null;
+            if (allow) {
+              await CapabilityCloudSync.instance.authorizeTaskDomains(
+                taskId,
+                domains,
+              );
+            } else {
+              final status = await CapabilityCloudSync.instance.cancelTask(
+                taskId,
+              );
+              terminalFailure = status == 'cancelled';
+              throw const AiException('已取消这次联网执行');
+            }
+            break;
+          case 'completed':
+            completedText = event['text']?.toString();
+            completedSkillDocument = event['draft']?.toString();
+            completedSkillFiles = event['files'] is Map
+                ? (event['files'] as Map).cast<String, dynamic>()
+                : null;
+            artifacts = _taskArtifacts(event['artifacts']);
+            break;
+          case 'artifacts_ready':
+            artifacts = _taskArtifacts(event['artifacts']);
+            break;
+          case 'status':
+            if (event['status']?.toString() == 'cancelled') {
+              cancelled = true;
+              terminalFailure = true;
+            }
+            break;
+          case 'error':
+            terminalFailure = true;
+            throw AiException(event['message']?.toString() ?? '任务失败，请稍后重试');
+        }
+      }
+
+      if (!_isCurrentRequest(generation, conversationId)) return null;
+      if (cancelled) {
+        await _clearCapabilityTaskId(conversationId, question.id, taskId);
+        return null;
+      }
+      final streamed = _streamingReplyBuffer.toString();
+      if (_streamingReplyBuffer.length == 0 && completedText != null) {
+        _streamingReplyBuffer.write(completedText);
+      }
+      if (completedSkillDocument != null &&
+          _activeSkillWorkflow != null &&
+          !(_extractSkillDocument(streamed)?.isNotEmpty ?? false)) {
+        _streamingReplyBuffer
+          ..write('\n\n## SKILL.md\n```markdown\n')
+          ..write(completedSkillDocument)
+          ..write('\n```');
+      }
+      if (completedSkillFiles != null && _activeSkillWorkflow != null) {
+        final existingReply = _streamingReplyBuffer.toString();
+        for (final entry in completedSkillFiles.entries) {
+          final path = entry.key;
+          if (path == 'SKILL.md' ||
+              RegExp(
+                r'^##\s+' + RegExp.escape(path) + r'\s*$',
+                multiLine: true,
+              ).hasMatch(existingReply)) {
+            continue;
+          }
+          try {
+            final resource = utf8.decode(base64.decode(entry.value.toString()));
+            _streamingReplyBuffer
+              ..write('\n\n## $path\n```text\n')
+              ..write(resource)
+              ..write('\n```');
+          } catch (_) {}
+        }
+      }
+      final reply = _streamingReplyBuffer.toString().trimRight();
+      if (reply.trim().isEmpty) {
+        terminalFailure = true;
+        throw const AiException('AI没有返回可用内容，请重试');
+      }
+      _flushStreamingReply(generation, conversationId);
+      return (taskId: taskId, reply: reply, artifacts: artifacts);
+    } catch (_) {
+      if (terminalFailure) {
+        await _clearCapabilityTaskId(conversationId, question.id, taskId);
+      }
+      rethrow;
+    } finally {
+      if (_activeCapabilityTaskId == taskId) _activeCapabilityTaskId = null;
+    }
   }
 
   Future<String> _capabilityCatalogPrompt(
@@ -2157,7 +2244,7 @@ $text''';
     }
     if (mounted &&
         updatedCurrent != null &&
-        _conversation?.id == updatedCurrent!.id) {
+        _conversation?.id == updatedCurrent.id) {
       setState(() {
         _conversation = updatedCurrent;
         _messages
@@ -2280,7 +2367,7 @@ $text''';
           _conversation = updatedCurrent;
           _messages
             ..clear()
-            ..addAll(updatedCurrent!.messages);
+            ..addAll(updatedCurrent.messages);
         }
         if (clearDeletedReview) _pendingSkillDraftReview = null;
       });
@@ -2500,7 +2587,7 @@ $text''';
           .map((node) {
             if (node.id != messageId) return node;
             found = true;
-            return node.copyWith(agentTaskId: taskId);
+            return node.copyWith(agentTaskId: taskId, agentTaskPending: true);
           })
           .toList(growable: false),
       updatedAt: DateTime.now(),
@@ -2534,7 +2621,10 @@ $text''';
               return node;
             }
             changed = true;
-            return node.copyWith(clearAgentTaskId: true);
+            return node.copyWith(
+              clearAgentTaskId: true,
+              agentTaskPending: false,
+            );
           })
           .toList(growable: false),
       updatedAt: DateTime.now(),
@@ -2560,23 +2650,33 @@ $text''';
           message.agentTaskId == null) {
         continue;
       }
-      final hasAnswer = record.nodes.any(
-        (node) =>
-            node.parentMessageId == message.id &&
-            !node.isUser &&
-            !node.isDeletedMarker &&
-            !node.isIncomplete &&
-            node.text.trim().isNotEmpty,
-      );
+      final hasAnswer = record.nodes.any((node) {
+        if (node.parentMessageId != message.id ||
+            node.isUser ||
+            node.isDeletedMarker ||
+            node.isIncomplete ||
+            node.text.trim().isEmpty) {
+          return false;
+        }
+        return message.agentTaskPending
+            ? node.agentTaskId == message.agentTaskId
+            : true;
+      });
       if (!hasAnswer) return message;
     }
     return null;
   }
 
-  void _resumePendingCapabilityTask(AiConversationRecord record) {
+  Future<void> _resumePendingCapabilityTask(AiConversationRecord record) async {
     final message = _pendingCapabilityTask(record);
     final taskId = message?.agentTaskId;
-    if (message == null || taskId == null) return;
+    if (message == null ||
+        taskId == null ||
+        !await CapabilityCloudSync.instance.hasEmailSession ||
+        !mounted ||
+        _conversation?.id != record.id) {
+      return;
+    }
     if (_isGenerating && _activeCapabilityTaskId == taskId) return;
 
     final generation = ++_requestGeneration;
@@ -2688,7 +2788,6 @@ $text''';
         _clearStreamingReply();
         _showReplyError('恢复云端任务失败：$error');
       }
-      await _clearCapabilityTaskId(conversationId, messageId, taskId);
     } finally {
       if (mounted && generation == _requestGeneration) {
         setState(() => _isGenerating = false);
@@ -2711,6 +2810,7 @@ $text''';
   Future<bool> _appendAssistantReply(
     String reply, {
     String? parentMessageId,
+    String? agentTaskId,
     bool isIncomplete = false,
     List<Map<String, Object?>> outputArtifacts = const [],
   }) async {
@@ -2723,6 +2823,7 @@ $text''';
     }
     final parentId = parentMessageId ?? current.messages.lastOrNull?.id;
     if (parentId == null) return false;
+    final replyTaskId = agentTaskId ?? current.nodeById(parentId)?.agentTaskId;
     CapabilityDraft? skillDraft;
     try {
       skillDraft = await _skillDraftFromReply(
@@ -2741,7 +2842,7 @@ $text''';
       skillDraft = null;
     }
     final now = DateTime.now();
-    final updated = current
+    var updated = current
         .appendAnswerVersion(
           parentId,
           AiConversationMessage(
@@ -2750,6 +2851,7 @@ $text''';
             parentMessageId: parentId,
             createdAt: now,
             isIncomplete: isIncomplete,
+            agentTaskId: replyTaskId,
             capabilityMetadata: skillDraft == null
                 ? null
                 : {
@@ -2762,6 +2864,20 @@ $text''';
           ),
         )
         .copyWith(updatedAt: now);
+    if (!isIncomplete && replyTaskId != null) {
+      updated = updated.copyWith(
+        nodes: updated.nodes
+            .map(
+              (node) => node.id == parentId && node.agentTaskId == replyTaskId
+                  ? node.copyWith(
+                      clearAgentTaskId: true,
+                      agentTaskPending: false,
+                    )
+                  : node,
+            )
+            .toList(growable: false),
+      );
+    }
     try {
       await _historyService.saveTransactional(updated);
     } catch (error) {
@@ -2805,6 +2921,8 @@ $text''';
     String messageId,
     String text, {
     required bool isIncomplete,
+    String? agentTaskId,
+    List<Map<String, Object?>>? outputArtifacts,
   }) async {
     if (!mounted) return false;
     final current = _conversation;
@@ -2817,17 +2935,42 @@ $text''';
         content.trim().isEmpty) {
       return false;
     }
+    final replyTaskId =
+        agentTaskId ??
+        current.nodeById(answer.parentMessageId ?? '')?.agentTaskId ??
+        answer.agentTaskId;
     final now = DateTime.now();
-    final updated = current.copyWith(
+    var updated = current.copyWith(
       nodes: current.nodes
           .map(
             (node) => node.id == messageId
-                ? node.copyWith(text: content, isIncomplete: isIncomplete)
+                ? node.copyWith(
+                    text: content,
+                    isIncomplete: isIncomplete,
+                    agentTaskId: replyTaskId,
+                    outputArtifacts: outputArtifacts ?? answer.outputArtifacts,
+                  )
                 : node,
           )
           .toList(growable: false),
       updatedAt: now,
     );
+    if (!isIncomplete && replyTaskId != null) {
+      updated = updated.copyWith(
+        nodes: updated.nodes
+            .map(
+              (node) =>
+                  node.id == answer.parentMessageId &&
+                      node.agentTaskId == replyTaskId
+                  ? node.copyWith(
+                      clearAgentTaskId: true,
+                      agentTaskPending: false,
+                    )
+                  : node,
+            )
+            .toList(growable: false),
+      );
+    }
     try {
       await _historyService.saveTransactional(updated);
     } catch (error) {
@@ -2935,7 +3078,6 @@ $text''';
 
   void _stopReply() {
     if (!_isGenerating) return;
-    final request = _activeRequest;
     final conversationId = _conversation?.id;
     final replyParentId = _pendingReplyParentId;
     final pendingMessage = replyParentId == null
@@ -2945,9 +3087,7 @@ $text''';
         _activeCapabilityTaskId ?? pendingMessage?.agentTaskId;
     final continuationMessageId = _pendingContinuationMessageId;
     final stoppedGeneration = ++_requestGeneration;
-    _activeRequest = null;
     _activeCapabilityTaskId = null;
-    request?.cancel();
     if (capabilityTaskId != null) {
       final taskIsBeingCreated = _pendingCapabilityTaskCreationIds.contains(
         capabilityTaskId,
@@ -2992,18 +3132,8 @@ $text''';
   }
 
   void _detachReply() {
-    if (_activeCapabilityTaskId == null && _activeRequest != null) {
-      _stopReply();
-      return;
-    }
-    if (!_isGenerating &&
-        _activeRequest == null &&
-        _activeCapabilityTaskId == null) {
-      return;
-    }
+    if (!_isGenerating) return;
     _requestGeneration++;
-    _activeRequest?.cancel();
-    _activeRequest = null;
     _activeCapabilityTaskId = null;
     _pendingReplyParentId = null;
     _pendingContinuationMessageId = null;
@@ -3672,6 +3802,9 @@ $text''';
     final questionIndex = path.indexWhere((item) => item.id == questionId);
     if (questionIndex < 0) return;
     final requestPath = path.take(questionIndex + 1).toList(growable: false);
+    if (!await _ensureEmailSessionForChat()) return;
+    final question = current.nodeById(questionId);
+    if (question == null || !question.isUser) return;
     final selection = _selectionFor(current);
     final requestGeneration = ++_requestGeneration;
     final conversationId = current.id;
@@ -3691,24 +3824,25 @@ $text''';
     try {
       final aiMessages = await _buildAiMessages(requestPath);
       if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-      final request = AiService().startChatReply(
-        messages: aiMessages,
+      final taskReply = await _runAgentTaskReply(
+        generation: requestGeneration,
+        conversationId: conversationId,
+        question: question,
+        history: requestPath,
+        aiMessages: aiMessages,
         modelId: selection.model.id,
-        reasoningLevel: selection.reasoningLevel,
+        reasoningLevel: selection.reasoningLevel.name,
       );
-      _activeRequest = request;
-      await for (final chunk in request.chunks) {
-        if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-        _streamingReplyBuffer.write(chunk);
-        _scheduleStreamingReplyUpdate(requestGeneration, conversationId);
+      if (taskReply == null ||
+          !_isCurrentRequest(requestGeneration, conversationId)) {
+        return;
       }
-      if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-      _flushStreamingReply(requestGeneration, conversationId);
-      final reply = _streamingReplyBuffer.toString().trimRight();
-      if (reply.trim().isEmpty) {
-        throw const AiException('AI没有返回可用内容，请重试');
-      }
-      await _appendAssistantReply(reply, parentMessageId: questionId);
+      await _appendAssistantReply(
+        taskReply.reply,
+        parentMessageId: questionId,
+        agentTaskId: taskReply.taskId,
+        outputArtifacts: taskReply.artifacts,
+      );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
         _clearStreamingReply();
@@ -3733,7 +3867,6 @@ $text''';
             ..clear()
             ..addAll(_conversation?.messages ?? const []);
         });
-        _activeRequest = null;
         _pendingReplyParentId = null;
         _pendingContinuationMessageId = null;
       }
@@ -3780,6 +3913,9 @@ $text''';
       (item) => item.id == parentMessageId && item.isUser,
     );
     if (questionIndex < 0) return;
+    final question = current.nodeById(parentMessageId);
+    if (question == null || !question.isUser) return;
+    if (!await _ensureEmailSessionForChat()) return;
     final requestPath = path.take(questionIndex + 1).toList(growable: false);
     final selection = _selectionFor(current);
     final requestGeneration = ++_requestGeneration;
@@ -3833,33 +3969,33 @@ $text''';
         aiMessages.add({'role': 'assistant', 'content': answer.text});
         aiMessages.add({'role': 'user', 'content': '请从这段已生成内容之后继续，不要重复已有内容。'});
       }
-      final request = AiService().startChatReply(
-        messages: aiMessages,
+      final taskReply = await _runAgentTaskReply(
+        generation: requestGeneration,
+        conversationId: conversationId,
+        question: question,
+        history: requestPath,
+        aiMessages: aiMessages,
         modelId: selection.model.id,
-        reasoningLevel: selection.reasoningLevel,
+        reasoningLevel: selection.reasoningLevel.name,
       );
-      _activeRequest = request;
-      await for (final chunk in request.chunks) {
-        if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-        _streamingReplyBuffer.write(chunk);
-        _scheduleStreamingReplyUpdate(requestGeneration, conversationId);
-      }
-      if (!_isCurrentRequest(requestGeneration, conversationId)) return;
-      _flushStreamingReply(requestGeneration, conversationId);
-      final addition = _streamingReplyBuffer.toString().trimRight();
-      if (addition.trim().isEmpty) {
-        throw const AiException('AI没有返回可用内容，请重试');
+      if (taskReply == null ||
+          !_isCurrentRequest(requestGeneration, conversationId)) {
+        return;
       }
       if (answer != null) {
         await _updateIncompleteReply(
           answer.id,
-          '${answer.text}$addition',
+          '${answer.text}${taskReply.reply}',
           isIncomplete: false,
+          agentTaskId: taskReply.taskId,
+          outputArtifacts: taskReply.artifacts,
         );
       } else {
         final saved = await _appendAssistantReply(
-          addition,
+          taskReply.reply,
           parentMessageId: parentMessageId,
+          agentTaskId: taskReply.taskId,
+          outputArtifacts: taskReply.artifacts,
         );
         if (!saved) restoreEmptyStoppedHint();
       }
@@ -3892,7 +4028,6 @@ $text''';
             ..clear()
             ..addAll(_conversation?.messages ?? const []);
         });
-        _activeRequest = null;
         _pendingReplyParentId = null;
         _pendingContinuationMessageId = null;
       }
@@ -4175,7 +4310,7 @@ $text''';
           _selectedReadingTaskBookName = item.book.title;
           _spaceMenuOpen = false;
         });
-        _resumePendingCapabilityTask(currentConversation);
+        unawaited(_resumePendingCapabilityTask(currentConversation));
         return;
       }
 
@@ -4215,7 +4350,7 @@ $text''';
         _spaceMenuOpen = false;
       });
       _restoreConversationDraft(conversation);
-      _resumePendingCapabilityTask(conversation);
+      unawaited(_resumePendingCapabilityTask(conversation));
       unawaited(_reconcileDraftTags(conversation.id));
       _scrollToLatest(immediate: true);
     } catch (_) {
@@ -4334,7 +4469,7 @@ $text''';
       _spaceMenuOpen = false;
     });
     _restoreConversationDraft(record);
-    _resumePendingCapabilityTask(record);
+    unawaited(_resumePendingCapabilityTask(record));
     unawaited(_reconcileDraftTags(record.id));
     _scrollToLatest(immediate: true);
   }
@@ -4343,14 +4478,18 @@ $text''';
     final pendingTaskIds = record.nodes
         .where((message) => message.isUser && message.agentTaskId != null)
         .where(
-          (message) => !record.nodes.any(
-            (node) =>
-                node.parentMessageId == message.id &&
-                !node.isUser &&
-                !node.isDeletedMarker &&
-                !node.isIncomplete &&
-                node.text.trim().isNotEmpty,
-          ),
+          (message) => !record.nodes.any((node) {
+            if (node.parentMessageId != message.id ||
+                node.isUser ||
+                node.isDeletedMarker ||
+                node.isIncomplete ||
+                node.text.trim().isEmpty) {
+              return false;
+            }
+            return message.agentTaskPending
+                ? node.agentTaskId == message.agentTaskId
+                : true;
+          }),
         )
         .map((message) => message.agentTaskId!)
         .toSet();
@@ -4367,8 +4506,6 @@ $text''';
     }
     if (_conversation?.id != record.id) return;
     _requestGeneration++;
-    _activeRequest?.cancel();
-    _activeRequest = null;
     _activeCapabilityTaskId = null;
     _pendingReplyParentId = null;
     _pendingContinuationMessageId = null;
@@ -4611,7 +4748,15 @@ $text''';
                                           ),
                                           child: _HomeComposer(
                                             key: _composerKey,
-                                            onSignOut: widget.onSignOut,
+                                            onRequestLogin: _openEmailLogin,
+                                            isSignedIn: _emailSignedIn,
+                                            onSessionChanged: (signedIn) {
+                                              if (_emailSignedIn != signedIn) {
+                                                setState(() {
+                                                  _emailSignedIn = signedIn;
+                                                });
+                                              }
+                                            },
                                             controller: _composerController,
                                             focusNode: _composerFocusNode,
                                             modelSelection: _selectedModel,
@@ -5043,7 +5188,9 @@ class _SpaceMenuItem extends StatelessWidget {
 class _HomeComposer extends StatefulWidget {
   const _HomeComposer({
     super.key,
-    this.onSignOut,
+    this.onRequestLogin,
+    required this.isSignedIn,
+    required this.onSessionChanged,
     required this.controller,
     required this.focusNode,
     required this.modelSelection,
@@ -5092,7 +5239,9 @@ class _HomeComposer extends StatefulWidget {
     required this.onVoiceLongPressCancel,
   });
 
-  final VoidCallback? onSignOut;
+  final Future<bool> Function()? onRequestLogin;
+  final bool isSignedIn;
+  final ValueChanged<bool> onSessionChanged;
   final TextEditingController controller;
   final FocusNode focusNode;
   final HomeChatModelSelection modelSelection;
@@ -5712,7 +5861,9 @@ class _HomeComposerState extends State<_HomeComposer> {
       children: [
         if (!widget.expanded)
           SkillsPluginsComposerControls(
-            onSignOut: widget.onSignOut,
+            onRequestLogin: widget.onRequestLogin,
+            isSignedIn: widget.isSignedIn,
+            onSessionChanged: widget.onSessionChanged,
             onCapabilitySelected: widget.onCapabilitySelected,
             reviewDraft: widget.pendingSkillDraftReview,
             onSaveReviewDraft: widget.onSaveSkillDraft,

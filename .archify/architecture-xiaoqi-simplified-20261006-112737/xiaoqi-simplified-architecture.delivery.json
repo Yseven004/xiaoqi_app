@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "41530e54-b648-4af1-b99f-3f2c0fb65114",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-simplified-20261006-112737\\candidate.json",
+  "output": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-simplified-20261006-112737\\xiaoqi-simplified-architecture.html",
+  "specification": {
+    "sha256": "d5a5803e64bee42131eb39228d3f8b7be28f64f90edd0d9cb7edf651894b915c",
+    "bytes": 7182
+  },
+  "artifact": {
+    "sha256": "a9944c5712e5c32f6fddcd0f031e9568ca93abe67dfff055605ff10b812051da",
+    "bytes": 768944
+  }
+}

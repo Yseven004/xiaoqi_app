@@ -18,7 +18,9 @@ class SkillsPluginsComposerControls extends StatefulWidget {
     required this.onReviseReviewDraft,
     required this.onDismissReviewDraft,
     required this.onDeleteReviewDraft,
-    this.onSignOut,
+    this.onRequestLogin,
+    required this.isSignedIn,
+    required this.onSessionChanged,
     this.reviewDraft,
     this.leadingControl,
     super.key,
@@ -31,7 +33,9 @@ class SkillsPluginsComposerControls extends StatefulWidget {
   final Future<void> Function(CapabilityDraft draft) onReviseReviewDraft;
   final VoidCallback onDismissReviewDraft;
   final Future<void> Function(CapabilityDraft draft) onDeleteReviewDraft;
-  final VoidCallback? onSignOut;
+  final Future<bool> Function()? onRequestLogin;
+  final bool isSignedIn;
+  final ValueChanged<bool> onSessionChanged;
   final Widget? leadingControl;
 
   @override
@@ -52,7 +56,6 @@ class _SkillsPluginsComposerControlsState
   bool _savingDraft = false;
   bool _deletingDraft = false;
   bool _cloudBusy = false;
-  bool _signedIn = false;
   bool _showDraftInMenu = true;
   String? _reviewDraftId;
 
@@ -70,7 +73,6 @@ class _SkillsPluginsComposerControlsState
   void initState() {
     super.initState();
     _refresh();
-    _refreshCloudState();
   }
 
   Future<void> _refresh() async {
@@ -83,16 +85,11 @@ class _SkillsPluginsComposerControlsState
     });
   }
 
-  Future<void> _refreshCloudState() async {
-    final signedIn = await CapabilityCloudSync.instance.hasEmailSession;
-    if (mounted) setState(() => _signedIn = signedIn);
-  }
-
   Future<void> _signOut() async {
     setState(() => _cloudBusy = true);
     try {
       await CapabilityCloudSync.instance.signOut();
-      widget.onSignOut?.call();
+      widget.onSessionChanged(false);
     } catch (error) {
       if (mounted) _showStatus('退出登录失败：$error');
     } finally {
@@ -487,7 +484,7 @@ class _SkillsPluginsComposerControlsState
               children: [
                 Expanded(
                   child: Text(
-                    _signedIn ? '已登录个人账号（自动同步）' : '未登录个人账号',
+                    widget.isSignedIn ? '已登录个人账号（自动同步）' : '未登录个人账号',
                     style: const TextStyle(
                       color: Color(0xFF777777),
                       fontSize: 13,
@@ -496,12 +493,12 @@ class _SkillsPluginsComposerControlsState
                 ),
                 if (_cloudBusy)
                   const Text('处理中…', style: TextStyle(fontSize: 13))
-                else if (!_signedIn)
+                else if (!widget.isSignedIn)
                   TextButton(
-                    onPressed: widget.onSignOut,
+                    onPressed: () => widget.onRequestLogin?.call(),
                     child: const Text('去登录'),
                   ),
-                if (_signedIn)
+                if (widget.isSignedIn)
                   TextButton(onPressed: _signOut, child: const Text('退出')),
               ],
             ),

@@ -116,46 +116,6 @@ def test_explicit_python_requests_require_execution_and_requested_file() -> None
     )
 
 
-def test_model_request_can_force_a_named_tool(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    class JsonResponse:
-        headers = {"Content-Type": "application/json"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args: Any) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return json.dumps(
-                {"choices": [{"message": {"content": ""}}]}
-            ).encode()
-
-    def fake_urlopen(request: Any, timeout: int) -> JsonResponse:
-        captured.update(json.loads(request.data.decode()))
-        assert timeout == 100
-        return JsonResponse()
-
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-    monkeypatch.setattr(worker.urllib.request, "urlopen", fake_urlopen)
-
-    worker._model_request(
-        "deepseek-flash",
-        "high",
-        [],
-        lambda _text: None,
-        required_tool="execute_python",
-    )
-
-    assert captured["tool_choice"] == {
-        "type": "function",
-        "function": {"name": "execute_python"},
-    }
-    assert captured["thinking"] == {"type": "disabled"}
-    assert "reasoning_effort" not in captured
-
 
 def _record(
     content: str = "---\nname: sample\ndescription: Example skill\n---\n\n# Instructions\n\nFollow the example.\n",
@@ -448,7 +408,7 @@ def test_mimo_text_task_uses_harness_after_compatibility_is_configured(
     assert task.value["runtime"] == "deepseek-harness"
 
 
-def test_deepseek_flash_image_uses_harness_and_other_vision_routes_stay_legacy(
+def test_deepseek_flash_image_uses_harness(
     client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     http, memory = client
@@ -471,7 +431,7 @@ def test_deepseek_flash_image_uses_harness_and_other_vision_routes_stay_legacy(
     assert task.value["runtime"] == "deepseek-harness"
 
 
-def test_mimo_image_task_stays_legacy_until_its_vision_route_is_verified(
+def test_mimo_image_task_uses_harness(
     client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     http, memory = client
@@ -492,7 +452,24 @@ def test_mimo_image_task_stays_legacy_until_its_vision_route_is_verified(
     assert response.status_code == 202
     task = memory.get("task/personal/task-mimo-image")
     assert task is not None
-    assert task.value["runtime"] == "legacy"
+    assert task.value["runtime"] == "deepseek-harness"
+
+
+def test_task_creation_rejects_tenants_outside_harness_allowlist(
+    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, memory = client
+    token = _paired_device(memory)
+    monkeypatch.setenv("CAPABILITY_HARNESS_TENANTS", "another-tenant")
+
+    response = http.post(
+        "/v1/agent/tasks",
+        headers=_auth(token),
+        json={"task_id": "task-not-allowed", "messages": [{"role": "user", "content": "Hi"}]},
+    )
+
+    assert response.status_code == 403
+    assert memory.get("task/personal/task-not-allowed") is None
 
 
 def test_worker_dispatches_harness_tasks_to_the_harness_runner(
@@ -556,118 +533,6 @@ def test_network_authorization_only_accepts_requested_exact_domains(
     assert task is not None
     assert task.value["authorized_network_domains"] == ["api.example.com"]
 
-
-def test_pure_text_agent_task_can_create_a_temporary_draft_without_e2b(
-    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _, memory = client
-    skill = "---\nname: sample-skill\ndescription: Use for a sample task.\n---\n\n# Instructions\n\nDo the sample task.\n"
-    input_key = "tenants/personal/tasks/task-test/input.json"
-    memory.put_immutable(
-        input_key,
-        {
-            "input.json": json.dumps(
-                {
-                    "model_id": "deepseek-flash",
-                    "reasoning_level": "medium",
-                    "messages": [{"role": "user", "content": "Create a skill."}],
-                }
-            ).encode(),
-        },
-    )
-    memory.put(
-        "task/personal/task-test",
-        {
-            "task_id": "task-test",
-            "status": "queued",
-            "attempt": 1,
-            "input_object_key": input_key,
-            "events": [],
-            "draft_files": {},
-            "cancel_requested": False,
-            "authorized_network_domains": [],
-        },
-        None,
-    )
-    requests: list[tuple[str, str]] = []
-
-    def model_request(model_id: str, reasoning_level: str, _messages: Any, _on_delta: Any) -> dict[str, Any]:
-        requests.append((model_id, reasoning_level))
-        if len(requests) == 1:
-            return {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "write-draft",
-                        "function": {
-                            "name": "draft_workspace",
-                            "arguments": json.dumps(
-                                {"action": "write", "path": "SKILL.md", "content": skill}
-                            ),
-                        },
-                    }
-                ],
-            }
-        return {"content": "## 代表性试用\n\n示例结果。"}
-
-    monkeypatch.setattr(worker, "_model_request", model_request)
-    worker.run_task(memory, "personal", "task-test", 1)
-
-    task = memory.get("task/personal/task-test")
-    assert task is not None
-    assert task.value["status"] == "succeeded"
-    assert task.value["draft_files"]["SKILL.md"] == skill
-    assert not any(key.startswith("cap/personal/") for key in memory.documents)
-    assert requests == [("deepseek-flash", "medium"), ("deepseek-flash", "medium")]
-    assert any(
-        event.get("type") == "completed" and event.get("draft") == skill
-        for event in task.value["events"]
-    )
-
-
-def test_cancel_during_model_request_discards_late_result(
-    client: tuple[Any, MemoryStore], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _, memory = client
-    input_key = "tenants/personal/tasks/task-test/input.json"
-    memory.put_immutable(
-        input_key,
-        {
-            "input.json": json.dumps(
-                {"messages": [{"role": "user", "content": "hello"}]}
-            ).encode(),
-        },
-    )
-    memory.put(
-        "task/personal/task-test",
-        {
-            "task_id": "task-test",
-            "status": "queued",
-            "attempt": 1,
-            "input_object_key": input_key,
-            "events": [],
-            "draft_files": {},
-            "cancel_requested": False,
-            "authorized_network_domains": [],
-        },
-        None,
-    )
-
-    def cancel_then_reply(*_args: Any) -> dict[str, Any]:
-        api._mutate_task(
-            "personal",
-            "task-test",
-            lambda old: {**old, "status": "cancelling", "cancel_requested": True},
-        )
-        return {"content": "This arrived after cancellation."}
-
-    monkeypatch.setattr(worker, "_model_request", cancel_then_reply)
-    worker.run_task(memory, "personal", "task-test", 1)
-
-    task = memory.get("task/personal/task-test")
-    assert task is not None
-    assert task.value["status"] == "cancelled"
-    assert task.value.get("result") is None
 
 
 @pytest.mark.parametrize(

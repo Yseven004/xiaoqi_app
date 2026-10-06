@@ -42,22 +42,11 @@ def _agent_runtime_for_task(tenant_id: str, task_request: dict[str, Any]) -> str
         if item.strip()
     }
     if tenant_id not in tenants:
-        return "legacy"
+        raise PermissionError("当前账号未启用后台 Agent 任务")
     model_id = str(task_request.get("model_id", "deepseek-flash")).lower()
-    has_images = _contains_image_input(task_request.get("messages"))
-    if has_images and model_id != "deepseek-flash":
-        return "legacy"
+    if model_id not in {"deepseek-flash", "mimo-v2.6-flash"}:
+        raise ValueError("所选模型暂不支持后台 Agent 任务")
     return "deepseek-harness"
-
-
-def _contains_image_input(value: Any) -> bool:
-    if isinstance(value, list):
-        return any(_contains_image_input(item) for item in value)
-    if not isinstance(value, dict):
-        return False
-    if value.get("type") in ("image", "image_url", "input_image") or "image_url" in value:
-        return True
-    return any(_contains_image_input(item) for item in value.values())
 
 
 def store() -> CloudStore:
@@ -837,17 +826,17 @@ def create_agent_task() -> Any:
             return jsonify({"task_id": task_id, "status": existing.value["status"], "deduplicated": True})
         if not isinstance(body.get("messages"), list):
             return _error("messages 必须是列表", 400)
+        runtime = _agent_runtime_for_task(g.tenant_id, body)
         transcript_key = f"tenants/{g.tenant_id}/tasks/{task_id}/input.json"
         store().put_immutable(transcript_key, {"input.json": json.dumps(body, ensure_ascii=False).encode("utf-8")})
         now = int(time.time())
-        runtime = _agent_runtime_for_task(g.tenant_id, body)
         task = {
             "task_id": task_id,
             "request_hash": request_hash,
             "tenant_id": g.tenant_id,
             "device_id": g.device_id,
             "runtime": runtime,
-            "runtime_version": "0.1.5rc1" if runtime == "deepseek-harness" else "legacy",
+            "runtime_version": "0.1.5rc1",
             "status": "queued",
             "attempt": 1,
             "input_object_key": transcript_key,
@@ -880,6 +869,8 @@ def create_agent_task() -> Any:
             })
             return _error("后台任务服务暂不可用，草稿仍保留在本机", 503)
         return jsonify({"task_id": task_id, "status": "queued"}), 202
+    except PermissionError as error:
+        return _error(str(error), 403)
     except ConfigurationError as error:
         return _error(str(error), 503)
     except (ValueError, TypeError) as error:

@@ -27,6 +27,7 @@ class AiConversationMessage {
     this.capabilityMetadata,
     this.outputArtifacts = const [],
     this.agentTaskId,
+    this.agentTaskPending = false,
   }) : id = id ?? _newMessageId();
 
   final String id;
@@ -41,6 +42,7 @@ class AiConversationMessage {
   final Map<String, Object?>? capabilityMetadata;
   final List<Map<String, Object?>> outputArtifacts;
   final String? agentTaskId;
+  final bool agentTaskPending;
 
   AiConversationMessage copyWith({
     String? id,
@@ -58,6 +60,7 @@ class AiConversationMessage {
     List<Map<String, Object?>>? outputArtifacts,
     String? agentTaskId,
     bool clearAgentTaskId = false,
+    bool? agentTaskPending,
   }) => AiConversationMessage(
     id: id ?? this.id,
     parentMessageId: clearParentMessageId
@@ -75,6 +78,7 @@ class AiConversationMessage {
         : capabilityMetadata ?? this.capabilityMetadata,
     outputArtifacts: outputArtifacts ?? this.outputArtifacts,
     agentTaskId: clearAgentTaskId ? null : agentTaskId ?? this.agentTaskId,
+    agentTaskPending: agentTaskPending ?? this.agentTaskPending,
   );
 
   Map<String, Object?> toJson() => {
@@ -96,6 +100,7 @@ class AiConversationMessage {
     if (capabilityMetadata != null) 'capability_metadata': capabilityMetadata,
     if (outputArtifacts.isNotEmpty) 'output_artifacts': outputArtifacts,
     if (agentTaskId != null) 'agent_task_id': agentTaskId,
+    if (agentTaskPending) 'agent_task_pending': true,
   };
 
   factory AiConversationMessage.fromJson(Object? raw) {
@@ -131,6 +136,7 @@ class AiConversationMessage {
                 .toList(growable: false)
           : const [],
       agentTaskId: raw['agent_task_id']?.toString(),
+      agentTaskPending: raw['agent_task_pending'] == true,
     );
   }
 }

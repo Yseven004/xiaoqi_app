@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "skipped",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-account-data-20261006-184755\\candidate.json",
+    "sha256": "a6bd65e97fafa1a54a133bf94eb69c80a9c2d1f78a7ee2af08697f9ccbe8a623",
+    "bytes": 4822
+  },
+  "artifact": {
+    "path": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-account-data-20261006-184755\\xiaoqi-account-data.html",
+    "sha256": "b3621a4ec25dba6034d34e68e0a79aee942781fd4963e01b05fdd181e9a8cb5a",
+    "bytes": 762979
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "skipped"
+  },
+  "failedStage": "browser-check",
+  "diagnostics": [
+    {
+      "code": "viewer/chrome-unavailable",
+      "severity": "warning",
+      "message": "Chrome or Chromium is unavailable. Set ARCHIFY_CHROME to its executable path.",
+      "subject": {
+        "artifact": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-account-data-20261006-184755\\xiaoqi-account-data.html"
+      },
+      "evidence": {
+        "executable": null
+      },
+      "supportedFixes": [
+        "set ARCHIFY_CHROME to a Chrome or Chromium executable and rerun browser-check"
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-account-data-20261006-184755\\xiaoqi-account-data.finalize.json",
+    "summaryReceipt": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-account-data-20261006-184755\\xiaoqi-account-data.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-account-data-20261006-184755\\xiaoqi-account-data.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.0.1",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-06T03:32:40.743Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2330
+}

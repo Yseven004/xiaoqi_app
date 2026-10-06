@@ -146,7 +146,11 @@ def _wait_for_mcp(process: subprocess.Popen[bytes], port: int) -> None:
 
 @pytest.mark.parametrize(
     ("model_id", "with_image"),
-    [("deepseek-flash", True), ("mimo-v2.6-flash", False)],
+    [
+        ("deepseek-flash", True),
+        ("mimo-v2.6-flash", False),
+        ("mimo-v2.6-flash", True),
+    ],
 )
 def test_harness_mcp_round_trip_and_session_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_id: str, with_image: bool
@@ -240,6 +244,7 @@ def test_harness_mcp_round_trip_and_session_restart(
             and any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
             for content in request_contents
         )
+    if model_id == "deepseek-flash":
         assert _MockModel.requests[0].get("thinking") == {"type": "enabled"}
         assert _MockModel.requests[0].get("reasoning_effort") == "high"
     else:

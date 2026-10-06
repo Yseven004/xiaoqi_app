@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "小七：简化后的新架构",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-xiaoqi-simplified-20261006-112737/xiaoqi-simplified-architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "learner",
+      "type": "external",
+      "label": "你 / 学习者",
+      "sublabel": "提问 · 查看结果",
+      "icon": "person",
+      "pos": [40, 235],
+      "size": [135, 76]
+    },
+    {
+      "id": "xiaoqi_app",
+      "type": "frontend",
+      "label": "小七 App",
+      "sublabel": "阅读 · 书籍 · 批注 · 笔记 · 学习入口",
+      "tag": "Flutter",
+      "icon": "frontend",
+      "pos": [235, 225],
+      "size": [205, 96]
+    },
+    {
+      "id": "cloud_api",
+      "type": "backend",
+      "label": "小七云端入口",
+      "sublabel": "账号 · 权限 · 创建任务",
+      "tag": "目标：阿里云 FC",
+      "icon": "backend",
+      "pos": [500, 225],
+      "size": [200, 96]
+    },
+    {
+      "id": "task_runner",
+      "type": "messagebus",
+      "label": "云端任务调度",
+      "sublabel": "排队 · 进度 · 停止 · 恢复",
+      "tag": "FC 异步模式待核实",
+      "icon": "messagebus",
+      "pos": [760, 225],
+      "size": [205, 96]
+    },
+    {
+      "id": "dsh_agent",
+      "type": "backend",
+      "label": "DSH Agent",
+      "sublabel": "思考 · 安排工具 · 生成结果",
+      "tag": "目标：统一主聊天",
+      "icon": "backend",
+      "pos": [1020, 225],
+      "size": [210, 96]
+    },
+    {
+      "id": "deepseek_api",
+      "type": "external",
+      "label": "DeepSeek API",
+      "sublabel": "模型推理 · 按 Token 计费",
+      "icon": "external",
+      "pos": [1290, 230],
+      "size": [180, 86]
+    },
+    {
+      "id": "local_library",
+      "type": "database",
+      "label": "手机本地资料",
+      "sublabel": "书籍 · 阅读记录 · 笔记",
+      "tag": "沿用现状",
+      "icon": "database",
+      "pos": [235, 500],
+      "size": [205, 82]
+    },
+    {
+      "id": "cloud_data",
+      "type": "database",
+      "label": "小七云端数据",
+      "sublabel": "Tablestore：账号/任务 · OSS：资料/结果",
+      "tag": "长期保存",
+      "icon": "database",
+      "pos": [650, 470],
+      "size": [280, 96]
+    },
+    {
+      "id": "xiaoqi_tools",
+      "type": "backend",
+      "label": "小七授权工具",
+      "sublabel": "读资料 · 读技能 · 写草稿 · Python",
+      "tag": "插件扩展点",
+      "icon": "backend",
+      "pos": [1015, 475],
+      "size": [225, 92]
+    },
+    {
+      "id": "aliyun_sandbox",
+      "type": "cloud",
+      "label": "阿里云 FC 云沙箱",
+      "sublabel": "需要 Python 时隔离运行",
+      "tag": "接入资格待确认",
+      "icon": "cloud",
+      "pos": [1350, 490],
+      "size": [205, 86]
+    }
+  ],
+  "connections": [
+    { "id": "user-app", "from": "learner", "to": "xiaoqi_app", "label": "打开小七" },
+    { "id": "app-api", "from": "xiaoqi_app", "to": "cloud_api", "label": "提交 / 查询" },
+    { "id": "api-task", "from": "cloud_api", "to": "task_runner", "label": "创建任务" },
+    { "id": "task-dsh", "from": "task_runner", "to": "dsh_agent", "label": "后台运行" },
+    { "id": "dsh-model", "from": "dsh_agent", "to": "deepseek_api", "label": "模型推理" },
+    { "id": "app-local", "from": "xiaoqi_app", "to": "local_library", "label": "本地读写" },
+    { "id": "api-data", "from": "cloud_api", "to": "cloud_data", "label": "账号 / 任务 / 附件" },
+    { "id": "dsh-data", "from": "dsh_agent", "to": "cloud_data", "label": "进度 / 成果文件" },
+    { "id": "dsh-tools", "from": "dsh_agent", "to": "xiaoqi_tools", "label": "按需调用" },
+    { "id": "tool-sandbox", "from": "xiaoqi_tools", "to": "aliyun_sandbox", "label": "隔离运行 Python" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "一条任务怎么跑",
+      "items": [
+        "你在手机里提问，小七把任务交给云端。",
+        "云端接到任务后继续运行；锁屏或切换应用，不会让手机承担计算。",
+        "DSH 决定何时调用小七授权工具，再向 DeepSeek 询问。",
+        "回来后小七查询同一条任务，显示进度、回答和文件。长期记录放在 Tablestore / OSS；函数计算的异步任务记录本身只保留 7 天。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "运行费用估算（人民币；以 2026-10-06 官方资料为准）",
+      "items": [
+        "DeepSeek Flash 示例：每月 600 次模型 API 调用，每次约 10,000 输入 Token + 4,000 输出 Token，全部按高峰且输入未命中缓存估算，约 ¥31；全按闲时价约 ¥16。一个任务若调用模型 5 次，费用约乘 5。",
+        "阿里云函数计算：按函数调用和实际资源用量计费；官方 50 万 CU 月包标价 ¥52.5。它是可选资源包，不是本项目固定月费，也不包含存储和公网流量。",
+        "阿里云云沙箱示例：2 vCPU + 4 GiB 经济档，活跃运行 1 小时约 ¥0.24；运行更久、规格更大就增加。独立计费当前处于邀测，账号与地域是否可用要先确认。",
+        "Tablestore / OSS：按数据读写、文件存储、请求和公网下载等用量收费；没定地域、保留期限和文件流量前，不能负责任地给月总价。",
+        "目标架构不购买 E2B 云服务。若第一版不需要 Python 工具，可先不接云沙箱；如果需要，费用走阿里云。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "维护难点（最需要盯住的四件事）",
+      "items": [
+        "高：任务不能丢、不能重复收费。锁屏、断网、失败、停止后，回来仍要看到真实状态和原结果。",
+        "高：权限和密钥。DeepSeek 密钥只放云端；每个插件只能读写获准的资料，Python 必须隔离运行。",
+        "中：长期保存。云函数临时任务记录只有 7 天；小七自己的任务历史和结果文件必须存到 Tablestore / OSS。",
+        "中：云沙箱开通。阿里云沙箱当前有邀测和地域限制；确认账号能用，并确保每个任务结束后释放资源。",
+        "中：版本升级。当前 Harness SDK 仍是预发布版本 `0.1.5rc1`；升级前要先做一次小范围验证。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "哪里变简单，哪里还在建设",
+      "items": [
+        "保留：Flutter 阅读、书籍、批注、笔记和学习入口。",
+        "目标：主聊天统一走云端 DSH；现在的代码基线仍能看到直连模型和云任务两条入口，迁移完成前不能说已经统一。",
+        "目标：不接 E2B 云服务。Python 工具改接阿里云 FC 云沙箱；若阿里云账号或接口暂时不可用，先把 Python 工具留到后续。",
+        "这张图说明目标方案，不代表异步任务模式、阿里云沙箱或整条手机流程已经上线验收。代码路径来自本地提交 9dedc30；当前工作区另有未提交修改。"
+      ]
+    }
+  ]
+}

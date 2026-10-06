@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "小七首版目标架构",
+    "subtitle": "同账号恢复长期资料；AI任务过程不做断点恢复",
+    "output": ".archify/architecture-xiaoqi-account-data-20261006-184755/xiaoqi-account-data.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "用户",
+      "sublabel": "使用同一账号",
+      "icon": "person",
+      "pos": [35, 360],
+      "size": [125, 76]
+    },
+    {
+      "id": "app",
+      "type": "frontend",
+      "label": "Flutter 小七 App",
+      "sublabel": "界面 · 本地缓存",
+      "pos": [215, 360],
+      "size": [155, 76]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "小七 API（FC）",
+      "sublabel": "登录 · 资料同步 · AI入口",
+      "tag": "账号权限与请求管理",
+      "pos": [455, 350],
+      "size": [205, 92]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "DSH Worker（FC）",
+      "sublabel": "在云端运行 DSH",
+      "tag": "AI任务执行",
+      "pos": [755, 350],
+      "size": [200, 92]
+    },
+    {
+      "id": "model",
+      "type": "external",
+      "label": "模型服务",
+      "sublabel": "DeepSeek / MiMo",
+      "tag": "阿里云外部 API",
+      "pos": [1060, 350],
+      "size": [185, 80]
+    },
+    {
+      "id": "email",
+      "type": "external",
+      "label": "邮箱验证码",
+      "sublabel": "现有 QQ SMTP",
+      "pos": [455, 145],
+      "size": [205, 76]
+    },
+    {
+      "id": "records",
+      "type": "database",
+      "label": "Tablestore",
+      "sublabel": "账号长期结构化资料",
+      "tag": "笔记 · 进度 · 聊天 · 书籍信息",
+      "pos": [455, 540],
+      "size": [220, 92]
+    },
+    {
+      "id": "files",
+      "type": "cloud",
+      "label": "OSS",
+      "sublabel": "账号长期文件",
+      "tag": "书籍 · 用户保留的文件",
+      "pos": [755, 540],
+      "size": [200, 92]
+    },
+    {
+      "id": "capabilities",
+      "type": "external",
+      "label": "按需使用的能力",
+      "sublabel": "Skill / Plugin / MCP",
+      "tag": "按首版范围启用",
+      "pos": [1015, 540],
+      "size": [220, 92]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "阿里云（首版核心部署）",
+      "wraps": ["api", "worker", "records", "files"]
+    }
+  ],
+  "connections": [
+    { "id": "user-app", "from": "user", "to": "app", "label": "打开", "variant": "emphasis" },
+    { "id": "app-api", "from": "app", "to": "api", "label": "请求", "variant": "emphasis" },
+    { "id": "api-worker", "from": "api", "to": "worker", "label": "发起AI任务", "variant": "emphasis" },
+    { "id": "worker-model", "from": "worker", "to": "model", "label": "调用模型", "variant": "emphasis" },
+    { "id": "api-email", "from": "api", "to": "email", "label": "发送验证码", "fromSide": "top", "toSide": "bottom" },
+    { "id": "api-records", "from": "api", "to": "records", "label": "按账号读写资料", "fromSide": "bottom", "toSide": "top" },
+    { "id": "api-files", "from": "api", "to": "files", "label": "书籍文件上传 / 下载", "fromSide": "right", "toSide": "top", "via": [[700, 396], [700, 490], [855, 490]], "labelSegment": 1, "labelAt": [700, 456] },
+    { "id": "worker-capabilities", "from": "worker", "to": "capabilities", "label": "按配置调用", "fromSide": "right", "toSide": "left" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "哪些资料会一直保留",
+      "items": [
+        "Tablestore：笔记、阅读进度、聊天记录、书籍信息",
+        "OSS：书籍原文件，以及用户选择保留的生成文件",
+        "同一账号登录后，从云端恢复到新设备"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "AI任务中断时会怎样",
+      "items": [
+        "DSH 在 FC Worker 中运行，完成的回复保存进聊天记录",
+        "不保存小七自己的运行快照或断点",
+        "离开或断网后，正在运行的任务不保证能恢复"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "图里的名称怎么理解",
+      "items": [
+        "FC API 和 FC Worker 是云端运行单元；DSH 在 Worker 内运行",
+        "AgentEngine / DSH Adapter 是程序里的接口层，不是额外服务器",
+        "模型和 QQ 邮箱在阿里云外；Skill / Plugin / MCP 按首版需要接入"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "范围说明",
+      "items": [
+        "这是按本次讨论整理的首版目标图，不表示所有资料同步功能已经上线",
+        "Tablestore 与 OSS 现有能力需要扩展到账号长期资料"
+      ]
+    }
+  ]
+}

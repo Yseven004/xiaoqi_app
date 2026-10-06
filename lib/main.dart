@@ -4,7 +4,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'config/colors.dart';
 import 'features/capabilities/data/capability_cloud_sync.dart';
-import 'pages/email_login_page.dart';
 import 'pages/home_page.dart';
 
 Future<void> main() async {
@@ -61,7 +60,6 @@ class _AuthGate extends StatefulWidget {
 
 class _AuthGateState extends State<_AuthGate> {
   bool _checking = true;
-  bool _authenticated = false;
 
   @override
   void initState() {
@@ -76,30 +74,12 @@ class _AuthGateState extends State<_AuthGate> {
       return;
     }
     try {
-      final valid = await cloud.validateEmailSession();
-      if (mounted) {
-        setState(() {
-          _authenticated = valid;
-          _checking = false;
-        });
-      }
+      await cloud.validateEmailSession();
+      if (mounted) setState(() => _checking = false);
     } catch (_) {
       // A previously authenticated user can still open local content offline.
-      if (mounted) {
-        setState(() {
-          _authenticated = true;
-          _checking = false;
-        });
-      }
+      if (mounted) setState(() => _checking = false);
     }
-  }
-
-  void _onAuthenticated() {
-    if (mounted) setState(() => _authenticated = true);
-  }
-
-  void _onSignedOut() {
-    if (mounted) setState(() => _authenticated = false);
   }
 
   @override
@@ -118,9 +98,6 @@ class _AuthGateState extends State<_AuthGate> {
         ),
       );
     }
-    if (!_authenticated) {
-      return EmailLoginPage(onAuthenticated: _onAuthenticated);
-    }
-    return HomePage(onSignOut: _onSignedOut);
+    return const HomePage();
   }
 }
