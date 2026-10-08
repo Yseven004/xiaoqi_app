@@ -1,0 +1,4 @@
+{$XIAOQI_PUBLIC_HOST:localhost} {
+	encode zstd gzip
+	reverse_proxy app:8080
+}

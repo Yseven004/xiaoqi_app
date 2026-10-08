@@ -22,8 +22,13 @@ class CapabilityCloudSync {
   Future<void>? _syncing;
   bool _syncAgain = false;
 
-  String get _baseUrl =>
-      ApiConfig.capabilitiesBaseUrl.replaceFirst(RegExp(r'/$'), '');
+  String get _baseUrl {
+    final value = ApiConfig.capabilitiesBaseUrl.trim();
+    if (value.isEmpty) {
+      throw StateError('小七服务地址尚未配置，请在构建时设置 CAPABILITIES_BASE_URL。');
+    }
+    return value.replaceFirst(RegExp(r'/$'), '');
+  }
 
   Future<bool> get hasEmailSession => hasLocalEmailSession;
 
@@ -457,6 +462,7 @@ class CapabilityCloudSync {
           yield event;
         }
       }
+      if (response['content_expired'] == true) return;
       final status = response['status']?.toString();
       final cleanupPending = response['sandbox_cleanup_pending'] == true;
       if (!cleanupPending &&

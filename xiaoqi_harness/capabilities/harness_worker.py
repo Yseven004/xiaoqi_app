@@ -26,6 +26,7 @@ _ACP_CANCEL_TIMEOUT_SECONDS = 5
 _SNAPSHOT_DIRS = ("sessions", "attachments", "storages")
 _DISABLED_TOOLS = (
     "plan-mode",
+    "mcp-resources",
     "tool-bash",
     "tool-pwsh",
     "tool-jobs",
@@ -233,6 +234,18 @@ def _stable_workspace(tenant: str, task_id: str) -> Path:
     return path
 
 
+def purge_task_workspace(tenant: str, task_id: str) -> None:
+    root = (Path(tempfile.gettempdir()) / "xiaoqi-harness-workspaces").resolve()
+    path = (root / _task_hash(tenant) / _task_hash(task_id)).resolve()
+    if path.parent.parent != root:
+        raise ValueError("Harness workspace path escaped its root")
+    shutil.rmtree(path, ignore_errors=False)
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+
+
 def _restore_snapshot(home: Path, snapshot: bytes) -> None:
     if len(snapshot) > _SNAPSHOT_LIMIT:
         raise ValueError("Harness 会话快照超过恢复上限")
@@ -275,6 +288,7 @@ def _runtime_environment(home: Path, api_key: str) -> dict[str, str]:
         "WINDIR",
         "TEMP",
         "TMP",
+        "TMPDIR",
         "HOMEDRIVE",
         "HOMEPATH",
     }
@@ -305,19 +319,8 @@ def _tool_environment(tenant: str, task_id: str, attempt: int, worker_id: str, p
         "TMP",
         "HOMEDRIVE",
         "HOMEPATH",
-        "OTS_ENDPOINT",
-        "OTS_INSTANCE",
-        "OTS_REGION",
-        "OSS_ENDPOINT",
-        "OSS_BUCKET",
-        "OSS_REGION",
-        "CAPABILITY_TABLE",
-        "ALIBABA_CLOUD_ACCESS_KEY_ID",
-        "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
-        "ALIBABA_CLOUD_SECURITY_TOKEN",
-        "E2B_API_KEY",
-        "E2B_API_URL",
-        "E2B_DOMAIN",
+        "XIAOQI_DATA_DIR",
+        "XIAOQI_SINGLE_SERVER",
     }
     env = {key: value for key, value in os.environ.items() if key in keys}
     env["PATH"] = os.pathsep.join(
@@ -382,7 +385,7 @@ def _stop_process(process: subprocess.Popen[bytes] | None) -> None:
 
 
 def _checkpoint(store: CloudStore, tenant: str, task_id: str, attempt: int, worker_id: str, session_id: str, home: Path) -> None:
-    from .api import _mutate_task
+    from .api import _DSH_RUNTIME_VERSION, _mutate_task
 
     snapshot = _make_snapshot(home)
     key = (
@@ -400,7 +403,7 @@ def _checkpoint(store: CloudStore, tenant: str, task_id: str, attempt: int, work
             **old,
             "harness_session_id": session_id,
             "harness_snapshot_key": key,
-            "harness_runtime_version": "0.1.5rc1",
+            "harness_runtime_version": _DSH_RUNTIME_VERSION,
             "updated_at": int(time.time()),
         }
 
@@ -477,6 +480,8 @@ def _claim_python_reminder(
     from .api import _mutate_task
     from .worker import TaskCancelled, TaskNotOwned, _requires_python_execution, _task_state
 
+    if os.environ.get("XIAOQI_SINGLE_SERVER") == "1":
+        return False
     if not _requires_python_execution(messages):
         return False
     current = _task_state(store, tenant, task_id)

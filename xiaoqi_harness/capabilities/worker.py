@@ -254,6 +254,20 @@ def _requested_python_output_names(messages: list[dict[str, Any]]) -> set[str]:
 
 
 def _xiaoqi_system_instructions() -> str:
+    if os.environ.get("XIAOQI_SINGLE_SERVER") == "1":
+        return (
+            "\n\n小栖当前开放的能力：读取本次任务附带的资料、读取已授权文字技能及其文字资源、"
+            "创建或修改等待用户确认保存的技能草稿。当前单机服务没有开放 Python 或其他代码执行，"
+            "也不能用代码处理数据或生成可下载文件。用户提出这类请求时，明确说明暂未开放；"
+            "可以提供文字分析或示例代码，但不能声称已经运行。"
+            "联网默认关闭。确需联网时列出精确域名和用途，等待系统单独授权。"
+            "长文本按工具提示的 offset 分段读取，直到到达末尾。"
+            "创建或修改技能时，若目的不明确，直接在普通聊天回复中用一句简短纯文本问题澄清，"
+            "不要返回结构化问题或选项面板；目的明确后将完整技能和资源写入 draft_workspace，"
+            "读回最终 SKILL.md 后再依据该版本完成一次代表性试用。"
+            "最终回复展示完整 SKILL.md、试用输入与实际结果；未执行的试用必须标为文字演示，不能声称已运行。"
+            "草稿工作区不是正式保存；只有用户点击保存才创建正式版本。"
+        )
     return (
         "\n\n小栖工具规则：需要实际运行 Python 时调用 execute_python，不要只描述执行结果；需要交付的文件写到 /home/user/workspace/output；"
         "如果 Python 工具返回‘执行失败’，必须明确告诉用户失败，不得描述成成功。"
@@ -268,6 +282,8 @@ def _xiaoqi_system_instructions() -> str:
 def _validate_python_requirements(
     task: dict[str, Any], messages: list[dict[str, Any]]
 ) -> None:
+    if os.environ.get("XIAOQI_SINGLE_SERVER") == "1":
+        return
     if not _requires_python_execution(messages):
         return
     if not task.get("python_succeeded"):
@@ -402,6 +418,11 @@ def _execute_python(
 ) -> str:
     if len(code.encode("utf-8")) > 64 * 1024:
         raise ValueError("Python 脚本超过 64 KB")
+    if os.environ.get("XIAOQI_SINGLE_SERVER") == "1":
+        raise RuntimeError(
+            "单机版暂未启用 Python 执行：需先在目标 Linux 服务器验证低权限隔离和联网域名限制。"
+            "当前可以继续使用文字任务。"
+        )
     sandbox_connection = {
         "api_key": os.environ.get("E2B_API_KEY", "").strip(),
         "api_url": os.environ.get("E2B_API_URL", "").strip(),

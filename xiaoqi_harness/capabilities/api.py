@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import re
 import secrets
 import smtplib
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -33,6 +36,18 @@ _AUTH_CODE_TTL_SECONDS = 600
 _AUTH_CODE_RESEND_SECONDS = 60
 _AUTH_CODE_MAX_SENDS_PER_HOUR = 5
 _AUTH_CODE_MAX_ATTEMPTS = 5
+_TASK_RETENTION_SECONDS = 24 * 60 * 60
+_TERMINAL_TASK_STATUSES = {"succeeded", "failed", "cancelled"}
+_DSH_RUNTIME_VERSION = os.environ.get("XIAOQI_DSH_VERSION", "0.1.5rc1")
+_LOCAL_TASK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="xiaoqi-task"
+)
+_LOCAL_TASK_LOCK = threading.Lock()
+_LOCAL_TASKS_SUBMITTED: set[tuple[str, str, int]] = set()
+_RUNTIME_LOCK = threading.Lock()
+_RUNTIME_STARTED = False
+_LOCAL_RUNTIME_ENABLED = False
+_LOGGER = logging.getLogger(__name__)
 
 
 def _agent_runtime_for_task(tenant_id: str, task_request: dict[str, Any]) -> str:
@@ -281,6 +296,10 @@ def _mutate_task(tenant: str, task_id: str, transform: Callable[[dict[str, Any]]
         if existing is None:
             raise KeyError(task_id)
         updated = transform(dict(existing.value))
+        if updated.get("status") in _TERMINAL_TASK_STATUSES:
+            updated.setdefault("finished_at", int(time.time()))
+        else:
+            updated.pop("finished_at", None)
         try:
             return store().put(key, updated, existing.revision)
         except RevisionConflict:
@@ -288,11 +307,41 @@ def _mutate_task(tenant: str, task_id: str, transform: Callable[[dict[str, Any]]
     raise RevisionConflict(task_id)
 
 
+def _run_local_task(tenant: str, task_id: str, attempt: int) -> None:
+    try:
+        from .worker import run_task
+
+        run_task(store(), tenant, task_id, attempt)
+    finally:
+        with _LOCAL_TASK_LOCK:
+            _LOCAL_TASKS_SUBMITTED.discard((tenant, task_id, attempt))
+
+
+def _enqueue_local_task(tenant: str, task_id: str, attempt: int) -> None:
+    identity = (tenant, task_id, attempt)
+    with _LOCAL_TASK_LOCK:
+        if identity in _LOCAL_TASKS_SUBMITTED:
+            return
+        _LOCAL_TASKS_SUBMITTED.add(identity)
+    try:
+        _LOCAL_TASK_EXECUTOR.submit(_run_local_task, tenant, task_id, attempt)
+    except Exception:
+        with _LOCAL_TASK_LOCK:
+            _LOCAL_TASKS_SUBMITTED.discard(identity)
+        raise
+
+
 def _enqueue_task(tenant: str, task_id: str, attempt: int) -> None:
+    """Use the local single-server queue, retaining the old FC route for rollback."""
+    if _LOCAL_RUNTIME_ENABLED:
+        _enqueue_local_task(tenant, task_id, attempt)
+        return
     invoke_url = os.environ.get("CAPABILITY_TASK_FUNCTION_URL", "").strip()
     internal_token = os.environ.get("CAPABILITY_TASK_INTERNAL_TOKEN", "")
-    if not invoke_url or len(internal_token) < 32:
-        raise ConfigurationError("后台任务函数尚未配置")
+    if not invoke_url:
+        raise ConfigurationError("单机任务运行时未启动")
+    if len(internal_token) < 32:
+        raise ConfigurationError("后台任务函数鉴权未配置")
     payload = json.dumps(
         {"tenant_id": tenant, "task_id": task_id, "attempt": attempt}
     ).encode("utf-8")
@@ -315,6 +364,216 @@ def _enqueue_task(tenant: str, task_id: str, attempt: int) -> None:
         # A retry with the same Function Compute task id is already enqueued.
         if error.code != 409:
             raise
+
+
+def _task_identity_from_key(key: str) -> tuple[str, str] | None:
+    parts = key.split("/")
+    if len(parts) != 3 or parts[0] != "task":
+        return None
+    return parts[1], parts[2]
+
+
+def _expire_task_content(tenant: str, task_id: str) -> bool:
+    current = store().get(f"task/{tenant}/{task_id}")
+    if current is None or current.value.get("content_expired"):
+        return True
+    if current.value.get("status") not in _TERMINAL_TASK_STATUSES:
+        return False
+
+    def mark_expiring(old: dict[str, Any]) -> dict[str, Any]:
+        if old.get("status") not in _TERMINAL_TASK_STATUSES:
+            return old
+        return {**old, "retention_state": "expiring", "updated_at": int(time.time())}
+
+    marked = _mutate_task(tenant, task_id, mark_expiring).value
+    if marked.get("content_expired"):
+        return True
+    if marked.get("retention_state") != "expiring":
+        return False
+
+    try:
+        object_keys: set[str] = set()
+        for field in ("input_object_key", "transcript_object_key", "harness_snapshot_key"):
+            value = marked.get(field)
+            if value:
+                object_keys.add(str(value))
+        for artifact in marked.get("artifacts", []):
+            if isinstance(artifact, dict) and artifact.get("object_key"):
+                object_keys.add(str(artifact["object_key"]))
+        for key in object_keys:
+            store().delete_immutable(key)
+        store().delete_objects_prefix(f"tenants/{tenant}/tasks/{task_id}/")
+        tenant_hash = hashlib.sha256(tenant.encode("utf-8")).hexdigest()[:24]
+        task_hash = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:24]
+        store().delete_objects_prefix(f"tenants/{tenant_hash}/tasks/{task_hash}/")
+        from .harness_worker import purge_task_workspace
+
+        purge_task_workspace(tenant, task_id)
+    except Exception:
+        _LOGGER.exception("Temporary task content cleanup failed for task %s", task_id)
+        return False
+
+    now = int(time.time())
+
+    def finish_expiry(old: dict[str, Any]) -> dict[str, Any]:
+        if old.get("content_expired"):
+            return old
+        if (
+            old.get("status") not in _TERMINAL_TASK_STATUSES
+            or old.get("retention_state") != "expiring"
+        ):
+            return old
+        expired = {
+            "task_id": task_id,
+            "status": old.get("status", "failed"),
+            "attempt": old.get("attempt", 1),
+            "created_at": old.get("created_at", now),
+            "updated_at": now,
+            "finished_at": old.get("finished_at", now),
+            "content_expired": True,
+            "cancel_requested": bool(old.get("cancel_requested")),
+            "events": [{
+                "seq": 0,
+                "type": "error",
+                "code": "content_expired",
+                "message": "服务器临时任务副本已过期；手机本地聊天记录仍保留。",
+                "created_at": now,
+            }],
+        }
+        for field in (
+            "sandbox_id",
+            "sandbox_cleanup_pending",
+            "sandbox_cleanup_retry_at",
+            "sandbox_cleanup_deadline",
+        ):
+            if field in old:
+                expired[field] = old[field]
+        return expired
+
+    final = _mutate_task(tenant, task_id, finish_expiry)
+    return bool(final.value.get("content_expired"))
+
+
+def _expire_finished_tasks() -> None:
+    now = int(time.time())
+    cursor: str | None = None
+    content_was_purged = False
+    while True:
+        page = store().list("task/", limit=200, after_key=cursor)
+        if not page:
+            if content_was_purged:
+                checkpoint = getattr(store(), "checkpoint_wal", None)
+                if callable(checkpoint) and not checkpoint():
+                    _LOGGER.warning("SQLite WAL could not be truncated after task expiry")
+            return
+        for key, document in page:
+            cursor = key
+            identity = _task_identity_from_key(key)
+            if identity is None:
+                continue
+            tenant, task_id = identity
+            value = document.value
+            if value.get("sandbox_cleanup_pending"):
+                try:
+                    _retry_pending_task_sandbox_cleanup(tenant, task_id, value)
+                except Exception:
+                    _LOGGER.exception("Sandbox cleanup retry failed for task %s", task_id)
+            if value.get("content_expired"):
+                continue
+            if value.get("status") not in _TERMINAL_TASK_STATUSES:
+                continue
+            finished_at = int(value.get("finished_at") or value.get("updated_at") or now)
+            if now - finished_at >= _TASK_RETENTION_SECONDS:
+                content_was_purged = _expire_task_content(tenant, task_id) or content_was_purged
+        if len(page) < 200:
+            if content_was_purged:
+                checkpoint = getattr(store(), "checkpoint_wal", None)
+                if callable(checkpoint) and not checkpoint():
+                    _LOGGER.warning("SQLite WAL could not be truncated after task expiry")
+            return
+
+
+def _recover_local_tasks() -> list[tuple[str, str, int]]:
+    queued: list[tuple[str, str, int]] = []
+    cursor: str | None = None
+    while True:
+        page = store().list("task/", limit=200, after_key=cursor)
+        if not page:
+            return queued
+        for key, document in page:
+            cursor = key
+            identity = _task_identity_from_key(key)
+            if identity is None:
+                continue
+            tenant, task_id = identity
+            value = document.value
+            status = value.get("status")
+            if status == "queued":
+                queued.append((tenant, task_id, int(value.get("attempt", 1))))
+            elif status in ("running", "cancelling"):
+                now = int(time.time())
+                cancelled = bool(value.get("cancel_requested")) or status == "cancelling"
+                terminal_status = "cancelled" if cancelled else "failed"
+
+                def interrupt(old: dict[str, Any]) -> dict[str, Any]:
+                    if old.get("status") not in ("running", "cancelling"):
+                        return old
+                    events = list(old.get("events", []))
+                    events.append({
+                        "seq": int(events[-1].get("seq", -1)) + 1 if events else 0,
+                        "type": "status" if cancelled else "error",
+                        "status": terminal_status,
+                        "message": None if cancelled else "服务重启，任务已中断；为避免重复操作，请重新发起。",
+                        "created_at": now,
+                    })
+                    return {
+                        **old,
+                        "status": terminal_status,
+                        "error": None if cancelled else "服务重启，任务已中断；为避免重复操作，请重新发起。",
+                        "worker_id": None,
+                        "worker_lease_until": 0,
+                        "active_tool_call": None,
+                        "updated_at": now,
+                        "events": events[-200:],
+                    }
+
+                _mutate_task(tenant, task_id, interrupt)
+        if len(page) < 200:
+            return queued
+
+
+def _retention_loop() -> None:
+    while True:
+        time.sleep(60)
+        try:
+            _expire_finished_tasks()
+        except Exception:
+            _LOGGER.exception("Task retention sweep failed")
+
+
+def start_background_runtime() -> None:
+    """Enable the in-process queue and recover persisted tasks before serving."""
+    global _LOCAL_RUNTIME_ENABLED, _RUNTIME_STARTED
+    with _RUNTIME_LOCK:
+        if _RUNTIME_STARTED:
+            return
+        _LOCAL_RUNTIME_ENABLED = True
+        os.environ["XIAOQI_SINGLE_SERVER"] = "1"
+        try:
+            store().remove_orphaned_temp_files()
+            _expire_finished_tasks()
+            queued = _recover_local_tasks()
+            for tenant, task_id, attempt in queued:
+                _enqueue_local_task(tenant, task_id, attempt)
+            threading.Thread(
+                target=_retention_loop,
+                name="xiaoqi-retention",
+                daemon=True,
+            ).start()
+        except Exception:
+            _LOCAL_RUNTIME_ENABLED = False
+            raise
+        _RUNTIME_STARTED = True
 
 
 @capabilities.post("/pairing-codes")
@@ -821,6 +1080,10 @@ def create_agent_task() -> Any:
         ).hexdigest()
         existing = store().get(key)
         if existing is not None:
+            if existing.value.get("content_expired"):
+                return _error("任务服务器副本已过期，请使用新的任务 ID 重新发送", 410)
+            if existing.value.get("retention_state") == "expiring":
+                return _error("任务临时副本正在清理，请稍后重试", 503)
             if existing.value.get("request_hash") != request_hash:
                 return _error("任务 ID 已用于另一份请求", 409)
             return jsonify({"task_id": task_id, "status": existing.value["status"], "deduplicated": True})
@@ -836,7 +1099,7 @@ def create_agent_task() -> Any:
             "tenant_id": g.tenant_id,
             "device_id": g.device_id,
             "runtime": runtime,
-            "runtime_version": "0.1.5rc1",
+            "runtime_version": _DSH_RUNTIME_VERSION,
             "status": "queued",
             "attempt": 1,
             "input_object_key": transcript_key,
@@ -888,6 +1151,16 @@ def get_agent_task(task_id: str) -> Any:
         if task is None:
             return _error("任务不存在", 404)
         value = task.value
+        if value.get("retention_state") == "expiring":
+            return _error("任务临时副本正在清理，请稍后重试", 503)
+        if value.get("content_expired"):
+            return jsonify({
+                "task_id": task_id,
+                "status": value.get("status", "unknown"),
+                "attempt": value.get("attempt", 1),
+                "content_expired": True,
+                "cloud_revision": task.revision,
+            })
         draft_files = value.get("draft_files", {})
         encoded_files = {
             name: base64.b64encode(str(content).encode("utf-8")).decode("ascii")
@@ -907,6 +1180,15 @@ def get_agent_task_events(task_id: str) -> Any:
         task = store().get(f"task/{g.tenant_id}/{task_id}")
         if task is None:
             return _error("任务不存在", 404)
+        if task.value.get("retention_state") == "expiring":
+            return _error("任务临时副本正在清理，请稍后重试", 503)
+        if task.value.get("content_expired"):
+            return jsonify({
+                "events": task.value.get("events", []),
+                "status": task.value.get("status", "unknown"),
+                "content_expired": True,
+                "sandbox_cleanup_pending": bool(task.value.get("sandbox_cleanup_pending")),
+            })
         value = _retry_pending_task_sandbox_cleanup(
             g.tenant_id, task_id, task.value
         )
@@ -1022,6 +1304,10 @@ def download_agent_task_artifact(task_id: str, artifact_id: str) -> Any:
         task = store().get(f"task/{g.tenant_id}/{task_id}")
         if task is None:
             return _error("任务不存在", 404)
+        if task.value.get("content_expired"):
+            return _error("文件已过期；手机本地聊天记录仍保留，请重新生成文件", 410)
+        if task.value.get("retention_state") == "expiring":
+            return _error("文件临时副本正在清理，请稍后重试", 503)
         artifact = next(
             (item for item in task.value.get("artifacts", []) if item.get("id") == artifact_id),
             None,
@@ -1143,16 +1429,28 @@ def resume_agent_task(task_id: str) -> Any:
         current = store().get(f"task/{g.tenant_id}/{task_id}")
         if current is None:
             return _error("任务不存在", 404)
+        if current.value.get("content_expired"):
+            return _error("任务服务器副本已过期，请使用新的任务 ID 重新发送", 410)
+        if current.value.get("retention_state") == "expiring":
+            return _error("任务临时副本正在清理，请稍后重试", 503)
         if current.value.get("status") not in ("failed", "cancelled"):
             return _error("只有失败或已取消的任务可以恢复", 409)
-        task = _mutate_task(g.tenant_id, task_id, lambda old: {
-            **old,
-            "status": "queued",
-            "attempt": int(old.get("attempt", 1)) + 1,
-            "cancel_requested": False,
-            "error": None,
-            "updated_at": int(time.time()),
-        })
+
+        def resume(old: dict[str, Any]) -> dict[str, Any]:
+            if old.get("retention_state") == "expiring" or old.get("content_expired"):
+                raise ValueError("任务临时副本已进入清理，暂时无法恢复")
+            if old.get("status") not in ("failed", "cancelled"):
+                raise ValueError("任务状态已变化，请刷新后重试")
+            return {
+                **old,
+                "status": "queued",
+                "attempt": int(old.get("attempt", 1)) + 1,
+                "cancel_requested": False,
+                "error": None,
+                "updated_at": int(time.time()),
+            }
+
+        task = _mutate_task(g.tenant_id, task_id, resume)
         _enqueue_task(g.tenant_id, task_id, int(task.value["attempt"]))
         return jsonify({"task_id": task_id, "status": "queued", "attempt": task.value["attempt"]}), 202
     except KeyError:

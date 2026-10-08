@@ -1,0 +1,269 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-08T03:12:46.504Z",
+  "title": "Design System: Xiaoqi",
+  "extensions": {
+    "colorMeta": {
+      "graphite": {
+        "role": "primary",
+        "displayName": "石墨黑",
+        "tonalRamp": [
+          "#15171A",
+          "#1D2024",
+          "#24272C",
+          "#3E4248",
+          "#686D74",
+          "#A1A5AA",
+          "#D5D7DA",
+          "#F4F4F4"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "正文墨色",
+        "tonalRamp": [
+          "#171717",
+          "#242424",
+          "#303134",
+          "#4D4D4F",
+          "#77787A",
+          "#A6A6A8",
+          "#D7D7D8",
+          "#F4F4F4"
+        ]
+      },
+      "secondary-ink": {
+        "role": "neutral",
+        "displayName": "中性灰",
+        "tonalRamp": [
+          "#202326",
+          "#35393E",
+          "#555B62",
+          "#72777D",
+          "#9A9DA2",
+          "#BEC0C4",
+          "#DFE0E2",
+          "#F5F5F5"
+        ]
+      },
+      "muted-ink": {
+        "role": "neutral",
+        "displayName": "提示灰",
+        "tonalRamp": [
+          "#24272C",
+          "#42464C",
+          "#70747C",
+          "#909399",
+          "#B2B5B9",
+          "#CFD1D4",
+          "#E5E6E8",
+          "#F7F7F8"
+        ]
+      },
+      "white": {
+        "role": "neutral",
+        "displayName": "纯白",
+        "tonalRamp": [
+          "#292929",
+          "#474747",
+          "#666666",
+          "#858585",
+          "#A3A3A3",
+          "#C2C2C2",
+          "#E0E0E0",
+          "#FFFFFF"
+        ]
+      },
+      "fog": {
+        "role": "neutral",
+        "displayName": "雾灰",
+        "tonalRamp": [
+          "#242527",
+          "#424345",
+          "#606163",
+          "#7F8082",
+          "#9E9FA0",
+          "#BDBDBE",
+          "#DCDCDD",
+          "#F7F7F8"
+        ]
+      },
+      "soft-gray": {
+        "role": "neutral",
+        "displayName": "浅灰",
+        "tonalRamp": [
+          "#202020",
+          "#3D3D3D",
+          "#5A5A5A",
+          "#777777",
+          "#949494",
+          "#B1B1B1",
+          "#CECECE",
+          "#F2F2F2"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "分隔灰",
+        "tonalRamp": [
+          "#202124",
+          "#3B3D41",
+          "#56595E",
+          "#71747A",
+          "#8C8F94",
+          "#A7A9AD",
+          "#C1C3C6",
+          "#D5D8DE"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "边框灰",
+        "tonalRamp": [
+          "#202020",
+          "#3C3C3C",
+          "#585858",
+          "#747474",
+          "#909090",
+          "#ACACAC",
+          "#C8C8C8",
+          "#E0E0E0"
+        ]
+      },
+      "alert": {
+        "role": "error",
+        "displayName": "错误红",
+        "tonalRamp": [
+          "#3A1110",
+          "#5D1917",
+          "#842320",
+          "#B3261E",
+          "#C75A53",
+          "#D88B86",
+          "#E8BCB9",
+          "#F7E9E8"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "标题",
+        "purpose": "AI 回复标题和页面层级。"
+      },
+      "body": {
+        "displayName": "正文",
+        "purpose": "普通界面说明和表单内容。"
+      },
+      "label": {
+        "displayName": "辅助文字",
+        "purpose": "状态、提示和次要信息。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "menu-floating",
+        "value": "0 4px 15px rgba(0,0,0,0.04)",
+        "purpose": "能力菜单从页面内容上轻微浮起。"
+      },
+      {
+        "name": "composer-capsule",
+        "value": "0 8px 22px rgba(23,33,43,0.11)",
+        "purpose": "输入框上方操作胶囊的轻柔分层。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "capsule-state",
+        "value": "180ms ease-in-out",
+        "purpose": "操作胶囊展开时的透明度与旋转过渡。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "主要按钮",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "用于明确的确认或提交操作，深色底配白字。",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">继续</button>",
+      "css": ".ds-btn-primary { min-height: 42px; padding: 0 18px; border: 0; border-radius: 8px; background: #24272C; color: #FFFFFF; font: 600 14px/1.4 system-ui, sans-serif; cursor: pointer; } .ds-btn-primary:hover { opacity: .9; } .ds-btn-primary:focus-visible { outline: 2px solid #70747C; outline-offset: 2px; } .ds-btn-primary:active { opacity: .82; }"
+    },
+    {
+      "name": "次要按钮",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "用于取消或次级动作，白底、细灰边框。",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">取消</button>",
+      "css": ".ds-btn-secondary { min-height: 42px; padding: 0 16px; border: 1px solid #D5D5D5; border-radius: 8px; background: #FFFFFF; color: #303134; font: 500 14px/1.4 system-ui, sans-serif; cursor: pointer; } .ds-btn-secondary:hover { background: #F7F7F8; } .ds-btn-secondary:focus-visible { outline: 2px solid #70747C; outline-offset: 2px; } .ds-btn-secondary:active { background: #F2F2F2; }"
+    },
+    {
+      "name": "选择标签",
+      "kind": "chip",
+      "refersTo": "chip-selected",
+      "description": "未选中时白底灰边，选中时深色底白字。",
+      "html": "<div class=\"ds-chip-row\"><button class=\"ds-chip\" aria-pressed=\"false\">稍后阅读</button><button class=\"ds-chip is-selected\" aria-pressed=\"true\">已选中</button></div>",
+      "css": ".ds-chip-row { display: flex; gap: 8px; } .ds-chip { min-height: 36px; padding: 0 14px; border: 1px solid #D5D8DE; border-radius: 9999px; background: #FFFFFF; color: #333741; font: 400 14px/1.3 system-ui, sans-serif; cursor: pointer; } .ds-chip.is-selected { border-color: #24272C; background: #24272C; color: #FFFFFF; } .ds-chip:focus-visible { outline: 2px solid #70747C; outline-offset: 2px; }"
+    },
+    {
+      "name": "输入框",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "多行补充说明；默认灰边，聚焦时边框加深。",
+      "html": "<label class=\"ds-field\"><span>补充说明</span><textarea placeholder=\"选填\"></textarea></label>",
+      "css": ".ds-field { display: grid; gap: 6px; color: #555B62; font: 400 13px/1.4 system-ui, sans-serif; } .ds-field textarea { min-height: 72px; padding: 10px 12px; border: 1px solid #D5D8DE; border-radius: 12px; background: #FFFFFF; color: #303134; font: 400 14px/1.5 system-ui, sans-serif; resize: vertical; } .ds-field textarea:focus { border-color: #24272C; outline: 1px solid #24272C; }"
+    },
+    {
+      "name": "能力菜单面板",
+      "kind": "card",
+      "refersTo": "menu-panel",
+      "description": "白色浮层，用细边框和轻阴影从页面内容中区分。",
+      "html": "<section class=\"ds-menu-panel\"><strong>管理我的能力</strong><p>技能与插件</p></section>",
+      "css": ".ds-menu-panel { width: 280px; padding: 16px 12px; border: 1px solid #E0E0E0; border-radius: 22px; background: #FFFFFF; color: #303134; box-shadow: 0 4px 15px rgba(0,0,0,.04); font: 400 14px/1.5 system-ui, sans-serif; } .ds-menu-panel strong { font-size: 16px; font-weight: 600; } .ds-menu-panel p { margin: 8px 0 0; color: #70747C; }"
+    },
+    {
+      "name": "操作胶囊",
+      "kind": "custom",
+      "description": "输入区上方的短操作入口，轻微透白并有背景模糊。",
+      "html": "<button class=\"ds-action-capsule\" type=\"button\"><span>联网搜索</span><span aria-hidden=\"true\">⌄</span></button>",
+      "css": ".ds-action-capsule { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 8px 11px; border: 1px solid rgba(255,255,255,.84); border-radius: 13px; background: rgba(255,255,255,.94); color: #252932; box-shadow: 0 8px 22px rgba(23,33,43,.11); backdrop-filter: blur(14px); font: 500 13px/1.1 system-ui, sans-serif; cursor: pointer; } .ds-action-capsule:focus-visible { outline: 2px solid #70747C; outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "清爽的黑白阅读桌",
+    "overview": "小七的界面以黑、白、灰为主，让书籍和资料内容保持醒目。黑色用于主要操作和选中状态；白色留给工作区域；浅灰色用来区分背景、提示文字和边界。界面保持安静、清楚，减少装饰。\\n\\n手机和平板共用这套视觉方向。页面之间通过文字层级、留白和细分隔线建立结构，按钮、输入框和浮层都沿用同一组灰阶与圆角规则。",
+    "keyCharacteristics": [
+      "黑白灰为主，颜色只承担清楚的状态含义。",
+      "结构靠文字、间距和细边框表达。",
+      "阴影只用于需要浮起的菜单和操作胶囊。"
+    ],
+    "rules": [
+      {
+        "name": "The Grayscale First Rule",
+        "body": "优先用文字层级、留白和灰阶表达重点；只有错误或危险状态才使用红色。",
+        "section": "colors"
+      },
+      {
+        "name": "The System Sans Rule",
+        "body": "界面文字沿用系统无衬线字体；代码片段使用等宽字体，阅读内容按阅读器设置显示。",
+        "section": "typography"
+      },
+      {
+        "name": "The Overlay Only Rule",
+        "body": "静态内容优先保持平面；阴影只给需要从页面上浮起的操作层。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use grayscale for ordinary surfaces, text, selection, and hierarchy.",
+      "Do use spacing and type weight before adding another visual accent.",
+      "Do keep inputs and menus readable with clear borders and focus states.",
+      "Do use static placeholders during route transitions; reserve small progress indicators for an action in progress."
+    ],
+    "donts": [
+      "Don't add saturated accent colors or decorative gradients to ordinary screens.",
+      "Don't add heavy shadows to static cards or nest several card layers.",
+      "Don't rely on color alone to communicate errors or selection.",
+      "Don't use a loading spinner as a page transition."
+    ]
+  }
+}

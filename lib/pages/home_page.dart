@@ -6656,8 +6656,14 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       if (savedPath != null && mounted) {
         AppToast.show(context, '文件已保存');
       }
-    } catch (_) {
-      if (mounted) AppToast.show(context, '文件下载失败，请重试');
+    } catch (error) {
+      if (mounted) {
+        final message = error is StateError ? error.message.toString() : '';
+        AppToast.show(
+          context,
+          message.contains('文件已过期') ? message : '文件下载失败，请重试',
+        );
+      }
     } finally {
       if (mounted) setState(() => _downloadingArtifactKeys.remove(key));
     }

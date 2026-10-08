@@ -664,3 +664,24 @@ def test_python_execution_uses_isolated_sandbox_and_cleans_it_up(
     if expected_cleanup_pending:
         assert task.value["sandbox_cleanup_deadline"] is not None
     assert task.value["python_succeeded"] is True
+
+
+def test_single_server_disables_unverified_python_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XIAOQI_SINGLE_SERVER", "1")
+
+    with pytest.raises(RuntimeError, match="低权限隔离"):
+        worker._execute_python(None, "personal", "task-test", "print('x')", [], {})
+
+
+def test_single_server_dispatches_tasks_to_its_local_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, int]] = []
+    monkeypatch.setattr(api, "_LOCAL_RUNTIME_ENABLED", True)
+    monkeypatch.setattr(api, "_enqueue_local_task", lambda *args: calls.append(args))
+
+    api._enqueue_task("personal", "task-local", 3)
+
+    assert calls == [("personal", "task-local", 3)]

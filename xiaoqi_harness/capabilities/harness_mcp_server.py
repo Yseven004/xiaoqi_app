@@ -230,24 +230,25 @@ def create_server(task: XiaoqiToolServer) -> MCPServer:
             arguments.update({"offset": offset, "limit": limit})
         return task.invoke("draft_workspace", arguments)
 
-    @server.tool(
-        name="execute_python",
-        description=(
-            "在隔离的 E2B Python 沙箱运行计算或数据转换。默认断网；"
-            "需要交付的文件写入 /home/user/workspace/output。"
-        ),
-    )
-    def execute_python(
-        code: str,
-        network_domains: list[str] | None = None,
-        network_purpose: str = "脚本需要访问指定网站",
-    ) -> str:
-        arguments: dict[str, Any] = {"code": code}
-        if network_domains is not None:
-            arguments["network_domains"] = network_domains
-        if network_purpose:
-            arguments["network_purpose"] = network_purpose
-        return task.invoke("execute_python", arguments)
+    if os.environ.get("XIAOQI_SINGLE_SERVER") != "1":
+        @server.tool(
+            name="execute_python",
+            description=(
+                "在隔离的 E2B Python 沙箱运行计算或数据转换。默认断网；"
+                "需要交付的文件写入 /home/user/workspace/output。"
+            ),
+        )
+        def execute_python(
+            code: str,
+            network_domains: list[str] | None = None,
+            network_purpose: str = "脚本需要访问指定网站",
+        ) -> str:
+            arguments: dict[str, Any] = {"code": code}
+            if network_domains is not None:
+                arguments["network_domains"] = network_domains
+            if network_purpose:
+                arguments["network_purpose"] = network_purpose
+            return task.invoke("execute_python", arguments)
 
     return server
 

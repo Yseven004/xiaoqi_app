@@ -59,6 +59,15 @@ app.*.map.json
 **/build/
 **/Generated.xcconfig
 
+# impeccable-ignore-start
+# Ephemeral output, runtime state, and per-developer overrides.
+# Shared artifacts such as config.json, DESIGN.md, and surface briefs stay tracked.
+**/.impeccable/config.local.json
+**/.impeccable/hook.cache.json
+**/.impeccable/hook.pending.json
+**/.impeccable/*.png
+**/.impeccable/review/
+
 # Local deployment artifacts and upload checkpoints
 .ossutil_checkpoint/
 xiaoqi_harness/deploy/**/*.zip

@@ -13,10 +13,18 @@ from xiaoqi_harness.capabilities import harness_worker
 
 def test_tool_environment_preserves_python_module_paths(monkeypatch) -> None:
     monkeypatch.setattr(harness_worker.sys, "path", ["/opt/python", "/app", ""])
+    monkeypatch.setenv("XIAOQI_DATA_DIR", "/var/lib/xiaoqi")
+    monkeypatch.setenv("XIAOQI_SINGLE_SERVER", "1")
+    monkeypatch.setenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "must-not-cross-process")
+    monkeypatch.setenv("E2B_API_KEY", "must-not-cross-process")
 
     env = harness_worker._tool_environment("personal", "task", 1, "worker", 8000)
 
     assert env["PYTHONPATH"] == os.pathsep.join(("/opt/python", "/app"))
+    assert env["XIAOQI_DATA_DIR"] == "/var/lib/xiaoqi"
+    assert env["XIAOQI_SINGLE_SERVER"] == "1"
+    assert "ALIBABA_CLOUD_ACCESS_KEY_SECRET" not in env
+    assert "E2B_API_KEY" not in env
 
 
 def test_session_prompt_preserves_history_and_inline_images() -> None:
