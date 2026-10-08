@@ -14,7 +14,7 @@ services:
       XIAOQI_DATA_DIR: /var/lib/xiaoqi
       XIAOQI_DSH_VERSION: 0.2.0-rc.2
       XIAOQI_DSH_RELEASE_ROOT: /opt/xiaoqi-dsh
-      XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:-}
+      XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:?Set XIAOQI_DSH_INTERNAL_TOKEN in single-server.env}
       XIAOQI_SINGLE_SERVER: "1"
     expose:
       - "8080"
@@ -53,16 +53,16 @@ services:
     build:
       context: ..
       dockerfile: dsh_manager/Dockerfile
-    env_file:
-      - ./single-server.env
     environment:
       HOME: /run/dsh-manager
       TMPDIR: /run/dsh-manager
       XIAOQI_DSH_RELEASE_ROOT: /opt/xiaoqi-dsh
       XIAOQI_DSH_STATIC_ROOT: /app/static
       XIAOQI_DSH_INTERNAL_API_URL: http://app:8080/v1/internal/dsh
-      XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:-}
-      XIAOQI_DSH_ADMIN_PASSWORD_HASH: ${XIAOQI_DSH_ADMIN_PASSWORD_HASH:-}
+      XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:?Set XIAOQI_DSH_INTERNAL_TOKEN in single-server.env}
+      XIAOQI_DSH_WEB_HOME: /opt/xiaoqi-dsh/web-home
+      XIAOQI_DSH_WEB_TOKEN_FILE: /opt/xiaoqi-dsh/web-launch-token
+      XIAOQI_DSH_ADMIN_PASSWORD_HASH: ${XIAOQI_DSH_ADMIN_PASSWORD_HASH:?Set XIAOQI_DSH_ADMIN_PASSWORD_HASH in single-server.env}
       XIAOQI_DSH_COOKIE_SECURE: "1"
     expose:
       - "8090"
@@ -90,11 +90,53 @@ services:
         - CMD
         - python
         - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/readyz', timeout=5).read()
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 45s
+
+  dsh-web:
+    profiles:
+      - https
+    image: xiaoqi-dsh-manager:local
+    command: ["python", "/app/start_web.py"]
+    network_mode: "service:caddy"
+    environment:
+      HOME: /run/dsh-web
+      TMPDIR: /run/dsh-web
+      DSH_HOME: /opt/xiaoqi-dsh/web-home
+      XIAOQI_DSH_WEB_TOKEN_FILE: /opt/xiaoqi-dsh/web-launch-token
+      XIAOQI_DSH_WEB_PORT: "8091"
+      XIAOQI_ADMIN_HOST: ${XIAOQI_ADMIN_HOST:?Set XIAOQI_ADMIN_HOST in single-server.env}
+    volumes:
+      - dsh-runtime:/opt/xiaoqi-dsh
+    tmpfs:
+      - /run/dsh-web:uid=10002,gid=10003,mode=0700,size=128m,exec
+      - /tmp:mode=1777,size=128m,noexec
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 96
+    cpus: 1.0
+    mem_limit: 1024m
+    stop_grace_period: 35s
+    restart: unless-stopped
+    depends_on:
+      caddy:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /app/health_web.py
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
 
   caddy:
     image: caddy:2-alpine

@@ -7,5 +7,52 @@
 
 {$XIAOQI_ADMIN_HOST:admin.localhost} {
 	encode zstd gzip
-	reverse_proxy dsh-manager:8090
+	@manager_health path /xiaoqi/healthz /xiaoqi/readyz
+	@manager_without_slash path /xiaoqi
+	@web_token_query {
+		path /
+		query token=*
+	}
+	@web_root_without_query {
+		path /
+		query ""
+	}
+	handle @manager_health {
+		respond 404
+	}
+	handle @manager_without_slash {
+		redir /xiaoqi/ 308
+	}
+	handle_path /xiaoqi/* {
+		reverse_proxy dsh-manager:8090
+	}
+	handle @web_token_query {
+		forward_auth dsh-manager:8090 {
+			uri /api/auth/verify
+			header_up -Connection
+			header_up -Upgrade
+		}
+		reverse_proxy 127.0.0.1:8091
+	}
+	handle @web_root_without_query {
+		forward_auth dsh-manager:8090 {
+			uri /api/auth/verify
+			header_up -Connection
+			header_up -Upgrade
+		}
+		reverse_proxy 127.0.0.1:8091 {
+			@dsh_unauthorized status 401
+			handle_response @dsh_unauthorized {
+				redir * /xiaoqi/api/web/launch 302
+			}
+		}
+	}
+	handle {
+		forward_auth dsh-manager:8090 {
+			uri /api/auth/verify
+			header_up -Connection
+			header_up -Upgrade
+		}
+		reverse_proxy 127.0.0.1:8091
+	}
 }

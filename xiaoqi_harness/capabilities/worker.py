@@ -630,8 +630,10 @@ def _run_tool(
         if action == "write":
             if path != "SKILL.md" and not path.startswith(("scripts/", "references/", "assets/")):
                 raise ValueError("草稿资源只能放在 scripts、references 或 assets 目录")
-            if path.startswith("scripts/") and not path.lower().endswith(".py"):
-                raise ValueError("首版只支持 Python 脚本")
+            if path.startswith("scripts/") and not path.lower().endswith(
+                (".py", ".js", ".mjs", ".cjs", ".ts", ".mts")
+            ):
+                raise ValueError("脚本文件支持 Python、JavaScript 或 TypeScript")
             content = str(arguments.get("content", ""))
             files[path] = content
             if sum(len(str(value).encode("utf-8")) for value in files.values()) > _MAX_TRANSCRIPT:

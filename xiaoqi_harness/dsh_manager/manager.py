@@ -15,22 +15,30 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 from werkzeug.security import check_password_hash
 
 
 ROOT = Path(os.environ.get("XIAOQI_DSH_RELEASE_ROOT", "/opt/xiaoqi-dsh")).resolve()
 STATIC_ROOT = Path(os.environ.get("XIAOQI_DSH_STATIC_ROOT", "/app/static")).resolve()
+WEB_HOME = Path(os.environ.get("XIAOQI_DSH_WEB_HOME", str(ROOT / "web-home"))).resolve()
+WEB_PROFILE = WEB_HOME / "profiles" / "web"
+WEB_TOKEN_PATH = Path(os.environ.get("XIAOQI_DSH_WEB_TOKEN_FILE", str(ROOT / "web-launch-token"))).resolve()
 DB_PATH = ROOT / "manager.sqlite3"
 STATE_PATH = ROOT / "manager-state.json"
 ADMIN_COOKIE = "xiaoqi_dsh_admin"
 SESSION_TTL = 8 * 60 * 60
+_WEB_CORE_BUNDLES = {
+    "@deepseek-ai/dsh-base",
+    "@deepseek-ai/dsh-web-app",
+    "@deepseek-ai/dsh-acp-app",
+}
 CATALOG_URL = (
     "https://raw.githubusercontent.com/hrhgit/deepseek-harness-plugin-manager/"
     "main/catalog/v2/catalog.json"
@@ -40,6 +48,11 @@ GITHUB_RELEASES = "https://api.github.com/repos/deepseek-ai/deepseek-harness/rel
 _SAFE_PACKAGE = re.compile(r"^(?:@[a-z0-9._-]+/)?[a-z0-9][a-z0-9._-]*$", re.I)
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+_SECURITY_UPDATE_NOTE = re.compile(
+    r"\bCVE-\d{4}-\d+\b|security.{0,32}(?:fix|patch|vulnerabilit|update)|安全.{0,12}(?:修复|漏洞)",
+    re.I,
+)
+_UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 _OPERATION_LOCK = threading.RLock()
 _MUTATION_LOCK = threading.Lock()
 _OPERATION_THREADS: dict[str, threading.Thread] = {}
@@ -245,6 +258,7 @@ def _prepare_request() -> Any:
     if request.path.startswith("/api/") and request.path not in (
         "/api/auth",
         "/api/auth/login",
+        "/api/auth/verify",
     ):
         current = _session()
         if current is None:
@@ -276,6 +290,20 @@ def healthz():
     return jsonify({"status": "ok"})
 
 
+@app.get("/readyz")
+def readyz():
+    if len(_admin_token()) < 32:
+        return jsonify({"status": "not_ready", "error": "DSH 内部控制凭据未配置或长度不足"}), 503
+    try:
+        state = _internal("/status", timeout=3)
+    except (OSError, RuntimeError, urllib.error.URLError, json.JSONDecodeError) as error:
+        return jsonify({"status": "not_ready", "error": str(error)[:200]}), 503
+    version = str(state.get("dsh_version", ""))
+    if not version:
+        return jsonify({"status": "not_ready", "error": "小七运行服务未返回 DSH 版本"}), 503
+    return jsonify({"status": "ready", "dsh_version": version})
+
+
 @app.get("/")
 def index():
     return send_from_directory(STATIC_ROOT, "index.html")
@@ -292,6 +320,25 @@ def auth_state():
     if current is None:
         return jsonify({"authenticated": False})
     return jsonify({"authenticated": True, "csrf": current[1]})
+
+
+@app.get("/api/auth/verify")
+def auth_verify():
+    if _session() is None:
+        return redirect("/xiaoqi/", code=302)
+    return "", 204
+
+
+@app.get("/api/web/launch")
+@_require_admin
+def launch_official_web():
+    try:
+        token = WEB_TOKEN_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return _error("官方 DSH Web 尚未就绪，请稍后重试", 503)
+    if not token or len(token) > 2048 or any(character.isspace() for character in token):
+        return _error("官方 DSH Web 启动凭据无效，请检查 Web 服务状态", 503)
+    return redirect("/?" + urllib.parse.urlencode({"token": token}), code=302)
 
 
 @app.post("/api/auth/login")
@@ -377,13 +424,18 @@ def _compatibility(package: dict[str, Any], runtime_version: str) -> str:
     peers = package.get("peerDependencies", {})
     if not isinstance(peers, dict):
         return "unknown"
-    version_range = peers.get("@deepseek-ai/dsh") or peers.get("deepseek-harness")
-    result = _semver_satisfies(str(version_range) if version_range else None, runtime_version)
-    if result is True:
-        return "compatible"
-    if result is False:
+    runtime_ranges = [
+        version_range
+        for name, version_range in peers.items()
+        if name in {"@deepseek-ai/dsh", "deepseek-harness"}
+        or name.startswith("@deepseek-ai/dsh-")
+    ]
+    if not runtime_ranges or any(not isinstance(item, str) or not item.strip() for item in runtime_ranges):
+        return "unknown"
+    results = [_semver_satisfies(version_range, runtime_version) for version_range in runtime_ranges]
+    if any(result is False for result in results):
         return "incompatible"
-    return "unknown"
+    return "compatible" if all(result is True for result in results) else "unknown"
 
 
 def _package_path(profile: Path, name: str) -> Path:
@@ -572,7 +624,7 @@ def _copy_immutable_profile(source: Path, destination: Path) -> None:
     manifest = _plugin_manifest(source)
     modules = source / "node_modules"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, destination, symlinks=True, ignore=shutil.ignore_patterns("node_modules"))
+    shutil.copytree(source, destination, symlinks=True, ignore=shutil.ignore_patterns("node_modules", ".plugin-manager"))
     if modules.exists() or modules.is_symlink():
         try:
             resolved_modules = modules.resolve(strict=True)
@@ -596,7 +648,7 @@ def _plugin_rows(profile: Path, runtime_version: str) -> list[dict[str, Any]]:
         raise RuntimeError("DSH profile manifest 格式无效")
     rows = []
     for name, spec in sorted(dependencies.items()):
-        if name in {"@deepseek-ai/dsh-base", "@deepseek-ai/dsh-acp-app"}:
+        if name in _WEB_CORE_BUNDLES:
             continue
         package_path = _package_path(profile, str(name))
         try:
@@ -622,6 +674,70 @@ def _plugin_rows(profile: Path, runtime_version: str) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _official_web_profile() -> tuple[Path, dict[str, Any], list[str]]:
+    profile = WEB_PROFILE
+    if not (profile / "package.json").is_file():
+        raise RuntimeError("官方 DSH Web profile 尚未就绪")
+    manifest = _plugin_manifest(profile)
+    dependencies = manifest.get("dependencies", {})
+    bundles = manifest.get("dsh", {}).get("profile", {}).get("bundles", [])
+    if not isinstance(dependencies, dict) or not isinstance(bundles, list) or not all(isinstance(item, str) for item in bundles):
+        raise RuntimeError("官方 DSH Web profile 清单格式无效")
+    if not {"@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"}.issubset(bundles):
+        raise RuntimeError("官方 DSH Web profile 缺少必需的 Web 组件")
+    return profile, manifest, bundles
+
+
+def _profile_digest(profile: Path) -> str:
+    digest = hashlib.sha256()
+    for directory, names, files in os.walk(profile, followlinks=False):
+        names[:] = sorted(name for name in names if name not in {"node_modules", ".plugin-manager"})
+        base = Path(directory)
+        for name in sorted(files):
+            path = base / name
+            relative = path.relative_to(profile).as_posix()
+            digest.update(relative.encode("utf-8") + b"\0")
+            if path.is_symlink():
+                digest.update(os.readlink(path).encode("utf-8", errors="replace"))
+            else:
+                with path.open("rb") as source:
+                    for chunk in iter(lambda: source.read(128 * 1024), b""):
+                        digest.update(chunk)
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _prepare_xiaoqi_profile(source: Path, destination: Path) -> list[str]:
+    source_manifest = _plugin_manifest(source)
+    source_dependencies = source_manifest.get("dependencies", {})
+    source_bundles = source_manifest.get("dsh", {}).get("profile", {}).get("bundles", [])
+    if not isinstance(source_dependencies, dict) or not isinstance(source_bundles, list):
+        raise RuntimeError("官方 DSH Web profile 清单格式无效")
+    selected = [
+        name for name in source_bundles
+        if isinstance(name, str) and name not in _WEB_CORE_BUNDLES
+    ]
+    if len(selected) != len([name for name in source_bundles if name not in _WEB_CORE_BUNDLES]):
+        raise RuntimeError("官方 DSH Web profile 含无效的插件名称")
+
+    _copy_immutable_profile(source, destination)
+    target_path = destination / "package.json"
+    target_manifest = _plugin_manifest(destination)
+    target_manifest["name"] = "dsh-profile-xiaoqi-acp"
+    target_manifest["dependencies"] = {
+        name: spec for name, spec in source_dependencies.items()
+        if name not in _WEB_CORE_BUNDLES
+    }
+    target_dsh = target_manifest.setdefault("dsh", {})
+    target_profile = target_dsh.setdefault("profile", {})
+    target_profile["bundles"] = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-acp-app", *selected]
+    temporary = target_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(target_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o640)
+    os.replace(temporary, target_path)
+    return selected
 
 
 def _verify_profile(binary: str, home: Path, operation_id: str | None = None) -> None:
@@ -902,35 +1018,50 @@ def _perform_release_prepare(operation_id: str, payload: dict[str, Any]) -> dict
         raise
 
 
-def _perform_plugin_apply(operation_id: str) -> dict[str, Any]:
+def _plugin_apply_context() -> tuple[dict[str, Any], Path, str, list[dict[str, Any]], list[str], str]:
     state = _internal("/status")
-    profile, metadata = _draft_profile(state)
-    if not metadata.get("dirty"):
-        raise ValueError("没有待应用的插件修改")
-    binary = _active_binary(state)
+    profile, _, _ = _official_web_profile()
+    if (profile / ".plugin-manager" / "run.json").exists():
+        raise RuntimeError("官方插件安装仍在进行，请完成或取消安装后再发布")
     runtime_version = str(state.get("dsh_version", ""))
+    digest_before = _profile_digest(profile)
     rows = _plugin_rows(profile, runtime_version)
+    source_digest = _profile_digest(profile)
+    if source_digest != digest_before:
+        raise RuntimeError("官方插件配置正在变化，请稍后重新检查")
     incompatible = [row["name"] for row in rows if row["enabled"] and row["compatibility"] == "incompatible"]
     unknown = [row["name"] for row in rows if row["enabled"] and row["compatibility"] not in {"compatible", "incompatible"}]
     if incompatible:
         raise ValueError("以下插件声明与当前 DSH 版本不兼容，不能发布：" + ", ".join(incompatible))
-    if unknown:
-        raise ValueError("以下插件尚未确认兼容当前 DSH 版本，不能发布到小七：" + ", ".join(unknown))
-    _set_step(operation_id, "检查配置", "正在验证小七 ACP profile")
-    _verify_profile(binary, ROOT / "draft", operation_id)
+    return state, profile, runtime_version, rows, unknown, source_digest
+
+
+def _perform_plugin_apply(operation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    state, profile, runtime_version, rows, unknown, source_digest = _plugin_apply_context()
+    confirmed_unknown = set(payload.get("confirmed_unknown_plugins", []))
+    if confirmed_unknown != set(unknown) or payload.get("confirmed_profile_digest", "") != source_digest:
+        raise ValueError("官方插件状态在确认期间发生变化，请重新点击应用并核对提示")
+    binary = _active_binary(state)
     config_id = "cfg-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
     destination = ROOT / "configs" / config_id
     destination_profile = destination / "profiles" / "xiaoqi-acp"
     try:
-        _set_step(operation_id, "发布配置", "正在生成只读配置版本")
-        _copy_immutable_profile(profile, destination_profile)
+        _set_step(operation_id, "发布配置", "正在复制官方 Web profile 并转换为小七 ACP 快照")
+        selected = _prepare_xiaoqi_profile(profile, destination_profile)
+        if _profile_digest(profile) != source_digest:
+            raise RuntimeError("官方插件配置在发布期间发生变化，请重新发布")
         config_manifest = {
             "config_id": config_id,
             "runtime_version": runtime_version,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source_profile": "web",
+            "source_profile_sha256": source_digest,
+            "unconfirmed_plugins": unknown,
+            "selected_bundles": selected,
             "plugins": [{"name": row["name"], "version": row["version"], "enabled": row["enabled"]} for row in rows],
         }
         _atomic_json(destination / "manifest.json", config_manifest)
+        _set_step(operation_id, "兼容性验证", "正在验证转换后的 ACP profile")
         _verify_profile(binary, destination, operation_id)
         published = _internal("/apply-config", {"config_id": config_id})
     except Exception:
@@ -948,8 +1079,12 @@ def _perform_plugin_apply(operation_id: str) -> dict[str, Any]:
         }
         history = [previous_entry] + [item for item in history if item.get("config_id") != previous_id]
         _write_state({"config_history": history[:20]})
+    _write_state({"last_published_web_profile_sha256": source_digest})
     _atomic_json(ROOT / "draft-state.json", {"base_config_id": config_id, "dirty": False, "created_at": int(time.time())})
-    return {"message": "配置已应用，下一条消息生效；正在回答的任务会继续使用旧配置", "config_id": config_id, "config_revision": published.get("config_revision")}
+    message = f"官方 profile 已发布到小七（{len(selected)} 个启用插件束）；下一条新消息将使用新配置"
+    if unknown:
+        message += "；已按你的确认包含兼容性未确认插件：" + ", ".join(unknown)
+    return {"message": message, "config_id": config_id, "config_revision": published.get("config_revision")}
 
 
 def _perform_release_switch(operation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1070,6 +1205,7 @@ def _recover_interrupted_operations() -> None:
 def _check_plugin_updates_for_profile(profile: Path, runtime_version: str) -> tuple[dict[str, dict[str, str]], str]:
     rows = _plugin_rows(profile, runtime_version)
     updates: dict[str, dict[str, str]] = {}
+    errors: dict[str, str] = {}
     for row in rows:
         if row.get("distribution") != "npm":
             continue
@@ -1077,15 +1213,21 @@ def _check_plugin_updates_for_profile(profile: Path, runtime_version: str) -> tu
             metadata = _npm_package(row["name"])
             version = str(metadata.get("version", ""))
             if not _SEMVER.fullmatch(version):
+                errors[row["name"]] = "npm 没有返回可确认的精确版本"
                 continue
             updates[row["name"]] = {
                 "version": version,
+                "checked_from_version": str(row.get("version", "")),
                 "compatibility": _compatibility(metadata, runtime_version),
             }
-        except (OSError, ValueError, urllib.error.URLError):
-            continue
+        except (OSError, ValueError, RuntimeError, urllib.error.URLError):
+            errors[row["name"]] = "无法读取 npm 上游版本"
     checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    _write_state({"plugin_updates": updates, "plugins_last_check": checked_at})
+    _write_state({
+        "plugin_updates": updates,
+        "plugin_update_errors": errors,
+        "plugins_last_check": checked_at,
+    })
     return updates, checked_at
 
 
@@ -1094,15 +1236,18 @@ def _run_update_scheduler() -> None:
         try:
             state = _read_state()
             last = state.get("updates", {}).get("last_check")
-            if not last or time.time() - datetime.fromisoformat(last).timestamp() >= 6 * 60 * 60:
+            if not last or time.time() - datetime.fromisoformat(last).timestamp() >= _UPDATE_CHECK_INTERVAL_SECONDS:
                 _check_release_updates()
         except Exception:
-            pass
+            try:
+                _record_release_check_failure()
+            except Exception:
+                pass
         try:
             last = _read_state().get("plugins_last_check")
-            if not last or time.time() - datetime.fromisoformat(last).timestamp() >= 6 * 60 * 60:
+            if not last or time.time() - datetime.fromisoformat(last).timestamp() >= _UPDATE_CHECK_INTERVAL_SECONDS:
                 state = _internal("/status")
-                profile, _ = _draft_profile(state)
+                profile, _, _ = _official_web_profile()
                 _check_plugin_updates_for_profile(profile, str(state.get("dsh_version", "")))
         except Exception:
             pass
@@ -1131,6 +1276,234 @@ def _version_parts(value: str) -> tuple[int, int, int, str] | None:
     main, _, prerelease = value.partition("-")
     core = main.split("+", 1)[0]
     return (*map(int, core.split(".")), prerelease)
+
+
+def _is_prerelease(version: str) -> bool:
+    return bool(_SEMVER.fullmatch(version) and "-" in version.split("+", 1)[0])
+
+
+def _is_newer_version(candidate: str, current: str) -> bool | None:
+    if not _SEMVER.fullmatch(candidate) or not _SEMVER.fullmatch(current):
+        return None
+    return _semver_satisfies(f">{current}", candidate)
+
+
+def _recommend_update(
+    current_version: str,
+    candidate_version: str | None,
+    compatibility: str,
+    checked_at: str | None,
+    source: str,
+    notes: str = "",
+    release_url: str | None = None,
+    unavailable_reason: str | None = None,
+    unavailable_label: str = "还不能判断",
+    unavailable_status: str = "unknown",
+    security_signal: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "current_version": current_version,
+        "candidate_version": candidate_version,
+        "compatibility": compatibility,
+        "checked_at": checked_at,
+        "source": source,
+        "notes": notes,
+        "release_url": release_url,
+        "status": "unknown",
+        "label": "还不能判断",
+        "reason": "",
+    }
+
+    if unavailable_reason:
+        result["status"] = unavailable_status
+        result["label"] = unavailable_label
+        result["reason"] = unavailable_reason
+        return result
+    if not checked_at:
+        result["status"] = "unchecked"
+        result["label"] = "尚未检查"
+        result["reason"] = "还没有可用的更新检查结果。"
+        return result
+    try:
+        if not isinstance(checked_at, str):
+            raise ValueError("invalid update check timestamp")
+        checked = datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=timezone.utc)
+        current_time = now or datetime.now(timezone.utc)
+        if checked > current_time + timedelta(minutes=5) or (current_time - checked).total_seconds() > _UPDATE_CHECK_INTERVAL_SECONDS:
+            result["status"] = "stale"
+            result["label"] = "检查结果已过期"
+            result["reason"] = "上次检查已超过 6 小时；请重新检查后再判断。"
+            return result
+    except (TypeError, ValueError):
+        result["status"] = "stale"
+        result["label"] = "检查时间无效"
+        result["reason"] = "无法确认这份更新信息的时间；请重新检查。"
+        return result
+
+    if not candidate_version or not _SEMVER.fullmatch(candidate_version) or not _SEMVER.fullmatch(current_version):
+        result["reason"] = "官方来源没有提供可核对的精确版本号。"
+        return result
+
+    newer = _is_newer_version(candidate_version, current_version)
+    if newer is None:
+        result["reason"] = "当前环境无法比较这两个版本号；请先重新检查。"
+        return result
+    if not newer:
+        if _is_prerelease(current_version):
+            result["status"] = "preview"
+            result["label"] = "当前运行预览版"
+            result["reason"] = "当前运行的是预发布版；官方更新通道没有指向更高版本，建议等待正式版或核实具体修复需求。"
+        else:
+            result["status"] = "current"
+            result["label"] = "暂不需要更新"
+            result["reason"] = "官方更新通道没有比当前版本更新的版本。"
+        return result
+
+    if _is_prerelease(candidate_version):
+        result["status"] = "preview"
+        result["label"] = "有预览版，建议先观察"
+        result["reason"] = "候选版本仍是预发布版；除非明确需要其中的修复，否则建议等待正式版。"
+        return result
+    if compatibility == "incompatible":
+        result["status"] = "blocked"
+        result["label"] = "版本要求不匹配"
+        result["reason"] = "已启用插件声明的 DSH 版本要求与候选版本不匹配，不能建议应用到小七。"
+        return result
+    if compatibility != "compatible":
+        result["status"] = "unknown"
+        result["label"] = "兼容性尚未确认"
+        result["reason"] = "没有足够的版本声明确认兼容；先不要应用到小七。"
+        return result
+
+    if security_signal or _SECURITY_UPDATE_NOTE.search(notes):
+        result["status"] = "priority"
+        result["label"] = "建议优先评估"
+        result["reason"] = "官方发行说明提到安全修复，且插件版本要求匹配；查看说明并确认影响后再更新。"
+    else:
+        result["status"] = "available"
+        result["label"] = "有稳定版，可考虑更新"
+        result["reason"] = "候选稳定版的插件版本要求匹配；是否需要更新可结合发行说明和当前问题判断。"
+    return result
+
+
+def _update_recommendations(
+    state: dict[str, Any], web_profile: Path, local_state: dict[str, Any]
+) -> dict[str, Any]:
+    updates = local_state.get("updates", {})
+    if not isinstance(updates, dict):
+        updates = {}
+    dsh_candidate = str(updates.get("npm_latest", ""))
+    dsh_release = next(
+        (
+            item for item in updates.get("releases", [])
+            if isinstance(item, dict) and item.get("version") == dsh_candidate
+        ),
+        {},
+    )
+    compatibility = "unknown"
+    if dsh_candidate:
+        try:
+            config_id = str(state.get("config_id", "builtin"))
+            active_profile = None if config_id == "builtin" else _profile_for_config(config_id)
+            compatibility, _ = _check_release_compatibility(active_profile, dsh_candidate)
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+            pass
+    dsh_check_error = None
+    failed_at = local_state.get("updates_check_failed_at")
+    if isinstance(failed_at, str):
+        try:
+            failed_time = datetime.fromisoformat(failed_at.replace("Z", "+00:00"))
+            successful_at = updates.get("last_check")
+            successful_time = (
+                datetime.fromisoformat(successful_at.replace("Z", "+00:00"))
+                if isinstance(successful_at, str) else None
+            )
+            if failed_time.tzinfo is None:
+                failed_time = failed_time.replace(tzinfo=timezone.utc)
+            if successful_time and successful_time.tzinfo is None:
+                successful_time = successful_time.replace(tzinfo=timezone.utc)
+            if successful_time is None or failed_time > successful_time:
+                dsh_check_error = "最近一次 DSH 更新检查失败；显示的是上次成功结果，请重新检查后再判断。"
+        except (TypeError, ValueError):
+            dsh_check_error = "最近一次 DSH 更新检查状态无效；请重新检查后再判断。"
+    dsh_recommendation = _recommend_update(
+        current_version=str(state.get("dsh_version", "")),
+        candidate_version=dsh_candidate or None,
+        compatibility=compatibility,
+        checked_at=updates.get("last_check"),
+        source="官方 npm latest 通道；GitHub 发行说明",
+        notes=str(dsh_release.get("notes", "")),
+        release_url=dsh_release.get("release_url"),
+        security_signal=bool(dsh_release.get("security_update_signal")),
+        unavailable_reason=dsh_check_error,
+        unavailable_label="检查失败" if dsh_check_error else "还不能判断",
+        unavailable_status="failed" if dsh_check_error else "unknown",
+    )
+
+    plugin_updates = local_state.get("plugin_updates", {})
+    plugin_errors = local_state.get("plugin_update_errors", {})
+    if not isinstance(plugin_updates, dict):
+        plugin_updates = {}
+    if not isinstance(plugin_errors, dict):
+        plugin_errors = {}
+    plugins = []
+    try:
+        rows = _plugin_rows(web_profile, str(state.get("dsh_version", "")))
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+        rows = []
+    checked_at = local_state.get("plugins_last_check")
+    for row in rows:
+        name = str(row["name"])
+        if row.get("distribution") == "github":
+            recommendation = {
+                "current_version": str(row.get("version", "")),
+                "candidate_version": None,
+                "compatibility": str(row.get("compatibility", "unknown")),
+                "checked_at": None,
+                "source": "固定 GitHub commit",
+                "notes": "",
+                "release_url": None,
+                "status": "unknown",
+                "label": "无法自动判断",
+                "reason": "插件固定到 GitHub commit；当前面板不自动追踪仓库的新提交。",
+            }
+        else:
+            cached = plugin_updates.get(name)
+            unavailable = None
+            unavailable_label = "还不能判断"
+            unavailable_status = "unknown"
+            if plugin_errors.get(name):
+                unavailable = "本次未能读取该插件的 npm 上游版本；不能据此判断是否需要更新。"
+                unavailable_label = "检查失败"
+                unavailable_status = "failed"
+            elif not isinstance(cached, dict):
+                unavailable = "还没有该插件的检查结果；请检查更新后再判断。"
+                unavailable_label = "尚未检查"
+                unavailable_status = "unchecked"
+            elif cached.get("checked_from_version") != row.get("version"):
+                unavailable = "插件版本在上次检查后发生变化；请重新检查更新。"
+                unavailable_label = "需要重新检查"
+                unavailable_status = "stale"
+            recommendation = _recommend_update(
+                current_version=str(row.get("version", "")),
+                candidate_version=str(cached.get("version", "")) if isinstance(cached, dict) else None,
+                compatibility=str(cached.get("compatibility", "unknown")) if isinstance(cached, dict) else "unknown",
+                checked_at=checked_at,
+                source="npm latest 标签",
+                unavailable_reason=unavailable,
+                unavailable_label=unavailable_label,
+                unavailable_status=unavailable_status,
+            )
+        plugins.append({
+            "name": name,
+            "enabled": bool(row.get("enabled")),
+            "source": str(row.get("source", "community")),
+            "recommendation": recommendation,
+        })
+    return {"dsh": dsh_recommendation, "plugins": plugins}
 
 
 def _check_release_compatibility(profile: Path | None, version: str) -> tuple[str, list[dict[str, str]]]:
@@ -1168,6 +1541,11 @@ def _check_release_updates() -> dict[str, Any]:
                 github_by_version[tag] = release
     versions = all_metadata.get("versions", {}) if isinstance(all_metadata, dict) else {}
     times = all_metadata.get("time", {}) if isinstance(all_metadata, dict) else {}
+    dist_tags = all_metadata.get("dist-tags", {}) if isinstance(all_metadata, dict) else {}
+    if not isinstance(dist_tags, dict):
+        dist_tags = {}
+    latest_version = str(dist_tags.get("latest") or metadata.get("version", ""))
+    next_version = str(dist_tags.get("next", ""))
     candidates = []
     for version in versions:
         parts = _version_parts(str(version))
@@ -1175,14 +1553,22 @@ def _check_release_updates() -> dict[str, Any]:
             continue
         compatibility, checks = _check_release_compatibility(active_profile, str(version))
         release = github_by_version.get(str(version), {})
+        release_notes = "\n".join(
+            value for value in (str(release.get("name", "")), str(release.get("body", ""))) if value
+        )
         candidates.append(
             {
                 "id": "dsh-" + str(version),
                 "version": str(version),
                 "compatibility": compatibility,
                 "plugin_checks": checks,
+                "prerelease": _is_prerelease(str(version)),
                 "released_at": times.get(str(version)),
-                "notes": str(release.get("name") or release.get("body") or "官方 npm 版本")[:240],
+                "notes": (release_notes or "官方 npm 版本")[:240],
+                "security_update_signal": bool(_SECURITY_UPDATE_NOTE.search(release_notes)),
+                "release_url": str(release.get("html_url", ""))
+                if str(release.get("html_url", "")).startswith("https://github.com/deepseek-ai/deepseek-harness/releases/")
+                else None,
                 "github_release_found": bool(release),
                 "source": "npm registry",
             }
@@ -1190,13 +1576,21 @@ def _check_release_updates() -> dict[str, Any]:
     candidates.sort(key=lambda item: (times.get(item["version"], ""), _version_parts(item["version"]) or (0, 0, 0, "")), reverse=True)
     cache = {
         "last_check": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "npm_latest": str(metadata.get("version", "")),
+        "npm_latest": latest_version,
+        "npm_next": next_version,
         "github_checked": github_error is None,
         "github_error": github_error,
         "releases": candidates[:30],
     }
-    _write_state({"updates": cache})
+    _write_state({"updates": cache, "updates_check_error": None, "updates_check_failed_at": None})
     return cache
+
+
+def _record_release_check_failure() -> None:
+    _write_state({
+        "updates_check_error": "无法读取官方 DSH 更新信息",
+        "updates_check_failed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
 
 
 def _prepared_releases(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1316,7 +1710,7 @@ def _run_operation(operation_id: str, kind: str, payload: dict[str, Any]) -> Non
             elif kind == "release_switch":
                 result = _perform_release_switch(operation_id, payload)
             elif kind == "plugin_apply":
-                result = _perform_plugin_apply(operation_id)
+                result = _perform_plugin_apply(operation_id, payload)
             else:
                 raise ValueError("不支持的管理操作")
         _update_operation(operation_id, status="completed", step="已完成", message=str(result.get("message", "操作已完成")), result=result, cancellable=0)
@@ -1333,8 +1727,7 @@ def _run_operation(operation_id: str, kind: str, payload: dict[str, Any]) -> Non
 def manager_status():
     try:
         state = _internal("/status")
-        profile, draft = _draft_profile(state)
-        plugins = _plugin_rows(profile, str(state.get("dsh_version", "")))
+        profile, _, bundles = _official_web_profile()
         local_state = _read_state()
         config_history = local_state.get("config_history", [])
         if not isinstance(config_history, list):
@@ -1346,15 +1739,14 @@ def manager_status():
             and item.get("config_id") != state.get("config_id")
             and (item.get("config_id") == "builtin" or (ROOT / "configs" / str(item.get("config_id")) / "manifest.json").is_file())
         ][:20]
-        for plugin in plugins:
-            update = local_state.get("plugin_updates", {}).get(plugin["name"], {})
-            if update and update.get("version") != plugin["version"]:
-                plugin["update_version"] = update["version"]
-                plugin["update_compatibility"] = update.get("compatibility", "unknown")
         state.update(
             {
-                "draft_dirty": bool(draft.get("dirty")),
-                "draft_plugins": plugins,
+                "official_web_profile": {
+                    "ready": True,
+                    "enabled_bundle_count": len([name for name in bundles if name not in _WEB_CORE_BUNDLES]),
+                    "changed_since_publish": _profile_digest(profile) != local_state.get("last_published_web_profile_sha256"),
+                    "installing": (profile / ".plugin-manager" / "run.json").exists(),
+                },
                 "config_history": config_history,
                 "last_check": local_state.get("updates", {}).get("last_check"),
                 "plugins_last_check": local_state.get("plugins_last_check"),
@@ -1371,7 +1763,9 @@ def manager_status():
 def list_releases():
     try:
         state = _internal("/status")
-        cache = _read_state().get("updates", {})
+        local_state = _read_state()
+        cache = local_state.get("updates", {})
+        web_profile, _, _ = _official_web_profile()
         prepared = _prepared_releases(state)
         prepared_versions = {release["version"] for release in prepared}
         releases = list(prepared)
@@ -1379,7 +1773,12 @@ def list_releases():
             if candidate.get("version") in prepared_versions or candidate.get("version") == state.get("dsh_version"):
                 continue
             releases.append({**candidate, "current": False, "prepared": False})
-        return jsonify({"current": state, "last_check": cache.get("last_check"), "releases": releases})
+        return jsonify({
+            "current": state,
+            "last_check": cache.get("last_check"),
+            "releases": releases,
+            "recommendations": _update_recommendations(state, web_profile, local_state),
+        })
     except (OSError, ValueError, RuntimeError, urllib.error.URLError) as error:
         return _error(str(error)[:400], 503)
 
@@ -1389,6 +1788,10 @@ def check_release_updates():
     try:
         return jsonify(_check_release_updates())
     except (OSError, ValueError, RuntimeError, urllib.error.URLError, json.JSONDecodeError) as error:
+        try:
+            _record_release_check_failure()
+        except OSError:
+            pass
         return _error("检查官方发行信息失败：" + str(error)[:240], 503)
 
 
@@ -1460,9 +1863,16 @@ def plugin_catalog():
 def check_plugin_updates():
     try:
         state = _internal("/status")
-        profile, _ = _draft_profile(state)
+        profile, _, _ = _official_web_profile()
         updates, checked_at = _check_plugin_updates_for_profile(profile, str(state.get("dsh_version", "")))
-        return jsonify({"checked": len(updates), "last_check": checked_at})
+        errors = _read_state().get("plugin_update_errors", {})
+        failed_plugins = sorted(errors) if isinstance(errors, dict) else []
+        return jsonify({
+            "checked": len(updates) + len(failed_plugins),
+            "failed": len(failed_plugins),
+            "failed_plugins": failed_plugins,
+            "last_check": checked_at,
+        })
     except (OSError, ValueError, RuntimeError, urllib.error.URLError, json.JSONDecodeError) as error:
         return _error("检查插件更新失败：" + str(error)[:240], 503)
 
@@ -1598,8 +2008,33 @@ def plugin_config():
 
 @app.post("/api/plugins/apply")
 def apply_plugins():
-    operation_id = _start_operation("plugin_apply", {})
-    return jsonify({"operation_id": operation_id}), 202
+    data = request.get_json(silent=True) or {}
+    confirmed_unknown = data.get("confirmed_unknown_plugins", [])
+    if not isinstance(confirmed_unknown, list) or any(not isinstance(name, str) or not name for name in confirmed_unknown):
+        return _error("已确认的插件清单格式无效", 400)
+    confirmed_digest = data.get("confirmed_profile_digest", "")
+    if not isinstance(confirmed_digest, str):
+        return _error("已确认的插件配置标识格式无效", 400)
+    try:
+        _, _, _, _, unknown, profile_digest = _plugin_apply_context()
+        if unknown and (not confirmed_unknown or not confirmed_digest):
+            return jsonify(
+                {
+                    "confirmation_required": True,
+                    "unknown_plugins": unknown,
+                    "profile_digest": profile_digest,
+                    "warning": "这些插件没有声明 DSH 版本范围。仍可尝试应用；若插件无法加载或任务异常，可恢复上一配置。",
+                }
+            )
+        if set(confirmed_unknown) != set(unknown) or (confirmed_digest and confirmed_digest != profile_digest):
+            return _error("官方插件状态在确认期间发生变化，请重新点击应用并核对提示", 409)
+        operation_id = _start_operation(
+            "plugin_apply",
+            {"confirmed_unknown_plugins": unknown, "confirmed_profile_digest": profile_digest},
+        )
+        return jsonify({"operation_id": operation_id}), 202
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
+        return _error(str(error)[:400], 409)
 
 
 @app.post("/api/plugins/discard")

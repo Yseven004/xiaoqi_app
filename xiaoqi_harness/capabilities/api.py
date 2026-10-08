@@ -527,7 +527,12 @@ def _normalize_record(tenant: str, raw: Any) -> dict[str, Any]:
                     or any(part in ("", ".", "..") for part in parts)
                     or not re.fullmatch(r"[A-Za-z0-9._/-]{1,240}", path)
                     or parts[0] not in ("scripts", "references", "assets")
-                    or (parts[0] == "scripts" and not path.lower().endswith(".py"))
+                    or (
+                        parts[0] == "scripts"
+                        and not path.lower().endswith(
+                            (".py", ".js", ".mjs", ".cjs", ".ts", ".mts")
+                        )
+                    )
                 ):
                     raise ValueError("技能资源路径无效")
                 if len(path) > 240 or path == "SKILL.md":

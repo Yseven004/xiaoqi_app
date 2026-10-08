@@ -9,10 +9,12 @@ RUN npm run build
 FROM node:22.23.2-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
+    && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install --global --omit=dev --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2 \
+    && git --version \
+    && npm install --global --omit=dev --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2 pnpm@11.7.0 \
     && test "$(dsh --version)" = "0.2.0-rc.2" \
+    && test "$(pnpm --version)" = "11.7.0" \
     && npm cache clean --force
 
 WORKDIR /app
@@ -21,6 +23,8 @@ RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --requirement requirements-manager.txt \
     && rm requirements-manager.txt
 COPY dsh_manager/manager.py ./manager.py
+COPY dsh_manager/start_web.py ./start_web.py
+COPY dsh_manager/health_web.py ./health_web.py
 COPY --from=ui-build /src/dist ./static
 
 RUN groupadd --system --gid 10003 dshreaders \

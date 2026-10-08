@@ -1331,6 +1331,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           parentMessageId: editedQuestion.id,
           agentTaskId: taskReply.taskId,
           outputArtifacts: taskReply.artifacts,
+          skillDocument: taskReply.skillDocument,
+          skillFiles: taskReply.skillFiles,
         );
       } on TimeoutException {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -1564,6 +1566,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         parentMessageId: _pendingReplyParentId,
         agentTaskId: taskReply.taskId,
         outputArtifacts: taskReply.artifacts,
+        skillDocument: taskReply.skillDocument,
+        skillFiles: taskReply.skillFiles,
       );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -1837,7 +1841,8 @@ $materialIndex
     return {'id': target.id, 'version_id': version.id};
   }
 
-  Future<({String taskId, String reply, List<Map<String, Object?>> artifacts})?>
+  Future<({String taskId, String reply, List<Map<String, Object?>> artifacts,
+    String? skillDocument, Map<String, String>? skillFiles})?>
   _runAgentTaskReply({
     required int generation,
     required String conversationId,
@@ -1888,7 +1893,7 @@ $materialIndex
     var cancelled = false;
     String? completedText;
     String? completedSkillDocument;
-    Map<String, dynamic>? completedSkillFiles;
+    Map<String, String>? completedSkillFiles;
     List<Map<String, Object?>> artifacts = const [];
     try {
       await for (final event in CapabilityCloudSync.instance.watchTask(
@@ -1925,9 +1930,7 @@ $materialIndex
           case 'completed':
             completedText = event['text']?.toString();
             completedSkillDocument = event['draft']?.toString();
-            completedSkillFiles = event['files'] is Map
-                ? (event['files'] as Map).cast<String, dynamic>()
-                : null;
+            completedSkillFiles = _taskSkillFiles(event['files']);
             artifacts = _taskArtifacts(event['artifacts']);
             break;
           case 'artifacts_ready':
@@ -1950,37 +1953,10 @@ $materialIndex
         await _clearCapabilityTaskId(conversationId, question.id, taskId);
         return null;
       }
-      final streamed = _streamingReplyBuffer.toString();
-      if (_streamingReplyBuffer.length == 0 && completedText != null) {
-        _streamingReplyBuffer.write(completedText);
-      }
-      if (completedSkillDocument != null &&
-          _activeSkillWorkflow != null &&
-          !(_extractSkillDocument(streamed)?.isNotEmpty ?? false)) {
+      if (completedText != null) {
         _streamingReplyBuffer
-          ..write('\n\n## SKILL.md\n```markdown\n')
-          ..write(completedSkillDocument)
-          ..write('\n```');
-      }
-      if (completedSkillFiles != null && _activeSkillWorkflow != null) {
-        final existingReply = _streamingReplyBuffer.toString();
-        for (final entry in completedSkillFiles.entries) {
-          final path = entry.key;
-          if (path == 'SKILL.md' ||
-              RegExp(
-                r'^##\s+' + RegExp.escape(path) + r'\s*$',
-                multiLine: true,
-              ).hasMatch(existingReply)) {
-            continue;
-          }
-          try {
-            final resource = utf8.decode(base64.decode(entry.value.toString()));
-            _streamingReplyBuffer
-              ..write('\n\n## $path\n```text\n')
-              ..write(resource)
-              ..write('\n```');
-          } catch (_) {}
-        }
+          ..clear()
+          ..write(completedText);
       }
       final reply = _streamingReplyBuffer.toString().trimRight();
       if (reply.trim().isEmpty) {
@@ -1988,7 +1964,8 @@ $materialIndex
         throw const AiException('AI没有返回可用内容，请重试');
       }
       _flushStreamingReply(generation, conversationId);
-      return (taskId: taskId, reply: reply, artifacts: artifacts);
+      return (taskId: taskId, reply: reply, artifacts: artifacts,
+        skillDocument: completedSkillDocument, skillFiles: completedSkillFiles);
     } catch (_) {
       if (terminalFailure) {
         await _clearCapabilityTaskId(conversationId, question.id, taskId);
@@ -2414,9 +2391,6 @@ $text''';
       if (path.contains('..') || path.startsWith('/') || path.contains('\\')) {
         continue;
       }
-      if (directory == 'scripts' && !filename.toLowerCase().endsWith('.py')) {
-        continue;
-      }
       final value = match.group(3) ?? '';
       files[path] = base64.encode(utf8.encode(value));
     }
@@ -2441,15 +2415,19 @@ $text''';
 
   Future<CapabilityDraft?> _skillDraftFromReply(
     AiConversationMessage? parent,
-    String response,
-  ) async {
+    String response, {
+    String? skillDocument,
+    Map<String, String>? skillFiles,
+  }) async {
     if (parent == null || parent.isIncomplete) return null;
     final metadata = parent.capabilityMetadata;
     if (metadata?['type'] != 'action') return null;
     final actionId = metadata?['id']?.toString();
     if (actionId != 'create-skill' && actionId != 'revise-skill') return null;
-    final content = _extractSkillDocument(response);
+    final content = skillDocument ?? _extractSkillDocument(response);
     if (content == null) return null;
+    if (!RegExp(r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)')
+        .hasMatch(content)) return null;
     final targetId = metadata?['target_id']?.toString();
     final previousDraft = targetId == null
         ? null
@@ -2479,12 +2457,11 @@ $text''';
       previousContent: previousContent,
       userSuggestion: parent.text,
       updatedAt: DateTime.now(),
-      files: _extractSkillFiles(response),
+      files: skillFiles ?? _extractSkillFiles(response),
     );
   }
 
   Future<void> _saveSkillDraft(CapabilityDraft draft, bool showInMenu) async {
-    await _queueCloudDraftDeletion(draft);
     final existing = await CapabilityStore.instance.find(
       draft.targetCapabilityId ?? draft.id,
     );
@@ -2493,6 +2470,8 @@ $text''';
       existingId: existing?.id,
       showInMenu: showInMenu,
     );
+    // Only retire the draft after the formal version is safely stored.
+    await _queueCloudDraftDeletion(draft);
     await _updateDraftMessageMetadata(draft.id, {
       'type': record.kind.name,
       'id': record.id,
@@ -2705,6 +2684,8 @@ $text''';
   }) async {
     List<Map<String, Object?>> artifacts = const [];
     String? completedText;
+    String? skillDocument;
+    Map<String, String>? skillFiles;
     var cancelled = false;
     try {
       await for (final event in CapabilityCloudSync.instance.watchTask(
@@ -2742,6 +2723,8 @@ $text''';
             break;
           case 'completed':
             completedText = event['text']?.toString();
+            skillDocument = event['draft']?.toString();
+            skillFiles = _taskSkillFiles(event['files']);
             artifacts = _taskArtifacts(event['artifacts']);
             break;
           case 'artifacts_ready':
@@ -2772,6 +2755,8 @@ $text''';
         result,
         parentMessageId: messageId,
         outputArtifacts: artifacts,
+        skillDocument: skillDocument,
+        skillFiles: skillFiles,
       );
     } on TimeoutException {
       if (_isCurrentRequest(generation, conversationId)) {
@@ -2807,12 +2792,35 @@ $text''';
             .toList(growable: false)
       : const [];
 
+  // Keep resource bytes separate from the model's Markdown presentation.
+  Map<String, String>? _taskSkillFiles(Object? value) {
+    if (value == null) return null;
+    if (value is! Map) throw const FormatException('技能文件格式无效');
+    final files = <String, String>{};
+    for (final entry in value.entries) {
+      final path = entry.key;
+      final encoded = entry.value;
+      if (path is! String || encoded is! String ||
+          path.isEmpty || path.startsWith('/') ||
+          path.contains('\\') || path.contains(':') ||
+          path.contains(RegExp(r'[\x00-\x1f\x7f]')) ||
+          path.split('/').any((part) => part.isEmpty || part == '.' || part == '..')) {
+        throw const FormatException('技能文件路径或内容无效');
+      }
+      base64.decode(encoded);
+      if (path != 'SKILL.md') files[path] = encoded;
+    }
+    return files;
+  }
+
   Future<bool> _appendAssistantReply(
     String reply, {
     String? parentMessageId,
     String? agentTaskId,
     bool isIncomplete = false,
     List<Map<String, Object?>> outputArtifacts = const [],
+    String? skillDocument,
+    Map<String, String>? skillFiles,
   }) async {
     if (!mounted) return false;
     final content = reply.trimRight();
@@ -2826,9 +2834,11 @@ $text''';
     final replyTaskId = agentTaskId ?? current.nodeById(parentId)?.agentTaskId;
     CapabilityDraft? skillDraft;
     try {
-      skillDraft = await _skillDraftFromReply(
+      skillDraft = isIncomplete ? null : await _skillDraftFromReply(
         current.nodeById(parentId),
         content,
+        skillDocument: skillDocument,
+        skillFiles: skillFiles,
       );
       if (skillDraft != null) {
         await CapabilityStore.instance.saveDraft(skillDraft);
@@ -2837,8 +2847,8 @@ $text''';
         }
       }
     } catch (_) {
-      // A malformed generated skill stays visible in chat but is not offered
-      // as a saveable draft.
+      // Keep the completed assistant reply when local draft persistence fails.
+      _showReplyError('回复已完成，但技能草稿暂未保存；请从此回复重新创建。');
       skillDraft = null;
     }
     final now = DateTime.now();
@@ -2923,6 +2933,8 @@ $text''';
     required bool isIncomplete,
     String? agentTaskId,
     List<Map<String, Object?>>? outputArtifacts,
+    String? skillDocument,
+    Map<String, String>? skillFiles,
   }) async {
     if (!mounted) return false;
     final current = _conversation;
@@ -2939,6 +2951,23 @@ $text''';
         agentTaskId ??
         current.nodeById(answer.parentMessageId ?? '')?.agentTaskId ??
         answer.agentTaskId;
+    CapabilityDraft? skillDraft;
+    if (!isIncomplete) {
+      skillDraft = await _skillDraftFromReply(
+        current.nodeById(answer.parentMessageId ?? ''),
+        content,
+        skillDocument: skillDocument,
+        skillFiles: skillFiles,
+      );
+      if (skillDraft != null) {
+        try {
+          await CapabilityStore.instance.saveDraft(skillDraft);
+        } catch (_) {
+          _showReplyError('回复已完成，但技能草稿暂未保存；请从此回复重新创建。');
+          skillDraft = null;
+        }
+      }
+    }
     final now = DateTime.now();
     var updated = current.copyWith(
       nodes: current.nodes
@@ -2949,6 +2978,14 @@ $text''';
                     isIncomplete: isIncomplete,
                     agentTaskId: replyTaskId,
                     outputArtifacts: outputArtifacts ?? answer.outputArtifacts,
+                    capabilityMetadata: skillDraft == null
+                        ? answer.capabilityMetadata
+                        : {
+                            'type': 'draft',
+                            'draft_id': skillDraft.id,
+                            'name': skillDraft.name,
+                            'kind': skillDraft.kind.name,
+                          },
                   )
                 : node,
           )
@@ -2992,6 +3029,12 @@ $text''';
     final bookId = updated.bookId;
     if (bookId != null) _bookConversationFallbacks[bookId] = updated;
     if (answer.isIncomplete && !isIncomplete) {
+      if (mounted && _conversation?.id == current.id && skillDraft != null) {
+        setState(() {
+          _pendingSkillDraftReview = skillDraft;
+          _activeSkillWorkflow = null;
+        });
+      }
       _maybeGenerateConversationTitle(updated, answer.parentMessageId, content);
     }
     if (mounted && _conversation?.id == current.id && shouldFollow) {
@@ -3842,6 +3885,8 @@ $text''';
         parentMessageId: questionId,
         agentTaskId: taskReply.taskId,
         outputArtifacts: taskReply.artifacts,
+        skillDocument: taskReply.skillDocument,
+        skillFiles: taskReply.skillFiles,
       );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -3989,6 +4034,8 @@ $text''';
           isIncomplete: false,
           agentTaskId: taskReply.taskId,
           outputArtifacts: taskReply.artifacts,
+          skillDocument: taskReply.skillDocument,
+          skillFiles: taskReply.skillFiles,
         );
       } else {
         final saved = await _appendAssistantReply(
@@ -3996,6 +4043,8 @@ $text''';
           parentMessageId: parentMessageId,
           agentTaskId: taskReply.taskId,
           outputArtifacts: taskReply.artifacts,
+          skillDocument: taskReply.skillDocument,
+          skillFiles: taskReply.skillFiles,
         );
         if (!saved) restoreEmptyStoppedHint();
       }

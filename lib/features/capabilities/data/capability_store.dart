@@ -66,10 +66,11 @@ class CapabilityStore {
     final prefs = await SharedPreferences.getInstance();
     final drafts = _decodeDrafts(prefs.getString(_draftsKey));
     drafts[draft.id] = draft;
-    await prefs.setString(
+    final saved = await prefs.setString(
       _draftsKey,
       jsonEncode(drafts.map((key, value) => MapEntry(key, value.toJson()))),
     );
+    if (!saved) throw StateError('草稿保存失败，请重试');
   }
 
   Future<void> discardDraft(String id) async {
@@ -278,11 +279,11 @@ class CapabilityStore {
     } else {
       nextRecords[existingIndex] = next;
     }
-    await prefs.setString(
+    final saved = await prefs.setString(
       _recordsKey,
       jsonEncode(nextRecords.map((record) => record.toJson()).toList()),
     );
-    await discardDraft(draft.id);
+    if (!saved) throw StateError('技能保存失败，草稿已保留');
     return next;
   }
 

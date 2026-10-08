@@ -776,7 +776,10 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int, worker_
                 "status": "succeeded",
                 "text": final_text,
                 "draft": completed.get("draft"),
-                "files": {},
+                "files": {
+                    path: base64.b64encode(content.encode("utf-8")).decode("ascii")
+                    for path, content in completed.get("draft_files", {}).items()
+                },
                 "artifacts": completed.get("artifacts", []),
             },
         )

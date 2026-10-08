@@ -677,7 +677,7 @@ class _SkillsPluginsComposerControlsState
         Row(
           children: [
             OutlinedButton(
-              onPressed: _savingDraft
+              onPressed: _savingDraft || _deletingDraft
                   ? null
                   : () async {
                       setState(() => _savingDraft = true);
@@ -700,7 +700,7 @@ class _SkillsPluginsComposerControlsState
             ),
             const SizedBox(width: 9),
             TextButton(
-              onPressed: _savingDraft
+              onPressed: _savingDraft || _deletingDraft
                   ? null
                   : () async => widget.onReviseReviewDraft(draft),
               style: TextButton.styleFrom(
