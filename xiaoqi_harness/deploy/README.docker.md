@@ -2,9 +2,10 @@
 
 ## 当前配置
 
-- `app` 容器包含 Flask API、ACP 适配代码和固定版本 `@deepseek-ai/dsh@0.2.0-rc.2`；只运行一个 Gunicorn worker 和一个后台任务 worker。
+- `app` 容器包含 Flask API、ACP 适配代码和固定版本 `@deepseek-ai/dsh@0.2.0-rc.2`；只运行一个 Gunicorn worker 和一个后台任务 worker。它以只读方式挂载 DSH 运行包卷。
+- `dsh-manager` 是独立的非 root 管理服务，提供简洁的插件页和版本管理页；管理器独占写入 DSH 运行包卷，生产 app 不能修改已发布的程序或配置。
 - SQLite 与对象文件位于 `/var/lib/xiaoqi`，由命名卷 `xiaoqi-data` 持久化。重建容器会复用该卷；`docker compose down -v` 会删除它。
-- 应用容器不发布宿主机端口。Caddy 在 `https` profile 中单独启动，只发布 80/443；`caddy-data` 和 `caddy-config` 保存证书状态。
+- app 与管理器均不发布宿主机端口。Caddy 在 `https` profile 中单独启动，只发布 80/443；`caddy-data` 和 `caddy-config` 保存证书状态。小七和管理后台使用不同域名。
 - 起始资源上限为 1.5 GiB 内存和 1.5 CPU，留出 ECS 系统与 Caddy 的余量；真实 DSH 对话的内存占用留到服务器运行时记录。
 - `/run/xiaoqi` 仅为 DSH 原生组件缓存启用可执行映射，内容随容器重建清空；`/tmp` 显式保持 `noexec`。
 - 密钥从宿主机 `single-server.env` 注入。该文件被 Git 和 Docker build context 忽略，不复制进镜像。服务器上应限制为仅管理员可读。
@@ -22,11 +23,24 @@ docker compose ps
 docker compose exec app dsh --version
 ```
 
-将 `single-server.env` 中的登录邮件、SMTP、pepper 和模型 API 配置填好后，健康检查应显示 `healthy`。当前阶段先启动 `app`；域名解析通过后，再以 `https` profile 启动 Caddy：
+为后台生成内部访问令牌和管理员密码哈希。令牌只保存在服务器环境文件；密码通过隐藏输入，不会写入命令历史：
 
 ```sh
-XIAOQI_PUBLIC_HOST=47-76-60-77.sslip.io docker compose --profile https up -d caddy
+openssl rand -hex 32
+docker compose --env-file ./single-server.env build dsh-manager
+docker compose --env-file ./single-server.env run --rm --no-deps dsh-manager python -c "from getpass import getpass; from werkzeug.security import generate_password_hash; print(generate_password_hash(getpass('新管理员密码: ')))"
 ```
+
+将第一条命令输出写入 `XIAOQI_DSH_INTERNAL_TOKEN`，将第二条命令输出写入 `XIAOQI_DSH_ADMIN_PASSWORD_HASH`。在 `single-server.env` 中填好登录邮件、SMTP、pepper、模型 API 和令牌；设置 `XIAOQI_ADMIN_HOST` 为已解析到此服务器的管理域名。随后构建并启动服务：
+
+```sh
+docker compose --env-file ./single-server.env build app dsh-manager
+docker compose --env-file ./single-server.env up -d app dsh-manager
+XIAOQI_PUBLIC_HOST=47-76-60-77.sslip.io docker compose --env-file ./single-server.env --profile https up -d caddy
+docker compose --env-file ./single-server.env ps
+```
+
+把 `XIAOQI_PUBLIC_HOST` 和 `XIAOQI_ADMIN_HOST` 都设为各自的公网域名，并确保 DNS 指向服务器后，Caddy 会分别代理到小七 API 和 DSH 管理后台。管理后台只接受预先设置的管理员密码，没有公开注册入口。密码哈希或内部令牌为空时应视为部署配置未完成，不要开放管理域名。
 
 ## 重建容器后的持久化检查
 

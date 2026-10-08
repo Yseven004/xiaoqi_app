@@ -58,6 +58,8 @@ app.*.map.json
 **/.kotlin/
 **/build/
 **/Generated.xcconfig
+**/node_modules/
+xiaoqi_harness/dsh_manager/ui/dist/
 
 # impeccable-ignore-start
 # Ephemeral output, runtime state, and per-developer overrides.

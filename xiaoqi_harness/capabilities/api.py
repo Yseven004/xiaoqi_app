@@ -11,13 +11,17 @@ import os
 import re
 import secrets
 import smtplib
+import shutil
+import subprocess
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
 from email.message import EmailMessage
 from functools import wraps
+from pathlib import Path
 from typing import Any, Callable
 
 from flask import Blueprint, Response, current_app, g, jsonify, request, send_file
@@ -42,8 +46,11 @@ _DSH_RUNTIME_VERSION = os.environ.get("XIAOQI_DSH_VERSION", "0.1.5rc1")
 _LOCAL_TASK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="xiaoqi-task"
 )
-_LOCAL_TASK_LOCK = threading.Lock()
+_LOCAL_TASK_LOCK = threading.RLock()
+_LOCAL_TASK_CONDITION = threading.Condition(_LOCAL_TASK_LOCK)
 _LOCAL_TASKS_SUBMITTED: set[tuple[str, str, int]] = set()
+_LOCAL_DSH_ACTIVE_TASKS = 0
+_LOCAL_DSH_MAINTENANCE = False
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIME_STARTED = False
 _LOCAL_RUNTIME_ENABLED = False
@@ -110,6 +117,291 @@ def _device_auth(handler: Callable[..., Any]) -> Callable[..., Any]:
         return handler(*args, **kwargs)
 
     return wrapped
+
+
+def _accepts_dsh_tasks(handler: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(handler)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with _LOCAL_TASK_CONDITION:
+            if _LOCAL_DSH_MAINTENANCE:
+                body = request.get_json(force=True, silent=True)
+                task_id = str(body.get("task_id", "")) if isinstance(body, dict) else ""
+                if task_id and store().get(f"task/{g.tenant_id}/{task_id}") is not None:
+                    return handler(*args, **kwargs)
+                response, status = _error("DSH 正在维护，请稍后重试", 503)
+                response.headers["Retry-After"] = "15"
+                return response, status
+            return handler(*args, **kwargs)
+
+    return wrapped
+
+
+def _dsh_admin_state() -> dict[str, Any]:
+    saved = store().get("dsh/admin-state")
+    if saved is not None:
+        return saved.value
+    return {
+        "maintenance": False,
+        "operation_id": None,
+        "active_release_id": "builtin",
+        "dsh_version": _DSH_RUNTIME_VERSION,
+        "config_id": "builtin",
+        "config_revision": 0,
+        "updated_at": int(time.time()),
+    }
+
+
+def _save_dsh_admin_state(value: dict[str, Any]) -> dict[str, Any]:
+    for _ in range(5):
+        current = store().get("dsh/admin-state")
+        try:
+            saved = store().put(
+                "dsh/admin-state",
+                {**value, "updated_at": int(time.time())},
+                current.revision if current else None,
+            )
+            return saved.value
+        except RevisionConflict:
+            continue
+    raise RevisionConflict("DSH 管理状态已变化，请重试")
+
+
+def _authorize_dsh_internal() -> bool:
+    expected = os.environ.get("XIAOQI_DSH_INTERNAL_TOKEN", "")
+    supplied = request.headers.get("X-DSH-Internal-Token", "")
+    return len(expected) >= 32 and secrets.compare_digest(supplied, expected)
+
+
+def _dsh_release_root() -> Path:
+    return Path(os.environ.get("XIAOQI_DSH_RELEASE_ROOT", "/opt/xiaoqi-dsh")).resolve()
+
+
+def _dsh_release(release_id: str) -> dict[str, Any]:
+    if release_id == "builtin":
+        return {"id": "builtin", "version": _DSH_RUNTIME_VERSION, "binary": None}
+    root = _dsh_release_root()
+    release_dir = (root / "releases" / _safe_id(release_id, "DSH 版本 ID")).resolve()
+    try:
+        release_dir.relative_to(root / "releases")
+    except ValueError as error:
+        raise ValueError("DSH 版本路径无效") from error
+    manifest_path = release_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("DSH 版本清单无效")
+    lock_path = release_dir / "package-lock.json"
+    expected_lock = str(manifest.get("lock_sha256", ""))
+    if not lock_path.is_file() or len(expected_lock) != 64 or hashlib.sha256(lock_path.read_bytes()).hexdigest() != expected_lock:
+        raise ValueError("DSH 版本完整性检查失败")
+    version = str(manifest.get("version", ""))
+    binary_relative = str(manifest.get("binary", ""))
+    if not version or not binary_relative or Path(binary_relative).is_absolute() or ".." in Path(binary_relative).parts:
+        raise ValueError("DSH 版本清单无效")
+    binary = (release_dir / binary_relative).resolve()
+    try:
+        binary.relative_to(release_dir)
+    except ValueError as error:
+        raise ValueError("DSH 可执行文件路径无效") from error
+    if not binary.is_file() or (os.name != "nt" and not os.access(binary, os.X_OK)):
+        raise ValueError("DSH 版本文件缺失")
+    return {"id": release_id, "version": version, "binary": str(binary)}
+
+
+def _dsh_config_exists(config_id: str) -> bool:
+    if config_id == "builtin":
+        return True
+    root = _dsh_release_root()
+    config_dir = (root / "configs" / _safe_id(config_id, "配置版本 ID")).resolve()
+    try:
+        config_dir.relative_to(root / "configs")
+    except ValueError:
+        return False
+    manifest_path = config_dir / "profiles" / "xiaoqi-acp" / "package.json"
+    try:
+        profile = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(profile, dict):
+        return False
+    dsh = profile.get("dsh", {})
+    profile_info = dsh.get("profile", {}) if isinstance(dsh, dict) else {}
+    bundles = profile_info.get("bundles", []) if isinstance(profile_info, dict) else None
+    return isinstance(bundles, list)
+
+
+def _dsh_admin_counts() -> dict[str, int]:
+    queued = 0
+    cursor: str | None = None
+    while True:
+        page = store().list("task/", limit=200, after_key=cursor)
+        if not page:
+            break
+        for key, document in page:
+            cursor = key
+            if key.count("/") == 2 and document.value.get("status") == "queued":
+                queued += 1
+        if len(page) < 200:
+            break
+    with _LOCAL_TASK_CONDITION:
+        active = _LOCAL_DSH_ACTIVE_TASKS
+    return {"active_tasks": active, "queued_tasks": queued}
+
+
+@capabilities.get("/internal/dsh/status")
+def internal_dsh_status() -> Any:
+    if not _authorize_dsh_internal():
+        return _error("无权读取 DSH 管理状态", 401)
+    try:
+        return jsonify({**_dsh_admin_state(), **_dsh_admin_counts()})
+    except ConfigurationError as error:
+        return _error(str(error), 503)
+
+
+@capabilities.get("/internal/dsh/health")
+def internal_dsh_health() -> Any:
+    if not _authorize_dsh_internal():
+        return _error("无权检查 DSH 运行状态", 401)
+    try:
+        state = _dsh_admin_state()
+        release = _dsh_release(str(state.get("active_release_id", "builtin")))
+        config_id = str(state.get("config_id", "builtin"))
+        if not _dsh_config_exists(config_id):
+            return jsonify({"healthy": False, "reason": "当前插件配置缺失或损坏", "state": state}), 503
+        binary = str(release["binary"] or shutil.which("dsh") or "")
+        if not binary:
+            return jsonify({"healthy": False, "reason": "DSH 可执行文件未找到", "state": state}), 503
+        result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=8, check=False, env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "/tmp")})
+        observed = (result.stdout or result.stderr).strip().splitlines()[0][:120] if (result.stdout or result.stderr).strip() else ""
+        version_ok = result.returncode == 0 and observed.split()[-1:] == [str(release["version"])]
+        if not version_ok:
+            return jsonify({"healthy": False, "expected_version": release["version"], "observed_version": observed, "state": state}), 503
+        with tempfile.TemporaryDirectory(prefix="xiaoqi-dsh-health-") as temporary_home:
+            home = Path(temporary_home)
+            args = [binary, "--profile", "xiaoqi-acp"]
+            if config_id == "builtin":
+                args.extend(["--from-default-profile", "acp"])
+            else:
+                from .harness_worker import _prepare_dsh_profile
+
+                _prepare_dsh_profile(home, {"dsh_config_id": config_id})
+            args.append("--dump-config")
+            profile_check = subprocess.run(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+                cwd=str(home),
+                env={"PATH": os.environ.get("PATH", ""), "HOME": str(home), "DSH_HOME": str(home), "DSH_TELEMETRY_MODE": "DISABLED", "CI": "1"},
+            )
+        healthy = profile_check.returncode == 0
+        return jsonify({"healthy": healthy, "expected_version": release["version"], "observed_version": observed, "profile_checked": healthy, "reason": None if healthy else "DSH ACP profile 启动检查失败", "state": state}), 200 if healthy else 503
+    except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError) as error:
+        return jsonify({"healthy": False, "reason": str(error)[:240]}), 503
+
+
+@capabilities.post("/internal/dsh/maintenance")
+def internal_dsh_maintenance() -> Any:
+    global _LOCAL_DSH_MAINTENANCE
+    if not _authorize_dsh_internal():
+        return _error("无权修改 DSH 维护状态", 401)
+    try:
+        body = _json_body(2048)
+        action = str(body.get("action", ""))
+        operation_id = _safe_id(body.get("operation_id", ""), "操作 ID")
+        if action not in ("enter", "release"):
+            return _error("维护操作无效", 400)
+        with _LOCAL_TASK_CONDITION:
+            current = _dsh_admin_state()
+            if action == "enter":
+                if current.get("maintenance") and current.get("operation_id") != operation_id:
+                    return _error("另一个 DSH 维护操作正在进行", 409)
+                updated = _save_dsh_admin_state({
+                    **current,
+                    "maintenance": True,
+                    "operation_id": operation_id,
+                    "previous_release_id": current.get("active_release_id", "builtin"),
+                    "previous_config_id": current.get("config_id", "builtin"),
+                })
+                _LOCAL_DSH_MAINTENANCE = True
+            else:
+                if not current.get("maintenance"):
+                    return jsonify({**current, **_dsh_admin_counts()})
+                if current.get("operation_id") != operation_id:
+                    return _error("维护操作 ID 不匹配", 409)
+                updated = _save_dsh_admin_state({
+                    **current,
+                    "maintenance": False,
+                    "operation_id": None,
+                    "previous_release_id": None,
+                    "previous_config_id": None,
+                })
+                _LOCAL_DSH_MAINTENANCE = False
+                _LOCAL_TASK_CONDITION.notify_all()
+        return jsonify({**updated, **_dsh_admin_counts()})
+    except ConfigurationError as error:
+        return _error(str(error), 503)
+    except (ValueError, TypeError) as error:
+        return _error(str(error), 400)
+
+
+@capabilities.post("/internal/dsh/apply-config")
+def internal_dsh_apply_config() -> Any:
+    if not _authorize_dsh_internal():
+        return _error("无权发布 DSH 配置", 401)
+    try:
+        body = _json_body(2048)
+        config_id = _safe_id(body.get("config_id", ""), "配置版本 ID")
+        if not _dsh_config_exists(config_id):
+            return _error("配置版本不存在或不完整", 404)
+        with _LOCAL_TASK_CONDITION:
+            current = _dsh_admin_state()
+            if current.get("maintenance"):
+                return _error("DSH 正在切换版本，请稍后再应用配置", 409)
+            if current.get("config_id") == config_id:
+                return jsonify(current), 200
+            updated = _save_dsh_admin_state({
+                **current,
+                "config_id": config_id,
+                "config_revision": int(current.get("config_revision", 0)) + 1,
+            })
+        return jsonify(updated), 200
+    except ConfigurationError as error:
+        return _error(str(error), 503)
+    except (ValueError, TypeError) as error:
+        return _error(str(error), 400)
+
+
+@capabilities.post("/internal/dsh/activate-release")
+def internal_dsh_activate_release() -> Any:
+    if not _authorize_dsh_internal():
+        return _error("无权切换 DSH 版本", 401)
+    try:
+        body = _json_body(2048)
+        release_id = _safe_id(body.get("release_id", ""), "DSH 版本 ID")
+        config_id = _safe_id(body.get("config_id", "builtin"), "配置版本 ID")
+        release = _dsh_release(release_id)
+        if not _dsh_config_exists(config_id):
+            return _error("目标配置不存在或不完整", 404)
+        with _LOCAL_TASK_CONDITION:
+            current = _dsh_admin_state()
+            if not current.get("maintenance"):
+                return _error("切换版本前必须进入维护状态", 409)
+            if _LOCAL_DSH_ACTIVE_TASKS:
+                return _error("仍有任务正在运行", 409)
+            updated = _save_dsh_admin_state({
+                **current,
+                "active_release_id": release_id,
+                "dsh_version": release["version"],
+                "config_id": config_id,
+                "config_revision": int(current.get("config_revision", 0)) + int(config_id != current.get("config_id", "builtin")),
+            })
+        return jsonify(updated), 200
+    except ConfigurationError as error:
+        return _error(str(error), 503)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as error:
+        return _error(str(error), 400)
 
 
 def _safe_id(value: Any, field: str = "id") -> str:
@@ -308,13 +600,52 @@ def _mutate_task(tenant: str, task_id: str, transform: Callable[[dict[str, Any]]
 
 
 def _run_local_task(tenant: str, task_id: str, attempt: int) -> None:
+    global _LOCAL_DSH_ACTIVE_TASKS
+    started = False
     try:
+        with _LOCAL_TASK_CONDITION:
+            while _LOCAL_DSH_MAINTENANCE:
+                _LOCAL_TASK_CONDITION.wait()
+            _pin_dsh_task_runtime(tenant, task_id, attempt)
+            _LOCAL_DSH_ACTIVE_TASKS += 1
+            started = True
         from .worker import run_task
 
         run_task(store(), tenant, task_id, attempt)
     finally:
-        with _LOCAL_TASK_LOCK:
+        with _LOCAL_TASK_CONDITION:
+            if started:
+                _LOCAL_DSH_ACTIVE_TASKS = max(0, _LOCAL_DSH_ACTIVE_TASKS - 1)
             _LOCAL_TASKS_SUBMITTED.discard((tenant, task_id, attempt))
+            _LOCAL_TASK_CONDITION.notify_all()
+
+
+def _pin_dsh_task_runtime(tenant: str, task_id: str, attempt: int) -> None:
+    current = store().get(f"task/{tenant}/{task_id}")
+    if current is None:
+        return
+    value = current.value
+    if value.get("dsh_pinned") or value.get("status") != "queued" or int(value.get("attempt", 0)) != attempt:
+        return
+    state = _dsh_admin_state()
+
+    def pin(old: dict[str, Any]) -> dict[str, Any]:
+        if (
+            old.get("dsh_pinned")
+            or old.get("status") != "queued"
+            or int(old.get("attempt", 0)) != attempt
+        ):
+            return old
+        return {
+            **old,
+            "runtime_version": str(state.get("dsh_version", _DSH_RUNTIME_VERSION)),
+            "dsh_release_id": str(state.get("active_release_id", "builtin")),
+            "dsh_config_id": str(state.get("config_id", "builtin")),
+            "dsh_config_revision": int(state.get("config_revision", 0)),
+            "dsh_pinned": True,
+        }
+
+    _mutate_task(tenant, task_id, pin)
 
 
 def _enqueue_local_task(tenant: str, task_id: str, attempt: int) -> None:
@@ -553,13 +884,15 @@ def _retention_loop() -> None:
 
 def start_background_runtime() -> None:
     """Enable the in-process queue and recover persisted tasks before serving."""
-    global _LOCAL_RUNTIME_ENABLED, _RUNTIME_STARTED
+    global _LOCAL_RUNTIME_ENABLED, _RUNTIME_STARTED, _LOCAL_DSH_MAINTENANCE
     with _RUNTIME_LOCK:
         if _RUNTIME_STARTED:
             return
         _LOCAL_RUNTIME_ENABLED = True
         os.environ["XIAOQI_SINGLE_SERVER"] = "1"
         try:
+            with _LOCAL_TASK_CONDITION:
+                _LOCAL_DSH_MAINTENANCE = bool(_dsh_admin_state().get("maintenance"))
             store().remove_orphaned_temp_files()
             _expire_finished_tasks()
             queued = _recover_local_tasks()
@@ -1069,6 +1402,7 @@ def delete_draft(draft_id: str) -> Any:
 
 @capabilities.post("/agent/tasks")
 @_device_auth
+@_accepts_dsh_tasks
 def create_agent_task() -> Any:
     try:
         body = _json_body(_MAX_TASK_BYTES)
@@ -1099,7 +1433,7 @@ def create_agent_task() -> Any:
             "tenant_id": g.tenant_id,
             "device_id": g.device_id,
             "runtime": runtime,
-            "runtime_version": _DSH_RUNTIME_VERSION,
+            "dsh_pinned": False,
             "status": "queued",
             "attempt": 1,
             "input_object_key": transcript_key,

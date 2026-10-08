@@ -13,11 +13,16 @@ services:
       TMPDIR: /run/xiaoqi
       XIAOQI_DATA_DIR: /var/lib/xiaoqi
       XIAOQI_DSH_VERSION: 0.2.0-rc.2
+      XIAOQI_DSH_RELEASE_ROOT: /opt/xiaoqi-dsh
+      XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:-}
       XIAOQI_SINGLE_SERVER: "1"
     expose:
       - "8080"
+    group_add:
+      - "10003"
     volumes:
       - xiaoqi-data:/var/lib/xiaoqi
+      - dsh-runtime:/opt/xiaoqi-dsh:ro
     tmpfs:
       - /run/xiaoqi:uid=10001,gid=10001,mode=0700,size=128m,exec
       - /tmp:mode=1777,size=128m,noexec
@@ -43,6 +48,54 @@ services:
       retries: 3
       start_period: 30s
 
+  dsh-manager:
+    image: xiaoqi-dsh-manager:local
+    build:
+      context: ..
+      dockerfile: dsh_manager/Dockerfile
+    env_file:
+      - ./single-server.env
+    environment:
+      HOME: /run/dsh-manager
+      TMPDIR: /run/dsh-manager
+      XIAOQI_DSH_RELEASE_ROOT: /opt/xiaoqi-dsh
+      XIAOQI_DSH_STATIC_ROOT: /app/static
+      XIAOQI_DSH_INTERNAL_API_URL: http://app:8080/v1/internal/dsh
+      XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:-}
+      XIAOQI_DSH_ADMIN_PASSWORD_HASH: ${XIAOQI_DSH_ADMIN_PASSWORD_HASH:-}
+      XIAOQI_DSH_COOKIE_SECURE: "1"
+    expose:
+      - "8090"
+    volumes:
+      - dsh-runtime:/opt/xiaoqi-dsh
+    tmpfs:
+      - /run/dsh-manager:uid=10002,gid=10003,mode=0700,size=128m,exec
+      - /tmp:mode=1777,size=128m,noexec
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 96
+    cpus: 1.0
+    mem_limit: 1024m
+    stop_grace_period: 35s
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   caddy:
     image: caddy:2-alpine
     profiles:
@@ -50,8 +103,11 @@ services:
     depends_on:
       app:
         condition: service_healthy
+      dsh-manager:
+        condition: service_healthy
     environment:
       XIAOQI_PUBLIC_HOST: ${XIAOQI_PUBLIC_HOST:-localhost}
+      XIAOQI_ADMIN_HOST: ${XIAOQI_ADMIN_HOST:-admin.localhost}
     ports:
       - "80:80"
       - "443:443"
@@ -64,5 +120,6 @@ services:
 
 volumes:
   xiaoqi-data:
+  dsh-runtime:
   caddy-data:
   caddy-config:

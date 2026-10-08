@@ -381,7 +381,8 @@ def test_new_task_runtime_is_selected_by_server_tenant_allowlist(
     task = memory.get("task/personal/task-harness")
     assert task is not None
     assert task.value["runtime"] == "deepseek-harness"
-    assert task.value["runtime_version"] == "0.1.5rc1"
+    assert task.value["dsh_pinned"] is False
+    assert "runtime_version" not in task.value
 
 
 def test_mimo_text_task_uses_harness_after_compatibility_is_configured(

@@ -308,6 +308,83 @@ def _runtime_environment(home: Path, api_key: str) -> dict[str, str]:
     return env
 
 
+def _resolve_dsh_binary(task: dict[str, Any]) -> str:
+    release_id = str(task.get("dsh_release_id", "builtin"))
+    if release_id != "builtin":
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", release_id):
+            raise ValueError("DSH 版本 ID 无效")
+        root = Path(os.environ.get("XIAOQI_DSH_RELEASE_ROOT", "/opt/xiaoqi-dsh")).resolve()
+        release_dir = (root / "releases" / release_id).resolve()
+        try:
+            release_dir.relative_to(root / "releases")
+            manifest = json.loads((release_dir / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError("任务指定的 DSH 版本不可用") from error
+        binary_relative = Path(str(manifest.get("binary", "")))
+        if binary_relative.is_absolute() or ".." in binary_relative.parts:
+            raise RuntimeError("DSH 版本清单中的可执行路径无效")
+        binary = (release_dir / binary_relative).resolve()
+        try:
+            binary.relative_to(release_dir)
+        except ValueError as error:
+            raise RuntimeError("DSH 可执行文件路径无效") from error
+        if not binary.is_file():
+            raise RuntimeError("任务指定的 DSH 可执行文件缺失")
+        return str(binary)
+
+    dsh = shutil.which("dsh")
+    if not dsh:
+        candidate = Path(sys.executable).parent / ("dsh.exe" if os.name == "nt" else "dsh")
+        if candidate.is_file():
+            dsh = str(candidate)
+    if not dsh:
+        try:
+            from deepseek_harness_runtime import bundled_runtime_path
+
+            dsh = str(bundled_runtime_path())
+        except (ImportError, FileNotFoundError):
+            pass
+    if not dsh:
+        raise RuntimeError("DeepSeek Harness Runtime 未安装或 dsh 不在 PATH 中")
+    return dsh
+
+
+def _prepare_dsh_profile(home: Path, task: dict[str, Any]) -> None:
+    config_id = str(task.get("dsh_config_id", "builtin"))
+    if config_id == "builtin":
+        return
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", config_id):
+        raise ValueError("DSH 配置版本 ID 无效")
+    root = Path(os.environ.get("XIAOQI_DSH_RELEASE_ROOT", "/opt/xiaoqi-dsh")).resolve()
+    config_dir = (root / "configs" / config_id).resolve()
+    profile = (config_dir / "profiles" / "xiaoqi-acp").resolve()
+    try:
+        config_dir.relative_to(root / "configs")
+        profile.relative_to(config_dir)
+    except ValueError as error:
+        raise RuntimeError("DSH 配置路径无效") from error
+    manifest_path = profile / "package.json"
+    if not manifest_path.is_file():
+        raise RuntimeError("任务指定的 DSH 插件配置缺失")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("DSH 插件配置无法读取") from error
+    if not isinstance(manifest.get("dsh", {}).get("profile", {}).get("bundles", []), list):
+        raise RuntimeError("DSH 插件配置格式无效")
+
+    destination = home / "profiles" / "xiaoqi-acp"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(profile, destination, ignore=shutil.ignore_patterns("node_modules"))
+    modules = profile / "node_modules"
+    if modules.exists():
+        modules.resolve().relative_to(config_dir)
+        try:
+            (destination / "node_modules").symlink_to(modules, target_is_directory=True)
+        except OSError:
+            shutil.copytree(modules, destination / "node_modules", symlinks=True)
+
+
 def _tool_environment(tenant: str, task_id: str, attempt: int, worker_id: str, port: int) -> dict[str, str]:
     keys = {
         "PATH",
@@ -519,22 +596,10 @@ async def _run_acp(store: CloudStore, task: dict[str, Any], task_request: dict[s
 
     model_id = str(task_request.get("model_id", "deepseek-flash"))
     api_key, base_url = _model_settings(model_id)
-    dsh = shutil.which("dsh")
-    if not dsh:
-        candidate = Path(sys.executable).parent / ("dsh.exe" if os.name == "nt" else "dsh")
-        if candidate.is_file():
-            dsh = str(candidate)
-    if not dsh:
-        try:
-            from deepseek_harness_runtime import bundled_runtime_path
-
-            dsh = str(bundled_runtime_path())
-        except (ImportError, FileNotFoundError):
-            pass
-    if not dsh:
-        raise RuntimeError("DeepSeek Harness Runtime 未安装或 dsh 不在 PATH 中")
+    dsh = _resolve_dsh_binary(task)
 
     home.mkdir(parents=True, exist_ok=True)
+    _prepare_dsh_profile(home, task)
     input_files = store.get_immutable(str(task["input_object_key"]))
     input_request = json.loads(input_files["input.json"].decode("utf-8"))
     messages = input_request.get("messages", [])

@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim
+FROM node:22.23.2-bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
@@ -19,9 +19,13 @@ COPY single_server.py ./single_server.py
 COPY capabilities ./capabilities
 
 RUN groupadd --system --gid 10001 xiaoqi \
+    && groupadd --system --gid 10003 dshreaders \
     && useradd --system --uid 10001 --gid xiaoqi --home-dir /run/xiaoqi --shell /usr/sbin/nologin xiaoqi \
-    && mkdir -p /var/lib/xiaoqi /run/xiaoqi \
-    && chown -R xiaoqi:xiaoqi /var/lib/xiaoqi /run/xiaoqi
+    && usermod --append --groups dshreaders xiaoqi \
+    && mkdir -p /var/lib/xiaoqi /run/xiaoqi /opt/xiaoqi-dsh \
+    && chown -R xiaoqi:xiaoqi /var/lib/xiaoqi /run/xiaoqi \
+    && chown 10002:dshreaders /opt/xiaoqi-dsh \
+    && chmod 2750 /opt/xiaoqi-dsh
 
 ENV PATH="/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -30,6 +34,7 @@ ENV PATH="/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:
     XIAOQI_SINGLE_SERVER=1 \
     XIAOQI_DATA_DIR=/var/lib/xiaoqi \
     XIAOQI_DSH_VERSION=0.2.0-rc.2 \
+    XIAOQI_DSH_RELEASE_ROOT=/opt/xiaoqi-dsh \
     HOME=/run/xiaoqi \
     TMPDIR=/run/xiaoqi
 
