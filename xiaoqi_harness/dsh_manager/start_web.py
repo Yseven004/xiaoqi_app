@@ -27,11 +27,16 @@ def _save_token(url: str) -> bool:
         output.flush()
         os.fsync(output.fileno())
     os.replace(temporary, TOKEN_PATH)
-    os.chmod(TOKEN_PATH, 0o600)
+    # The manager reads this launch token from the shared volume as the
+    # dshreaders group.
+    os.chmod(TOKEN_PATH, 0o640)
     return True
 
 
 def main() -> int:
+    # Keep shared profile files group-readable/writable for the manager while
+    # preserving private credential-file permissions from DSH itself.
+    os.umask(0o007)
     TOKEN_PATH.unlink(missing_ok=True)
     admin_host = os.environ.get("XIAOQI_ADMIN_HOST", "").strip()
     if not admin_host:

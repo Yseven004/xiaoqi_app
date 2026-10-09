@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import asyncio
 import os
+import stat
 import zipfile
 from io import BytesIO
 
@@ -89,6 +90,32 @@ def test_snapshot_rejects_path_traversal(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="无效路径"):
         harness_worker._restore_snapshot(tmp_path / "home", payload.getvalue())
+
+
+def test_dsh_task_home_receives_shared_credentials_with_private_permissions(tmp_path, monkeypatch) -> None:
+    web_home = tmp_path / "web-home"
+    web_home.mkdir()
+    (web_home / ".credentials.yaml").write_text("version: 1\n", encoding="utf-8")
+    monkeypatch.setenv("XIAOQI_DSH_WEB_HOME", str(web_home))
+    task_home = tmp_path / "task-home"
+
+    harness_worker._copy_dsh_credentials(task_home)
+
+    copied = task_home / ".credentials.yaml"
+    assert copied.read_text(encoding="utf-8") == "version: 1\n"
+    if os.name != "nt":
+        assert stat.S_IMODE(copied.stat().st_mode) == 0o600
+
+
+def test_dsh_task_home_drops_stale_shared_credentials_when_source_is_absent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XIAOQI_DSH_WEB_HOME", str(tmp_path / "web-home"))
+    task_home = tmp_path / "task-home"
+    task_home.mkdir()
+    (task_home / ".credentials.yaml").write_text("stale", encoding="utf-8")
+
+    harness_worker._copy_dsh_credentials(task_home)
+
+    assert not (task_home / ".credentials.yaml").exists()
 
 
 def test_cancelled_task_sends_acp_cancel(monkeypatch) -> None:

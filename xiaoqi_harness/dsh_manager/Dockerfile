@@ -8,14 +8,20 @@ RUN npm run build
 
 FROM node:22.23.2-bookworm-slim
 
+ARG XIAOQI_ADMIN_HOST=admin.localhost
+COPY dsh_manager/patch_remote_settings.mjs /tmp/patch_remote_settings.mjs
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && git --version \
     && npm install --global --omit=dev --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2 pnpm@11.7.0 \
+    && node /tmp/patch_remote_settings.mjs "$XIAOQI_ADMIN_HOST" \
     && test "$(dsh --version)" = "0.2.0-rc.2" \
     && test "$(pnpm --version)" = "11.7.0" \
     && npm cache clean --force
+
+RUN rm /tmp/patch_remote_settings.mjs
 
 WORKDIR /app
 COPY requirements-manager.txt ./requirements-manager.txt

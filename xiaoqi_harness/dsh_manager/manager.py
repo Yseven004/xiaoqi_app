@@ -338,7 +338,20 @@ def launch_official_web():
         return _error("官方 DSH Web 尚未就绪，请稍后重试", 503)
     if not token or len(token) > 2048 or any(character.isspace() for character in token):
         return _error("官方 DSH Web 启动凭据无效，请检查 Web 服务状态", 503)
-    return redirect("/?" + urllib.parse.urlencode({"token": token}), code=302)
+    query = {"token": token}
+    settings_tab = request.args.get("settings_tab", "")
+    plugin_bundle = request.args.get("plugin_bundle", "")
+    if settings_tab and plugin_bundle:
+        return _error("插件配置目标无效", 400)
+    if settings_tab:
+        if not _SAFE_ID.fullmatch(settings_tab):
+            return _error("插件配置目标无效", 400)
+        query.update({"xiaoqiSettingsSection": "plugins", "xiaoqiSettingsTab": settings_tab})
+    elif plugin_bundle:
+        if not _SAFE_PACKAGE.fullmatch(plugin_bundle):
+            return _error("插件配置目标无效", 400)
+        query["xiaoqiPluginBundle"] = plugin_bundle
+    return redirect("/?" + urllib.parse.urlencode(query), code=302)
 
 
 @app.post("/api/auth/login")
@@ -658,6 +671,30 @@ def _plugin_rows(profile: Path, runtime_version: str) -> list[dict[str, Any]]:
         bundle = package.get("dsh", {}).get("bundle")
         if not isinstance(bundle, dict) or not bundle.get("patch"):
             continue
+        client = package.get("dsh", {}).get("client", {})
+        injected_clients = client.get("inject", []) if isinstance(client, dict) else []
+        configuration_target = None
+        declared_target = client.get("configurationTarget") if isinstance(client, dict) else None
+        if isinstance(declared_target, dict):
+            target_kind = declared_target.get("kind")
+            target_id = declared_target.get("id")
+            if target_kind == "settings_tab" and isinstance(target_id, str) and _SAFE_ID.fullmatch(target_id):
+                configuration_target = {"kind": "settings_tab", "id": target_id}
+        if configuration_target is None and isinstance(injected_clients, list):
+            if "@deepseek-ai/dsh-client-ui-settings-plugins" in injected_clients:
+                patch_spec = bundle.get("patch")
+                if isinstance(patch_spec, str):
+                    patch_path = (package_path.parent / patch_spec).resolve()
+                    try:
+                        patch_path.relative_to(package_path.parent.resolve())
+                        patch_source = patch_path.read_text(encoding="utf-8")
+                    except (OSError, ValueError):
+                        patch_source = ""
+                    row_ids = set(re.findall(r"(?m)^\s*- id:\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*$", patch_source))
+                    if len(row_ids) == 1:
+                        configuration_target = {"kind": "settings_tab", "id": next(iter(row_ids))}
+            if configuration_target is None and "@deepseek-ai/dsh-client-ui-plugin-manager" in injected_clients:
+                configuration_target = {"kind": "bundle", "name": str(name)}
         compatibility = _compatibility(package, runtime_version)
         rows.append(
             {
@@ -667,6 +704,10 @@ def _plugin_rows(profile: Path, runtime_version: str) -> list[dict[str, Any]]:
                 "source": "official" if str(name).startswith("@deepseek-ai/") else "community",
                 "distribution": "github" if re.search(r"github\.com|^github:", str(spec), re.I) else "npm",
                 "enabled": name in selected,
+                "configuration_available": (
+                    configuration_target is not None
+                ),
+                "configuration_target": configuration_target,
                 "compatibility": compatibility,
                 "peer_range": package.get("peerDependencies", {}).get("@deepseek-ai/dsh")
                 or package.get("peerDependencies", {}).get("deepseek-harness"),
@@ -1501,6 +1542,8 @@ def _update_recommendations(
             "name": name,
             "enabled": bool(row.get("enabled")),
             "source": str(row.get("source", "community")),
+            "configuration_available": bool(row.get("configuration_available")),
+            "configuration_target": row.get("configuration_target"),
             "recommendation": recommendation,
         })
     return {"dsh": dsh_recommendation, "plugins": plugins}

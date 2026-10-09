@@ -69,6 +69,11 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .bridge-update-row-heading > div { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .bridge-update-row-heading strong { overflow-wrap: anywhere; color: #30352c; font-size: 13px; }
 .bridge-update-row-heading small { color: #81867d; font-size: 11px; }
+.bridge-plugin-config-link { color: #30352c; font-size: 13px; font-weight: 700; text-decoration: none; overflow-wrap: anywhere; }
+.bridge-plugin-config-link:hover { color: #456e38; text-decoration: underline; }
+.bridge-plugin-config-status { display: flex; align-items: center; flex: 0 0 auto; gap: 8px; }
+.bridge-plugin-config-status .bridge-button { min-height: 32px; padding: 0 10px; font-size: 11px; }
+.bridge-config-unavailable { color: #a2342d; font-size: 11px; font-weight: 700; }
 .bridge-update-badge { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; }
 .bridge-update-badge-current, .bridge-update-badge-available { color: #35592b; background: #eaf2e5; }
 .bridge-update-badge-caution { color: #765011; background: #fff1d8; }

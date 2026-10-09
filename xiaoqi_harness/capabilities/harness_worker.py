@@ -385,6 +385,38 @@ def _prepare_dsh_profile(home: Path, task: dict[str, Any]) -> None:
             shutil.copytree(modules, destination / "node_modules", symlinks=True)
 
 
+def _copy_dsh_credentials(home: Path) -> None:
+    web_home = Path(
+        os.environ.get(
+            "XIAOQI_DSH_WEB_HOME",
+            str(Path(os.environ.get("XIAOQI_DSH_RELEASE_ROOT", "/opt/xiaoqi-dsh")) / "web-home"),
+        )
+    )
+    source = web_home / ".credentials.yaml"
+    destination = home / ".credentials.yaml"
+    if not source.exists():
+        destination.unlink(missing_ok=True)
+        return
+    if source.is_symlink() or not source.is_file():
+        raise RuntimeError("DSH 插件凭据文件无效")
+
+    home.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=home, prefix=".credentials-", delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            os.chmod(temporary_path, 0o600)
+            with source.open("rb") as credentials:
+                shutil.copyfileobj(credentials, temporary)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, destination)
+        os.chmod(destination, 0o600)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def _tool_environment(tenant: str, task_id: str, attempt: int, worker_id: str, port: int) -> dict[str, str]:
     keys = {
         "PATH",
@@ -607,6 +639,7 @@ async def _run_acp(store: CloudStore, task: dict[str, Any], task_request: dict[s
         _restore_snapshot(home, store.get_task_blob(str(task["harness_snapshot_key"])))
     elif task.get("harness_session_id"):
         raise RuntimeError("Harness 会话 ID 存在但会话快照缺失，拒绝从头重放任务")
+    _copy_dsh_credentials(home)
 
     patch_path = home / "xiaoqi-cordis.patch.yml"
     _write_profile_patch(

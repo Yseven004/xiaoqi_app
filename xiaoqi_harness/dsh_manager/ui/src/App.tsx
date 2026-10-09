@@ -27,6 +27,8 @@ type PluginRecommendation = {
   name: string
   enabled: boolean
   source: string
+  configuration_available: boolean
+  configuration_target?: { kind: 'settings_tab'; id: string } | { kind: 'bundle'; name: string } | null
   recommendation: Recommendation
 }
 type UpdateRecommendations = { dsh: Recommendation; plugins: PluginRecommendation[] }
@@ -80,6 +82,14 @@ async function api<T>(path: string, auth?: Auth, body?: unknown): Promise<T> {
   const result = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(result.error?.message || '请求失败，请稍后重试')
   return result as T
+}
+
+function pluginConfigurationHref(target?: PluginRecommendation['configuration_target']): string | undefined {
+  if (!target) return undefined
+  const params = new URLSearchParams()
+  if (target.kind === 'settings_tab') params.set('settings_tab', target.id)
+  else params.set('plugin_bundle', target.name)
+  return `${PREFIX}/api/web/launch?${params.toString()}`
 }
 
 function App() {
@@ -372,6 +382,7 @@ function App() {
                       title={plugin.name}
                       detail={plugin.enabled ? '官方 profile · 已启用' : '官方 profile · 已关闭'}
                       recommendation={plugin.recommendation}
+                      configurationHref={plugin.configuration_available ? pluginConfigurationHref(plugin.configuration_target) : undefined}
                     />
                   ))}
                 </div>
@@ -419,10 +430,11 @@ function App() {
   )
 }
 
-function UpdateRecommendationRow({ title, detail, recommendation }: {
+function UpdateRecommendationRow({ title, detail, recommendation, configurationHref }: {
   title: string
   detail: string
   recommendation: Recommendation
+  configurationHref?: string
 }) {
   const tone = recommendation.status === 'current'
     ? 'current'
@@ -444,10 +456,19 @@ function UpdateRecommendationRow({ title, detail, recommendation }: {
     <article className="bridge-update-row">
       <div className="bridge-update-row-heading">
         <div>
-          <strong>{title}</strong>
+          {configurationHref ? (
+            <a className="bridge-plugin-config-link" href={configurationHref} target="_blank" rel="noreferrer" title="打开 DSH 官方插件配置界面">{title}</a>
+          ) : <strong>{title}</strong>}
           <small>{detail}</small>
         </div>
-        <span className={`bridge-update-badge bridge-update-badge-${tone}`}>{recommendation.label}</span>
+        <div className="bridge-plugin-config-status">
+          {configurationHref ? (
+            <a className="bridge-button bridge-button-secondary" href={configurationHref} target="_blank" rel="noreferrer">配置插件</a>
+          ) : (
+            <span className="bridge-config-unavailable">未配置，不可使用</span>
+          )}
+          <span className={`bridge-update-badge bridge-update-badge-${tone}`}>{recommendation.label}</span>
+        </div>
       </div>
       <p className="bridge-update-reason">{recommendation.reason}</p>
       <p className="bridge-update-versions">

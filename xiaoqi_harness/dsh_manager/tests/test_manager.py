@@ -500,6 +500,68 @@ class DshManagerTest(unittest.TestCase):
         self.assertEqual(updates, {})
         self.assertEqual(manager._read_state()["plugin_update_errors"], {"npm-plugin": "无法读取 npm 上游版本"})
 
+    def test_plugin_rows_identifies_native_configuration_pages_generically(self):
+        profile = self.root / "profile"
+        dependencies = {
+            "configured-plugin": "1.0.0",
+            "plain-plugin": "1.0.0",
+        }
+        (profile / "package.json").parent.mkdir(parents=True, exist_ok=True)
+        (profile / "package.json").write_text(
+            json.dumps({"dependencies": dependencies, "dsh": {"profile": {"bundles": list(dependencies)}}}),
+            encoding="utf-8",
+        )
+        for name, client in (
+            ("configured-plugin", {"inject": ["@deepseek-ai/dsh-client-ui-settings-plugins"]}),
+            ("plain-plugin", {"inject": ["@deepseek-ai/dsh-client-ui-conversation"]}),
+        ):
+            package_path = profile / "node_modules" / name / "package.json"
+            package_path.parent.mkdir(parents=True)
+            (package_path.parent / "cordis.patch.yml").write_text(
+                "- insert:\n    - id: configured-plugin\n",
+                encoding="utf-8",
+            )
+            package_path.write_text(
+                json.dumps({
+                    "name": name,
+                    "version": "1.0.0",
+                    "dsh": {"bundle": {"patch": "./cordis.patch.yml"}, "client": client},
+                }),
+                encoding="utf-8",
+            )
+
+        with patch.object(manager, "_compatibility", return_value="compatible"):
+            rows = manager._plugin_rows(profile, "0.2.0")
+
+        self.assertEqual(
+            {row["name"]: row["configuration_available"] for row in rows},
+            {"configured-plugin": True, "plain-plugin": False},
+        )
+        configured = next(row for row in rows if row["name"] == "configured-plugin")
+        self.assertEqual(configured["configuration_target"], {"kind": "settings_tab", "id": "configured-plugin"})
+
+    def test_official_web_launch_opens_declared_plugin_configuration_target(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XIAOQI_DSH_ADMIN_PASSWORD_HASH": generate_password_hash("test-admin-password"),
+                "XIAOQI_DSH_COOKIE_SECURE": "0",
+            },
+        ):
+            self.client.post("/api/auth/login", json={"password": "test-admin-password"})
+            token_path = self.root / "web-launch-token"
+            token_path.write_text("web-token", encoding="utf-8")
+            with patch.object(manager, "WEB_TOKEN_PATH", token_path):
+                response = self.client.get("/api/web/launch?settings_tab=image-gen")
+                rejected = self.client.get("/api/web/launch?settings_tab=bad%2Ftarget")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            "/?token=web-token&xiaoqiSettingsSection=plugins&xiaoqiSettingsTab=image-gen",
+        )
+        self.assertEqual(rejected.status_code, 400)
+
     def test_failed_plugin_update_check_is_not_rendered_as_no_update(self):
         profile = self.root / "profile"
         plugin_package = profile / "node_modules" / "plugin-a" / "package.json"

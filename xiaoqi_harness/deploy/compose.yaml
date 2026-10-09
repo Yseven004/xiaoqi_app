@@ -14,6 +14,7 @@ services:
       XIAOQI_DATA_DIR: /var/lib/xiaoqi
       XIAOQI_DSH_VERSION: 0.2.0-rc.2
       XIAOQI_DSH_RELEASE_ROOT: /opt/xiaoqi-dsh
+      XIAOQI_DSH_WEB_HOME: /opt/xiaoqi-dsh/web-home
       XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:?Set XIAOQI_DSH_INTERNAL_TOKEN in single-server.env}
       XIAOQI_SINGLE_SERVER: "1"
     expose:
@@ -53,6 +54,8 @@ services:
     build:
       context: ..
       dockerfile: dsh_manager/Dockerfile
+      args:
+        XIAOQI_ADMIN_HOST: ${XIAOQI_ADMIN_HOST:-admin.localhost}
     environment:
       HOME: /run/dsh-manager
       TMPDIR: /run/dsh-manager
@@ -101,6 +104,7 @@ services:
       - https
     image: xiaoqi-dsh-manager:local
     command: ["python", "/app/start_web.py"]
+    user: "10001:10003"
     network_mode: "service:caddy"
     environment:
       HOME: /run/dsh-web
@@ -112,7 +116,7 @@ services:
     volumes:
       - dsh-runtime:/opt/xiaoqi-dsh
     tmpfs:
-      - /run/dsh-web:uid=10002,gid=10003,mode=0700,size=128m,exec
+      - /run/dsh-web:uid=10001,gid=10003,mode=0700,size=128m,exec
       - /tmp:mode=1777,size=128m,noexec
     read_only: true
     init: true
