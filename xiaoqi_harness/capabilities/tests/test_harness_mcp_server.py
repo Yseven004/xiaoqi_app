@@ -14,7 +14,9 @@ class _Task:
         return "ok"
 
 
-def test_server_exposes_only_existing_xiaoqi_tools() -> None:
+def test_server_exposes_only_existing_xiaoqi_tools(monkeypatch) -> None:
+    monkeypatch.setenv("XIAOQI_SINGLE_SERVER", "0")
+    monkeypatch.setenv("XIAOQI_SKILL_SCRIPT_SANDBOX_ENABLED", "0")
     task = _Task()
     server = harness_mcp_server.create_server(task)  # type: ignore[arg-type]
 
@@ -28,6 +30,21 @@ def test_server_exposes_only_existing_xiaoqi_tools() -> None:
     ]
     python_tool = next(tool for tool in tools if tool.name == "execute_python")
     assert python_tool.input_schema["required"] == ["code"]
+
+
+def test_single_server_exposes_selected_skill_script_runner_only_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("XIAOQI_SINGLE_SERVER", "1")
+    monkeypatch.setenv("XIAOQI_SKILL_SCRIPT_SANDBOX_ENABLED", "1")
+    server = harness_mcp_server.create_server(_Task())  # type: ignore[arg-type]
+
+    tools = asyncio.run(server.list_tools())
+
+    assert [tool.name for tool in tools] == [
+        "read_task_material",
+        "read_skill_resource",
+        "draft_workspace",
+        "execute_skill_script",
+    ]
 
 
 def test_main_binds_streamable_http_to_loopback(monkeypatch) -> None:

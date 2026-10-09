@@ -296,6 +296,45 @@ class DshManagerTest(unittest.TestCase):
         self.assertTrue((destination / "node_modules" / "@acme" / "dsh-enabled" / "package.json").is_file())
         self.assertFalse((destination / ".plugin-manager").exists())
 
+    def test_profile_verification_installs_declared_plugin_peers_once(self):
+        home = self.root / "draft"
+        profile = home / "profiles" / "xiaoqi-acp"
+        plugin = profile / "node_modules" / "@acme" / "dsh-image"
+        plugin.mkdir(parents=True)
+        (profile / "package.json").write_text(json.dumps({
+            "dependencies": {"@acme/dsh-image": "1.0.0"},
+            "dsh": {"profile": {"bundles": ["@acme/dsh-image"]}},
+        }), encoding="utf-8")
+        (plugin / "package.json").write_text(json.dumps({
+            "name": "@acme/dsh-image",
+            "peerDependencies": {"@deepseek-ai/cordis": "^4.0.0", "react": "^18.0.0"},
+        }), encoding="utf-8")
+        workspace = profile / "pnpm-workspace.yaml"
+        workspace.write_text("nodeLinker: hoisted\nautoInstallPeers: false\n", encoding="utf-8")
+
+        with patch.object(manager, "_run_command", return_value="") as run:
+            manager._verify_profile("dsh", home)
+            manager._verify_profile("dsh", home)
+
+        self.assertIn("autoInstallPeers: true", workspace.read_text(encoding="utf-8"))
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_args_list[0].args[0][0], "pnpm")
+        self.assertEqual(run.call_args_list[0].args[0][3:5], ["install", "--prod"])
+        self.assertEqual(run.call_args_list[1].args[0][0], "dsh")
+
+    def test_profile_verification_rejects_plugins_that_did_not_activate(self):
+        home = self.root / "draft"
+        profile = home / "profiles" / "xiaoqi-acp"
+        profile.mkdir(parents=True)
+        (profile / "package.json").write_text(json.dumps({
+            "dependencies": {},
+            "dsh": {"profile": {"bundles": []}},
+        }), encoding="utf-8")
+
+        with patch.object(manager, "_run_command", return_value="3 entries did not activate"):
+            with self.assertRaisesRegex(RuntimeError, "插件未成功加载"):
+                manager._verify_profile("dsh", home)
+
     def test_publish_failure_removes_candidate_without_recording_it_as_active(self):
         source = self.root / "web-home" / "profiles" / "web"
         source.mkdir(parents=True)

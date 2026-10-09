@@ -79,7 +79,10 @@ class XiaoqiToolServer:
             )
             _emit(self.store, self.tenant, self.task_id, {"type": "tool_started", "tool": name})
 
-            if name == "execute_python":
+            if name == "execute_python" or (
+                name == "execute_skill_script"
+                and arguments.get("language") == "python"
+            ):
                 def mark_python_called(old: dict[str, Any]) -> dict[str, Any]:
                     if old.get("worker_id") != self.worker_id or int(old.get("attempt", 0)) != self.attempt:
                         raise TaskNotOwned("worker lease was replaced")
@@ -249,6 +252,29 @@ def create_server(task: XiaoqiToolServer) -> MCPServer:
             if network_purpose:
                 arguments["network_purpose"] = network_purpose
             return task.invoke("execute_python", arguments)
+
+    if os.environ.get("XIAOQI_SKILL_SCRIPT_SANDBOX_ENABLED") == "1":
+        @server.tool(
+            name="execute_skill_script",
+            description=(
+                "在有文件访问边界的运行环境中执行本次已选技能 scripts/ 目录里的一个 Python、"
+                "JavaScript 或 TypeScript 脚本，可正常联网访问服务和 API。脚本只能读取该技能和"
+                "本次文字资料；交付文件写到 /workspace/output。每个任务最多执行一次。"
+            ),
+        )
+        def execute_skill_script(
+            language: Literal["python", "javascript", "typescript"],
+            script_path: str,
+            arguments: list[str] | None = None,
+        ) -> str:
+            return task.invoke(
+                "execute_skill_script",
+                {
+                    "language": language,
+                    "script_path": script_path,
+                    "arguments": arguments or [],
+                },
+            )
 
     return server
 

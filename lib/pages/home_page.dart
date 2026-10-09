@@ -1841,8 +1841,15 @@ $materialIndex
     return {'id': target.id, 'version_id': version.id};
   }
 
-  Future<({String taskId, String reply, List<Map<String, Object?>> artifacts,
-    String? skillDocument, Map<String, String>? skillFiles})?>
+  Future<
+    ({
+      String taskId,
+      String reply,
+      List<Map<String, Object?>> artifacts,
+      String? skillDocument,
+      Map<String, String>? skillFiles,
+    })?
+  >
   _runAgentTaskReply({
     required int generation,
     required String conversationId,
@@ -1964,8 +1971,13 @@ $materialIndex
         throw const AiException('AI没有返回可用内容，请重试');
       }
       _flushStreamingReply(generation, conversationId);
-      return (taskId: taskId, reply: reply, artifacts: artifacts,
-        skillDocument: completedSkillDocument, skillFiles: completedSkillFiles);
+      return (
+        taskId: taskId,
+        reply: reply,
+        artifacts: artifacts,
+        skillDocument: completedSkillDocument,
+        skillFiles: completedSkillFiles,
+      );
     } catch (_) {
       if (terminalFailure) {
         await _clearCapabilityTaskId(conversationId, question.id, taskId);
@@ -2426,8 +2438,9 @@ $text''';
     if (actionId != 'create-skill' && actionId != 'revise-skill') return null;
     final content = skillDocument ?? _extractSkillDocument(response);
     if (content == null) return null;
-    if (!RegExp(r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)')
-        .hasMatch(content)) return null;
+    if (!RegExp(r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)').hasMatch(content)) {
+      return null;
+    }
     final targetId = metadata?['target_id']?.toString();
     final previousDraft = targetId == null
         ? null
@@ -2800,11 +2813,16 @@ $text''';
     for (final entry in value.entries) {
       final path = entry.key;
       final encoded = entry.value;
-      if (path is! String || encoded is! String ||
-          path.isEmpty || path.startsWith('/') ||
-          path.contains('\\') || path.contains(':') ||
+      if (path is! String ||
+          encoded is! String ||
+          path.isEmpty ||
+          path.startsWith('/') ||
+          path.contains('\\') ||
+          path.contains(':') ||
           path.contains(RegExp(r'[\x00-\x1f\x7f]')) ||
-          path.split('/').any((part) => part.isEmpty || part == '.' || part == '..')) {
+          path
+              .split('/')
+              .any((part) => part.isEmpty || part == '.' || part == '..')) {
         throw const FormatException('技能文件路径或内容无效');
       }
       base64.decode(encoded);
@@ -2834,12 +2852,14 @@ $text''';
     final replyTaskId = agentTaskId ?? current.nodeById(parentId)?.agentTaskId;
     CapabilityDraft? skillDraft;
     try {
-      skillDraft = isIncomplete ? null : await _skillDraftFromReply(
-        current.nodeById(parentId),
-        content,
-        skillDocument: skillDocument,
-        skillFiles: skillFiles,
-      );
+      skillDraft = isIncomplete
+          ? null
+          : await _skillDraftFromReply(
+              current.nodeById(parentId),
+              content,
+              skillDocument: skillDocument,
+              skillFiles: skillFiles,
+            );
       if (skillDraft != null) {
         await CapabilityStore.instance.saveDraft(skillDraft);
         if (await CapabilityCloudSync.instance.hasEmailSession) {
@@ -6304,6 +6324,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   final Map<String, GlobalKey> _versionAnchorKeys = {};
   final Set<String> _expandedStoppedReplies = {};
   final Set<String> _downloadingArtifactKeys = {};
+  final Map<String, Future<Uint8List>> _artifactPreviewFutures = {};
   int _versionAnchorEpoch = 0;
   _PendingVersionAnchor? _pendingVersionAnchor;
 
@@ -6324,6 +6345,9 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   @override
   void didUpdateWidget(covariant _ConversationMessages oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.record.id != widget.record.id) {
+      _artifactPreviewFutures.clear();
+    }
     if (oldWidget.record.id != widget.record.id ||
         oldWidget.presentationRevision != widget.presentationRevision) {
       _clearActiveSelection();
@@ -6626,6 +6650,17 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     final taskId = artifact['task_id']?.toString() ?? '';
     final key = '$taskId:$artifactId';
     final isDownloading = _downloadingArtifactKeys.contains(key);
+    final isImage =
+        artifact['media_type']?.toString().startsWith('image/') == true;
+    final preview = isImage && taskId.isNotEmpty && artifactId.isNotEmpty
+        ? _artifactPreviewFutures.putIfAbsent(
+            key,
+            () => CapabilityCloudSync.instance.downloadTaskArtifact(
+              taskId,
+              artifactId,
+            ),
+          )
+        : null;
 
     return Card(
       margin: EdgeInsets.zero,
@@ -6634,31 +6669,65 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
         borderRadius: BorderRadius.circular(12),
         side: const BorderSide(color: Color(0xFFE7E8EA)),
       ),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        leading: const Icon(
-          Icons.insert_drive_file_outlined,
-          color: Color(0xFF747981),
-        ),
-        title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text(_artifactSizeLabel(artifact['size'])),
-        trailing: TextButton.icon(
-          onPressed: isDownloading
-              ? null
-              : () => unawaited(_downloadArtifact(artifact)),
-          style: TextButton.styleFrom(
-            minimumSize: const Size(48, 48),
-            padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (isImage)
+            SizedBox(
+              height: 280,
+              child: preview == null
+                  ? const Center(child: Text('图片预览不可用'))
+                  : FutureBuilder<Uint8List>(
+                      future: preview,
+                      builder: (context, snapshot) {
+                        if (snapshot.hasError) {
+                          return const Center(child: Text('图片预览加载失败，可下载原图'));
+                        }
+                        if (!snapshot.hasData) {
+                          return const Center(child: Text('正在加载图片预览…'));
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Image.memory(
+                            snapshot.data!,
+                            fit: BoxFit.contain,
+                            errorBuilder: (context, error, stackTrace) =>
+                                const Center(child: Text('图片格式无法预览，可下载原图')),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 4,
+            ),
+            leading: Icon(
+              isImage ? Icons.image_outlined : Icons.insert_drive_file_outlined,
+              color: const Color(0xFF747981),
+            ),
+            title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+            subtitle: Text(_artifactSizeLabel(artifact['size'])),
+            trailing: TextButton.icon(
+              onPressed: isDownloading
+                  ? null
+                  : () => unawaited(_downloadArtifact(artifact)),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              icon: isDownloading
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.download_outlined, size: 18),
+              label: Text(isDownloading ? '保存中' : '下载'),
+            ),
           ),
-          icon: isDownloading
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.download_outlined, size: 18),
-          label: Text(isDownloading ? '保存中' : '下载'),
-        ),
+        ],
       ),
     );
   }

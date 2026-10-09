@@ -17,6 +17,7 @@ services:
       XIAOQI_DSH_WEB_HOME: /opt/xiaoqi-dsh/web-home
       XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:?Set XIAOQI_DSH_INTERNAL_TOKEN in single-server.env}
       XIAOQI_SINGLE_SERVER: "1"
+      XIAOQI_SKILL_SCRIPT_SANDBOX_ENABLED: "1"
     expose:
       - "8080"
     group_add:

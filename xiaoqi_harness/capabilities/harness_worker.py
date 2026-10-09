@@ -138,7 +138,7 @@ def _write_profile_patch(
                 "- id: system-prompt",
                 "  config:",
                 f"    personaPrefix: {_yaml_scalar(system_prompt)}",
-                "    personaSuffix: You are working on a Xiaoqi user task. Use only the tools explicitly provided by Xiaoqi.",
+                "    personaSuffix: You are working on a Xiaoqi user task. Use relevant tools available in the active DSH profile, including enabled plugins, and tools provided by Xiaoqi. Check for and try a matching tool before saying the capability is unavailable.",
                 disabled,
                 "",
             )
@@ -187,7 +187,8 @@ def _session_prompt(messages: list[dict[str, Any]]) -> list[Any]:
         TextContentBlock(
             text=(
                 "以下是小栖对话上下文。方括号中的角色标记用于区分历史发言；"
-                "请处理最后一条用户消息，必须通过可用的小栖工具完成所需操作。\n"
+                "请处理最后一条用户消息，使用当前 DSH profile 中已启用的插件工具或小栖 MCP 工具完成操作；"
+                "不要因为小栖专用工具里没有某项能力就直接说不能做，先查找并尝试当前可用的匹配工具。\n"
             )
         )
     ]
@@ -217,8 +218,9 @@ def _system_prompt(messages: list[dict[str, Any]]) -> str:
     if "小栖工具规则" not in base:
         base += _xiaoqi_system_instructions()
     return (
-        "你是小栖的任务 Agent。只使用已连接的小栖 MCP 工具，不得使用本地终端、"
-        "文件系统、外部联网、子 Agent 或其他未授权工具。遵守以下小栖系统指令：\n\n"
+        "你是小栖的任务 Agent。可以使用当前 DSH profile 中已启用的插件工具和小栖 MCP 工具；"
+        "优先查找并调用匹配插件完成任务。不要调用未连接的工具、本地终端、文件系统或子 Agent。"
+        "遵守以下小栖系统指令：\n\n"
         + base
     )
 
@@ -430,6 +432,7 @@ def _tool_environment(tenant: str, task_id: str, attempt: int, worker_id: str, p
         "HOMEPATH",
         "XIAOQI_DATA_DIR",
         "XIAOQI_SINGLE_SERVER",
+        "XIAOQI_SKILL_SCRIPT_SANDBOX_ENABLED",
     }
     env = {key: value for key, value in os.environ.items() if key in keys}
     env["PATH"] = os.pathsep.join(
@@ -524,17 +527,81 @@ class _AcpClient:
         self.on_text = on_text
         self.last_message_id: str | None = None
         self.final_text: list[str] = []
+        self.generated_images: list[tuple[str, bytes]] = []
+        self._seen_image_hashes: set[str] = set()
+
+    def _capture_tool_images(self, content: Any) -> None:
+        from .worker import _MAX_ARTIFACT_SIZE, _MAX_ARTIFACT_TOTAL, _MAX_ARTIFACTS
+
+        def field(value: Any, name: str, default: Any = None) -> Any:
+            return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+        def blocks(value: Any) -> list[Any]:
+            if isinstance(value, (list, tuple)):
+                return [block for item in value for block in blocks(item)]
+            kind = str(field(value, "type", ""))
+            class_name = type(value).__name__
+            if kind == "image" or class_name == "ImageContentBlock":
+                return [value]
+            if kind == "content" or class_name == "ToolCallContent":
+                return blocks(field(value, "content"))
+            return []
+
+        extensions = {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/webp": "webp",
+            "image/gif": "gif",
+        }
+        for block in blocks(content):
+            mime_type = str(field(block, "mimeType", field(block, "mime_type", ""))).lower()
+            encoded = field(block, "data")
+            if mime_type not in extensions or not isinstance(encoded, str):
+                continue
+            if encoded.startswith("data:"):
+                header, separator, encoded = encoded.partition(",")
+                if not separator or not header.endswith(";base64"):
+                    raise ValueError("DSH 插件返回了无效的图片附件")
+            if len(encoded) > (_MAX_ARTIFACT_SIZE * 4 // 3 + 8):
+                raise ValueError("DSH 插件返回的图片超过 10 MB")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except ValueError as error:
+                raise ValueError("DSH 插件返回了无效的图片附件") from error
+            if not data:
+                raise ValueError("DSH 插件返回了空图片附件")
+            digest = hashlib.sha256(data).hexdigest()
+            if digest in self._seen_image_hashes:
+                continue
+            if len(self.generated_images) >= _MAX_ARTIFACTS:
+                raise ValueError("每个任务最多回传 10 个文件")
+            if sum(len(image) for _, image in self.generated_images) + len(data) > _MAX_ARTIFACT_TOTAL:
+                raise ValueError("本次任务产物总大小超过 20 MB")
+            if len(data) > _MAX_ARTIFACT_SIZE:
+                raise ValueError("DSH 插件返回的图片超过 10 MB")
+            self._seen_image_hashes.add(digest)
+            name = f"generated-image-{len(self.generated_images) + 1}.{extensions[mime_type]}"
+            self.generated_images.append((name, data))
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
-        from acp.schema import AgentMessageChunk, TextContentBlock
-
-        if not isinstance(update, AgentMessageChunk) or not isinstance(update.content, TextContentBlock):
+        class_name = type(update).__name__
+        event_name = str(getattr(update, "sessionUpdate", ""))
+        if class_name in {"ToolCallUpdate", "ToolCallContentChunk"} or event_name in {
+            "tool_call_update",
+            "tool_call_content_chunk",
+        }:
+            self._capture_tool_images(getattr(update, "content", None))
             return
-        message_id = update.messageId
+        if class_name != "AgentMessageChunk":
+            return
+        content = getattr(update, "content", None)
+        text = getattr(content, "text", None)
+        if not isinstance(text, str):
+            return
+        message_id = getattr(update, "messageId", None)
         if message_id and message_id != self.last_message_id:
             self.final_text.clear()
             self.last_message_id = message_id
-        text = update.content.text
         if not text:
             return
         self.final_text.append(text)
@@ -620,7 +687,7 @@ def _claim_python_reminder(
     )
 
 
-async def _run_acp(store: CloudStore, task: dict[str, Any], task_request: dict[str, Any], tenant: str, task_id: str, attempt: int, worker_id: str, home: Path, workspace: Path) -> tuple[str, str]:
+async def _run_acp(store: CloudStore, task: dict[str, Any], task_request: dict[str, Any], tenant: str, task_id: str, attempt: int, worker_id: str, home: Path, workspace: Path) -> tuple[str, str, list[tuple[str, bytes]]]:
     import acp
     from acp.schema import ClientCapabilities, HttpMcpServer, Implementation
 
@@ -748,7 +815,7 @@ async def _run_acp(store: CloudStore, task: dict[str, Any], task_request: dict[s
                 pass
     finally:
         _stop_process(tool_process)
-    return session_id, "".join(client.final_text).strip()
+    return session_id, "".join(client.final_text).strip(), client.generated_images
 
 
 def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int, worker_id: str, task: dict[str, Any]) -> None:
@@ -758,6 +825,7 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int, worker_
         TaskNotOwned,
         _emit,
         _ensure_active,
+        _persist_artifact_candidates,
         _requires_python_execution,
         _task_state,
         _validate_python_requirements,
@@ -773,10 +841,13 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int, worker_
     try:
         with tempfile.TemporaryDirectory(prefix="xiaoqi-dsh-") as home:
             home_path = Path(home)
-            session_id, final_text = asyncio.run(
+            session_id, final_text, generated_images = asyncio.run(
                 _run_acp(store, task, task_request, tenant, task_id, attempt, worker_id, home_path, workspace)
             )
             _checkpoint(store, tenant, task_id, attempt, worker_id, session_id, home_path)
+        artifacts = _persist_artifact_candidates(
+            generated_images, store, tenant, task_id, attempt, worker_id
+        )
         current = _task_state(store, tenant, task_id)
         if current.get("status") == "awaiting_network_permission":
             return
@@ -791,7 +862,7 @@ def run_task(store: CloudStore, tenant: str, task_id: str, attempt: int, worker_
             return {
                 **old,
                 "status": "succeeded",
-                "result": final_text,
+                "result": final_text or ("图片已生成，请查看下方结果。" if artifacts else ""),
                 "draft": old.get("draft_files", {}).get("SKILL.md"),
                 "worker_id": None,
                 "worker_lease_until": 0,

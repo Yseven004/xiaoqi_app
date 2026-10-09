@@ -10,6 +10,7 @@ from io import BytesIO
 import pytest
 
 from xiaoqi_harness.capabilities import harness_worker
+from xiaoqi_harness.capabilities import skill_script_sandbox
 
 
 def test_tool_environment_preserves_python_module_paths(monkeypatch) -> None:
@@ -54,6 +55,28 @@ def test_session_prompt_rejects_remote_images() -> None:
         )
 
 
+def test_system_prompt_allows_enabled_dsh_plugins_and_skill_network(monkeypatch) -> None:
+    monkeypatch.setenv("XIAOQI_SINGLE_SERVER", "1")
+    prompt = harness_worker._system_prompt([{"role": "user", "content": "生成一张图片"}])
+
+    assert "当前 DSH profile 中已启用的插件工具" in prompt
+    assert "小栖 MCP 工具" in prompt
+    assert "脚本可以联网访问所需服务和 API" in prompt
+    assert "只使用已连接的小栖 MCP 工具" not in prompt
+
+
+def test_skill_script_runtimes_cover_python_javascript_and_typescript() -> None:
+    assert skill_script_sandbox._runtime_binary("python") == (
+        skill_script_sandbox.sys.executable,
+        ["-I", "-B"],
+    )
+    assert skill_script_sandbox._runtime_binary("javascript") == (
+        "/usr/local/bin/node",
+        ["--disable-proto=throw"],
+    )
+    assert skill_script_sandbox._runtime_binary("typescript") == ("/usr/local/bin/tsx", [])
+
+
 def test_mimo_profile_advertises_image_input(tmp_path) -> None:
     profile = tmp_path / "profile.yaml"
 
@@ -66,6 +89,120 @@ def test_mimo_profile_advertises_image_input(tmp_path) -> None:
     )
 
     assert "input: [text, image]" in profile.read_text(encoding="utf-8")
+    assert "enabled plugins" in profile.read_text(encoding="utf-8")
+
+
+def test_acp_tool_image_content_is_captured_once() -> None:
+    image = base64.b64encode(b"generated png bytes").decode("ascii")
+
+    class ImageBlock:
+        type = "image"
+        mimeType = "image/png"
+        data = image
+
+    class Content:
+        type = "content"
+
+        def __init__(self):
+            self.content = ImageBlock()
+
+    class ToolCallUpdate:
+        sessionUpdate = "tool_call_update"
+
+        def __init__(self):
+            self.content = [Content()]
+
+    client = harness_worker._AcpClient(lambda *_args: None)
+
+    asyncio.run(client.session_update("session", ToolCallUpdate()))
+    asyncio.run(client.session_update("session", ToolCallUpdate()))
+
+    assert client.generated_images == [("generated-image-1.png", b"generated png bytes")]
+
+
+def test_harness_image_artifact_uses_existing_task_download_pipeline(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from xiaoqi_harness.capabilities import worker
+
+    task = {"worker_id": "worker", "attempt": 1, "artifacts": []}
+    saved = {}
+    emitted = []
+
+    class Store:
+        def put_immutable(self, key, files):
+            saved[key] = files
+
+    def mutate(_tenant, _task_id, update):
+        task.update(update(dict(task)))
+        return SimpleNamespace(value=dict(task))
+
+    monkeypatch.setattr("xiaoqi_harness.capabilities.api._mutate_task", mutate)
+    monkeypatch.setattr(worker, "_ensure_active", lambda *_args: None)
+    monkeypatch.setattr(worker, "_emit", lambda _store, _tenant, _task_id, event: emitted.append(event))
+
+    artifacts = worker._persist_artifact_candidates(
+        [("generated-image-1.png", b"png bytes")],
+        Store(),
+        "tenant",
+        "task",
+        1,
+        "worker",
+    )
+
+    assert artifacts[0]["media_type"] == "image/png"
+    assert task["artifacts"][0]["object_key"] in saved
+    assert emitted[-1]["type"] == "artifacts_ready"
+
+
+def test_skill_script_runner_uses_only_the_selected_skill_version(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from xiaoqi_harness.capabilities import worker
+
+    task = {"worker_id": "worker", "attempt": 1, "skill_script_runs": 0}
+    record = SimpleNamespace(value={"versions": [{"id": "v1", "artifact_key": "skill-v1"}]})
+    captured = {}
+
+    class Store:
+        def get(self, key):
+            assert key == "cap/tenant/skill-1"
+            return record
+
+        def get_immutable(self, key):
+            assert key == "skill-v1"
+            return {"SKILL.md": b"instructions", "scripts/run.ts": b"console.log('ok')"}
+
+    def mutate(_tenant, _task_id, update):
+        task.update(update(dict(task)))
+        return SimpleNamespace(value=dict(task))
+
+    def run_script(**kwargs):
+        captured.update(kwargs)
+        assert kwargs["should_cancel"]() is False
+        return 0, "script ran", []
+
+    monkeypatch.setenv("XIAOQI_SKILL_SCRIPT_SANDBOX_ENABLED", "1")
+    monkeypatch.setattr("xiaoqi_harness.capabilities.api._mutate_task", mutate)
+    monkeypatch.setattr("xiaoqi_harness.capabilities.worker._task_state", lambda *_args: dict(task))
+    monkeypatch.setattr("xiaoqi_harness.capabilities.worker._ensure_active", lambda *_args: None)
+    monkeypatch.setattr("xiaoqi_harness.capabilities.skill_script_sandbox.run_skill_script", run_script)
+    monkeypatch.setattr(worker, "_persist_artifact_candidates", lambda *_args: [])
+
+    result = worker._execute_skill_script(
+        Store(),
+        "tenant",
+        "task",
+        {"capability": {"id": "skill-1", "version_id": "v1"}},
+        {"language": "typescript", "script_path": "scripts/run.ts", "arguments": ["safe"]},
+        1,
+        "worker",
+    )
+
+    assert result == "script ran"
+    assert captured["script_files"]["scripts/run.ts"] == b"console.log('ok')"
+    assert captured["arguments"] == ["safe"]
+    assert task["skill_script_runs"] == 1
 
 
 def test_snapshot_round_trip_keeps_only_runtime_session_data(tmp_path) -> None:

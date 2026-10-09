@@ -257,10 +257,12 @@ def _xiaoqi_system_instructions() -> str:
     if os.environ.get("XIAOQI_SINGLE_SERVER") == "1":
         return (
             "\n\n小栖当前开放的能力：读取本次任务附带的资料、读取已授权文字技能及其文字资源、"
-            "创建或修改等待用户确认保存的技能草稿。当前单机服务没有开放 Python 或其他代码执行，"
-            "也不能用代码处理数据或生成可下载文件。用户提出这类请求时，明确说明暂未开放；"
+            "创建或修改等待用户确认保存的技能草稿。若已选技能包含 scripts/ 下的脚本，可用 execute_skill_script"
+            "运行该技能自带的 Python、JavaScript 或 TypeScript 脚本；脚本可以联网访问所需服务和 API，"
+            "但只能访问本次技能文件、任务资料和输出目录，不能读取小栖服务配置或密钥；不得用它执行任意用户代码。"
+            "单机服务没有开放通用 Python 代码执行。"
+            "未选择技能或技能没有对应脚本时，不要声称脚本已经运行；"
             "可以提供文字分析或示例代码，但不能声称已经运行。"
-            "联网默认关闭。确需联网时列出精确域名和用途，等待系统单独授权。"
             "长文本按工具提示的 offset 分段读取，直到到达末尾。"
             "创建或修改技能时，若目的不明确，直接在普通聊天回复中用一句简短纯文本问题澄清，"
             "不要返回结构化问题或选项面板；目的明确后将完整技能和资源写入 draft_workspace，"
@@ -271,7 +273,7 @@ def _xiaoqi_system_instructions() -> str:
     return (
         "\n\n小栖工具规则：需要实际运行 Python 时调用 execute_python，不要只描述执行结果；需要交付的文件写到 /home/user/workspace/output；"
         "如果 Python 工具返回‘执行失败’，必须明确告诉用户失败，不得描述成成功。"
-        "联网默认关闭。确需联网时列出精确域名和用途，等待系统单独授权。"
+        "execute_python 工具联网默认关闭，确需联网时列出精确域名和用途并等待授权；已启用的 DSH 插件可以按自身配置访问服务。"
         "附件、技能资源和草稿可用对应工具完整读取；长文本按工具提示的 offset 分段读取，直到到达末尾。"
         "创建或修改技能时，若目的不明确，直接在普通聊天回复中用一句简短纯文本问题澄清，不要返回结构化问题或选项面板；目的明确后将完整技能和资源写入 draft_workspace，读回最终 SKILL.md 后再依据该版本完成一次代表性试用。"
         "最终回复展示完整 SKILL.md、试用输入与实际结果；未执行的试用必须标为文字演示，不能声称已运行。"
@@ -363,16 +365,39 @@ def _persist_artifacts(
             if len(candidates) > _MAX_ARTIFACTS:
                 raise ValueError("每个任务最多回传 10 个文件")
 
-    if sum(len(data) for _, data in candidates) > _MAX_ARTIFACT_TOTAL:
+    return _persist_artifact_candidates(
+        candidates, store, tenant, task_id, attempt, worker_id
+    )
+
+
+def _persist_artifact_candidates(
+    candidates: list[tuple[str, bytes]],
+    store: CloudStore,
+    tenant: str,
+    task_id: str,
+    attempt: int | None,
+    worker_id: str | None,
+) -> list[dict[str, Any]]:
+    safe_candidates = []
+    for name, data in candidates:
+        safe_name = re.sub(r'[\\/\x00-\x1f<>:"|?*]', "_", PurePosixPath(name).name).strip(" .")[:120]
+        if not safe_name:
+            raise ValueError("产物文件名无效")
+        if len(data) > _MAX_ARTIFACT_SIZE:
+            raise ValueError(f"产物 {safe_name} 超过 10 MB")
+        safe_candidates.append((safe_name, bytes(data)))
+        if len(safe_candidates) > _MAX_ARTIFACTS:
+            raise ValueError("每个任务最多回传 10 个文件")
+    if sum(len(data) for _, data in safe_candidates) > _MAX_ARTIFACT_TOTAL:
         raise ValueError("本次任务产物总大小超过 20 MB")
-    if not candidates:
+    if not safe_candidates:
         return []
     if worker_id is not None and attempt is not None:
         _ensure_active(store, tenant, task_id, attempt, worker_id)
 
     archive_files: dict[str, bytes] = {}
     artifacts = []
-    for index, (name, data) in enumerate(candidates):
+    for index, (name, data) in enumerate(safe_candidates):
         archive_path = f"{index:02d}-{name}"
         archive_files[archive_path] = data
         artifacts.append({
@@ -556,6 +581,92 @@ def _execute_python(
             pass
 
 
+def _execute_skill_script(
+    store: CloudStore,
+    tenant: str,
+    task_id: str,
+    task_request: dict[str, Any],
+    arguments: dict[str, Any],
+    attempt: int,
+    worker_id: str,
+) -> str:
+    if os.environ.get("XIAOQI_SKILL_SCRIPT_SANDBOX_ENABLED") != "1":
+        raise RuntimeError("技能脚本沙箱尚未在此服务实例启用")
+    from .api import _mutate_task, _safe_id
+    from .skill_script_sandbox import run_skill_script
+
+    capability = task_request.get("capability")
+    if not isinstance(capability, dict):
+        raise ValueError("当前任务没有选择技能")
+    capability_id = _safe_id(capability.get("id"), "技能 ID")
+    version_id = _safe_id(capability.get("version_id"), "技能版本 ID")
+    record = store.get(f"cap/{tenant}/{capability_id}")
+    if record is None or record.value.get("deleted_at"):
+        raise ValueError("技能不存在或已删除")
+    version = next(
+        (item for item in record.value.get("versions", []) if item.get("id") == version_id),
+        None,
+    )
+    if version is None:
+        raise ValueError("技能版本不存在")
+    script_files = store.get_immutable(str(version["artifact_key"]))
+    script_path = _safe_resource_path(str(arguments.get("script_path", "")))
+    language = str(arguments.get("language", ""))
+    extensions = {
+        "python": {".py"},
+        "javascript": {".js", ".mjs", ".cjs"},
+        "typescript": {".ts", ".mts"},
+    }
+    if not script_path.startswith("scripts/") or PurePosixPath(script_path).suffix.lower() not in extensions.get(language, set()):
+        raise ValueError("脚本路径或语言与当前技能不匹配")
+    if script_path not in script_files:
+        raise ValueError("脚本不在本次已授权的技能版本中")
+    script_arguments = arguments.get("arguments", [])
+    if not isinstance(script_arguments, list) or len(script_arguments) > 32 or any(not isinstance(value, str) for value in script_arguments):
+        raise ValueError("技能脚本参数格式无效")
+    if sum(len(value.encode("utf-8")) for value in script_arguments) > 8 * 1024:
+        raise ValueError("技能脚本参数不能超过 8 KB")
+
+    task = _task_state(store, tenant, task_id)
+    if int(task.get("skill_script_runs", 0)) >= 1:
+        raise ValueError("本次任务的技能脚本执行次数已用完")
+    _mutate_task(
+        tenant,
+        task_id,
+        lambda old: {**old, "skill_script_runs": int(old.get("skill_script_runs", 0)) + 1, "updated_at": int(time.time())},
+    )
+    materials = {
+        str(item.get("name") or f"material-{index}.txt"): str(item["text"])
+        for index, item in enumerate(task_request.get("materials", []), start=1)
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
+    }
+
+    def should_cancel() -> bool:
+        try:
+            _ensure_active(store, tenant, task_id, attempt, worker_id)
+        except (TaskCancelled, TaskNotOwned):
+            return True
+        return False
+
+    exit_code, output, files = run_skill_script(
+        language=language,
+        script_path=script_path,
+        script_files=script_files,
+        materials=materials,
+        arguments=script_arguments,
+        should_cancel=should_cancel,
+    )
+    if exit_code != 0:
+        raise RuntimeError("技能脚本执行失败：" + (output[-500:] or f"退出码 {exit_code}"))
+    artifacts = _persist_artifact_candidates(
+        files, store, tenant, task_id, attempt, worker_id
+    )
+    summary = output.strip() or "技能脚本已执行，没有标准输出。"
+    if artifacts:
+        summary += "\n已生成文件：" + ", ".join(item["name"] for item in artifacts)
+    return _clean_output(summary)
+
+
 def _run_tool(
     store: CloudStore,
     tenant: str,
@@ -656,6 +767,13 @@ def _run_tool(
 
         _mutate_task(tenant, task_id, lambda old: {**old, "python_runs": int(old.get("python_runs", 0)) + 1, "updated_at": int(time.time())})
         return _execute_python(store, tenant, task_id, str(arguments.get("code", "")), domains, task_request, attempt, worker_id)
+
+    if name == "execute_skill_script":
+        if not isinstance(arguments.get("language"), str):
+            raise ValueError("技能脚本语言无效")
+        return _execute_skill_script(
+            store, tenant, task_id, task_request, arguments, attempt, worker_id
+        )
 
     raise ValueError("工具未开放")
 

@@ -1,11 +1,13 @@
 FROM node:22.23.2-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
+    && apt-get install -y --no-install-recommends python3 python3-venv libseccomp2 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install --global --omit=dev @deepseek-ai/dsh@0.2.0-rc.2 \
+RUN npm install --global --omit=dev @deepseek-ai/dsh@0.2.0-rc.2 typescript@7.0.2 tsx@4.23.15 \
     && test "$(dsh --version)" = "0.2.0-rc.2" \
+    && test "$(tsc --version)" = "Version 7.0.2" \
+    && node -e "if (require('/usr/local/lib/node_modules/tsx/package.json').version !== '4.23.15') process.exit(1)" \
     && npm cache clean --force
 
 WORKDIR /app

@@ -781,8 +781,78 @@ def _prepare_xiaoqi_profile(source: Path, destination: Path) -> list[str]:
     return selected
 
 
+def _ensure_profile_peer_dependencies(home: Path, operation_id: str | None = None) -> None:
+    profile = home / "profiles" / "xiaoqi-acp"
+    manifest = _plugin_manifest(profile)
+    bundles = manifest.get("dsh", {}).get("profile", {}).get("bundles", [])
+    peers_by_plugin = {}
+    for name in bundles:
+        if name not in manifest.get("dependencies", {}):
+            continue
+        package_path = _package_path(profile, name)
+        if not package_path.is_file():
+            raise RuntimeError(f"启用插件 {name} 未安装完整，无法检查依赖")
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+        peers = package.get("peerDependencies", {})
+        optional = package.get("peerDependenciesMeta", {})
+        if not isinstance(peers, dict):
+            continue
+        required = {}
+        for dependency, version in peers.items():
+            metadata = optional.get(dependency, {}) if isinstance(optional, dict) else {}
+            if not (isinstance(metadata, dict) and metadata.get("optional") is True):
+                required[dependency] = version
+        if required:
+            peers_by_plugin[name] = {
+                "version": package.get("version", ""),
+                "peer_dependencies": required,
+            }
+    if not peers_by_plugin:
+        return
+
+    fingerprint = hashlib.sha256(
+        json.dumps(peers_by_plugin, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    marker = profile / ".xiaoqi-peer-dependencies.json"
+    try:
+        if json.loads(marker.read_text(encoding="utf-8")).get("fingerprint") == fingerprint:
+            return
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    workspace_file = profile / "pnpm-workspace.yaml"
+    workspace = workspace_file.read_text(encoding="utf-8") if workspace_file.is_file() else ""
+    workspace, replacements = re.subn(
+        r"(?m)^autoInstallPeers\s*:\s*(?:true|false)\s*$",
+        "autoInstallPeers: true",
+        workspace,
+    )
+    if not replacements:
+        workspace = workspace.rstrip() + "\nautoInstallPeers: true\n"
+    workspace_file.write_text(workspace, encoding="utf-8")
+    os.chmod(workspace_file, 0o640)
+    _run_command(
+        ["pnpm", "--dir", "profiles/xiaoqi-acp", "install", "--prod", "--ignore-scripts", "--no-frozen-lockfile"],
+        home=home,
+        operation_id=operation_id,
+        timeout=900,
+    )
+    temporary = marker.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"fingerprint": fingerprint}) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o640)
+    os.replace(temporary, marker)
+
+
 def _verify_profile(binary: str, home: Path, operation_id: str | None = None) -> None:
-    _run_command([binary, "--profile", "xiaoqi-acp", "--dump-config"], home=home, operation_id=operation_id, timeout=90)
+    _ensure_profile_peer_dependencies(home, operation_id)
+    output = _run_command(
+        [binary, "--profile", "xiaoqi-acp", "--dump-config"],
+        home=home,
+        operation_id=operation_id,
+        timeout=90,
+    )
+    if re.search(r"(?i)\b\d+\s+entr(?:y|ies) did not activate\b|failed to (?:load|import) plugin|ERR_MODULE_NOT_FOUND", output):
+        raise RuntimeError("DSH 检查发现有插件未成功加载；请查看本次操作日志中的插件导入错误")
 
 
 def _verify_release_profile(binary: str, config_id: str, operation_id: str) -> None:
