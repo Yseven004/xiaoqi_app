@@ -129,16 +129,6 @@ SchemanticType<Map<String, dynamic>> _objectToolSchema(
   parse: (json) => Map<String, dynamic>.from(json as Map),
 );
 
-final _generateImageSchema = _objectToolSchema(
-  const {
-    'prompt': {'type': 'string', 'minLength': 1, 'maxLength': 4000},
-    'image_url': {'type': 'string'},
-    'count': {'type': 'integer', 'minimum': 1, 'maximum': 4},
-    'size': {'type': 'string'},
-  },
-  required: const ['prompt'],
-);
-
 final _executePythonSchema = _objectToolSchema(
   const {
     'code': {'type': 'string', 'minLength': 1, 'maxLength': 65536},
@@ -174,22 +164,48 @@ final _executeSkillScriptSchema = _objectToolSchema(
   required: const ['script_path', 'language'],
 );
 
+bool agentShouldGenerateImage(String text) {
+  final normalized = text.toLowerCase();
+  final requestMarkers = RegExp(r'(帮我|给我|替我|请直接|来一张|做一张|画一张)');
+  final specifiesImage = RegExp(r'(一张|一幅|一个|一份|张|幅)').hasMatch(normalized);
+  final asksCapabilityOnly = RegExp(
+    r'^(?:请问)?(?:你)?(?:能否|能不能|可不可以|是否可以|可以|能|会不会).{0,12}'
+    r'(?:生成|生图|绘制|画).{0,8}(?:图片|图像|插画|海报|头像|壁纸|照片|图)?[吗?？]*$',
+  ).hasMatch(normalized);
+  final asksWhether = RegExp(
+    r'(能否|能不能|可不可以|是否|可以吗|会不会|吗[?？]?$)',
+  ).hasMatch(normalized);
+  final directAction = RegExp(
+    r'^(?:(?:请|麻烦|我想|我要|直接)?(?:生成|生图|画|绘制|创作|制作|做|来)|'
+    r'(?:帮我|给我|替我|请直接).{0,3}(?:生成|生图|画|绘制|创作|制作|做|来))',
+  ).hasMatch(normalized);
+  if (asksCapabilityOnly &&
+      !requestMarkers.hasMatch(normalized) &&
+      !specifiesImage) {
+    return false;
+  }
+
+  final asksGeneralQuestion = RegExp(
+    r'(怎么|如何|为什么|什么意思|是什么|什么是|原理|特点|区别|有什么用)',
+  ).hasMatch(normalized);
+  if (asksGeneralQuestion && !directAction) return false;
+
+  return RegExp(
+        r'(生成|生图|画|绘制|创作|制作|做|来).{0,12}'
+        r'(一张|一幅|一个|一份|张|幅|图片|图像|插画|海报|头像|壁纸|照片|示意图|图)|'
+        r'(编辑|修改|修复|修图|改图).{0,8}(图片|图像|照片|插画|海报|头像|壁纸|图)|'
+        r'\b(generate|create|draw|make|edit|retouch)\b.{0,20}'
+        r'\b(image|picture|photo|illustration|diagram)\b',
+      ).hasMatch(normalized) ||
+      (normalized.contains('生图') && (!asksWhether || directAction));
+}
+
 List<String> agentToolNamesForRequest({
   required String latestUserText,
   bool capabilitySelected = false,
   bool skillHasScripts = false,
 }) {
   final text = latestUserText.toLowerCase();
-  final isInquiry = RegExp(
-    r'(怎么|如何|能否|能不能|是否|什么意思|是什么|原理|特点|区别|有什么用|吗[?？]?$)',
-  ).hasMatch(text);
-  final wantsImage =
-      !isInquiry &&
-      RegExp(
-        r'(生成|画|绘制|创作|制作).{0,8}(一张|一个|个|幅|图片|图像|插画|海报|头像|壁纸|照片|图)|'
-        r'(编辑|修改|修复|修图|改图).{0,8}(图片|图像|照片|插画|海报|头像|壁纸|图)|'
-        r'\b(generate|create|draw|edit|retouch)\b.{0,20}\b(image|picture|photo|illustration)\b',
-      ).hasMatch(text);
   final wantsCode =
       capabilitySelected ||
       RegExp(
@@ -200,7 +216,6 @@ List<String> agentToolNamesForRequest({
         r'(保存|导出|生成|写入).{0,8}(文件|csv|xlsx)',
       ).hasMatch(text);
   return [
-    if (wantsImage) 'generate_image',
     if (wantsCode) 'execute_python',
     if (capabilitySelected && skillHasScripts) 'execute_skill_script',
   ];
@@ -236,6 +251,35 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     required void Function(String text) onDelta,
     required CancellationToken cancellation,
   }) async {
+    cancellation.throwIfCancelled();
+    final rawCapability = request['capability'];
+    final imageGenerationSelected =
+        rawCapability is Map &&
+        rawCapability['type'] == 'action' &&
+        rawCapability['id'] == 'create-image';
+    final latestUserText = _latestUserText(request['messages']);
+    if (imageGenerationSelected && latestUserText.trim().isEmpty) {
+      const answer = '你想生成什么内容的图片？可以描述一下主体、风格或用途。';
+      onDelta(answer);
+      return answer;
+    }
+    final messages = agentMessagesFromRequest(request['messages']);
+    if (imageGenerationSelected || agentShouldGenerateImage(latestUserText)) {
+      // Image generation has billing side effects; explicit requests should not depend on model-emitted tool markup.
+      cancellation.throwIfCancelled();
+      await images.generate(
+        taskId: taskId,
+        tenantId: tenantId,
+        prompt: latestUserText,
+        count: 1,
+        imageUrl: _latestUserImageUrl(request['messages']),
+      );
+      cancellation.throwIfCancelled();
+      const answer = '图片已生成。';
+      onDelta(answer);
+      return answer;
+    }
+
     final requestedModel = request['model_id']?.toString().trim() ?? '';
     final defaultModel =
         Platform.environment['XIAOQI_DEFAULT_TEXT_MODEL']?.trim() ?? '';
@@ -262,28 +306,6 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     );
 
     NetworkPermissionRequired? pendingPermission;
-    ai.defineTool<Map<String, dynamic>, Map<String, dynamic>>(
-      name: 'generate_image',
-      description: '根据文字生成或编辑图片。只有用户明确要求图片时才调用。',
-      inputSchema: _generateImageSchema,
-      fn: (input, context) async {
-        _logAgentRuntime('tool_called', taskId, {
-          'tool_name': 'generate_image',
-          'input_fields': input.keys.toList()..sort(),
-          'prompt_characters': input['prompt']?.toString().length ?? 0,
-          'has_source_image': input['image_url'] != null,
-        });
-        final result = await images.generate(
-          taskId: taskId,
-          tenantId: tenantId,
-          prompt: input['prompt']?.toString() ?? '',
-          imageUrl: input['image_url']?.toString(),
-          count: int.tryParse('${input['count'] ?? 1}') ?? 1,
-          size: input['size']?.toString(),
-        );
-        return ToolResult.response(result);
-      },
-    );
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'execute_python',
       description:
@@ -402,7 +424,6 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
       },
     );
 
-    final messages = agentMessagesFromRequest(request['messages']);
     _logAgentRuntime('messages_prepared', taskId, {
       'message_count': messages.length,
       'image_count': messages
@@ -410,26 +431,23 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
           .where((part) => part.isMedia)
           .length,
     });
-    final latestUserText = _textContent(
-      (request['messages'] as List).whereType<Map>().lastWhere(
-        (message) => message['role'] == 'user',
-        orElse: () => const {},
-      )['content'],
-    ).toLowerCase();
     final selectedCapability = request['capability'] is Map;
-    final skillFiles = selectedCapability
+    final skillSelected = selectedCapability && !imageGenerationSelected;
+    final skillFiles = skillSelected
         ? _loadSkillFiles(tenantId, request['capability'])
         : const <String, List<int>>{};
     final hasSkillScripts = skillFiles.keys.any(
       (path) => path.replaceAll('\\', '/').startsWith('scripts/'),
     );
     final toolNames = agentToolNamesForRequest(
-      latestUserText: latestUserText,
-      capabilitySelected: selectedCapability,
+      latestUserText: latestUserText.toLowerCase(),
+      capabilitySelected: skillSelected,
       skillHasScripts: hasSkillScripts,
     );
 
-    final skill = _loadSkill(tenantId, request['capability']);
+    final skill = skillSelected
+        ? _loadSkill(tenantId, request['capability'])
+        : '';
     final materialText = _materialsText(request['materials']);
     final system = StringBuffer(
       '你是小七的 AI 助手。请使用中文回答，遵循用户的最新要求。'
@@ -622,6 +640,32 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     }
     if (content is Map) return content['text']?.toString() ?? '';
     return '';
+  }
+
+  static String _latestUserText(Object? rawMessages) {
+    if (rawMessages is! List) return '';
+    for (final rawMessage in rawMessages.reversed) {
+      if (rawMessage is Map && rawMessage['role'] == 'user') {
+        return _textContent(rawMessage['content']);
+      }
+    }
+    return '';
+  }
+
+  static String? _latestUserImageUrl(Object? rawMessages) {
+    if (rawMessages is! List) return null;
+    for (final rawMessage in rawMessages.reversed) {
+      if (rawMessage is! Map || rawMessage['role'] != 'user') continue;
+      final content = rawMessage['content'];
+      if (content is! List) return null;
+      for (final rawPart in content) {
+        if (rawPart is! Map || rawPart['type'] != 'image_url') continue;
+        final image = rawPart['image_url'];
+        if (image is Map) return image['url']?.toString();
+      }
+      return null;
+    }
+    return null;
   }
 
   static final _safeId = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$');

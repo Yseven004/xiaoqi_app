@@ -16,6 +16,227 @@ import 'chat_completion_service.dart';
 import 'code_execution_service.dart';
 import 'store.dart';
 
+({String code, String message, String details}) _taskFailurePresentation(
+  Object error, {
+  required bool imageGeneration,
+}) {
+  final details = _redactTaskError(error.toString());
+  final normalized = details.toLowerCase();
+  final isArkFailure =
+      normalized.contains('seedream') ||
+      normalized.contains('生图服务') ||
+      normalized.contains('生图结果') ||
+      normalized.contains('ark');
+  final accountOverdue = RegExp(
+    r'(overdue balance|balance.{0,16}overdue|account.{0,24}overdue|past[- ]due|outstanding balance|insufficient balance|账户欠费|账户逾期|余额不足|欠费)',
+  ).hasMatch(normalized);
+
+  if (accountOverdue && isArkFailure) {
+    return (
+      code: 'ark_account_overdue',
+      message: '图片生成失败：火山引擎 Ark 账户存在逾期欠款，Seedream 已拒绝请求。请在火山引擎控制台结清欠款后重试。',
+      details: details,
+    );
+  }
+  if (accountOverdue) {
+    return (
+      code: 'text_model_billing_required',
+      message: '任务失败：文字模型服务提示账户欠费或余额不足，请在对应服务商控制台处理账单后重试。',
+      details: details,
+    );
+  }
+
+  if (imageGeneration && normalized.contains('ark_api_key')) {
+    return (
+      code: 'ark_not_configured',
+      message:
+          '图片生成失败：服务端没有配置火山引擎 Ark 密钥（ARK_API_KEY）。'
+          '请在实际连接的 API 服务器配置密钥并重启服务。',
+      details: details,
+    );
+  }
+  if (imageGeneration &&
+      (normalized.contains('create-image') ||
+          normalized.contains('所选技能') ||
+          normalized.contains('技能不存在') ||
+          normalized.contains('技能 id 无效'))) {
+    return (
+      code: 'image_action_not_deployed',
+      message:
+          '图片生成失败：服务端把“创建图像”当成了普通技能加载；该内置动作没有技能版本 ID（version_id），'
+          '所以在调用 Seedream 前就失败了。请更新并重启当前连接的 Genkit 服务端，使其支持 create-image 动作。',
+      details: details,
+    );
+  }
+  if (normalized.contains('mimo_api_key') ||
+      normalized.contains('deepseek_api_key')) {
+    return (
+      code: 'text_model_not_configured',
+      message: '任务失败：服务端缺少所选文字模型的 API Key，请配置后重启服务。',
+      details: details,
+    );
+  }
+
+  final status = RegExp(
+    r'(?:http|返回错误)\s*[\(: ]\s*(\d{3})',
+    caseSensitive: false,
+  ).firstMatch(details)?.group(1);
+  final statusCode = status == null ? null : int.tryParse(status);
+  if (imageGeneration && status != null && isArkFailure) {
+    final providerDetail = RegExp(
+      r'生图服务返回错误\s*\(\d{3}\)\s*:\s*(.+)$',
+      caseSensitive: false,
+    ).firstMatch(details)?.group(1);
+    if (statusCode == 401 || statusCode == 403) {
+      return (
+        code: 'ark_auth_failed',
+        message:
+            '图片生成失败：Seedream 拒绝了服务器凭据（HTTP $status）。'
+            '请检查 Ark API Key、模型权限和服务端配置。',
+        details: details,
+      );
+    }
+    if (statusCode == 429) {
+      return (
+        code: 'ark_rate_limited',
+        message: '图片生成失败：Seedream 当前限流或额度不足（HTTP 429），请稍后查看 Ark 配额。',
+        details: details,
+      );
+    }
+    if (statusCode == 400) {
+      return (
+        code: 'ark_request_rejected',
+        message:
+            '图片生成失败：Seedream 拒绝了请求（HTTP 400）。'
+            '${providerDetail == null ? '' : '\n原因：$providerDetail'}',
+        details: details,
+      );
+    }
+    if (statusCode != null && statusCode >= 500) {
+      return (
+        code: 'ark_server_error',
+        message: '图片生成失败：Seedream 服务端暂时异常（HTTP $status），请稍后再试。',
+        details: details,
+      );
+    }
+  }
+  if (imageGeneration && statusCode != null) {
+    if (statusCode == 401 || statusCode == 403) {
+      return (
+        code: 'text_model_auth_failed',
+        message: '图片任务未能启动：负责理解描述的文字模型鉴权失败（HTTP $statusCode）。',
+        details: details,
+      );
+    }
+    if (statusCode == 429) {
+      return (
+        code: 'text_model_rate_limited',
+        message: '图片任务未能启动：负责理解描述的文字模型限流或额度不足（HTTP 429）。',
+        details: details,
+      );
+    }
+    if (statusCode == 400) {
+      return (
+        code: 'text_model_request_rejected',
+        message: '图片任务未能启动：负责理解描述的文字模型拒绝了请求（HTTP 400）。',
+        details: details,
+      );
+    }
+    if (statusCode >= 500) {
+      return (
+        code: 'upstream_server_error',
+        message: '图片任务失败：上游模型服务暂时异常（HTTP $statusCode）。',
+        details: details,
+      );
+    }
+  }
+  if (!imageGeneration && statusCode != null) {
+    if (statusCode == 401 || statusCode == 403) {
+      return (
+        code: 'text_model_auth_failed',
+        message: '任务失败：文字模型服务拒绝了服务器凭据或当前模型权限（HTTP $statusCode）。',
+        details: details,
+      );
+    }
+    if (statusCode == 429) {
+      return (
+        code: 'text_model_rate_limited',
+        message: '任务失败：文字模型服务当前限流或额度不足（HTTP 429）。',
+        details: details,
+      );
+    }
+    if (statusCode >= 500) {
+      return (
+        code: 'text_model_server_error',
+        message: '任务失败：文字模型服务暂时异常（HTTP $statusCode）。',
+        details: details,
+      );
+    }
+  }
+  if (normalized.contains('timeout') || normalized.contains('超时')) {
+    final isArkFailure =
+        normalized.contains('seedream') ||
+        normalized.contains('生图服务') ||
+        normalized.contains('生图结果') ||
+        normalized.contains('ark');
+    return (
+      code: imageGeneration ? 'image_generation_timeout' : 'task_timeout',
+      message: imageGeneration && isArkFailure
+          ? '图片生成请求超时。服务端没有自动重试；结果可能未知，请确认 Ark 任务状态后再重试。'
+          : imageGeneration
+          ? '图片任务等待文字模型响应超时。请检查文字模型服务状态后再试。'
+          : '任务等待超时，请检查服务端任务状态后再重试。',
+      details: details,
+    );
+  }
+  if (normalized.contains('socketexception') ||
+      normalized.contains('clientexception') ||
+      normalized.contains('failed host lookup')) {
+    final isArkFailure =
+        normalized.contains('seedream') ||
+        normalized.contains('生图服务') ||
+        normalized.contains('生图结果') ||
+        normalized.contains('ark');
+    return (
+      code: imageGeneration ? 'ark_network_error' : 'task_network_error',
+      message: imageGeneration && isArkFailure
+          ? '图片生成失败：服务端无法连接 Seedream。请检查服务器出网、DNS 和 Ark API 地址。'
+          : imageGeneration
+          ? '图片任务未能启动：服务端无法连接负责理解描述的文字模型。请检查模型地址和服务器网络。'
+          : '任务失败：服务端无法连接上游服务，请检查网络连接。',
+      details: details,
+    );
+  }
+
+  final summary = details.isEmpty ? '服务端没有提供错误详情。' : details;
+  return (
+    code: imageGeneration ? 'image_generation_failed' : 'agent_task_failed',
+    message: imageGeneration ? '图片生成失败：$summary' : '任务执行失败：$summary',
+    details: details,
+  );
+}
+
+String _redactTaskError(String value) {
+  var safe = value.replaceAll(
+    RegExp(r'Bearer\s+\S+', caseSensitive: false),
+    'Bearer [已隐藏]',
+  );
+  for (final entry in Platform.environment.entries) {
+    if (entry.key.contains('KEY') ||
+        entry.key.contains('TOKEN') ||
+        entry.key.contains('PASSWORD') ||
+        entry.key.contains('PEPPER')) {
+      final secret = entry.value;
+      if (secret.length >= 8) safe = safe.replaceAll(secret, '[已隐藏]');
+    }
+  }
+  safe = safe.replaceAll(
+    RegExp(r'\b(?:ark|sk)-[A-Za-z0-9_-]{12,}\b', caseSensitive: false),
+    '[密钥已隐藏]',
+  );
+  return safe.length <= 320 ? safe : '${safe.substring(0, 320)}…';
+}
+
 class XiaoqiApi {
   XiaoqiApi(this.store, this.runtime, {ChatCompletionService? chatCompletions})
     : chatCompletions = chatCompletions ?? ChatCompletionService();
@@ -693,16 +914,27 @@ class XiaoqiApi {
         final cancelled =
             cancellation.isCancelled ||
             current.value['cancel_requested'] == true;
+        final capability = body['capability'];
+        final normalizedError = error.toString().toLowerCase();
+        final imageGeneration =
+            (capability is Map &&
+                capability['type'] == 'action' &&
+                capability['id'] == 'create-image') ||
+            normalizedError.contains('generate_image') ||
+            normalizedError.contains('seedream') ||
+            normalizedError.contains('生图服务');
+        final failure = _taskFailurePresentation(
+          error,
+          imageGeneration: imageGeneration,
+        );
         _mutateTask(
           key,
           (value) => {
             ...value,
             'status': cancelled ? 'cancelled' : 'failed',
-            if (!cancelled)
-              'error': error.toString().substring(
-                0,
-                min(500, error.toString().length),
-              ),
+            if (!cancelled) 'error': failure.message,
+            if (!cancelled) 'error_code': failure.code,
+            if (!cancelled) 'error_details': failure.details,
             'updated_at': _now(),
           },
         );
@@ -710,11 +942,18 @@ class XiaoqiApi {
           key,
           cancelled
               ? {'type': 'status', 'status': 'cancelled'}
-              : {'type': 'error', 'message': '任务执行失败，请检查服务端配置或稍后重试'},
+              : {
+                  'type': 'error',
+                  'message': failure.message,
+                  'error_code': failure.code,
+                  'details': failure.details,
+                },
         );
         _logTaskEvent('finished', taskId, {
           'status': cancelled ? 'cancelled' : 'failed',
           'error_type': error.runtimeType.toString(),
+          if (!cancelled) 'error_code': failure.code,
+          if (!cancelled) 'error_summary': failure.details,
           'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
         });
       }
@@ -761,6 +1000,8 @@ class XiaoqiApi {
         'status': _publicTaskStatus(value['status']),
         'attempt': value['attempt'] ?? 1,
         'error': value['error'],
+        'error_code': value['error_code'],
+        'error_details': value['error_details'],
         'result': value['result'],
         'draft': files['SKILL.md'],
         'files': encoded,

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "developing-genkit-dart": {
+      "source": "genkit-ai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/developing-genkit-dart/SKILL.md",
+      "computedHash": "646891c8722c4e919911735d1ee890e480bf357a4b5bff89fb2d82b1adfc3519"
+    }
+  }
+}

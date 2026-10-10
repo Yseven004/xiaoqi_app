@@ -10,6 +10,173 @@ import '../../../config/api_config.dart';
 import 'capability_models.dart';
 import 'capability_store.dart';
 
+({String code, String message, String details}) _presentTaskFailure(
+  Object? value, {
+  Object? fallback,
+  bool imageGeneration = false,
+}) {
+  final raw = (value ?? fallback)?.toString().trim() ?? '';
+  final normalized = raw.toLowerCase();
+  final isArkFailure =
+      normalized.contains('seedream') ||
+      normalized.contains('生图服务') ||
+      normalized.contains('生图结果') ||
+      normalized.contains('ark');
+  final isImageGenerationFailure =
+      imageGeneration || normalized.contains('generate_image') || isArkFailure;
+  final details = raw
+      .replaceAll(RegExp(r'Bearer\s+\S+', caseSensitive: false), 'Bearer [已隐藏]')
+      .replaceAll(
+        RegExp(r'\b(?:ark|sk)-[A-Za-z0-9_-]{12,}\b', caseSensitive: false),
+        '[密钥已隐藏]',
+      );
+  if (RegExp(
+    r'(overdue balance|balance.{0,16}overdue|account.{0,24}overdue|past[- ]due|outstanding balance|insufficient balance|账户欠费|账户逾期|余额不足|欠费)',
+  ).hasMatch(normalized)) {
+    return (
+      code: isArkFailure
+          ? 'ark_account_overdue'
+          : 'text_model_billing_required',
+      message: isArkFailure
+          ? '图片生成失败：火山引擎 Ark 账户存在逾期欠款，Seedream 已拒绝请求。请在火山引擎控制台结清欠款后重试。'
+          : '任务失败：文字模型服务提示账户欠费或余额不足，请在对应服务商控制台处理账单后重试。',
+      details: details,
+    );
+  }
+  if (normalized.contains('ark_api_key')) {
+    return (
+      code: 'ark_not_configured',
+      message:
+          '图片生成失败：服务端没有配置火山引擎 Ark 密钥（ARK_API_KEY）。请在实际连接的 API 服务器配置密钥并重启服务。',
+      details: details,
+    );
+  }
+  if (normalized.contains('create-image') ||
+      normalized.contains('所选技能') ||
+      normalized.contains('技能不存在') ||
+      (imageGeneration && normalized.contains('技能 id 无效'))) {
+    return (
+      code: 'image_action_not_deployed',
+      message:
+          '图片生成失败：服务端把“创建图像”当成了普通技能加载；该内置动作没有技能版本 ID（version_id），所以在调用 Seedream 前就失败了。请更新并重启当前连接的 Genkit 服务端，使其支持 create-image 动作。',
+      details: details,
+    );
+  }
+  if (normalized.contains('mimo_api_key') ||
+      normalized.contains('deepseek_api_key')) {
+    return (
+      code: 'text_model_not_configured',
+      message: '任务失败：服务端缺少所选文字模型的 API Key，请配置后重启服务。',
+      details: details,
+    );
+  }
+
+  final status = RegExp(
+    r'(?:http|返回错误)\s*[\(: ]\s*(\d{3})',
+    caseSensitive: false,
+  ).firstMatch(raw)?.group(1);
+  if (status != null) {
+    final statusCode = int.tryParse(status);
+    if (isImageGenerationFailure &&
+        isArkFailure &&
+        (statusCode == 401 || statusCode == 403)) {
+      return (
+        code: 'ark_auth_failed',
+        message:
+            '图片生成失败：Seedream 拒绝了服务器凭据（HTTP $status）。请检查 Ark API Key 和模型权限。',
+        details: details,
+      );
+    }
+    if (isImageGenerationFailure && isArkFailure && statusCode == 429) {
+      return (
+        code: 'ark_rate_limited',
+        message: '图片生成失败：Seedream 当前限流或额度不足（HTTP 429），请查看 Ark 配额。',
+        details: details,
+      );
+    }
+    if (isImageGenerationFailure && isArkFailure && statusCode == 400) {
+      return (
+        code: 'ark_request_rejected',
+        message: '图片生成失败：Seedream 拒绝了请求（HTTP 400）。$details',
+        details: details,
+      );
+    }
+    if (isImageGenerationFailure &&
+        isArkFailure &&
+        statusCode != null &&
+        statusCode >= 500) {
+      return (
+        code: 'ark_server_error',
+        message: '图片生成失败：Seedream 服务端暂时异常（HTTP $status），请稍后再试。',
+        details: details,
+      );
+    }
+    if (statusCode == 401 || statusCode == 403) {
+      return (
+        code: 'upstream_auth_failed',
+        message: isImageGenerationFailure
+            ? '图片任务未能启动：文字模型服务鉴权失败（HTTP $status）。'
+            : '任务失败：上游模型服务鉴权失败（HTTP $status）。',
+        details: details,
+      );
+    }
+    if (statusCode == 429) {
+      return (
+        code: 'upstream_rate_limited',
+        message: '任务失败：上游模型服务限流或额度不足（HTTP 429）。',
+        details: details,
+      );
+    }
+    if (statusCode != null && statusCode >= 500) {
+      return (
+        code: 'upstream_server_error',
+        message: '任务失败：上游服务暂时异常（HTTP $status）。',
+        details: details,
+      );
+    }
+  }
+  if (normalized.contains('timeout') || normalized.contains('超时')) {
+    return (
+      code: 'task_timeout',
+      message:
+          isImageGenerationFailure &&
+              (normalized.contains('seedream') ||
+                  normalized.contains('生图服务') ||
+                  normalized.contains('生图结果'))
+          ? '图片生成请求超时。服务端没有自动重试；结果可能未知，请确认 Ark 任务状态后再重试。'
+          : '任务等待上游服务响应超时。请先确认任务状态，再决定是否重试。',
+      details: details,
+    );
+  }
+  if (normalized.contains('socketexception') ||
+      normalized.contains('clientexception') ||
+      normalized.contains('failed host lookup')) {
+    return (
+      code: 'task_network_error',
+      message: '任务失败：服务端无法连接上游服务，请检查服务器网络和 DNS。',
+      details: details,
+    );
+  }
+
+  final clean = details
+      .replaceFirst(RegExp(r'^(Bad state: |Exception: |HttpException: )'), '')
+      .trim();
+  if (clean.isEmpty ||
+      clean == '任务执行失败，请检查服务端配置或稍后重试' ||
+      clean == '图片生成失败，请检查服务端配置或稍后重试') {
+    return (
+      code: 'task_error_details_unavailable',
+      message: '服务端只返回了通用失败状态，没有提供具体原因。',
+      details: '',
+    );
+  }
+  return (
+    code: 'agent_task_failed',
+    message: '任务执行失败：$clean',
+    details: details,
+  );
+}
+
 class CapabilityCloudSync {
   CapabilityCloudSync._();
 
@@ -408,8 +575,10 @@ class CapabilityCloudSync {
       'reasoning_level': reasoningLevel,
       if (capability != null)
         'capability': {
+          if (capability['type'] != null) 'type': capability['type'],
           'id': capability['id'],
-          'version_id': capability['version_id'],
+          if (capability['version_id'] != null)
+            'version_id': capability['version_id'],
         },
       'materials': materials,
     });
@@ -458,7 +627,10 @@ class CapabilityCloudSync {
     return _checked(response);
   }
 
-  Stream<Map<String, dynamic>> watchTask(String taskId) async* {
+  Stream<Map<String, dynamic>> watchTask(
+    String taskId, {
+    bool imageGeneration = false,
+  }) async* {
     var cursor = -1;
     final started = DateTime.now();
     var completionReceived = false;
@@ -491,10 +663,18 @@ class CapabilityCloudSync {
       final events = response['events'];
       if (events is List) {
         for (final raw in events.whereType<Map>()) {
-          final event = raw.cast<String, dynamic>();
+          var event = raw.cast<String, dynamic>();
           cursor = max(cursor, (event['seq'] as num?)?.toInt() ?? cursor);
           if (event['type'] == 'completed') completionReceived = true;
-          if (event['type'] == 'error') errorReceived = true;
+          if (event['type'] == 'error') {
+            errorReceived = true;
+            event = await _detailedTaskErrorEvent(
+              taskId,
+              event['message'],
+              event,
+              imageGeneration,
+            );
+          }
           yield event;
           if (event['type'] == 'completed' || event['type'] == 'error') {
             return;
@@ -523,7 +703,12 @@ class CapabilityCloudSync {
         } else if (status == 'failed' && !errorReceived) {
           final task = await getTask(taskId);
           if (task['error'] != null) {
-            yield {'type': 'error', 'message': task['error']};
+            yield await _detailedTaskErrorEvent(
+              taskId,
+              task['error'],
+              task,
+              imageGeneration,
+            );
           }
         }
         return;
@@ -531,6 +716,47 @@ class CapabilityCloudSync {
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
     throw TimeoutException('技能任务等待超时，可稍后恢复。');
+  }
+
+  Future<Map<String, dynamic>> _detailedTaskErrorEvent(
+    String taskId,
+    Object? reportedMessage,
+    Map<String, dynamic> reported,
+    bool imageGeneration,
+  ) async {
+    final message = reportedMessage?.toString().trim() ?? '';
+    final generic =
+        message == '任务执行失败，请检查服务端配置或稍后重试' || message == '图片生成失败，请检查服务端配置或稍后重试';
+    Map<String, dynamic> task = reported;
+    if (generic || message.isEmpty) {
+      try {
+        task = await getTask(taskId);
+      } on Object {
+        // Preserve the original event when the follow-up detail request fails.
+      }
+    }
+    final storedDetails = task['error_details'] ?? task['error'];
+    if (!generic && message.isNotEmpty) {
+      return {
+        ...reported,
+        'type': 'error',
+        'message': message,
+        'error_code': ?task['error_code'],
+        'details': ?storedDetails,
+      };
+    }
+    final failure = _presentTaskFailure(
+      storedDetails,
+      fallback: message.isEmpty ? reportedMessage : message,
+      imageGeneration: imageGeneration,
+    );
+    return {
+      ...reported,
+      'type': 'error',
+      'message': failure.message,
+      'error_code': task['error_code'] ?? failure.code,
+      if (failure.details.isNotEmpty) 'details': failure.details,
+    };
   }
 
   Future<Uint8List> downloadTaskArtifact(

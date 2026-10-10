@@ -27,11 +27,23 @@ V1 沿用当前消息模型的单个能力元数据字段：每条消息保留�
 | 联网搜索 | 联网查找实时资料和信息 |
 | 绘图 | 用绘图更直观地表达想法 |
 
+### 创建图像与对话生图
+
+- 选择“创建图像”后插入 `type: action, id: create-image` 能力标签，保留输入正文并关闭菜单；能力身份随现有消息元数据保存、编辑和恢复。
+- 任务请求在现有 `capability` 字段发送 `{type: "action", id: "create-image"}`。服务端将它作为内置动作处理，不读取同名已保存技能；该动作只开放 `generate_image`，每次固定生成一张图，并用中文简短说明。没有文字描述时直接追问，不调用图片 API。
+- 普通会话只在明确要求生成/编辑图片、“用图说明 / 生成示意图”，或询问“能否生成图片”这类能力问题时开放生图工具。能力问题先简短回答“可以”，再生成一张示例图；普通解释不触发生图。
+- 任务失败时服务端保留错误代码和脱敏诊断，并在失败事件中返回具体原因；客户端收到失败事件后回查任务详情，在弹窗中显示可操作原因、诊断信息和任务编号，不以固定“检查服务端配置”文案覆盖底层错误。
+- 后端 `ImageService` 已调用 Ark Seedream API，并默认使用 Seedream 5.0 Lite（模型 ID：`doubao-seedream-5-0-260128`）。火山引擎文档将 `doubao-seedream-5-0-lite-260128` 标为即将下线的别名，因此采用仍列出的模型 ID。部署需由服务器运维人员在 `single-server.env` 配置 `ARK_API_KEY`；密钥只保存在服务器环境文件，不能写入客户端或仓库。图片 API 超时不自动重试。
+- 图片继续走任务附件事件、聊天预览和现有会话持久化。2026-10-10 已用配置密钥完成一次 Ark 真实出图与图片下载（HTTP 200）。同日通过阿里云 CLI 将 `api.dart`、`agent_runtime.dart`、`image_service.dart` 更新到目标 ECS 并重建、重启 Genkit 容器；新容器健康，公网 `/health` 返回 HTTP 200，运行容器已读到 Ark 配置，数据卷清单部署前后匹配。源码、旧镜像和数据卷备份保存在服务器 `/opt/xiaoqi-single-server/backups/create-image-remote-update-20261010-154344`。Android 真机生图闭环仍待复测。
+
 ### 实现参考
 
 - Flutter 官方 `TextEditingController.buildTextSpan` 文档（访问于 2026-10-03）：允许子类定制编辑区域的 InlineSpan 呈现，现有输入框可在保留原生光标和键盘编辑的前提下呈现轻量标签；[API 文档](https://api.flutter.dev/flutter/widgets/TextEditingController/buildTextSpan.html)。
 - Flutter 官方 `OverlayPortal.overlayChildLayoutBuilder` 文档（访问于 2026-10-03）：在布局阶段取得锚点与 Overlay 的尺寸和坐标，可按边界定位、限高浮层；[API 文档](https://api.flutter.dev/flutter/widgets/OverlayPortal/OverlayPortal.overlayChildLayoutBuilder.html)。
 - GitHub 项目 `fayeed/flutter_mentions`，`master` 分支，访问于 2026-10-03；README 标注 MIT，仓库页面显示 60 次提交、110 stars、132 forks。用于对照 Flutter TextField 内联提及 / 数据标签的控制器与 markup 概念；项目使用额外依赖和 Portal，因此只参考设计思路，不复用代码或添加依赖：[仓库](https://github.com/fayeed/flutter_mentions)。
+- Genkit Dart 官方工具调用文档（访问于 2026-10-10）：Agent 可显式配置工具；[工具调用](https://genkit.dev/docs/dart/tool-calling/)。
+- 火山引擎 Ark Seedream 官方图片生成 API（访问于 2026-10-10）：本项目复用现有 `ImageService` 接入；[API 文档](https://docs.volcengine.com/docs/ark/image-generation-api?lang=en)。
+- GitHub 项目 `shanliuling/dsh-image-gen`，v0.8.6，Apache-2.0，访问于 2026-10-10：仅参考直接在对话中描述并展示图片的交互，不复用代码；[仓库](https://github.com/shanliuling/dsh-image-gen)。
 
 ## 已确认的操作状态
 

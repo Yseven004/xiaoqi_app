@@ -13,7 +13,9 @@ cp single-server.env.example single-server.env
 chmod 600 single-server.env
 ```
 
-至少填写单人邮箱登录、SMTP、`CAPABILITY_AUTH_CODE_PEPPER` 和至少一个文字模型密钥。默认模型由 `XIAOQI_DEFAULT_TEXT_MODEL` 选择，温度由 `XIAOQI_TEXT_TEMPERATURE` 控制；密钥只保存在服务器。图片生成模型与 `ARK_API_KEY` 暂不作为本次迁移验收项，等架构迁移完成后再配置。首次部署时，在服务器上生成沙箱执行器内部令牌：
+至少填写单人邮箱登录、SMTP、`CAPABILITY_AUTH_CODE_PEPPER` 和至少一个文字模型密钥。默认模型由 `XIAOQI_DEFAULT_TEXT_MODEL` 选择，温度由 `XIAOQI_TEXT_TEMPERATURE` 控制；密钥只保存在服务器。
+
+要启用聊天中的图片生成，还要在服务器的 `single-server.env` 配置火山引擎 Ark `ARK_API_KEY`。默认图片模型为 Seedream 5.0 Lite（模型 ID：`doubao-seedream-5-0-260128`），API 地址可用 `ARK_IMAGE_API_URL` 覆盖。不要把密钥放进客户端或提交到仓库；未配置时，生图请求会返回“服务器未配置 ARK_API_KEY”。首次部署时，在服务器上生成沙箱执行器内部令牌：
 
 ```sh
 sed -i "s/^SANDBOX_RUNNER_TOKEN=.*/SANDBOX_RUNNER_TOKEN=$(openssl rand -hex 32)/" single-server.env

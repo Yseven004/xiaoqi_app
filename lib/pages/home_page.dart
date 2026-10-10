@@ -52,6 +52,85 @@ import 'email_login_page.dart';
 import 'note_editor_page.dart';
 import 'book_learning_shell_page.dart';
 
+class _AgentTaskFailure extends AiException {
+  const _AgentTaskFailure(
+    super.message, {
+    required this.taskId,
+    required this.isImageGeneration,
+    this.errorCode,
+    this.details,
+  });
+
+  final String taskId;
+  final bool isImageGeneration;
+  final String? errorCode;
+  final String? details;
+}
+
+String _agentTaskFailureMessage(
+  Object error, {
+  required bool isImageGeneration,
+}) {
+  final details = error.toString();
+  final normalized = details.toLowerCase();
+  if (isImageGeneration && normalized.contains('ark_api_key')) {
+    return '图片生成失败：服务端没有配置火山引擎 Ark 密钥（ARK_API_KEY）。请在实际连接的 API 服务器配置密钥并重启服务。';
+  }
+  if (isImageGeneration &&
+      (normalized.contains('create-image') ||
+          normalized.contains('所选技能') ||
+          normalized.contains('技能不存在') ||
+          normalized.contains('技能 id 无效'))) {
+    return '图片生成失败：服务端把“创建图像”当成了普通技能加载；该内置动作没有技能版本 ID（version_id），所以在调用 Seedream 前就失败了。请更新并重启当前连接的 Genkit 服务端，使其支持 create-image 动作。';
+  }
+  if (normalized.contains('timeout') || normalized.contains('超时')) {
+    return isImageGeneration
+        ? '图片生成请求超时。服务端没有自动重试；结果可能未知，请确认 Ark 任务状态后再重试。'
+        : '任务等待超时。请先确认服务端任务状态，再决定是否重试。';
+  }
+  if (normalized.contains('socketexception') ||
+      normalized.contains('clientexception') ||
+      normalized.contains('failed host lookup')) {
+    return isImageGeneration
+        ? '图片生成失败：服务端无法连接 Seedream。请检查服务器出网、DNS 和 Ark API 地址。'
+        : '任务无法连接服务端，请检查网络连接。';
+  }
+  final status = RegExp(
+    r'(?:http|返回错误)\s*[\(: ]\s*(\d{3})',
+    caseSensitive: false,
+  ).firstMatch(details)?.group(1);
+  if (isImageGeneration && status != null) {
+    final statusCode = int.tryParse(status);
+    if (statusCode == 401 || statusCode == 403) {
+      return '图片生成失败：Seedream 拒绝了服务器凭据（HTTP $status）。请检查 Ark API Key 和模型权限。';
+    }
+    if (statusCode == 429) {
+      return '图片生成失败：Seedream 当前限流或额度不足（HTTP 429），请查看 Ark 配额。';
+    }
+    if (statusCode == 400) {
+      return '图片生成失败：Seedream 拒绝了请求（HTTP 400）。请查看下方诊断信息。';
+    }
+  }
+  final clean = details
+      .replaceFirst(RegExp(r'^(Bad state: |Exception: |HttpException: )'), '')
+      .trim();
+  return isImageGeneration
+      ? '图片生成任务失败：${clean.isEmpty ? '服务端没有返回具体原因。' : clean}'
+      : '任务执行失败：${clean.isEmpty ? '服务端没有返回具体原因。' : clean}';
+}
+
+String? _safeAgentTaskDetails(Object error) {
+  final details = error
+      .toString()
+      .replaceAll(RegExp(r'Bearer\s+\S+', caseSensitive: false), 'Bearer [已隐藏]')
+      .replaceAll(
+        RegExp(r'\b(?:ark|sk)-[A-Za-z0-9_-]{12,}\b', caseSensitive: false),
+        '[密钥已隐藏]',
+      );
+  if (details.isEmpty) return null;
+  return details.length <= 320 ? details : '${details.substring(0, 320)}…';
+}
+
 /// 极简聊天首页：空间切换、会话消息和键盘跟随输入区。
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -1342,7 +1421,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } on AiException catch (error) {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
           _clearStreamingReply();
-          _showReplyError(error.message);
+          _showAgentTaskError(error);
         }
       } catch (_) {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -1577,7 +1656,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } on AiException catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
         _clearStreamingReply();
-        _showReplyError(error.message);
+        _showAgentTaskError(error);
       }
     } catch (_) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -1819,6 +1898,9 @@ $materialIndex
     AiConversationMessage question,
   ) async {
     final metadata = question.capabilityMetadata;
+    if (metadata?['type'] == 'action' && metadata?['id'] == 'create-image') {
+      return {'type': 'action', 'id': 'create-image'};
+    }
     if (metadata?['type'] == 'skill') {
       return Map<String, Object?>.from(metadata!);
     }
@@ -1851,6 +1933,8 @@ $materialIndex
     final materials = await _agentTaskMaterials(history);
     final taskMessages = _agentTaskMessages(aiMessages, materials);
     final capability = await _agentTaskCapability(question);
+    final isImageGeneration =
+        capability?['type'] == 'action' && capability?['id'] == 'create-image';
     if (!_isCurrentRequest(generation, conversationId)) return null;
 
     final taskId = CapabilityCloudSync.newTaskId();
@@ -1869,6 +1953,14 @@ $materialIndex
         reasoningLevel: reasoningLevel,
         capability: capability,
         materials: materials,
+      );
+    } on Object catch (error) {
+      await _clearCapabilityTaskId(conversationId, question.id, taskId);
+      throw _AgentTaskFailure(
+        _agentTaskFailureMessage(error, isImageGeneration: isImageGeneration),
+        taskId: taskId,
+        isImageGeneration: isImageGeneration,
+        details: _safeAgentTaskDetails(error),
       );
     } finally {
       _pendingCapabilityTaskCreationIds.remove(taskId);
@@ -1894,6 +1986,7 @@ $materialIndex
     try {
       await for (final event in CapabilityCloudSync.instance.watchTask(
         taskId,
+        imageGeneration: isImageGeneration,
       )) {
         if (!_isCurrentRequest(generation, conversationId)) return null;
         switch (event['type']) {
@@ -1940,7 +2033,17 @@ $materialIndex
             break;
           case 'error':
             terminalFailure = true;
-            throw AiException(event['message']?.toString() ?? '任务失败，请稍后重试');
+            final errorCode = event['error_code']?.toString();
+            throw _AgentTaskFailure(
+              event['message']?.toString() ?? '服务端未提供任务失败原因。',
+              taskId: taskId,
+              isImageGeneration:
+                  isImageGeneration ||
+                  errorCode?.startsWith('ark_') == true ||
+                  errorCode?.startsWith('image_generation_') == true,
+              errorCode: errorCode,
+              details: event['details']?.toString(),
+            );
         }
       }
 
@@ -1967,11 +2070,21 @@ $materialIndex
         skillDocument: completedSkillDocument,
         skillFiles: completedSkillFiles,
       );
-    } catch (_) {
+    } on _AgentTaskFailure {
       if (terminalFailure) {
         await _clearCapabilityTaskId(conversationId, question.id, taskId);
       }
       rethrow;
+    } on Object catch (error) {
+      if (terminalFailure) {
+        await _clearCapabilityTaskId(conversationId, question.id, taskId);
+      }
+      throw _AgentTaskFailure(
+        _agentTaskFailureMessage(error, isImageGeneration: isImageGeneration),
+        taskId: taskId,
+        isImageGeneration: isImageGeneration,
+        details: _safeAgentTaskDetails(error),
+      );
     } finally {
       if (_activeCapabilityTaskId == taskId) _activeCapabilityTaskId = null;
     }
@@ -2627,6 +2740,9 @@ $text''';
         messageId: message.id,
         conversationId: record.id,
         generation: generation,
+        imageGeneration:
+            message.capabilityMetadata?['type'] == 'action' &&
+            message.capabilityMetadata?['id'] == 'create-image',
       ),
     );
   }
@@ -2636,6 +2752,7 @@ $text''';
     required String messageId,
     required String conversationId,
     required int generation,
+    required bool imageGeneration,
   }) async {
     List<Map<String, Object?>> artifacts = const [];
     String? completedText;
@@ -2645,6 +2762,7 @@ $text''';
     try {
       await for (final event in CapabilityCloudSync.instance.watchTask(
         taskId,
+        imageGeneration: imageGeneration,
       )) {
         if (!_isCurrentRequest(generation, conversationId)) return;
         switch (event['type']) {
@@ -3079,6 +3197,52 @@ $text''';
   void _showReplyError(String message) {
     if (!mounted) return;
     AppToast.show(context, message);
+  }
+
+  void _showAgentTaskError(AiException error) {
+    if (error is! _AgentTaskFailure) {
+      _showReplyError(error.message);
+      return;
+    }
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(error.isImageGeneration ? '图片生成失败' : '任务执行失败'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(error.message),
+                if (error.details?.isNotEmpty == true) ...[
+                  const SizedBox(height: 16),
+                  const Text('诊断信息'),
+                  const SizedBox(height: 4),
+                  SelectableText(error.details!),
+                ],
+                const SizedBox(height: 16),
+                SelectableText(
+                  [
+                    if (error.errorCode?.isNotEmpty == true)
+                      '错误代码：${error.errorCode}',
+                    '任务编号：${error.taskId}',
+                  ].join('\n'),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _stopReply() {
@@ -3858,7 +4022,7 @@ $text''';
     } on AiException catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
         _clearStreamingReply();
-        _showReplyError(error.message);
+        _showAgentTaskError(error);
       }
     } catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -4020,7 +4184,7 @@ $text''';
       if (_isCurrentRequest(requestGeneration, conversationId)) {
         final answerWasSaved = await retainPartialAfterFailure();
         restoreEmptyStoppedHint(answerWasSaved: answerWasSaved);
-        _showReplyError(error.message);
+        _showAgentTaskError(error);
       }
     } catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {

@@ -59,6 +59,23 @@ class _NetworkRuntime implements XiaoqiAgentRuntime {
   }
 }
 
+class _FailingRuntime implements XiaoqiAgentRuntime {
+  _FailingRuntime(this.error);
+
+  final Object error;
+
+  @override
+  Future<String> run({
+    required String tenantId,
+    required String taskId,
+    required Map<String, dynamic> request,
+    required void Function(String) onDelta,
+    required CancellationToken cancellation,
+  }) async {
+    throw error;
+  }
+}
+
 void main() {
   late Directory directory;
   late CloudStore store;
@@ -230,6 +247,53 @@ void main() {
     expect(artifact['id'], 'image-1');
     expect(artifact.containsKey('object_key'), isFalse);
   });
+
+  test(
+    'explains Ark overdue balance for an automatically called image tool',
+    () async {
+      api = XiaoqiApi(
+        store,
+        _FailingRuntime(
+          HttpException(
+            'AgentError(INTERNAL): tool "generate_image" failed: '
+            'HttpException: 生图服务返回错误 (403): The request failed because '
+            'your account has an overdue balance. Request id: test-request-id',
+          ),
+        ),
+      );
+      await call(
+        'POST',
+        '/v1/agent/tasks',
+        body: {
+          'task_id': 'task-image-overdue',
+          'messages': [
+            {'role': 'user', 'content': '生成一张动漫风景图'},
+          ],
+          'model_id': 'deepseek-flash',
+          'reasoning_level': 'medium',
+          'materials': [],
+        },
+      );
+
+      Map<String, dynamic> task = {};
+      for (var i = 0; i < 40; i++) {
+        final response = await call(
+          'GET',
+          '/v1/agent/tasks/task-image-overdue',
+        );
+        task = Map<String, dynamic>.from(
+          jsonDecode(await response.readAsString()) as Map,
+        );
+        if (task['status'] == 'failed') break;
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      expect(task['status'], 'failed');
+      expect(task['error_code'], 'ark_account_overdue');
+      expect(task['error'], contains('欠款'));
+      expect(task['error'], contains('Seedream'));
+    },
+  );
 
   test('resumes a task after the requested domain is authorized', () async {
     final networkRuntime = _NetworkRuntime(store);

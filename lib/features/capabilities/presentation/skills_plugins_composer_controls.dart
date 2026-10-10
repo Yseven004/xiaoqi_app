@@ -399,7 +399,7 @@ class _SkillsPluginsComposerControlsState
             'image',
             '创建图像',
             '可视化呈现任何内容',
-            () => _showStatus('图像能力入口已保留，尚未开放'),
+            () => _selectAction('create-image', '创建图像'),
           ),
           _featureRow(
             'web_search',

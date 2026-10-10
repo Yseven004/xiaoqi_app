@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -51,7 +52,7 @@ class ImageService {
     final model =
         _model ??
         Platform.environment['ARK_IMAGE_MODEL'] ??
-        'doubao-seedream-5-0-flash-260915';
+        'doubao-seedream-5-0-260128';
     final body = <String, dynamic>{
       'model': model,
       'prompt': prompt,
@@ -63,22 +64,35 @@ class ImageService {
         'sequential_image_generation_options': {'max_images': imageCount},
       if (imageUrl != null && imageUrl.isNotEmpty) 'image': imageUrl,
     };
-    final response = await _client
-        .post(
-          Uri.parse(
-            _apiUrl ??
-                Platform.environment['ARK_IMAGE_API_URL'] ??
-                'https://ark.cn-beijing.volces.com/api/v3/images/generations',
-          ),
-          headers: {
-            HttpHeaders.authorizationHeader: 'Bearer $apiKey',
-            HttpHeaders.contentTypeHeader: 'application/json',
-          },
-          body: jsonEncode(body),
-        )
-        .timeout(_apiTimeout);
+    late final http.Response response;
+    try {
+      response = await _client
+          .post(
+            Uri.parse(
+              _apiUrl ??
+                  Platform.environment['ARK_IMAGE_API_URL'] ??
+                  'https://ark.cn-beijing.volces.com/api/v3/images/generations',
+            ),
+            headers: {
+              HttpHeaders.authorizationHeader: 'Bearer $apiKey',
+              HttpHeaders.contentTypeHeader: 'application/json',
+            },
+            body: jsonEncode(body),
+          )
+          .timeout(_apiTimeout);
+    } on TimeoutException {
+      throw TimeoutException('Seedream 图片生成请求超时');
+    } on SocketException catch (error) {
+      throw HttpException('Seedream 图片生成网络连接失败：${error.message}');
+    } on http.ClientException catch (error) {
+      throw HttpException('Seedream 图片生成请求失败：${error.message}');
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw HttpException('生图服务返回错误 (${response.statusCode})');
+      final detail = _providerErrorMessage(response.body);
+      throw HttpException(
+        '生图服务返回错误 (${response.statusCode})'
+        '${detail == null ? '' : ': $detail'}',
+      );
     }
     final payload = jsonDecode(response.body);
     final entries = payload is Map && payload['data'] is List
@@ -124,9 +138,14 @@ class ImageService {
     if (url == null || url.isEmpty) throw const FormatException('生图结果地址缺失');
     final parsed = Uri.parse(url);
     if (parsed.scheme != 'https') throw const FormatException('生图结果必须使用 HTTPS');
-    final response = await _client
-        .get(parsed)
-        .timeout(const Duration(seconds: 45));
+    late final http.Response response;
+    try {
+      response = await _client.get(parsed).timeout(const Duration(seconds: 45));
+    } on TimeoutException {
+      throw TimeoutException('Seedream 生图结果下载超时');
+    } on SocketException catch (error) {
+      throw HttpException('Seedream 生图结果下载网络失败：${error.message}');
+    }
     if (response.statusCode < 200 ||
         response.statusCode >= 300 ||
         response.bodyBytes.isEmpty) {
@@ -147,8 +166,27 @@ class ImageService {
   }
 
   static String _normalizeSize(String? requested) {
-    const allowed = {'1K', '2K', '4K'};
-    return allowed.contains(requested) ? requested! : '2K';
+    const allowed = {'2k', '3k', '4k'};
+    final normalized = requested?.trim().toLowerCase();
+    return allowed.contains(normalized) ? normalized! : '2k';
+  }
+
+  static String? _providerErrorMessage(String body) {
+    try {
+      final payload = jsonDecode(body);
+      if (payload is! Map) return null;
+      final error = payload['error'];
+      final message = error is Map
+          ? error['message'] ?? error['detail']
+          : error ?? payload['message'];
+      final normalized = message?.toString().trim();
+      if (normalized == null || normalized.isEmpty) return null;
+      return normalized.length <= 240
+          ? normalized
+          : '${normalized.substring(0, 240)}…';
+    } on FormatException {
+      return null;
+    }
   }
 
   static Map<String, dynamic> _publicArtifact(Map<String, dynamic> item) => {
