@@ -1,58 +1,15 @@
 {$XIAOQI_PUBLIC_HOST:localhost} {
 	encode zstd gzip
-	@internal_dsh path /v1/internal/dsh /v1/internal/dsh/*
-	respond @internal_dsh 404
-	reverse_proxy app:8080
-}
 
-{$XIAOQI_ADMIN_HOST:admin.localhost} {
-	encode zstd gzip
-	@manager_health path /xiaoqi/healthz /xiaoqi/readyz
-	@manager_without_slash path /xiaoqi
-	@web_token_query {
-		path /
-		query token=*
-	}
-	@web_root_without_query {
-		path /
-		query ""
-	}
-	handle @manager_health {
-		respond 404
-	}
-	handle @manager_without_slash {
-		redir /xiaoqi/ 308
-	}
-	handle_path /xiaoqi/* {
-		reverse_proxy dsh-manager:8090
-	}
-	handle @web_token_query {
-		forward_auth dsh-manager:8090 {
-			uri /api/auth/verify
-			header_up -Connection
-			header_up -Upgrade
+	@mcp path /mcp /mcp/*
+	handle @mcp {
+		forward_auth app:8080 {
+			uri /v1/auth/me
 		}
-		reverse_proxy 127.0.0.1:8091
-	}
-	handle @web_root_without_query {
-		forward_auth dsh-manager:8090 {
-			uri /api/auth/verify
-			header_up -Connection
-			header_up -Upgrade
-		}
-		reverse_proxy 127.0.0.1:8091 {
-			@dsh_unauthorized status 401
-			handle_response @dsh_unauthorized {
-				redir * /xiaoqi/api/web/launch 302
-			}
+		reverse_proxy app:8081 {
+			header_up Host app:8081
 		}
 	}
-	handle {
-		forward_auth dsh-manager:8090 {
-			uri /api/auth/verify
-			header_up -Connection
-			header_up -Upgrade
-		}
-		reverse_proxy 127.0.0.1:8091
-	}
+
+	reverse_proxy app:8080
 }

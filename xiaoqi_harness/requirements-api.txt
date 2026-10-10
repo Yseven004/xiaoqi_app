@@ -1,3 +1,1 @@
 Flask==3.1.2
-tablestore==6.4.8
-oss2==2.19.1

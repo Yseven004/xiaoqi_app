@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+
 import '../config/api_config.dart';
+import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/ai_analysis_result.dart';
 import '../models/note.dart';
 import 'database_service.dart';
@@ -23,62 +26,28 @@ class AiService {
 
   final http.Client _client = http.Client();
   final DatabaseService _db = DatabaseService();
+
+  Future<Map<String, String>> _authenticatedAiHeaders() async {
+    try {
+      return await CapabilityCloudSync.instance.authenticatedHeaders();
+    } on StateError catch (error) {
+      throw AiException(error.message.toString());
+    }
+  }
+
   Future<http.Request> _buildConversationTitleRequest(
     HomeChatModelSelection selection,
     List<Map<String, Object?>> messages,
   ) async {
-    final isDeepSeek = selection.model.id == HomeChatModelOption.deepSeek.id;
-    final provider = isDeepSeek ? 'deepseek' : 'mimo';
-    final apiKey = await ApiConfig.resolveHomeChatApiKey(provider);
-    if (apiKey.isEmpty) {
-      if (ApiConfig.requiresLocalHomeChatApiKey) {
-        throw const AiException(
-          '本机首页 AI 尚未配置，请检查 private/models.local.env 后重新构建。',
-        );
-      }
-      return http.Request('POST', Uri.parse(ApiConfig.baseUrl))
-        ..headers.addAll({
-          'Content-Type': 'application/json',
-          'X-App-Secret': ApiConfig.appSecret,
-        })
-        ..body = jsonEncode({
-          'model_id': selection.model.id,
-          'reasoning_level': selection.reasoningLevel.name,
-          'messages': messages,
-          'stream': false,
-          'max_output_tokens': 128,
-        });
-    }
-
-    final directBody = <String, Object?>{
-      'model': selection.model.id,
-      'messages': messages,
-      'stream': false,
-      if (isDeepSeek)
-        'reasoning_effort': switch (selection.reasoningLevel) {
-          HomeChatReasoningLevel.low => 'low',
-          HomeChatReasoningLevel.medium => 'high',
-          HomeChatReasoningLevel.high => 'max',
-        },
-      if (!isDeepSeek)
-        'thinking': {
-          'type': selection.reasoningLevel == HomeChatReasoningLevel.low
-              ? 'disabled'
-              : 'enabled',
-        },
-      (isDeepSeek ? 'max_tokens' : 'max_completion_tokens'): 128,
-    };
-    return http.Request(
-        'POST',
-        isDeepSeek
-            ? Uri.https('api.deepseek.com', '/chat/completions')
-            : Uri.https('api.xiaomimimo.com', '/v1/chat/completions'),
-      )
-      ..headers.addAll({
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $apiKey',
-      })
-      ..body = jsonEncode(directBody);
+    return http.Request('POST', Uri.parse(ApiConfig.baseUrl))
+      ..headers.addAll(await _authenticatedAiHeaders())
+      ..body = jsonEncode({
+        'model_id': selection.model.id,
+        'reasoning_level': selection.reasoningLevel.name,
+        'messages': messages,
+        'stream': false,
+        'max_output_tokens': 128,
+      });
   }
 
   /// Generates a short title from the first visible user/assistant exchange.
@@ -188,12 +157,8 @@ class AiService {
     final response = await _client
         .post(
           Uri.parse(ApiConfig.baseUrl),
-          headers: {
-            'Content-Type': 'application/json',
-            'X-App-Secret': ApiConfig.appSecret,
-          },
+          headers: await _authenticatedAiHeaders(),
           body: jsonEncode({
-            'model': ApiConfig.model,
             'messages': [
               {
                 'role': 'system',
@@ -206,7 +171,6 @@ class AiService {
                 'content': '编辑动作：$action\n要求：$instruction\n\n原文：\n$source',
               },
             ],
-            'temperature': 0.45,
           }),
         )
         .timeout(
@@ -301,16 +265,11 @@ class AiService {
     final response = await _client
         .post(
           Uri.parse(ApiConfig.baseUrl),
-          headers: {
-            'Content-Type': 'application/json',
-            'X-App-Secret': ApiConfig.appSecret,
-          },
+          headers: await _authenticatedAiHeaders(),
           body: jsonEncode({
-            'model': ApiConfig.model,
             'messages': [
               {'role': 'user', 'content': prompt},
             ],
-            'temperature': ApiConfig.temperature,
           }),
         )
         .timeout(
@@ -477,12 +436,8 @@ $content
     final response = await _client
         .post(
           Uri.parse(ApiConfig.baseUrl),
-          headers: {
-            'Content-Type': 'application/json',
-            'X-App-Secret': ApiConfig.appSecret,
-          },
+          headers: await _authenticatedAiHeaders(),
           body: jsonEncode({
-            'model': ApiConfig.model,
             'messages': [
               {
                 'role': 'user',
@@ -495,7 +450,6 @@ $content
                 ],
               },
             ],
-            'temperature': ApiConfig.temperature,
           }),
         )
         .timeout(

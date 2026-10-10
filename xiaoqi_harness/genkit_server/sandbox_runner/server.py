@@ -1,0 +1,596 @@
+#!/usr/bin/env python3
+"""Private, allowlisted Docker executor for Xiaoqi code tasks."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hmac
+import io
+import json
+import mimetypes
+import os
+import re
+import tarfile
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import PurePosixPath
+from typing import Any, Iterable
+
+import docker
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+
+
+MAX_BODY_BYTES = 100 * 1024 * 1024
+MAX_CODE_BYTES = 64 * 1024
+MAX_MATERIAL_BYTES = 20 * 1024 * 1024
+MAX_SKILL_BYTES = 50 * 1024 * 1024
+MAX_SINGLE_FILE_BYTES = 20 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 10 * 1024 * 1024
+MAX_ARTIFACT_TOTAL_BYTES = 20 * 1024 * 1024
+MAX_ARTIFACTS = 10
+MAX_LOG_BYTES = 1024 * 1024
+MAX_RUN_SECONDS = 120
+MAX_DOMAINS = 10
+MAX_SCRIPT_ARGUMENTS = 32
+OWNER_LABEL = "com.xiaoqi.local-sandbox"
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+SAFE_NAME_RE = re.compile(r"[\\/\x00-\x1f<>:\"|?*]")
+
+RUNNER_TOKEN = os.environ.get("SANDBOX_RUNNER_TOKEN", "").strip()
+SANDBOX_IMAGE = os.environ.get("XIAOQI_SANDBOX_IMAGE", "xiaoqi-code-sandbox:local")
+PROXY_IMAGE = os.environ.get("XIAOQI_SANDBOX_PROXY_IMAGE", "xiaoqi-sandbox-proxy:local")
+DOCKER_SOCKET = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
+RUNNER_HOST = os.environ.get("SANDBOX_RUNNER_HOST", "0.0.0.0")
+RUNNER_PORT = int(os.environ.get("SANDBOX_RUNNER_PORT", "8090"))
+
+_docker: docker.DockerClient | None = None
+_slots = threading.BoundedSemaphore(1)
+
+
+class RequestError(ValueError):
+    pass
+
+
+class ClientDisconnected(Exception):
+    pass
+
+
+def _safe_relative(value: Any) -> str:
+    if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
+        raise RequestError("文件路径无效")
+    if any(part in {"", ".", ".."} for part in value.split("/")):
+        raise RequestError("文件路径无效")
+    path = PurePosixPath(value)
+    if path.is_absolute() or not path.parts:
+        raise RequestError("文件路径无效")
+    return path.as_posix()
+
+
+def _normalize_domains(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) > MAX_DOMAINS:
+        raise RequestError("联网域名列表无效")
+    domains = sorted({str(item).strip().lower().rstrip(".") for item in raw})
+    if any(not DOMAIN_RE.fullmatch(domain) for domain in domains):
+        raise RequestError("联网域名格式无效")
+    return domains
+
+
+def _decode_b64(value: Any, label: str) -> bytes:
+    if not isinstance(value, str):
+        raise RequestError(f"{label}内容无效")
+    try:
+        return base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise RequestError(f"{label}内容无效") from error
+
+
+def _safe_filename(value: Any, fallback: str) -> str:
+    raw = str(value or fallback).replace("\\", "/").split("/")[-1]
+    safe = SAFE_NAME_RE.sub("_", raw).strip(" .")[:120]
+    return safe or fallback
+
+
+def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], str, list[str], list[str]]:
+    code = request.get("code")
+    if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES:
+        raise RequestError("代码不能为空且不能超过 64 KB")
+    language = str(request.get("language") or "").lower()
+    if language not in {"python", "javascript", "typescript"}:
+        raise RequestError("不支持的代码语言")
+
+    script_path = request.get("script_path")
+    arguments = request.get("arguments", [])
+    if script_path is not None:
+        script_path = _safe_relative(script_path)
+        if not script_path.startswith("scripts/"):
+            raise RequestError("技能脚本必须位于 scripts/ 目录")
+        extension = PurePosixPath(script_path).suffix.lower()
+        allowed = {
+            "python": {".py"},
+            "javascript": {".js", ".mjs", ".cjs"},
+            "typescript": {".ts", ".mts"},
+        }[language]
+        if extension not in allowed:
+            raise RequestError("技能脚本扩展名与语言不匹配")
+        if not isinstance(arguments, list) or len(arguments) > MAX_SCRIPT_ARGUMENTS:
+            raise RequestError("技能脚本参数无效")
+        if any(not isinstance(item, str) for item in arguments):
+            raise RequestError("技能脚本参数无效")
+        if sum(len(item.encode("utf-8")) for item in arguments) > 8 * 1024:
+            raise RequestError("技能脚本参数超过 8 KB")
+    else:
+        arguments = []
+
+    files: list[tuple[str, bytes]] = []
+    material_total = 0
+    materials = request.get("materials", [])
+    if not isinstance(materials, list):
+        raise RequestError("任务资料格式无效")
+    for index, item in enumerate(materials):
+        if not isinstance(item, dict):
+            continue
+        name = _safe_filename(item.get("name") or item.get("filename"), f"material-{index + 1}.txt")
+        if isinstance(item.get("base64"), str):
+            data = _decode_b64(item["base64"], "任务资料")
+        else:
+            content = item.get("content", item.get("text", ""))
+            data = str(content).encode("utf-8")
+        material_total += len(data)
+        if len(data) > MAX_SINGLE_FILE_BYTES or material_total > MAX_MATERIAL_BYTES:
+            raise RequestError("任务资料超过 20 MB")
+        files.append((f"materials/{index + 1}-{name}", data))
+
+    skill_files = request.get("skill_files", {})
+    if not isinstance(skill_files, dict):
+        raise RequestError("技能文件格式无效")
+    skill_total = 0
+    for raw_path, encoded in skill_files.items():
+        relative = _safe_relative(raw_path)
+        data = _decode_b64(encoded, "技能文件")
+        skill_total += len(data)
+        if len(data) > MAX_SINGLE_FILE_BYTES or skill_total > MAX_SKILL_BYTES:
+            raise RequestError("技能文件总大小超过 50 MB")
+        files.append((f"skill/{relative}", data))
+
+    if script_path is not None and f"skill/{script_path}" not in {name for name, _ in files}:
+        raise RequestError("技能脚本文件不存在")
+    if script_path is None:
+        extension = {"python": ".py", "javascript": ".js", "typescript": ".ts"}[language]
+        files.append((f"main{extension}", code.encode("utf-8")))
+    return files, language, (arguments if script_path is not None else []), ([script_path] if script_path else [])
+
+
+def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        directories = {"materials", "skill", "skill/scripts", "output"}
+        for name, _ in files:
+            parent = PurePosixPath(name).parent
+            while parent.as_posix() not in {".", ""}:
+                directories.add(parent.as_posix())
+                parent = parent.parent
+        for name in sorted(directories):
+            entry = tarfile.TarInfo(name + "/")
+            entry.type = tarfile.DIRTYPE
+            entry.uid = 10001
+            entry.gid = 10001
+            entry.mode = 0o777 if name == "output" else 0o755
+            archive.addfile(entry)
+        for name, data in files:
+            entry = tarfile.TarInfo(name)
+            entry.uid = 10001
+            entry.gid = 10001
+            entry.mode = 0o644
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
+    return output.getvalue()
+
+
+def _command(language: str, arguments: list[str], script_paths: list[str]) -> list[str]:
+    if script_paths:
+        path = "/workspace/skill/" + script_paths[0]
+        if language == "python":
+            return ["python3", "-B", path, *arguments]
+        if language == "javascript":
+            return ["node", "--disable-proto=throw", path, *arguments]
+        return ["node", "--experimental-strip-types", path, *arguments]
+    if language == "python":
+        return ["python3", "-B", "/workspace/main.py"]
+    if language == "javascript":
+        return ["node", "--disable-proto=throw", "/workspace/main.js"]
+    return ["node", "--experimental-strip-types", "/workspace/main.ts"]
+
+
+def _get_client() -> docker.DockerClient:
+    global _docker
+    if _docker is None:
+        _docker = docker.DockerClient(base_url=DOCKER_SOCKET, timeout=20)
+    _docker.ping()
+    return _docker
+
+
+def _create_task_network(client: Any, name: str, labels: dict[str, str]) -> Any:
+    return client.networks.create(
+        name=name,
+        driver="bridge",
+        internal=True,
+        options={"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+        labels=labels,
+    )
+
+
+def _remove_stale_resources(client: docker.DockerClient) -> None:
+    filters = {"label": OWNER_LABEL}
+    for container in client.containers.list(all=True, filters=filters):
+        try:
+            container.remove(force=True, v=True)
+        except DockerException:
+            pass
+    for network in client.networks.list(filters=filters):
+        try:
+            network.remove()
+        except DockerException:
+            pass
+    for volume in client.volumes.list(filters=filters):
+        try:
+            volume.remove(force=True)
+        except DockerException:
+            pass
+
+
+def _safe_artifacts(container: Any) -> list[dict[str, str]]:
+    try:
+        stream, _stat = container.get_archive("/workspace/output")
+    except NotFound:
+        return []
+    archive_bytes = bytearray()
+    for chunk in stream:
+        archive_bytes.extend(chunk)
+        if len(archive_bytes) > MAX_ARTIFACT_TOTAL_BYTES + 1024 * 1024:
+            raise RequestError("任务产物总大小超过 20 MB")
+    candidates: list[dict[str, str]] = []
+    total = 0
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as archive:
+        for entry in archive.getmembers():
+            if not entry.isfile():
+                continue
+            relative = entry.name.removeprefix("output/").lstrip("/")
+            if not relative or relative.startswith("../") or "/../" in relative:
+                continue
+            if entry.size > MAX_ARTIFACT_BYTES:
+                raise RequestError("单个任务产物超过 10 MB")
+            source = archive.extractfile(entry)
+            if source is None:
+                continue
+            data = source.read(MAX_ARTIFACT_BYTES + 1)
+            if len(data) > MAX_ARTIFACT_BYTES:
+                raise RequestError("单个任务产物超过 10 MB")
+            total += len(data)
+            if total > MAX_ARTIFACT_TOTAL_BYTES:
+                raise RequestError("任务产物总大小超过 20 MB")
+            candidates.append({
+                "name": _safe_filename(PurePosixPath(relative).name, "artifact"),
+                "media_type": mimetypes.guess_type(relative)[0] or "application/octet-stream",
+                "base64": base64.b64encode(data).decode("ascii"),
+            })
+            if len(candidates) > MAX_ARTIFACTS:
+                raise RequestError("任务最多可返回 10 个产物")
+    return candidates
+
+
+def _decode_logs(container: Any, stream: str) -> str:
+    value = bytes(container.logs(stdout=stream == "stdout", stderr=stream == "stderr", tail=10000))
+    expected = 1 if stream == "stdout" else 2
+    frames: list[bytes] = []
+    offset = 0
+    while offset + 8 <= len(value):
+        kind = value[offset]
+        size = int.from_bytes(value[offset + 4:offset + 8], "big")
+        start = offset + 8
+        end = start + size
+        if kind not in {1, 2} or end > len(value):
+            return value[-MAX_LOG_BYTES:].decode("utf-8", errors="replace")
+        if kind == expected:
+            frames.append(value[start:end])
+        offset = end
+    decoded = b"".join(frames) if offset == len(value) else value
+    return decoded[-MAX_LOG_BYTES:].decode("utf-8", errors="replace")
+
+
+def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
+    client = _get_client()
+    task_id = str(request.get("task_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", task_id):
+        raise RequestError("任务 ID 无效")
+    files, language, arguments, script_paths = _request_files(request)
+    domains = _normalize_domains(request.get("authorized_domains"))
+    payload = _make_archive(files)
+    suffix = uuid.uuid4().hex
+    labels = {OWNER_LABEL: "true", "com.xiaoqi.task-id": task_id[:128]}
+    volume = None
+    network = None
+    proxy = None
+    container = None
+    cleanup_pending = False
+    run_error: str | None = None
+    sandbox_id: str | None = None
+    stdout = ""
+    stderr = ""
+    artifacts: list[dict[str, str]] = []
+    try:
+        volume = client.volumes.create(
+            name=f"xq-code-{suffix}",
+            labels=labels,
+        )
+        environment = {
+            "HOME": "/workspace/.home",
+            "TMPDIR": "/tmp",
+            "PYTHONUSERBASE": "/workspace/.python",
+            "PATH": "/workspace/.python/bin:/usr/local/bin:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "0",
+            "LANG": "C.UTF-8",
+        }
+        if domains:
+            network = _create_task_network(client, f"xq-code-net-{suffix}", labels)
+            proxy = client.containers.create(
+                image=PROXY_IMAGE,
+                name=f"xq-code-proxy-{suffix}",
+                environment={"XIAOQI_ALLOWED_DOMAINS": json.dumps(domains)},
+                network="bridge",
+                read_only=True,
+                tmpfs={"/tmp": "rw,nosuid,nodev,size=16m"},
+                user="10001:10001",
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                pids_limit=32,
+                mem_limit="64m",
+                nano_cpus=100_000_000,
+                labels=labels,
+                log_config=docker.types.LogConfig(type="json-file", config={"max-size": "64k", "max-file": "1"}),
+            )
+            network.connect(proxy, aliases=["sandbox-proxy"])
+            proxy.start()
+            if not _wait_for_proxy(proxy):
+                raise RuntimeError("服务器本机联网代理启动失败")
+            environment.update({
+                "HTTP_PROXY": "http://sandbox-proxy:3128",
+                "HTTPS_PROXY": "http://sandbox-proxy:3128",
+                "http_proxy": "http://sandbox-proxy:3128",
+                "https_proxy": "http://sandbox-proxy:3128",
+                "NO_PROXY": "localhost,127.0.0.1",
+                "no_proxy": "localhost,127.0.0.1",
+            })
+
+        container = client.containers.create(
+            image=SANDBOX_IMAGE,
+            name=f"xq-code-{suffix}",
+            command=_command(language, arguments, script_paths),
+            working_dir="/workspace",
+            environment=environment,
+            user="10001:10001",
+            network=network.name if network else "none",
+            volumes={volume.name: {"bind": "/workspace", "mode": "rw"}},
+            read_only=True,
+            tmpfs={"/tmp": "rw,nosuid,nodev,size=128m"},
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
+            pids_limit=64,
+            mem_limit="384m",
+            memswap_limit="384m",
+            nano_cpus=500_000_000,
+            labels=labels,
+            log_config=docker.types.LogConfig(type="json-file", config={"max-size": "1m", "max-file": "1"}),
+        )
+        sandbox_id = container.id
+        if not container.put_archive("/workspace", payload):
+            raise RuntimeError("无法准备本次任务的临时工作区")
+        container.start()
+        send({"type": "sandbox_started", "sandbox_id": sandbox_id})
+        started_at = time.monotonic()
+        exit_code: int | None = None
+        while True:
+            container.reload()
+            state = container.attrs.get("State", {})
+            if state.get("Status") in {"exited", "dead"}:
+                exit_code = int(state.get("ExitCode", 1))
+                break
+            if time.monotonic() - started_at >= MAX_RUN_SECONDS:
+                run_error = "代码执行超过 120 秒，沙箱已停止"
+                try:
+                    container.kill()
+                except DockerException:
+                    pass
+                break
+            send({"type": "heartbeat"})
+            time.sleep(1)
+
+        if run_error is None and exit_code not in {None, 0}:
+            run_error = f"脚本退出码：{exit_code}"
+        try:
+            stdout = _decode_logs(container, "stdout")
+            stderr = _decode_logs(container, "stderr")
+        except DockerException:
+            pass
+        if run_error is None:
+            artifacts = _safe_artifacts(container)
+    finally:
+        for resource, action in ((container, "container"), (proxy, "container"), (network, "network"), (volume, "volume")):
+            if resource is None:
+                continue
+            try:
+                if action == "container":
+                    try:
+                        resource.reload()
+                        if resource.attrs.get("State", {}).get("Running"):
+                            resource.stop(timeout=2)
+                    except NotFound:
+                        continue
+                    resource.remove(force=True, v=True)
+                elif action == "network":
+                    resource.remove()
+                else:
+                    resource.remove(force=True)
+            except DockerException:
+                cleanup_pending = True
+
+    return {
+        "type": "result",
+        "ok": run_error is None,
+        "stdout": stdout[-40000:],
+        "stderr": stderr[-20000:],
+        "error": run_error,
+        "artifacts": artifacts,
+        "cleanup_pending": cleanup_pending,
+        "sandbox_id": sandbox_id if cleanup_pending else None,
+    }
+
+
+def _wait_for_proxy(proxy: Any) -> bool:
+    for _ in range(30):
+        try:
+            result = proxy.exec_run([
+                "python3", "-c",
+                "import socket; s=socket.create_connection(('127.0.0.1',3128),timeout=0.5); s.close()",
+            ])
+            if result.exit_code == 0:
+                return True
+        except DockerException:
+            pass
+        try:
+            proxy.reload()
+            if proxy.attrs.get("State", {}).get("Status") != "running":
+                return False
+        except DockerException:
+            return False
+        time.sleep(0.25)
+    return False
+
+
+def _authorized(handler: BaseHTTPRequestHandler) -> bool:
+    header = handler.headers.get("Authorization", "")
+    prefix = "Bearer "
+    return bool(RUNNER_TOKEN) and header.startswith(prefix) and hmac.compare_digest(header[len(prefix):], RUNNER_TOKEN)
+
+
+class RunnerHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return
+
+    def _json_response(self, status: int, data: dict[str, Any]) -> None:
+        body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _start_stream(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _send(self, event: dict[str, Any]) -> None:
+        body = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+        self.wfile.write(f"{len(body):X}\r\n".encode("ascii") + body + b"\r\n")
+        self.wfile.flush()
+
+    def _finish_stream(self) -> None:
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+    def do_GET(self) -> None:
+        if self.path != "/health":
+            self._json_response(404, {"error": "not found"})
+            return
+        try:
+            client = _get_client()
+            client.images.get(SANDBOX_IMAGE)
+            client.images.get(PROXY_IMAGE)
+            self._json_response(200, {"status": "ready"})
+        except (DockerException, ImageNotFound):
+            self._json_response(503, {"status": "unavailable"})
+
+    def do_POST(self) -> None:
+        if self.path != "/v1/execute":
+            self._json_response(404, {"error": "not found"})
+            return
+        if not _authorized(self):
+            self._json_response(401, {"error": "unauthorized"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "-1"))
+        except ValueError:
+            self._json_response(400, {"error": "invalid content length"})
+            return
+        if length < 0 or length > MAX_BODY_BYTES:
+            self._json_response(413, {"error": "request too large"})
+            return
+        try:
+            request = json.loads(self.rfile.read(length))
+            if not isinstance(request, dict):
+                raise RequestError("沙箱请求格式无效")
+        except (json.JSONDecodeError, UnicodeDecodeError, RequestError) as error:
+            self._json_response(400, {"error": str(error)})
+            return
+        if not _slots.acquire(timeout=180):
+            self._json_response(429, {"error": "服务器代码沙箱正在处理其他任务，请稍后重试"})
+            return
+        self._start_stream()
+        try:
+            result = _run_sandbox(request, self._send)
+            self._send(result)
+        except ClientDisconnected:
+            return
+        except (RequestError, DockerException, RuntimeError, OSError) as error:
+            try:
+                self._send({"type": "result", "ok": False, "error": str(error)[:500], "artifacts": [], "cleanup_pending": False})
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+        except Exception:
+            try:
+                self._send({"type": "result", "ok": False, "error": "服务器本机 Docker 沙箱执行失败", "artifacts": [], "cleanup_pending": False})
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+        finally:
+            _slots.release()
+            try:
+                self._finish_stream()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
+
+def main() -> int:
+    if len(RUNNER_TOKEN) < 32:
+        raise RuntimeError("SANDBOX_RUNNER_TOKEN must contain at least 32 characters")
+    client = _get_client()
+    _remove_stale_resources(client)
+    for image in (SANDBOX_IMAGE, PROXY_IMAGE):
+        try:
+            client.images.get(image)
+        except ImageNotFound as error:
+            raise RuntimeError(f"required local image is missing: {image}") from error
+    server = ThreadingHTTPServer((RUNNER_HOST, RUNNER_PORT), RunnerHandler)
+    server.daemon_threads = True
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

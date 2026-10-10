@@ -2,31 +2,27 @@ name: xiaoqi-single-server
 
 services:
   app:
-    image: xiaoqi-single-server:local
+    image: xiaoqi-genkit-server:local
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: genkit_server/Dockerfile
     env_file:
       - ./single-server.env
     environment:
-      HOME: /run/xiaoqi
-      TMPDIR: /run/xiaoqi
+      HOME: /tmp
+      TMPDIR: /tmp
+      PORT: "8080"
+      MCP_PORT: "8081"
       XIAOQI_DATA_DIR: /var/lib/xiaoqi
-      XIAOQI_DSH_VERSION: 0.2.0-rc.2
-      XIAOQI_DSH_RELEASE_ROOT: /opt/xiaoqi-dsh
-      XIAOQI_DSH_WEB_HOME: /opt/xiaoqi-dsh/web-home
-      XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:?Set XIAOQI_DSH_INTERNAL_TOKEN in single-server.env}
-      XIAOQI_SINGLE_SERVER: "1"
-      XIAOQI_SKILL_SCRIPT_SANDBOX_ENABLED: "1"
+      XIAOQI_PUBLIC_HOST: ${XIAOQI_PUBLIC_HOST:-localhost}
+      SANDBOX_RUNNER_URL: http://sandbox-runner:8090
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?Set SANDBOX_RUNNER_TOKEN in single-server.env}
     expose:
       - "8080"
-    group_add:
-      - "10003"
+      - "8081"
     volumes:
       - xiaoqi-data:/var/lib/xiaoqi
-      - dsh-runtime:/opt/xiaoqi-dsh:ro
     tmpfs:
-      - /run/xiaoqi:uid=10001,gid=10001,mode=0700,size=128m,exec
       - /tmp:mode=1777,size=128m,noexec
     read_only: true
     init: true
@@ -36,112 +32,69 @@ services:
       - no-new-privileges:true
     pids_limit: 128
     cpus: 1.5
-    mem_limit: 1536m
+    mem_limit: 768m
     stop_grace_period: 35s
     restart: unless-stopped
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
+    networks:
+      - default
+      - sandbox-control
 
-  dsh-manager:
-    image: xiaoqi-dsh-manager:local
+  sandbox-runner:
+    image: xiaoqi-sandbox-runner:local
     build:
-      context: ..
-      dockerfile: dsh_manager/Dockerfile
-      args:
-        XIAOQI_ADMIN_HOST: ${XIAOQI_ADMIN_HOST:-admin.localhost}
+      context: ../genkit_server/sandbox_runner
+      dockerfile: Dockerfile
+    env_file:
+      - ./single-server.env
     environment:
-      HOME: /run/dsh-manager
-      TMPDIR: /run/dsh-manager
-      XIAOQI_DSH_RELEASE_ROOT: /opt/xiaoqi-dsh
-      XIAOQI_DSH_STATIC_ROOT: /app/static
-      XIAOQI_DSH_INTERNAL_API_URL: http://app:8080/v1/internal/dsh
-      XIAOQI_DSH_INTERNAL_TOKEN: ${XIAOQI_DSH_INTERNAL_TOKEN:?Set XIAOQI_DSH_INTERNAL_TOKEN in single-server.env}
-      XIAOQI_DSH_WEB_HOME: /opt/xiaoqi-dsh/web-home
-      XIAOQI_DSH_WEB_TOKEN_FILE: /opt/xiaoqi-dsh/web-launch-token
-      XIAOQI_DSH_ADMIN_PASSWORD_HASH: ${XIAOQI_DSH_ADMIN_PASSWORD_HASH:?Set XIAOQI_DSH_ADMIN_PASSWORD_HASH in single-server.env}
-      XIAOQI_DSH_COOKIE_SECURE: "1"
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?Set SANDBOX_RUNNER_TOKEN in single-server.env}
+      XIAOQI_SANDBOX_IMAGE: xiaoqi-code-sandbox:local
+      XIAOQI_SANDBOX_PROXY_IMAGE: xiaoqi-sandbox-proxy:local
     expose:
       - "8090"
     volumes:
-      - dsh-runtime:/opt/xiaoqi-dsh
-    tmpfs:
-      - /run/dsh-manager:uid=10002,gid=10003,mode=0700,size=128m,exec
-      - /tmp:mode=1777,size=128m,noexec
+      - /var/run/docker.sock:/var/run/docker.sock
     read_only: true
-    init: true
+    tmpfs:
+      - /tmp:mode=1777,size=32m
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    pids_limit: 96
-    cpus: 1.0
-    mem_limit: 1024m
-    stop_grace_period: 35s
+    pids_limit: 64
+    cpus: 0.2
+    mem_limit: 384m
     restart: unless-stopped
-    depends_on:
-      app:
-        condition: service_healthy
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/readyz', timeout=5).read()
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2)"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 45s
+      start_period: 20s
+    networks:
+      - sandbox-control
 
-  dsh-web:
-    profiles:
-      - https
-    image: xiaoqi-dsh-manager:local
-    command: ["python", "/app/start_web.py"]
-    user: "10001:10003"
-    network_mode: "service:caddy"
-    environment:
-      HOME: /run/dsh-web
-      TMPDIR: /run/dsh-web
-      DSH_HOME: /opt/xiaoqi-dsh/web-home
-      XIAOQI_DSH_WEB_TOKEN_FILE: /opt/xiaoqi-dsh/web-launch-token
-      XIAOQI_DSH_WEB_PORT: "8091"
-      XIAOQI_ADMIN_HOST: ${XIAOQI_ADMIN_HOST:?Set XIAOQI_ADMIN_HOST in single-server.env}
-    volumes:
-      - dsh-runtime:/opt/xiaoqi-dsh
-    tmpfs:
-      - /run/dsh-web:uid=10001,gid=10003,mode=0700,size=128m,exec
-      - /tmp:mode=1777,size=128m,noexec
-    read_only: true
-    init: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 96
-    cpus: 1.0
-    mem_limit: 1024m
-    stop_grace_period: 35s
-    restart: unless-stopped
-    depends_on:
-      caddy:
-        condition: service_started
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - /app/health_web.py
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 45s
+  sandbox-image:
+    image: xiaoqi-code-sandbox:local
+    build:
+      context: ../genkit_server/sandbox_image
+      dockerfile: Dockerfile
+    profiles: [build-only]
+    entrypoint: ["true"]
+
+  sandbox-proxy-image:
+    image: xiaoqi-sandbox-proxy:local
+    build:
+      context: ../genkit_server/sandbox_proxy
+      dockerfile: Dockerfile
+    profiles: [build-only]
+    entrypoint: ["true"]
 
   caddy:
     image: caddy:2-alpine
@@ -150,11 +103,8 @@ services:
     depends_on:
       app:
         condition: service_healthy
-      dsh-manager:
-        condition: service_healthy
     environment:
       XIAOQI_PUBLIC_HOST: ${XIAOQI_PUBLIC_HOST:-localhost}
-      XIAOQI_ADMIN_HOST: ${XIAOQI_ADMIN_HOST:-admin.localhost}
     ports:
       - "80:80"
       - "443:443"
@@ -167,6 +117,9 @@ services:
 
 volumes:
   xiaoqi-data:
-  dsh-runtime:
   caddy-data:
   caddy-config:
+
+networks:
+  sandbox-control:
+    internal: true

@@ -1,7 +1,0 @@
-# Replace xiaoqi.example.com with the real domain before enabling this site.
-xiaoqi.example.com {
-	encode zstd gzip
-	@internal_dsh path /v1/internal/dsh /v1/internal/dsh/*
-	respond @internal_dsh 404
-	reverse_proxy 127.0.0.1:8080
-}

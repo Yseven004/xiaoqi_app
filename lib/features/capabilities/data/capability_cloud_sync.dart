@@ -38,6 +38,15 @@ class CapabilityCloudSync {
     return method == 'email' && token?.isNotEmpty == true;
   }
 
+  Future<Map<String, String>> authenticatedHeaders() async {
+    final method = await _secureStorage.read(key: _authMethodKey);
+    final token = await _secureStorage.read(key: _tokenKey);
+    if (method != 'email' || token == null || token.isEmpty) {
+      throw StateError('请先登录个人账号');
+    }
+    return _headers(token);
+  }
+
   Future<String?> get signedInEmail => _secureStorage.read(key: _emailKey);
 
   Future<void> requestEmailLoginCode(String email) async {

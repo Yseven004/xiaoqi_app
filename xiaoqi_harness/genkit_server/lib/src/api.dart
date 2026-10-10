@@ -1,0 +1,1249 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+
+import 'package:crypto/crypto.dart';
+import 'package:genkit/genkit.dart' show CancellationController;
+import 'package:mailer/mailer.dart';
+import 'package:mailer/smtp_server.dart';
+import 'package:shelf/shelf.dart';
+import 'package:shelf_router/shelf_router.dart';
+import 'package:uuid/uuid.dart';
+
+import 'agent_runtime.dart';
+import 'chat_completion_service.dart';
+import 'code_execution_service.dart';
+import 'store.dart';
+
+class XiaoqiApi {
+  XiaoqiApi(this.store, this.runtime, {ChatCompletionService? chatCompletions})
+    : chatCompletions = chatCompletions ?? ChatCompletionService();
+
+  final CloudStore store;
+  final XiaoqiAgentRuntime runtime;
+  final ChatCompletionService chatCompletions;
+  final _controllers = <String, CancellationController>{};
+  static const _uuid = Uuid();
+  static const _maxJsonBytes = 22 * 1024 * 1024;
+  static const _maxCapabilityBytes = 2 * 1024 * 1024;
+
+  Router get router {
+    final router = Router()
+      ..get('/health', (Request request) => _json({'status': 'ok'}))
+      ..post('/v1/auth/email/start', _startEmail)
+      ..post('/v1/auth/email/verify', _verifyEmail)
+      ..get(
+        '/v1/auth/me',
+        (request) =>
+            _authenticated(request, (device) => _authMe(request, device)),
+      )
+      ..delete(
+        '/v1/auth/session',
+        (request) =>
+            _authenticated(request, (device) => _revokeDevice(request, device)),
+      )
+      ..delete(
+        '/v1/devices/me',
+        (request) =>
+            _authenticated(request, (device) => _revokeDevice(request, device)),
+      )
+      ..get(
+        '/v1/capabilities',
+        (request) => _authenticated(
+          request,
+          (device) => _listCapabilities(request, device),
+        ),
+      )
+      ..post(
+        '/v1/capabilities/sync',
+        (request) => _authenticated(
+          request,
+          (device) => _syncCapability(request, device),
+        ),
+      )
+      ..patch(
+        '/v1/capabilities/<id>/visibility',
+        (request, id) => _authenticated(
+          request,
+          (device) => _setVisibility(request, device, id),
+        ),
+      )
+      ..delete(
+        '/v1/capabilities/<id>',
+        (request, id) => _authenticated(
+          request,
+          (device) => _deleteCapability(request, device, id),
+        ),
+      )
+      ..get(
+        '/v1/drafts',
+        (request) =>
+            _authenticated(request, (device) => _drafts(request, device)),
+      )
+      ..put(
+        '/v1/drafts',
+        (request) =>
+            _authenticated(request, (device) => _drafts(request, device)),
+      )
+      ..delete(
+        '/v1/drafts/<id>',
+        (request, id) =>
+            _authenticated(request, (device) => _deleteDraft(device, id)),
+      )
+      ..post(
+        '/v1/agent/tasks',
+        (request) =>
+            _authenticated(request, (device) => _createTask(request, device)),
+      )
+      ..post(
+        '/v1/chat/completions',
+        (request) => _authenticated(
+          request,
+          (_) => chatCompletions.handle(request),
+        ),
+      )
+      ..get(
+        '/v1/agent/tasks/<id>',
+        (request, id) =>
+            _authenticated(request, (device) => _getTask(device, id)),
+      )
+      ..get(
+        '/v1/agent/tasks/<id>/events',
+        (request, id) => _authenticated(
+          request,
+          (device) => _getEvents(request, device, id),
+        ),
+      )
+      ..post(
+        '/v1/agent/tasks/<id>/cancel',
+        (request, id) =>
+            _authenticated(request, (device) => _cancelTask(device, id)),
+      )
+      ..post(
+        '/v1/agent/tasks/<id>/authorize-network',
+        (request, id) => _authenticated(
+          request,
+          (device) => _authorizeNetwork(request, device, id),
+        ),
+      )
+      ..post(
+        '/v1/agent/tasks/<id>/resume',
+        (request, id) =>
+            _authenticated(request, (device) => _resumeTask(device, id)),
+      )
+      ..get(
+        '/v1/agent/tasks/<task>/artifacts/<artifact>',
+        (request, task, artifact) => _authenticated(
+          request,
+          (device) => _downloadArtifact(device, task, artifact),
+        ),
+      );
+    return router;
+  }
+
+  Handler get handler =>
+      const Pipeline().addMiddleware(logRequests()).addHandler(router.call);
+
+  Future<Response> _startEmail(Request request) async {
+    try {
+      final body = await _body(request, 1024);
+      final email = _email(body['email']);
+      final config = _emailConfig();
+      if (!_constantTimeEquals(email, config.ownerEmail))
+        return _genericCodeResponse();
+      final now = _now();
+      final key = 'auth-code/${sha256.convert(utf8.encode(email))}';
+      final current = store.get(key);
+      final sent = (current?.value['send_times'] as List? ?? const [])
+          .whereType<num>()
+          .map((value) => value.toInt())
+          .where((value) => now - value < 3600)
+          .toList();
+      if (current != null &&
+          (now - (current.value['sent_at'] as num).toInt() < 60 ||
+              sent.length >= 5)) {
+        return _genericCodeResponse();
+      }
+      final code = Random.secure().nextInt(1000000).toString().padLeft(6, '0');
+      final challenge = <String, dynamic>{
+        'email': email,
+        'code_hash': _codeDigest(email, code, config.pepper),
+        'expires_at': now + 600,
+        'sent_at': now,
+        'send_times': [...sent, now],
+        'attempts': 0,
+        'consumed': false,
+      };
+      final saved = store.put(key, challenge, current?.revision);
+      try {
+        final smtp = SmtpServer(
+          config.smtpHost,
+          port: config.smtpPort,
+          username: config.smtpUsername,
+          password: config.smtpPassword,
+          ssl: config.smtpPort == 465,
+        );
+        final message = Message()
+          ..from = Address(config.smtpUsername, '小七')
+          ..recipients.add(email)
+          ..subject = '小七登录验证码'
+          ..text = '你的小七登录验证码是：$code\n验证码 10 分钟内有效，请勿转发给他人。';
+        await send(message, smtp).timeout(const Duration(seconds: 15));
+      } on Object {
+        try {
+          store.put(key, {...challenge, 'consumed': true}, saved.revision);
+        } on Object {}
+        return _genericCodeResponse();
+      }
+      return _genericCodeResponse();
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on _ConfigurationException {
+      return _error('登录服务暂不可用', 503);
+    } on RevisionConflict {
+      return _genericCodeResponse();
+    } on Object {
+      return _error('登录服务暂不可用', 503);
+    }
+  }
+
+  Future<Response> _verifyEmail(Request request) async {
+    String? token;
+    String? tokenHash;
+    try {
+      final body = await _body(request, 1024);
+      final email = _email(body['email']);
+      final code = body['code']?.toString().trim() ?? '';
+      final config = _emailConfig();
+      if (!_constantTimeEquals(email, config.ownerEmail) ||
+          !RegExp(r'^\d{6}$').hasMatch(code)) {
+        return _error('验证码无效或已过期', 401);
+      }
+      final key = 'auth-code/${sha256.convert(utf8.encode(email))}';
+      final challenge = store.get(key);
+      final now = _now();
+      final valid =
+          challenge != null &&
+          challenge.value['consumed'] != true &&
+          (challenge.value['expires_at'] as num? ?? 0) >= now &&
+          (challenge.value['attempts'] as num? ?? 0) < 5 &&
+          _constantTimeEquals(
+            challenge.value['code_hash']?.toString() ?? '',
+            _codeDigest(email, code, config.pepper),
+          );
+      if (!valid) {
+        if (challenge != null && challenge.value['consumed'] != true) {
+          final attempts =
+              (challenge.value['attempts'] as num? ?? 0).toInt() + 1;
+          try {
+            store.put(key, {
+              ...challenge.value,
+              'attempts': attempts,
+              'consumed': attempts >= 5,
+            }, challenge.revision);
+          } on Object {}
+        }
+        return _error('验证码无效或已过期', 401);
+      }
+      token = _token();
+      tokenHash = sha256.convert(utf8.encode(token)).toString();
+      final deviceId = 'device-${_uuid.v4().replaceAll('-', '')}';
+      store.put('device/$tokenHash', {
+        'tenant_id': 'personal',
+        'device_id': deviceId,
+        'auth_method': 'email',
+        'account_email': email,
+        'created_at': now,
+        'revoked_at': null,
+      }, null);
+      try {
+        store.put(key, {
+          ...challenge.value,
+          'consumed': true,
+          'consumed_at': now,
+        }, challenge.revision);
+      } on RevisionConflict {
+        final issued = store.get('device/$tokenHash');
+        if (issued != null)
+          store.put('device/$tokenHash', {
+            ...issued.value,
+            'revoked_at': now,
+          }, issued.revision);
+        return _error('验证码已使用，请重新获取', 409);
+      }
+      return _json({
+        'access_token': token,
+        'device_id': deviceId,
+        'email': email,
+      }, 201);
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on _ConfigurationException {
+      return _error('登录服务暂不可用', 503);
+    } on Object {
+      if (tokenHash != null) {
+        final issued = store.get('device/$tokenHash');
+        if (issued != null) {
+          try {
+            store.put('device/$tokenHash', {
+              ...issued.value,
+              'revoked_at': _now(),
+            }, issued.revision);
+          } on Object {}
+        }
+      }
+      return _error('登录失败，请重新获取验证码', 503);
+    }
+  }
+
+  Future<Response> _authMe(Request request, _Device device) async {
+    if (device.value['auth_method'] != 'email')
+      return _error('请先使用个人邮箱登录', 401);
+    return _json({
+      'authenticated': true,
+      'email': device.value['account_email'] ?? '',
+      'tenant_id': device.tenant,
+    });
+  }
+
+  Future<Response> _revokeDevice(Request request, _Device device) async {
+    final current = store.get(device.key);
+    if (current != null)
+      store.put(device.key, {
+        ...current.value,
+        'revoked_at': _now(),
+      }, current.revision);
+    return _json({'ok': true});
+  }
+
+  Future<Response> _listCapabilities(Request request, _Device device) async {
+    try {
+      final records = <Map<String, dynamic>>[];
+      for (final (_, doc) in store.list('cap/${device.tenant}/', limit: 200)) {
+        records.add(_publicCapability(doc.value, doc.revision, true));
+      }
+      return _json({'items': records});
+    } on Object {
+      return _error('读取云端能力失败', 503);
+    }
+  }
+
+  Future<Response> _syncCapability(Request request, _Device device) async {
+    try {
+      final body = await _body(request, _maxJsonBytes);
+      final record = await _normalizeCapability(device.tenant, body['record']);
+      final key = 'cap/${device.tenant}/${record['id']}';
+      final current = store.get(key);
+      final expected = _asInt(body['expected_revision']);
+      if (current == null && expected != null && expected != 0)
+        return _error('云端版本已变化', 409);
+      if (current != null && expected != current.revision) {
+        return _json({
+          'error': {
+            'message': '云端版本已变化',
+            'current': _publicCapability(current.value, current.revision, true),
+            'cloud_revision': current.revision,
+          },
+        }, 409);
+      }
+      record['cloud_revision'] = (current?.revision ?? 0) + 1;
+      final saved = store.put(key, record, current?.revision);
+      return _json({
+        'record': _publicCapability(saved.value, saved.revision, true),
+        'cloud_revision': saved.revision,
+      });
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on RevisionConflict {
+      return _error('云端版本已变化', 409);
+    } on Object {
+      return _error('同步能力失败', 503);
+    }
+  }
+
+  Future<Response> _setVisibility(
+    Request request,
+    _Device device,
+    String id,
+  ) async {
+    try {
+      final safeId = _safeId(id, '能力 ID');
+      final body = await _body(request, 1024);
+      final key = 'cap/${device.tenant}/$safeId';
+      final current = store.get(key);
+      if (current == null || current.value['deleted_at'] != null)
+        return _error('能力不存在', 404);
+      if (_asInt(body['expected_revision']) != current.revision)
+        return _json({
+          'error': {
+            'message': '云端版本已变化',
+            'current': _publicCapability(current.value, current.revision, true),
+            'cloud_revision': current.revision,
+          },
+        }, 409);
+      final updated = {
+        ...current.value,
+        'show_in_menu': body['show_in_menu'] == true,
+        'updated_at':
+            body['updated_at']?.toString() ?? DateTime.now().toIso8601String(),
+        'cloud_revision': current.revision + 1,
+      };
+      final saved = store.put(key, updated, current.revision);
+      return _json({
+        'record': _publicCapability(saved.value, saved.revision, false),
+        'cloud_revision': saved.revision,
+      });
+    } on Object {
+      return _error('更新展示偏好失败', 503);
+    }
+  }
+
+  Future<Response> _deleteCapability(
+    Request request,
+    _Device device,
+    String id,
+  ) async {
+    try {
+      final safeId = _safeId(id, '能力 ID');
+      final expected =
+          int.tryParse(
+            request.url.queryParameters['expected_revision'] ?? '',
+          ) ??
+          -1;
+      final key = 'cap/${device.tenant}/$safeId';
+      final current = store.get(key);
+      if (current == null) return _json({'ok': true});
+      if (expected != current.revision)
+        return _json({
+          'error': {
+            'message': '云端版本已变化',
+            'current': _publicCapability(current.value, current.revision, true),
+            'cloud_revision': current.revision,
+          },
+        }, 409);
+      final now = DateTime.now().toIso8601String();
+      final saved = store.put(key, {
+        ...current.value,
+        'deleted_at': now,
+        'updated_at': now,
+        'cloud_revision': current.revision + 1,
+      }, current.revision);
+      return _json({'ok': true, 'cloud_revision': saved.revision});
+    } on Object {
+      return _error('同步删除标记失败', 503);
+    }
+  }
+
+  Future<Response> _drafts(Request request, _Device device) async {
+    final prefix = 'draft/${device.tenant}/';
+    if (request.method == 'GET') {
+      return _json({
+        'items': [
+          for (final (_, item) in store.list(prefix, limit: 200))
+            {...item.value, 'cloud_revision': item.revision},
+        ],
+      });
+    }
+    try {
+      final body = await _body(request, _maxCapabilityBytes * 2);
+      final draft = body['draft'];
+      if (draft is! Map) return _error('草稿格式无效', 400);
+      final draftValue = Map<String, dynamic>.from(draft);
+      final id = _safeId(draftValue['id'], '草稿 ID');
+      final key = prefix + id;
+      final current = store.get(key);
+      final expected = _asInt(body['expected_revision']);
+      if (current != null && current.value['deleted_at'] != null)
+        return _json({
+          'error': {
+            'message': '云端草稿已删除',
+            'current': {...current.value, 'cloud_revision': current.revision},
+            'cloud_revision': current.revision,
+          },
+        }, 409);
+      if (current == null && expected != null && expected != 0)
+        return _error('云端草稿已变化', 409);
+      if (current != null && expected != current.revision)
+        return _json({
+          'error': {
+            'message': '云端草稿已变化',
+            'current': {...current.value, 'cloud_revision': current.revision},
+            'cloud_revision': current.revision,
+          },
+        }, 409);
+      draftValue['cloud_revision'] = (current?.revision ?? 0) + 1;
+      Map<String, dynamic>? currentWithoutRevision;
+      if (current != null) {
+        currentWithoutRevision = {...current.value};
+        currentWithoutRevision.remove('cloud_revision');
+      }
+      final draftWithoutRevision = {...draftValue}..remove('cloud_revision');
+      if (current != null &&
+          _canonical(currentWithoutRevision) ==
+              _canonical(draftWithoutRevision)) {
+        return _json({
+          'draft': current.value,
+          'cloud_revision': current.revision,
+        });
+      }
+      final saved = store.put(key, draftValue, current?.revision);
+      return _json({'draft': saved.value, 'cloud_revision': saved.revision});
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('同步草稿失败', 503);
+    }
+  }
+
+  Future<Response> _deleteDraft(_Device device, String id) async {
+    try {
+      final safeId = _safeId(id, '草稿 ID');
+      final key = 'draft/${device.tenant}/$safeId';
+      final current = store.get(key);
+      if (current != null && current.value['deleted_at'] != null)
+        return _json({'ok': true, 'cloud_revision': current.revision});
+      final deletedAt = DateTime.now().toIso8601String();
+      final saved = store.put(key, {
+        'id': safeId,
+        'deleted_at': deletedAt,
+        'updated_at': deletedAt,
+        'cloud_revision': (current?.revision ?? 0) + 1,
+      }, current?.revision);
+      return _json({'ok': true, 'cloud_revision': saved.revision});
+    } on Object {
+      return _error('删除云端草稿失败', 503);
+    }
+  }
+
+  Future<Response> _createTask(Request request, _Device device) async {
+    try {
+      final body = await _body(request, _maxJsonBytes);
+      final taskId = _safeId(body['task_id'] ?? 'task-${_uuid.v4()}', '任务 ID');
+      if (body['messages'] is! List) return _error('messages 必须是列表', 400);
+      final key = 'task/${device.tenant}/$taskId';
+      final requestHash = sha256
+          .convert(utf8.encode(_canonical(body)))
+          .toString();
+      final existing = store.get(key);
+      if (existing != null) {
+        if (existing.value['request_hash'] != requestHash)
+          return _error('任务 ID 已用于另一份请求', 409);
+        return _json({
+          'task_id': taskId,
+          'status': existing.value['status'],
+          'deduplicated': true,
+        });
+      }
+      final now = _now();
+      final task = <String, dynamic>{
+        'task_id': taskId,
+        'request_hash': requestHash,
+        'tenant_id': device.tenant,
+        'device_id': device.value['device_id'],
+        'status': 'queued',
+        'attempt': 1,
+        'events': [
+          {'seq': 0, 'type': 'status', 'status': 'queued', 'created_at': now},
+        ],
+        'draft_files': <String, String>{},
+        'artifacts': <Map<String, dynamic>>[],
+        'cancel_requested': false,
+        'authorized_network_domains': <String>[],
+        'requested_network_domains': <String>[],
+        'created_at': now,
+        'updated_at': now,
+      };
+      final inputKey = 'tenants/${device.tenant}/tasks/$taskId/input.json';
+      store.putImmutable(inputKey, {
+        'input.json': utf8.encode(jsonEncode(body)),
+      });
+      task['input_object_key'] = inputKey;
+      store.put(key, task, null);
+      unawaited(_runTask(device.tenant, taskId, body));
+      return _json({'task_id': taskId, 'status': 'queued'}, 202);
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('创建后台任务失败', 503);
+    }
+  }
+
+  Future<void> _runTask(
+    String tenant,
+    String taskId,
+    Map<String, dynamic> body,
+  ) async {
+    final key = 'task/$tenant/$taskId';
+    final cancellation = CancellationController();
+    _controllers[key] = cancellation;
+    try {
+      _mutateTask(
+        key,
+        (value) => {...value, 'status': 'running', 'updated_at': _now()},
+      );
+      _appendEvent(key, {'type': 'status', 'status': 'running'});
+      final answer = await runtime.run(
+        tenantId: tenant,
+        taskId: taskId,
+        request: body,
+        cancellation: cancellation.token,
+        onDelta: (text) =>
+            _appendEvent(key, {'type': 'assistant_delta', 'text': text}),
+      );
+      final current = store.get(key);
+      if (current == null) return;
+      if (cancellation.isCancelled ||
+          current.value['cancel_requested'] == true) {
+        _mutateTask(
+          key,
+          (value) => {...value, 'status': 'cancelled', 'updated_at': _now()},
+        );
+        _appendEvent(key, {'type': 'status', 'status': 'cancelled'});
+      } else {
+        _mutateTask(
+          key,
+          (value) => {
+            ...value,
+            'status': 'completed',
+            'result': answer,
+            'updated_at': _now(),
+          },
+        );
+        final artifacts = (current.value['artifacts'] as List? ?? const [])
+            .whereType<Map>()
+            .map(
+              (item) =>
+                  _publicArtifact(Map<String, dynamic>.from(item), taskId),
+            )
+            .toList();
+        _appendEvent(key, {
+          'type': 'completed',
+          'text': answer,
+          'draft': null,
+          'files': {},
+          'artifacts': artifacts,
+        });
+      }
+    } on NetworkPermissionRequired catch (required) {
+      final current = store.get(key);
+      if (current != null) {
+        if (cancellation.isCancelled ||
+            current.value['cancel_requested'] == true) {
+          _mutateTask(
+            key,
+            (value) => {...value, 'status': 'cancelled', 'updated_at': _now()},
+          );
+          _appendEvent(key, {'type': 'status', 'status': 'cancelled'});
+        } else {
+          _mutateTask(
+            key,
+            (value) => {
+              ...value,
+              'status': 'awaiting_network_permission',
+              'requested_network_domains': required.domains,
+              'network_purpose': required.purpose,
+              'updated_at': _now(),
+            },
+          );
+          _appendEvent(key, {
+            'type': 'network_permission_required',
+            'domains': required.domains,
+            'purpose': required.purpose,
+          });
+        }
+      }
+    } on Object catch (error) {
+      final current = store.get(key);
+      if (current != null) {
+        final cancelled =
+            cancellation.isCancelled ||
+            current.value['cancel_requested'] == true;
+        _mutateTask(
+          key,
+          (value) => {
+            ...value,
+            'status': cancelled ? 'cancelled' : 'failed',
+            if (!cancelled)
+              'error': error.toString().substring(
+                0,
+                min(500, error.toString().length),
+              ),
+            'updated_at': _now(),
+          },
+        );
+        _appendEvent(
+          key,
+          cancelled
+              ? {'type': 'status', 'status': 'cancelled'}
+              : {'type': 'error', 'message': '任务执行失败，请检查服务端配置或稍后重试'},
+        );
+      }
+    } finally {
+      _controllers.remove(key);
+    }
+  }
+
+  Future<Response> _getTask(_Device device, String id) async {
+    try {
+      final taskId = _safeId(id, '任务 ID');
+      final doc = store.get('task/${device.tenant}/$taskId');
+      if (doc == null) return _error('任务不存在', 404);
+      final value = doc.value;
+      final files = Map<String, dynamic>.from(
+        value['draft_files'] as Map? ?? const {},
+      );
+      final encoded = {
+        for (final entry in files.entries)
+          entry.key: base64Encode(utf8.encode(entry.value.toString())),
+      };
+      return _json({
+        'task_id': taskId,
+        'status': value['status'] ?? 'unknown',
+        'attempt': value['attempt'] ?? 1,
+        'error': value['error'],
+        'result': value['result'],
+        'draft': files['SKILL.md'],
+        'files': encoded,
+        'artifacts': [
+          for (final item in (value['artifacts'] as List? ?? const []))
+            if (item is Map)
+              _publicArtifact(Map<String, dynamic>.from(item), taskId),
+        ],
+        'requested_network_domains': value['requested_network_domains'] ?? [],
+        'network_purpose': value['network_purpose'],
+        'cloud_revision': doc.revision,
+      });
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('读取任务失败', 503);
+    }
+  }
+
+  Future<Response> _getEvents(
+    Request request,
+    _Device device,
+    String id,
+  ) async {
+    try {
+      final taskId = _safeId(id, '任务 ID');
+      final after =
+          int.tryParse(request.url.queryParameters['after'] ?? '-1') ?? -1;
+      final doc = store.get('task/${device.tenant}/$taskId');
+      if (doc == null) return _error('任务不存在', 404);
+      final events = (doc.value['events'] as List? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .where((item) => (item['seq'] as num? ?? 0) > after)
+          .map((item) => _publicEvent(item, taskId))
+          .toList();
+      return _json({
+        'events': events,
+        'status': doc.value['status'] ?? 'unknown',
+        'sandbox_cleanup_pending': false,
+      });
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('读取任务事件失败', 503);
+    }
+  }
+
+  Future<Response> _cancelTask(_Device device, String id) async {
+    try {
+      final key = 'task/${device.tenant}/${_safeId(id, '任务 ID')}';
+      final current = store.get(key);
+      if (current == null) return _error('任务不存在', 404);
+      if (const {
+        'queued',
+        'running',
+        'awaiting_network_permission',
+      }.contains(current.value['status'])) {
+        _mutateTask(
+          key,
+          (value) => {
+            ...value,
+            'cancel_requested': true,
+            'status': 'cancelled',
+            'updated_at': _now(),
+          },
+        );
+        _controllers[key]?.cancel('用户取消任务');
+        _appendEvent(key, {'type': 'status', 'status': 'cancelled'});
+      }
+      return _json({'ok': true});
+    } on Object {
+      return _error('取消任务失败', 503);
+    }
+  }
+
+  Future<Response> _authorizeNetwork(
+    Request request,
+    _Device device,
+    String id,
+  ) async {
+    try {
+      final body = await _body(request, 2048);
+      final domains = body['domains'];
+      if (domains is! List || domains.isEmpty)
+        return _error('需要明确授权至少一个域名', 400);
+      final requested =
+          domains
+              .map(
+                (item) => item.toString().trim().toLowerCase().replaceFirst(
+                  RegExp(r'\.$'),
+                  '',
+                ),
+              )
+              .toSet()
+              .toList()
+            ..sort();
+      final domainPattern = RegExp(
+        r'^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$',
+      );
+      if (requested.any((domain) => !domainPattern.hasMatch(domain)))
+        return _error('域名格式无效', 400);
+      final key = 'task/${device.tenant}/${_safeId(id, '任务 ID')}';
+      final doc = store.get(key);
+      if (doc == null) return _error('任务不存在', 404);
+      if (doc.value['status'] != 'awaiting_network_permission')
+        return _error('任务当前没有待确认的联网请求', 409);
+      final asked =
+          (doc.value['requested_network_domains'] as List? ?? const [])
+              .map((item) => item.toString())
+              .toSet();
+      if (!requested.toSet().difference(asked).isEmpty)
+        return _error('只能授权本次任务已说明的域名', 400);
+      final inputKey = doc.value['input_object_key']?.toString();
+      if (inputKey == null || inputKey.isEmpty) {
+        return _error('任务输入已过期', 410);
+      }
+      final savedInput =
+          jsonDecode(utf8.decode(store.getImmutable(inputKey)['input.json']!))
+              as Map<String, dynamic>;
+      _mutateTask(
+        key,
+        (value) => {
+          ...value,
+          'authorized_network_domains': {
+            ...(value['authorized_network_domains'] as List? ?? const []).map(
+              (item) => item.toString(),
+            ),
+            ...requested,
+          }.toList()..sort(),
+          'requested_network_domains': [],
+          'status': 'queued',
+          'attempt': (value['attempt'] as num? ?? 1).toInt() + 1,
+          'updated_at': _now(),
+        },
+      );
+      unawaited(_runTask(device.tenant, id, savedInput));
+      return _json({'ok': true, 'status': 'queued'});
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('授权联网失败', 503);
+    }
+  }
+
+  Future<Response> _resumeTask(_Device device, String id) async {
+    try {
+      final taskId = _safeId(id, '任务 ID');
+      final key = 'task/${device.tenant}/$taskId';
+      final task = store.get(key);
+      if (task == null) return _error('任务不存在', 404);
+      if (!const {
+        'failed',
+        'awaiting_network_permission',
+      }.contains(task.value['status']))
+        return _error('任务当前无法恢复', 409);
+      final inputKey = task.value['input_object_key']?.toString();
+      if (inputKey == null) return _error('任务输入已过期', 410);
+      final requestMap =
+          jsonDecode(utf8.decode(store.getImmutable(inputKey)['input.json']!))
+              as Map<String, dynamic>;
+      _mutateTask(
+        key,
+        (value) => {
+          ...value,
+          'status': 'queued',
+          'cancel_requested': false,
+          'attempt': (value['attempt'] as num? ?? 1).toInt() + 1,
+          'updated_at': _now(),
+        },
+      );
+      unawaited(_runTask(device.tenant, taskId, requestMap));
+      return _json({'ok': true, 'status': 'queued'});
+    } on Object {
+      return _error('恢复任务失败', 503);
+    }
+  }
+
+  Future<Response> _downloadArtifact(
+    _Device device,
+    String taskId,
+    String artifactId,
+  ) async {
+    try {
+      final safeTask = _safeId(taskId, '任务 ID');
+      final safeArtifact = _safeId(artifactId, '产物 ID');
+      final doc = store.get('task/${device.tenant}/$safeTask');
+      if (doc == null) return _error('任务不存在', 404);
+      final artifact = (doc.value['artifacts'] as List? ?? const [])
+          .whereType<Map>()
+          .cast<Map<String, dynamic>>()
+          .where((item) => item['id'] == safeArtifact)
+          .firstOrNull;
+      if (artifact == null) return _error('产物不存在', 404);
+      final bytes = store.getObject(artifact['object_key'].toString());
+      return Response.ok(
+        bytes,
+        headers: {
+          HttpHeaders.contentTypeHeader:
+              artifact['media_type'] ?? 'application/octet-stream',
+          HttpHeaders.contentLengthHeader: '${bytes.length}',
+          'content-disposition': 'attachment; filename="${artifact['name']}"',
+          'Cache-Control': 'private, no-store',
+        },
+      );
+    } on Object {
+      return _error('下载产物失败', 404);
+    }
+  }
+
+  Future<Response> _authenticated(
+    Request request,
+    Future<Response> Function(_Device) action,
+  ) async {
+    final header = request.headers[HttpHeaders.authorizationHeader] ?? '';
+    if (!header.startsWith('Bearer ')) return _error('登录状态已失效，请重新登录', 401);
+    final token = header.substring(7).trim();
+    if (token.isEmpty || token.length > 512)
+      return _error('登录状态已失效，请重新登录', 401);
+    final key = 'device/${sha256.convert(utf8.encode(token))}';
+    final record = store.get(key);
+    if (record == null || record.value['revoked_at'] != null)
+      return _error('登录状态已失效，请重新登录', 401);
+    return action(_Device(key, record.value));
+  }
+
+  Future<Map<String, dynamic>> _normalizeCapability(
+    String tenant,
+    Object? raw,
+  ) async {
+    if (raw is! Map) throw const FormatException('技能记录格式无效');
+    final id = _safeId(raw['id'], '能力 ID');
+    final kind = raw['kind'] ?? 'skill';
+    if (kind != 'skill' && kind != 'plugin')
+      throw const FormatException('能力类型无效');
+    final name = raw['name']?.toString().trim() ?? '';
+    final description = raw['description']?.toString().trim() ?? '';
+    if (name.isEmpty || name.length > 128 || description.length > 2048)
+      throw const FormatException('技能名称或用途说明不符合长度限制');
+    final versions = raw['versions'];
+    if (versions is! List || versions.length > 100)
+      throw const FormatException('技能版本列表无效');
+    final normalized = <Map<String, dynamic>>[];
+    for (final rawVersion in versions) {
+      if (rawVersion is! Map) throw const FormatException('技能版本格式无效');
+      final versionId = _safeId(rawVersion['id'], '版本 ID');
+      final content = rawVersion['content']?.toString() ?? '';
+      final contentBytes = utf8.encode(content);
+      if (contentBytes.length > _maxCapabilityBytes)
+        throw const FormatException('技能版本超过 2 MB');
+      final fm = RegExp(
+        r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)',
+      ).firstMatch(content);
+      if (fm == null)
+        throw const FormatException('SKILL.md 必须以 YAML frontmatter 开始');
+      final header = fm.group(1)!;
+      final skillName = RegExp(
+        r'(?m)^name:\s*([a-z0-9]+(?:-[a-z0-9]+)*)\s*$',
+      ).firstMatch(header)?.group(1);
+      var skillDescription = RegExp(
+        r'(?m)^description:\s*(.*?)\s*$',
+      ).firstMatch(header)?.group(1)?.trim();
+      if (skillDescription != null &&
+          skillDescription.length >= 2 &&
+          ((skillDescription.startsWith('"') &&
+                  skillDescription.endsWith('"')) ||
+              (skillDescription.startsWith("'") &&
+                  skillDescription.endsWith("'")))) {
+        skillDescription = skillDescription
+            .substring(1, skillDescription.length - 1)
+            .trim();
+      }
+      if (skillName == null || skillName.length > 64)
+        throw const FormatException('技能 name 必须是 1-64 位小写字母、数字或连字符');
+      if (skillDescription == null ||
+          skillDescription.isEmpty ||
+          skillDescription.length > 1024)
+        throw const FormatException('SKILL.md 必须包含有效 description');
+      if (content.substring(fm.end).trim().isEmpty)
+        throw const FormatException('SKILL.md 必须包含 Markdown 技能指令');
+      final files = <String, List<int>>{'SKILL.md': contentBytes};
+      final extra = rawVersion['files'];
+      if (extra is Map) {
+        for (final entry in extra.entries) {
+          final path = entry.key.toString().replaceAll('\\', '/');
+          final parts = path.split('/');
+          if (path.startsWith('/') ||
+              parts.any(
+                (part) => part.isEmpty || part == '.' || part == '..',
+              ) ||
+              !RegExp(r'^[A-Za-z0-9._/-]{1,240}$').hasMatch(path) ||
+              !const {
+                'scripts',
+                'references',
+                'assets',
+              }.contains(parts.first) ||
+              (parts.first == 'scripts' &&
+                  !RegExp(
+                    r'\.(py|js|mjs|cjs|ts|mts)$',
+                    caseSensitive: false,
+                  ).hasMatch(path))) {
+            throw const FormatException('技能资源路径无效');
+          }
+          try {
+            files[path] = base64Decode(entry.value.toString());
+          } on Object {
+            throw const FormatException('技能资源编码无效');
+          }
+        }
+      } else if (extra != null) {
+        throw const FormatException('技能资源格式无效');
+      }
+      if (files.values.fold<int>(0, (sum, file) => sum + file.length) >
+          _maxCapabilityBytes)
+        throw const FormatException('技能包超过 2 MB');
+      final digestInput = files.length == 1
+          ? utf8.encode(content)
+          : utf8.encode(
+              _canonical({
+                for (final path in files.keys) path: base64Encode(files[path]!),
+              }),
+            );
+      final digest = sha256.convert(digestInput).toString();
+      final suppliedHash = rawVersion['content_hash']?.toString() ?? '';
+      if (suppliedHash.isNotEmpty && suppliedHash != digest)
+        throw const FormatException('技能版本校验值不匹配');
+      final artifactKey =
+          'tenants/$tenant/capabilities/$id/versions/$versionId-$digest.zip';
+      store.putImmutable(artifactKey, files);
+      normalized.add({
+        'id': versionId,
+        'number': _asInt(rawVersion['number']) ?? normalized.length + 1,
+        'content_hash': digest,
+        'created_at': rawVersion['created_at']?.toString() ?? '',
+        'parent_version_id': rawVersion['parent_version_id'],
+        'artifact_key': artifactKey,
+      });
+    }
+    final currentVersionId = versions.isEmpty
+        ? ''
+        : _safeId(raw['current_version_id'], '当前版本 ID');
+    if (versions.isNotEmpty &&
+        !normalized.any((version) => version['id'] == currentVersionId))
+      throw const FormatException('当前版本不在技能版本列表中');
+    return {
+      'schema_version': 1,
+      'id': id,
+      'kind': kind,
+      'name': name,
+      'description': description,
+      'versions': normalized,
+      'current_version_id': currentVersionId,
+      'created_at': raw['created_at']?.toString() ?? '',
+      'updated_at': raw['updated_at']?.toString() ?? '',
+      'show_in_menu': raw['show_in_menu'] != false,
+      'deleted_at': raw['deleted_at'],
+    };
+  }
+
+  Map<String, dynamic> _publicCapability(
+    Map<String, dynamic> document,
+    int revision,
+    bool includeContent,
+  ) {
+    final result = {...document, 'cloud_revision': revision};
+    result['versions'] = (document['versions'] as List? ?? const [])
+        .whereType<Map>()
+        .map((raw) {
+          final version = Map<String, dynamic>.from(raw);
+          final artifactKey = version.remove('artifact_key')?.toString() ?? '';
+          if (includeContent && artifactKey.isNotEmpty) {
+            final files = store.getImmutable(artifactKey);
+            version['content'] = utf8.decode(files['SKILL.md'] ?? const []);
+            version['files'] = {
+              for (final entry in files.entries)
+                if (entry.key != 'SKILL.md')
+                  entry.key: base64Encode(entry.value),
+            };
+          }
+          return version;
+        })
+        .toList();
+    return result;
+  }
+
+  void _appendEvent(String key, Map<String, dynamic> event) {
+    _mutateTask(key, (value) {
+      final events = (value['events'] as List? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+      events.add({'seq': events.length, ...event, 'created_at': _now()});
+      return {...value, 'events': events, 'updated_at': _now()};
+    });
+  }
+
+  StoredDocument? _mutateTask(
+    String key,
+    Map<String, dynamic> Function(Map<String, dynamic>) transform,
+  ) {
+    for (var attempt = 0; attempt < 10; attempt++) {
+      final current = store.get(key);
+      if (current == null) return null;
+      try {
+        return store.put(key, transform(current.value), current.revision);
+      } on RevisionConflict {
+        continue;
+      }
+    }
+    throw StateError('任务更新冲突过多');
+  }
+
+  Map<String, dynamic> _publicArtifact(
+    Map<String, dynamic> item,
+    String taskId,
+  ) => {
+    'task_id': taskId,
+    for (final field in const ['id', 'name', 'media_type', 'size', 'sha256'])
+      if (item.containsKey(field)) field: item[field],
+  };
+
+  Map<String, dynamic> _publicEvent(Map<String, dynamic> item, String taskId) {
+    final result = {...item};
+    if (result['artifacts'] is List) {
+      result['artifacts'] = (result['artifacts'] as List)
+          .whereType<Map>()
+          .map((raw) => _publicArtifact(Map<String, dynamic>.from(raw), taskId))
+          .toList();
+    }
+    return result;
+  }
+
+  static Future<Map<String, dynamic>> _body(Request request, int limit) async {
+    final raw = await request.read().toList();
+    final size = raw.fold<int>(0, (sum, part) => sum + part.length);
+    if (size > limit) throw const FormatException('请求内容过大');
+    final decoded = jsonDecode(
+      utf8.decode(raw.expand((part) => part).toList()),
+    );
+    if (decoded is! Map) throw const FormatException('请求格式无效');
+    return Map<String, dynamic>.from(decoded);
+  }
+
+  _EmailConfig _emailConfig() {
+    final env = Platform.environment;
+    final email = (env['CAPABILITY_OWNER_EMAIL'] ?? '').trim().toLowerCase();
+    final host = (env['CAPABILITY_SMTP_HOST'] ?? 'smtp.qq.com').trim();
+    final username = (env['CAPABILITY_SMTP_USERNAME'] ?? '').trim();
+    final password = env['CAPABILITY_SMTP_PASSWORD'] ?? '';
+    final pepper = env['CAPABILITY_AUTH_CODE_PEPPER'] ?? '';
+    final port = int.tryParse(env['CAPABILITY_SMTP_PORT'] ?? '465') ?? 0;
+    if (!_validEmail(email) ||
+        host.isEmpty ||
+        username.isEmpty ||
+        password.isEmpty ||
+        pepper.length < 32 ||
+        port < 1 ||
+        port > 65535)
+      throw const _ConfigurationException();
+    return _EmailConfig(email, host, username, password, pepper, port);
+  }
+
+  static String _email(Object? value) {
+    final email = value?.toString().trim().toLowerCase() ?? '';
+    if (!_validEmail(email)) throw const FormatException('邮箱地址格式无效');
+    return email;
+  }
+
+  static bool _validEmail(String email) =>
+      email.length <= 254 &&
+      RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email);
+  static String _codeDigest(String email, String code, String pepper) => Hmac(
+    sha256,
+    utf8.encode(pepper),
+  ).convert(utf8.encode('$email:$code')).toString();
+  static bool _constantTimeEquals(String a, String b) {
+    final left = utf8.encode(a), right = utf8.encode(b);
+    var difference = left.length ^ right.length;
+    final size = max(left.length, right.length);
+    for (var i = 0; i < size; i++)
+      difference |=
+          (i < left.length ? left[i] : 0) ^ (i < right.length ? right[i] : 0);
+    return difference == 0;
+  }
+
+  static String _token() => base64Url
+      .encode(List<int>.generate(48, (_) => Random.secure().nextInt(256)))
+      .replaceAll('=', '');
+  static String _safeId(Object? value, String label) {
+    final id = value?.toString() ?? '';
+    if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$').hasMatch(id))
+      throw FormatException('$label无效');
+    return id;
+  }
+
+  static int? _asInt(Object? value) =>
+      value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
+  static int _now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  static String _canonical(Object? value) {
+    if (value is Map) {
+      final keys = value.keys.map((key) => key.toString()).toList()..sort();
+      return '{${keys.map((key) => '${jsonEncode(key)}:${_canonical(value[key])}').join(',')}}';
+    }
+    if (value is List) return '[${value.map(_canonical).join(',')}]';
+    return jsonEncode(value);
+  }
+
+  static Response _json(Object? value, [int status = 200]) => Response(
+    status,
+    body: jsonEncode(value),
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  );
+  static Response _error(String message, int status) => _json({
+    'error': {'message': message},
+  }, status);
+  static Response _genericCodeResponse() =>
+      _json({'ok': true, 'message': '如果该邮箱已获准登录，验证码会发送到邮箱'}, 202);
+}
+
+class _Device {
+  const _Device(this.key, this.value);
+  final String key;
+  final Map<String, dynamic> value;
+  String get tenant => value['tenant_id']?.toString() ?? 'personal';
+}
+
+class _EmailConfig {
+  const _EmailConfig(
+    this.ownerEmail,
+    this.smtpHost,
+    this.smtpUsername,
+    this.smtpPassword,
+    this.pepper,
+    this.smtpPort,
+  );
+  final String ownerEmail, smtpHost, smtpUsername, smtpPassword, pepper;
+  final int smtpPort;
+}
+
+class _ConfigurationException implements Exception {
+  const _ConfigurationException();
+}
