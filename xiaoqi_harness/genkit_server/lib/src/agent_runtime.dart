@@ -5,10 +5,206 @@ import 'dart:io';
 import 'package:genkit/experimental.dart';
 import 'package:genkit/genkit.dart';
 import 'package:genkit_openai/genkit_openai.dart';
+import 'package:schemantic/schemantic.dart';
 
 import 'image_service.dart';
 import 'code_execution_service.dart';
 import 'store.dart';
+
+const _maxAgentImageBytes = 5 * 1024 * 1024;
+
+void _logAgentRuntime(
+  String event,
+  String taskId,
+  Map<String, Object?> details,
+) {
+  try {
+    stderr.writeln(
+      jsonEncode({
+        'component': 'genkit_agent',
+        'event': event,
+        'task_id': taskId,
+        'timestamp': DateTime.now().toUtc().toIso8601String(),
+        ...details,
+      }),
+    );
+  } on Object {
+    // Logging must not change the task result.
+  }
+}
+
+List<Message> agentMessagesFromRequest(Object? rawMessages) {
+  if (rawMessages is! List || rawMessages.isEmpty || rawMessages.length > 64) {
+    throw const FormatException('messages 必须包含 1 到 64 条消息');
+  }
+  final output = <Message>[];
+  var totalImageBytes = 0;
+  for (final rawMessage in rawMessages) {
+    if (rawMessage is! Map) throw const FormatException('消息格式无效');
+    final role = switch (rawMessage['role']?.toString()) {
+      'system' => Role.system,
+      'user' => Role.user,
+      'assistant' => Role.model,
+      _ => throw const FormatException('消息角色无效'),
+    };
+    final content = rawMessage['content'];
+    final parts = <Part>[];
+    if (content is String) {
+      if (content.isNotEmpty) parts.add(TextPart(text: content));
+    } else if (content is List) {
+      for (final rawPart in content) {
+        if (rawPart is! Map) throw const FormatException('消息内容无效');
+        if (rawPart['type'] == 'text') {
+          final text = rawPart['text']?.toString() ?? '';
+          if (text.isNotEmpty) parts.add(TextPart(text: text));
+        } else if (rawPart['type'] == 'image_url') {
+          final image = rawPart['image_url'];
+          final url = image is Map ? image['url']?.toString() ?? '' : '';
+          final comma = url.indexOf(',');
+          if (!url.startsWith('data:') || comma < 0) {
+            throw const FormatException('只支持 PNG、JPEG、WEBP 或 GIF 图片');
+          }
+          final header = url.substring(5, comma);
+          if (!header.endsWith(';base64')) {
+            throw const FormatException('只支持 PNG、JPEG、WEBP 或 GIF 图片');
+          }
+          final contentType = header
+              .substring(0, header.length - 7)
+              .toLowerCase();
+          if (!const {
+            'image/png',
+            'image/jpeg',
+            'image/webp',
+            'image/gif',
+          }.contains(contentType)) {
+            throw const FormatException('只支持 PNG、JPEG、WEBP 或 GIF 图片');
+          }
+          final encoded = url.substring(comma + 1);
+          final maxEncodedLength =
+              ((_maxAgentImageBytes - totalImageBytes + 2) ~/ 3) * 4;
+          if (encoded.isEmpty || encoded.length > maxEncodedLength) {
+            throw const FormatException('图片总大小不能超过 5 MB');
+          }
+          late final List<int> bytes;
+          try {
+            bytes = base64.decode(encoded);
+          } on FormatException {
+            throw const FormatException('图片数据格式无效');
+          }
+          totalImageBytes += bytes.length;
+          if (totalImageBytes > _maxAgentImageBytes) {
+            throw const FormatException('图片总大小不能超过 5 MB');
+          }
+          parts.add(
+            MediaPart(
+              media: Media(contentType: contentType, url: url),
+            ),
+          );
+        } else {
+          throw const FormatException('暂不支持这种消息内容类型');
+        }
+      }
+    } else {
+      throw const FormatException('消息内容无效');
+    }
+    if (parts.isNotEmpty) output.add(Message(role: role, content: parts));
+  }
+  if (output.isEmpty) throw const FormatException('对话内容为空');
+  if (output.last.role != Role.user) {
+    throw const FormatException('最后一条消息必须来自用户');
+  }
+  return output;
+}
+
+SchemanticType<Map<String, dynamic>> _objectToolSchema(
+  Map<String, Object?> properties, {
+  required List<String> required,
+}) => SchemanticType.from<Map<String, dynamic>>(
+  jsonSchema: {
+    'type': 'object',
+    'properties': properties,
+    'required': required,
+    'additionalProperties': false,
+  },
+  parse: (json) => Map<String, dynamic>.from(json as Map),
+);
+
+final _generateImageSchema = _objectToolSchema(
+  const {
+    'prompt': {'type': 'string', 'minLength': 1, 'maxLength': 4000},
+    'image_url': {'type': 'string'},
+    'count': {'type': 'integer', 'minimum': 1, 'maximum': 4},
+    'size': {'type': 'string'},
+  },
+  required: const ['prompt'],
+);
+
+final _executePythonSchema = _objectToolSchema(
+  const {
+    'code': {'type': 'string', 'minLength': 1, 'maxLength': 65536},
+    'domains': {
+      'type': 'array',
+      'items': {'type': 'string'},
+      'maxItems': 10,
+    },
+    'purpose': {'type': 'string', 'maxLength': 300},
+  },
+  required: const ['code'],
+);
+
+final _executeSkillScriptSchema = _objectToolSchema(
+  const {
+    'script_path': {'type': 'string', 'minLength': 1},
+    'language': {
+      'type': 'string',
+      'enum': ['python', 'javascript', 'typescript'],
+    },
+    'arguments': {
+      'type': 'array',
+      'items': {'type': 'string'},
+      'maxItems': 32,
+    },
+    'domains': {
+      'type': 'array',
+      'items': {'type': 'string'},
+      'maxItems': 10,
+    },
+    'purpose': {'type': 'string', 'maxLength': 300},
+  },
+  required: const ['script_path', 'language'],
+);
+
+List<String> agentToolNamesForRequest({
+  required String latestUserText,
+  bool capabilitySelected = false,
+  bool skillHasScripts = false,
+}) {
+  final text = latestUserText.toLowerCase();
+  final isInquiry = RegExp(
+    r'(怎么|如何|能否|能不能|是否|什么意思|是什么|原理|特点|区别|有什么用|吗[?？]?$)',
+  ).hasMatch(text);
+  final wantsImage =
+      !isInquiry &&
+      RegExp(
+        r'(生成|画|绘制|创作|制作).{0,8}(一张|一个|个|幅|图片|图像|插画|海报|头像|壁纸|照片|图)|'
+        r'(编辑|修改|修复|修图|改图).{0,8}(图片|图像|照片|插画|海报|头像|壁纸|图)|'
+        r'\b(generate|create|draw|edit|retouch)\b.{0,20}\b(image|picture|photo|illustration)\b',
+      ).hasMatch(text);
+  final wantsCode =
+      capabilitySelected ||
+      RegExp(
+        r'(运行|执行).{0,12}(代码|脚本|python|javascript|typescript|sql)|'
+        r'(代码|脚本|python|javascript|typescript|sql).{0,8}(运行|执行)|'
+        r'(处理|转换|统计|批量).{0,8}(文件|附件|数据)|'
+        r'(文件|附件|数据).{0,8}(处理|转换|统计|批量)|'
+        r'(保存|导出|生成|写入).{0,8}(文件|csv|xlsx)',
+      ).hasMatch(text);
+  return [
+    if (wantsImage) 'generate_image',
+    if (wantsCode) 'execute_python',
+    if (capabilitySelected && skillHasScripts) 'execute_skill_script',
+  ];
+}
 
 abstract interface class XiaoqiAgentRuntime {
   Future<String> run({
@@ -46,6 +242,10 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     final selection = _modelSelection(
       requestedModel.isNotEmpty ? requestedModel : defaultModel,
     );
+    _logAgentRuntime('model_selected', taskId, {
+      'provider': selection.namespace,
+      'model_id': selection.modelId,
+    });
     final apiKey = Platform.environment[selection.keyName] ?? '';
     if (apiKey.isEmpty) throw StateError('服务器未配置 ${selection.keyName}');
     final ai = Genkit(
@@ -65,7 +265,14 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     ai.defineTool<Map<String, dynamic>, Map<String, dynamic>>(
       name: 'generate_image',
       description: '根据文字生成或编辑图片。只有用户明确要求图片时才调用。',
+      inputSchema: _generateImageSchema,
       fn: (input, context) async {
+        _logAgentRuntime('tool_called', taskId, {
+          'tool_name': 'generate_image',
+          'input_fields': input.keys.toList()..sort(),
+          'prompt_characters': input['prompt']?.toString().length ?? 0,
+          'has_source_image': input['image_url'] != null,
+        });
         final result = await images.generate(
           taskId: taskId,
           tenantId: tenantId,
@@ -80,11 +287,19 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'execute_python',
       description:
-          '在服务器本机隔离的 Docker 沙箱执行 Python 代码。默认断网。'
+          '在服务器隔离的 Docker 沙箱执行 Python 代码。仅用于用户明确要求执行代码、'
+          '处理文件或对资料做程序化操作时。默认断网。'
           '只有确实需要联网时才在 domains 中列出精确域名，并用 purpose 说明用途；'
-          '用户授权后任务会恢复。工作目录为 /home/user/workspace，'
+          '用户授权后任务会恢复。工作目录为 /workspace，'
           '资料位于 materials/，技能位于 skill/，文件产物写入 output/。',
+      inputSchema: _executePythonSchema,
       fn: (input, context) async {
+        _logAgentRuntime('tool_called', taskId, {
+          'tool_name': 'execute_python',
+          'input_fields': input.keys.toList()..sort(),
+          'code_bytes': utf8.encode(input['code']?.toString() ?? '').length,
+          'domain_count': (input['domains'] as List? ?? const []).length,
+        });
         final permission = _networkPermission(
           tenantId,
           taskId,
@@ -123,7 +338,15 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
       description:
           '执行当前技能已同步版本中的脚本。只接受 scripts/ 下真实存在的 .py、.js、.mjs、.cjs、.ts 或 .mts 文件；'
           '每个任务仅允许执行一次。脚本只能访问本次任务资料和当前技能文件，默认断网。',
+      inputSchema: _executeSkillScriptSchema,
       fn: (input, context) async {
+        _logAgentRuntime('tool_called', taskId, {
+          'tool_name': 'execute_skill_script',
+          'input_fields': input.keys.toList()..sort(),
+          'language': input['language'],
+          'argument_count': (input['arguments'] as List? ?? const []).length,
+          'domain_count': (input['domains'] as List? ?? const []).length,
+        });
         final permission = _networkPermission(
           tenantId,
           taskId,
@@ -179,22 +402,39 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
       },
     );
 
-    final messages = request['messages'];
-    if (messages is! List) throw const FormatException('messages 必须是列表');
-    final conversation = messages
-        .whereType<Map>()
-        .map((message) {
-          final role = message['role'] == 'assistant' ? '助手' : '用户';
-          return '$role：${_textContent(message['content'])}';
-        })
-        .where((line) => line.trim().isNotEmpty)
-        .join('\n\n');
-    if (conversation.isEmpty) throw const FormatException('对话内容为空');
+    final messages = agentMessagesFromRequest(request['messages']);
+    _logAgentRuntime('messages_prepared', taskId, {
+      'message_count': messages.length,
+      'image_count': messages
+          .expand((message) => message.content)
+          .where((part) => part.isMedia)
+          .length,
+    });
+    final latestUserText = _textContent(
+      (request['messages'] as List).whereType<Map>().lastWhere(
+        (message) => message['role'] == 'user',
+        orElse: () => const {},
+      )['content'],
+    ).toLowerCase();
+    final selectedCapability = request['capability'] is Map;
+    final skillFiles = selectedCapability
+        ? _loadSkillFiles(tenantId, request['capability'])
+        : const <String, List<int>>{};
+    final hasSkillScripts = skillFiles.keys.any(
+      (path) => path.replaceAll('\\', '/').startsWith('scripts/'),
+    );
+    final toolNames = agentToolNamesForRequest(
+      latestUserText: latestUserText,
+      capabilitySelected: selectedCapability,
+      skillHasScripts: hasSkillScripts,
+    );
 
     final skill = _loadSkill(tenantId, request['capability']);
     final materialText = _materialsText(request['materials']);
     final system = StringBuffer(
       '你是小七的 AI 助手。请使用中文回答，遵循用户的最新要求。'
+      '普通问候、问答、解释和写作直接回答，不要调用技能、代码或文件工具。'
+      '只有用户明确要求相应操作，并且对应工具已提供时才调用工具。'
       '不要声称执行了没有执行的操作。',
     );
     if (skill.isNotEmpty) system.write('\n\n当前技能指令：\n$skill');
@@ -205,15 +445,11 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
       model: openAI.model(selection.modelId, namespace: selection.namespace),
       system: system.toString(),
       maxTurns: 8,
-      toolNames: const [
-        'generate_image',
-        'execute_python',
-        'execute_skill_script',
-      ],
-      store: InMemorySessionStore(),
+      toolNames: toolNames,
     );
-    final chat = agent.chat();
-    final turn = chat.sendStream(text: conversation, cancel: cancellation);
+    final priorMessages = messages.take(messages.length - 1).toList();
+    final chat = agent.chat(state: SessionState(messages: priorMessages));
+    final turn = chat.sendStream(message: messages.last, cancel: cancellation);
     final output = StringBuffer();
     await for (final chunk in turn.stream) {
       cancellation.throwIfCancelled();

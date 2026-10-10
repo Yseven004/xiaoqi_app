@@ -98,10 +98,8 @@ class XiaoqiApi {
       )
       ..post(
         '/v1/chat/completions',
-        (request) => _authenticated(
-          request,
-          (_) => chatCompletions.handle(request),
-        ),
+        (request) =>
+            _authenticated(request, (_) => chatCompletions.handle(request)),
       )
       ..get(
         '/v1/agent/tasks/<id>',
@@ -531,7 +529,7 @@ class XiaoqiApi {
           return _error('任务 ID 已用于另一份请求', 409);
         return _json({
           'task_id': taskId,
-          'status': existing.value['status'],
+          'status': _publicTaskStatus(existing.value['status']),
           'deduplicated': true,
         });
       }
@@ -576,6 +574,30 @@ class XiaoqiApi {
   ) async {
     final key = 'task/$tenant/$taskId';
     final cancellation = CancellationController();
+    final startedAt = DateTime.now();
+    final messages = (body['messages'] as List? ?? const [])
+        .whereType<Map>()
+        .toList(growable: false);
+    final imageCount = messages.fold<int>(0, (count, message) {
+      final content = message['content'];
+      return count +
+          (content is List
+              ? content
+                    .whereType<Map>()
+                    .where((part) => part['type'] == 'image_url')
+                    .length
+              : 0);
+    });
+    _logTaskEvent('started', taskId, {
+      'model_id': body['model_id'],
+      'message_count': messages.length,
+      'roles': messages
+          .map((message) => message['role']?.toString())
+          .toSet()
+          .toList(),
+      'image_count': imageCount,
+      'capability_selected': body['capability'] is Map,
+    });
     _controllers[key] = cancellation;
     try {
       _mutateTask(
@@ -600,6 +622,10 @@ class XiaoqiApi {
           (value) => {...value, 'status': 'cancelled', 'updated_at': _now()},
         );
         _appendEvent(key, {'type': 'status', 'status': 'cancelled'});
+        _logTaskEvent('finished', taskId, {
+          'status': 'cancelled',
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+        });
       } else {
         _mutateTask(
           key,
@@ -623,6 +649,10 @@ class XiaoqiApi {
           'draft': null,
           'files': {},
           'artifacts': artifacts,
+        });
+        _logTaskEvent('finished', taskId, {
+          'status': 'completed',
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
         });
       }
     } on NetworkPermissionRequired catch (required) {
@@ -651,6 +681,10 @@ class XiaoqiApi {
             'domains': required.domains,
             'purpose': required.purpose,
           });
+          _logTaskEvent('awaiting_network_permission', taskId, {
+            'domain_count': required.domains.length,
+            'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          });
         }
       }
     } on Object catch (error) {
@@ -678,9 +712,34 @@ class XiaoqiApi {
               ? {'type': 'status', 'status': 'cancelled'}
               : {'type': 'error', 'message': '任务执行失败，请检查服务端配置或稍后重试'},
         );
+        _logTaskEvent('finished', taskId, {
+          'status': cancelled ? 'cancelled' : 'failed',
+          'error_type': error.runtimeType.toString(),
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+        });
       }
     } finally {
       _controllers.remove(key);
+    }
+  }
+
+  void _logTaskEvent(
+    String event,
+    String taskId,
+    Map<String, Object?> details,
+  ) {
+    try {
+      stderr.writeln(
+        jsonEncode({
+          'component': 'agent_task',
+          'event': event,
+          'task_id': taskId,
+          'timestamp': DateTime.now().toUtc().toIso8601String(),
+          ...details,
+        }),
+      );
+    } on Object {
+      // Logging must not change the task result.
     }
   }
 
@@ -699,7 +758,7 @@ class XiaoqiApi {
       };
       return _json({
         'task_id': taskId,
-        'status': value['status'] ?? 'unknown',
+        'status': _publicTaskStatus(value['status']),
         'attempt': value['attempt'] ?? 1,
         'error': value['error'],
         'result': value['result'],
@@ -740,7 +799,7 @@ class XiaoqiApi {
           .toList();
       return _json({
         'events': events,
-        'status': doc.value['status'] ?? 'unknown',
+        'status': _publicTaskStatus(doc.value['status']),
         'sandbox_cleanup_pending': false,
       });
     } on FormatException catch (error) {
@@ -1199,6 +1258,8 @@ class XiaoqiApi {
 
   static int? _asInt(Object? value) =>
       value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
+  static Object _publicTaskStatus(Object? status) =>
+      status == 'completed' ? 'succeeded' : status ?? 'unknown';
   static int _now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
   static String _canonical(Object? value) {
     if (value is Map) {

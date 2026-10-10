@@ -1650,17 +1650,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final latestUserMessage = history.reversed
         .where((item) => item.isUser && !item.isDeletedMarker)
         .firstOrNull;
-    final latestCapability = latestUserMessage?.capabilityMetadata;
-    final isSkillAuthoring =
-        latestCapability?['type'] == 'action' &&
-        (latestCapability?['id'] == 'create-skill' ||
-            latestCapability?['id'] == 'revise-skill');
-    if (!isSkillAuthoring) {
-      final capabilityCatalog = await _capabilityCatalogPrompt(history);
-      if (capabilityCatalog.isNotEmpty) {
-        systemInstructions.add(capabilityCatalog);
-      }
-    }
     if (latestUserMessage != null) {
       final capabilityPrompt = await _capabilityPromptFor(latestUserMessage);
       if (capabilityPrompt.trim().isNotEmpty) {
@@ -1986,53 +1975,6 @@ $materialIndex
     } finally {
       if (_activeCapabilityTaskId == taskId) _activeCapabilityTaskId = null;
     }
-  }
-
-  Future<String> _capabilityCatalogPrompt(
-    List<AiConversationMessage> history,
-  ) async {
-    final skills = (await CapabilityStore.instance.list())
-        .where((record) => record.kind == CapabilityKind.skill)
-        .toList(growable: false);
-    if (skills.isEmpty) return '';
-    final recentUserText = history
-        .where((message) => message.isUser && !message.isDeletedMarker)
-        .toList(growable: false)
-        .reversed
-        .take(4)
-        .map((message) => message.text)
-        .join('\n')
-        .toLowerCase();
-    final selectedIds = history
-        .map((message) => message.capabilityMetadata?['id']?.toString())
-        .whereType<String>()
-        .toSet();
-    final relevant = <({CapabilityRecord record, int score})>[];
-    for (final record in skills) {
-      if (selectedIds.contains(record.id)) continue;
-      final source = '${record.name} ${record.description}'.toLowerCase();
-      final terms = RegExp(
-        r'[a-z0-9]{3,}|[\u4e00-\u9fff]{2,}',
-      ).allMatches(source).map((match) => match.group(0)!).toSet();
-      final score = terms.where((term) => recentUserText.contains(term)).length;
-      if (score > 0) relevant.add((record: record, score: score));
-    }
-    relevant.sort((a, b) => b.score.compareTo(a.score));
-    final buffer = StringBuffer('''
-小栖技能目录（包括用户隐藏在菜单中的技能）：
-根据名称与用途判断是否有适用技能。若有，优先使用其内容；用户明确选中的技能优先级最高。不要仅因它出现在目录中就强行套用。
-''');
-    for (final record in skills) {
-      buffer.writeln('- ${record.name}：${record.description}');
-    }
-    for (final match in relevant.take(1)) {
-      final version = match.record.currentVersion;
-      if (version == null) continue;
-      buffer.writeln('''
-自动发现的相关技能：${match.record.name}
-${version.content}''');
-    }
-    return buffer.toString().trim();
   }
 
   Future<String> _capabilityPromptFor(AiConversationMessage message) async {

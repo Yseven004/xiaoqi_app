@@ -166,10 +166,13 @@ void main() {
           '/v1/agent/tasks/task-test/events?after=-1',
         );
         events = jsonDecode(await response.readAsString()) as Map;
-        if (events['status'] == 'completed') break;
+        if (events['status'] == 'succeeded') break;
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
-      expect(events['status'], 'completed');
+      expect(events['status'], 'succeeded');
+      final taskResponse = await call('GET', '/v1/agent/tasks/task-test');
+      final task = jsonDecode(await taskResponse.readAsString()) as Map;
+      expect(task['status'], 'succeeded');
       final entries = events['events'] as List;
       expect(
         entries.map((event) => event['type']),
@@ -217,7 +220,7 @@ void main() {
         '/v1/agent/tasks/task-image/events?after=-1',
       );
       events = jsonDecode(await response.readAsString()) as Map;
-      if (events['status'] == 'completed') break;
+      if (events['status'] == 'succeeded') break;
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
     final completed = (events['events'] as List).cast<Map>().firstWhere(
@@ -280,7 +283,7 @@ void main() {
       if (events['status'] == 'completed') break;
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
-    expect(events['status'], 'completed');
+    expect(events['status'], 'succeeded');
     expect(networkRuntime.authorizedDomains, ['example.com']);
   });
 }

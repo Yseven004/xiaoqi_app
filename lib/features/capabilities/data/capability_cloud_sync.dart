@@ -438,19 +438,23 @@ class CapabilityCloudSync {
 
   Future<Map<String, dynamic>> getTask(String taskId) async {
     final token = await _requireToken();
-    final response = await _client.get(
-      Uri.parse('$_baseUrl/agent/tasks/$taskId'),
-      headers: _headers(token),
-    );
+    final response = await _client
+        .get(
+          Uri.parse('$_baseUrl/agent/tasks/$taskId'),
+          headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 20));
     return _checked(response);
   }
 
   Future<Map<String, dynamic>> getTaskEvents(String taskId, int after) async {
     final token = await _requireToken();
-    final response = await _client.get(
-      Uri.parse('$_baseUrl/agent/tasks/$taskId/events?after=$after'),
-      headers: _headers(token),
-    );
+    final response = await _client
+        .get(
+          Uri.parse('$_baseUrl/agent/tasks/$taskId/events?after=$after'),
+          headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 20));
     return _checked(response);
   }
 
@@ -459,8 +463,31 @@ class CapabilityCloudSync {
     final started = DateTime.now();
     var completionReceived = false;
     var errorReceived = false;
+    var consecutiveNetworkFailures = 0;
     while (DateTime.now().difference(started) < const Duration(minutes: 20)) {
-      final response = await getTaskEvents(taskId, cursor);
+      late final Map<String, dynamic> response;
+      try {
+        response = await getTaskEvents(taskId, cursor);
+        consecutiveNetworkFailures = 0;
+      } on TimeoutException {
+        consecutiveNetworkFailures++;
+        if (consecutiveNetworkFailures >= 3) {
+          throw TimeoutException('连接云端任务超时，可重新打开会话恢复。');
+        }
+        await Future<void>.delayed(
+          Duration(seconds: consecutiveNetworkFailures),
+        );
+        continue;
+      } on http.ClientException {
+        consecutiveNetworkFailures++;
+        if (consecutiveNetworkFailures >= 3) {
+          throw http.ClientException('连接云端任务失败，可重新打开会话恢复。');
+        }
+        await Future<void>.delayed(
+          Duration(seconds: consecutiveNetworkFailures),
+        );
+        continue;
+      }
       final events = response['events'];
       if (events is List) {
         for (final raw in events.whereType<Map>()) {
@@ -469,16 +496,21 @@ class CapabilityCloudSync {
           if (event['type'] == 'completed') completionReceived = true;
           if (event['type'] == 'error') errorReceived = true;
           yield event;
+          if (event['type'] == 'completed' || event['type'] == 'error') {
+            return;
+          }
         }
       }
       if (response['content_expired'] == true) return;
       final status = response['status']?.toString();
       final cleanupPending = response['sandbox_cleanup_pending'] == true;
       if (!cleanupPending &&
-          (status == 'succeeded' ||
+          (status == 'completed' ||
+              status == 'succeeded' ||
               status == 'failed' ||
               status == 'cancelled')) {
-        if (!completionReceived && status == 'succeeded') {
+        if (!completionReceived &&
+            (status == 'completed' || status == 'succeeded')) {
           final task = await getTask(taskId);
           yield {
             'type': 'completed',
@@ -540,7 +572,10 @@ class CapabilityCloudSync {
     var status = decoded['status']?.toString();
     var cleanupPending = decoded['sandbox_cleanup_pending'] == true;
     bool isTerminal(String? value) =>
-        value == 'cancelled' || value == 'succeeded' || value == 'failed';
+        value == 'cancelled' ||
+        value == 'completed' ||
+        value == 'succeeded' ||
+        value == 'failed';
     while ((!isTerminal(status) || cleanupPending) &&
         DateTime.now().isBefore(deadline)) {
       final state = await getTaskEvents(
