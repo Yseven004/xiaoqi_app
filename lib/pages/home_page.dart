@@ -295,6 +295,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _composerFocusNode = FocusNode();
   final _messagesScrollController = ScrollController();
   final _streamingReply = ValueNotifier<String>('');
+  final _imageGenerationInProgress = ValueNotifier<bool>(false);
   final _streamingReplyBuffer = StringBuffer();
   final _speechService = SpeechRecognitionService.instance;
   final _voiceSoundLevel = ValueNotifier<double>(0.0);
@@ -470,6 +471,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _composerExpansionTimer?.cancel();
     _streamingReplyPublishTimer?.cancel();
     _streamingReply.dispose();
+    _imageGenerationInProgress.dispose();
     _keyboardInsetsChanging.dispose();
     unawaited(_cancelVoiceInput());
     _voiceSoundLevel.dispose();
@@ -1994,6 +1996,9 @@ $materialIndex
             _streamingReplyBuffer.write(event['text']?.toString() ?? '');
             _scheduleStreamingReplyUpdate(generation, conversationId);
             break;
+          case 'image_generation_started':
+            _imageGenerationInProgress.value = true;
+            break;
           case 'network_permission_required':
             final domains = (event['domains'] as List? ?? const [])
                 .map((value) => value.toString())
@@ -2617,6 +2622,7 @@ $text''';
     _streamingReplyPublishTimer = null;
     _streamingReplyBuffer.clear();
     _streamingReply.value = '';
+    _imageGenerationInProgress.value = false;
   }
 
   Future<void> _persistCapabilityTaskId(
@@ -4865,6 +4871,8 @@ $text''';
                                         isUserScrollingMessages:
                                             _userScrollingMessages,
                                         streamingReply: _streamingReply,
+                                        imageGenerationInProgress:
+                                            _imageGenerationInProgress,
                                         onScrollNotification:
                                             _onMessagesScrollNotification,
                                         onCopy: _copyReply,
@@ -6375,6 +6383,7 @@ class _ConversationMessages extends StatefulWidget {
     required this.isSelectingVersion,
     required this.isUserScrollingMessages,
     required this.streamingReply,
+    required this.imageGenerationInProgress,
     required this.onScrollNotification,
     required this.onCopy,
     required this.onCopySelectedText,
@@ -6403,6 +6412,7 @@ class _ConversationMessages extends StatefulWidget {
   final bool isSelectingVersion;
   final bool isUserScrollingMessages;
   final ValueListenable<String> streamingReply;
+  final ValueListenable<bool> imageGenerationInProgress;
   final bool Function(ScrollNotification) onScrollNotification;
   final Future<void> Function(AiConversationMessage) onCopy;
   final Future<void> Function(String) onCopySelectedText;
@@ -6767,6 +6777,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
             ),
           )
         : null;
+    if (isImage) return _assistantImageArtifact(artifact, preview);
 
     return Card(
       margin: EdgeInsets.zero,
@@ -6778,39 +6789,13 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (isImage)
-            SizedBox(
-              height: 280,
-              child: preview == null
-                  ? const Center(child: Text('图片预览不可用'))
-                  : FutureBuilder<Uint8List>(
-                      future: preview,
-                      builder: (context, snapshot) {
-                        if (snapshot.hasError) {
-                          return const Center(child: Text('图片预览加载失败，可下载原图'));
-                        }
-                        if (!snapshot.hasData) {
-                          return const Center(child: Text('正在加载图片预览…'));
-                        }
-                        return Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: Image.memory(
-                            snapshot.data!,
-                            fit: BoxFit.contain,
-                            errorBuilder: (context, error, stackTrace) =>
-                                const Center(child: Text('图片格式无法预览，可下载原图')),
-                          ),
-                        );
-                      },
-                    ),
-            ),
           ListTile(
             contentPadding: const EdgeInsets.symmetric(
               horizontal: 12,
               vertical: 4,
             ),
             leading: Icon(
-              isImage ? Icons.image_outlined : Icons.insert_drive_file_outlined,
+              Icons.insert_drive_file_outlined,
               color: const Color(0xFF747981),
             ),
             title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -6834,6 +6819,141 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _assistantImageArtifact(
+    Map<String, Object?> artifact,
+    Future<Uint8List>? preview,
+  ) {
+    if (preview == null) return const Text('图片预览不可用');
+    return FutureBuilder<Uint8List>(
+      future: preview,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('图片预览加载失败'),
+              TextButton(
+                onPressed: () => unawaited(_downloadArtifact(artifact)),
+                child: const Text('下载原图'),
+              ),
+            ],
+          );
+        }
+        final bytes = snapshot.data;
+        if (bytes == null) {
+          return Align(
+            alignment: Alignment.centerLeft,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: AspectRatio(
+                aspectRatio: 3 / 4,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF7F7F8),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFE7E8EA)),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+
+        final maxWidth = min(
+          480.0,
+          MediaQuery.sizeOf(context).width - 40,
+        ).clamp(1.0, 480.0);
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxWidth),
+            child: Semantics(
+              button: true,
+              label: '预览图片：${artifact['name'] ?? '生成图片'}',
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: () => unawaited(_showImagePreview(bytes, artifact)),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: LayoutBuilder(
+                      builder: (context, constraints) => Image.memory(
+                        bytes,
+                        width: constraints.maxWidth,
+                        fit: BoxFit.fitWidth,
+                        errorBuilder: (context, error, stackTrace) =>
+                            const AspectRatio(
+                              aspectRatio: 3 / 4,
+                              child: Center(child: Text('图片格式无法预览')),
+                            ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showImagePreview(
+    Uint8List bytes,
+    Map<String, Object?> artifact,
+  ) async {
+    await showDialog<void>(
+      context: context,
+      barrierColor: const Color(0xE6000000),
+      builder: (dialogContext) => Material(
+        color: const Color(0xF20D0D0F),
+        child: SafeArea(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: InteractiveViewer(
+                  minScale: 0.8,
+                  maxScale: 5,
+                  child: Center(
+                    child: Image.memory(
+                      bytes,
+                      width: MediaQuery.sizeOf(dialogContext).width,
+                      height: MediaQuery.sizeOf(dialogContext).height * 0.84,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 4,
+                right: 8,
+                child: IconButton(
+                  tooltip: '关闭预览',
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  color: Colors.white,
+                  icon: const Icon(Icons.close),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 20,
+                child: Center(
+                  child: FilledButton.icon(
+                    onPressed: () => unawaited(_downloadArtifact(artifact)),
+                    icon: const Icon(Icons.download_outlined),
+                    label: const Text('下载图片'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -6988,25 +7108,41 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                 if (showSeparateStream && rowIndex >= _messageRows.length) {
                   final child = ValueListenableBuilder<String>(
                     valueListenable: widget.streamingReply,
-                    builder: (context, reply, _) {
-                      if (reply.isNotEmpty) {
-                        return _assistantStreamingText(context, reply);
-                      }
-                      if (widget.isContinuingReply) {
-                        return const SizedBox.shrink();
-                      }
-                      return const Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          '正在思考...',
-                          style: TextStyle(
-                            color: Color(0xFF777777),
-                            fontSize: 15,
-                            height: 1.4,
-                          ),
+                    builder: (context, reply, _) =>
+                        ValueListenableBuilder<bool>(
+                          valueListenable: widget.imageGenerationInProgress,
+                          builder: (context, imageInProgress, _) {
+                            if (reply.isNotEmpty || imageInProgress) {
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (reply.isNotEmpty)
+                                    _assistantStreamingText(context, reply),
+                                  if (imageInProgress)
+                                    const Padding(
+                                      padding: EdgeInsets.only(top: 12),
+                                      child: _ImageGenerationProgress(),
+                                    ),
+                                ],
+                              );
+                            }
+                            if (widget.isContinuingReply) {
+                              return const SizedBox.shrink();
+                            }
+                            return const Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                '正在思考...',
+                                style: TextStyle(
+                                  color: Color(0xFF777777),
+                                  fontSize: 15,
+                                  height: 1.4,
+                                ),
+                              ),
+                            );
+                          },
                         ),
-                      );
-                    },
                   );
                   return KeyedSubtree(
                     key: itemKeys[index],
@@ -7339,6 +7475,102 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
           blockAnimation: GptMarkdownBlockAnimation.none,
           isStreaming: isStreaming,
           useDollarSignsForLatex: false,
+        ),
+      ),
+    );
+  }
+}
+
+class _ImageGenerationProgress extends StatefulWidget {
+  const _ImageGenerationProgress();
+
+  @override
+  State<_ImageGenerationProgress> createState() =>
+      _ImageGenerationProgressState();
+}
+
+class _ImageGenerationProgressState extends State<_ImageGenerationProgress>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 7),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 480),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AspectRatio(
+              aspectRatio: 3 / 4,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFAFAFB),
+                    border: Border.all(color: const Color(0xFFE3E5E9)),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(13),
+                    child: AnimatedBuilder(
+                      animation: _controller,
+                      builder: (context, child) {
+                        final progress = _controller.value;
+                        return Opacity(
+                          opacity: 0.72 + progress * 0.18,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment(-1.5 + progress, -1),
+                                end: Alignment(0.5 + progress, 1),
+                                colors: const [
+                                  Color(0x00DDEBFF),
+                                  Color(0x1ADDEBFF),
+                                  Color(0x19EEE5FF),
+                                  Color(0x18DDF3EF),
+                                  Color(0x00DDF3EF),
+                                ],
+                                stops: const [0, 0.3, 0.52, 0.72, 1],
+                              ),
+                            ),
+                            child: child,
+                          ),
+                        );
+                      },
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              '正在生成图片...',
+              style: TextStyle(
+                color: Color(0xFF777981),
+                fontSize: 13,
+                height: 1.35,
+              ),
+            ),
+          ],
         ),
       ),
     );

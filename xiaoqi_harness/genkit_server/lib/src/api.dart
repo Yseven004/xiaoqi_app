@@ -833,6 +833,8 @@ class XiaoqiApi {
         cancellation: cancellation.token,
         onDelta: (text) =>
             _appendEvent(key, {'type': 'assistant_delta', 'text': text}),
+        onImageGenerationStarted: () =>
+            _appendEvent(key, {'type': 'image_generation_started'}),
       );
       final current = store.get(key);
       if (current == null) return;

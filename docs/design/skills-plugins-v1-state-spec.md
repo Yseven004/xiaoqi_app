@@ -38,6 +38,13 @@ V1 沿用当前消息模型的单个能力元数据字段：每条消息保留�
 
 ### 实现参考
 
+### 对话生图链路与展示（本次确认）
+
+- 明确要求配图的自然语言请求（包括“先解释，再加一张图片帮助理解”）必须进入生图链路。此前普通问答关键词判断会把含“原理”等词的复合请求提前排除；漏判后，Genkit Agent 又没有可用的生图工具，因此模型只能把图片要求写成 SVG / 代码文本。修复后，复合请求会向 Agent 提供受控的 `generate_image` 工具；若 Agent 没有调用，服务端仍会调用现有 `ImageService` 保底生成，避免工具选择结果决定图片是否存在。纯图片请求继续由服务端直接调用图片服务。
+- 生成中的聊天消息显示 3:4 轮廓和轻微呼吸、缓慢流动的淡色光晕，状态文字只显示“正在生成图片...”。图片完成后在对话中直接显示原图比例的图片，不显示附件文件名、大小和下载卡片；点击图片打开可缩放预览，并可从预览中下载。非图片附件保持现有卡片样式。
+- 图片提示词未指定画幅比例 / 尺寸时追加竖版 3:4 要求；用户写明比例、宽高或方向时保留用户要求。现有 Ark `size` 参数表示分辨率档位，继续使用现有 2K 默认值，不把比例误传为分辨率参数。
+- 验收范围：覆盖复合请求意图分类、生图工具仅在明确请求时开放、Agent 漏调时的服务端保底，以及任务事件驱动的前端生成态；ARTEMIS 实机探索按用户要求跳过，目标设备验证仍待后续完成。
+
 - Flutter 官方 `TextEditingController.buildTextSpan` 文档（访问于 2026-10-03）：允许子类定制编辑区域的 InlineSpan 呈现，现有输入框可在保留原生光标和键盘编辑的前提下呈现轻量标签；[API 文档](https://api.flutter.dev/flutter/widgets/TextEditingController/buildTextSpan.html)。
 - Flutter 官方 `OverlayPortal.overlayChildLayoutBuilder` 文档（访问于 2026-10-03）：在布局阶段取得锚点与 Overlay 的尺寸和坐标，可按边界定位、限高浮层；[API 文档](https://api.flutter.dev/flutter/widgets/OverlayPortal/OverlayPortal.overlayChildLayoutBuilder.html)。
 - GitHub 项目 `fayeed/flutter_mentions`，`master` 分支，访问于 2026-10-03；README 标注 MIT，仓库页面显示 60 次提交、110 stars、132 forks。用于对照 Flutter TextField 内联提及 / 数据标签的控制器与 markup 概念；项目使用额外依赖和 Portal，因此只参考设计思路，不复用代码或添加依赖：[仓库](https://github.com/fayeed/flutter_mentions)。

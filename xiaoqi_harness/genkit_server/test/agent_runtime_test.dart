@@ -38,7 +38,31 @@ void main() {
     expect(agentShouldGenerateImage('请问可以生成图片吗？'), isFalse);
     expect(agentShouldGenerateImage('怎么生成图片？'), isFalse);
     expect(agentShouldGenerateImage('帮我解释一下如何生成图片'), isFalse);
+    expect(agentShouldGenerateImage('给我解释一下马斯克第一性原理，再加上一张图片给我更直观地理解'), isTrue);
+    expect(agentShouldGenerateImage('帮我解释光合作用并配图'), isTrue);
+    expect(agentShouldGenerateImage('解释光合作用，然后画一张图'), isTrue);
   });
+
+  test(
+    'keeps explanations for requests that ask for an accompanying image',
+    () {
+      expect(
+        agentImageRequestNeedsTextAnswer('给我解释一下马斯克第一性原理，再加上一张图片给我更直观地理解'),
+        isTrue,
+      );
+      expect(agentImageRequestNeedsTextAnswer('帮我做一张动漫风景图片'), isFalse);
+      expect(agentImageRequestNeedsTextAnswer('解释光合作用，然后画一张图'), isTrue);
+    },
+  );
+
+  test(
+    'defaults image requests to portrait 3:4 unless a frame was specified',
+    () {
+      expect(agentImagePrompt('生成一张森林图片'), contains('竖版 3:4'));
+      expect(agentImagePrompt('生成一张 16:9 横版森林图片'), isNot(contains('竖版 3:4')));
+      expect(agentImagePrompt('生成一张 1024x1536 图片'), isNot(contains('竖版 3:4')));
+    },
+  );
 
   test('keeps ordinary conversation away from optional tools', () {
     expect(
@@ -49,8 +73,19 @@ void main() {
     expect(agentToolNamesForRequest(latestUserText: '请问可以生成图片吗？'), isEmpty);
   });
 
-  test('does not expose image generation as an LLM tool', () {
+  test('only exposes image generation for explicit image requests', () {
     expect(agentToolNamesForRequest(latestUserText: '帮我做一张动漫风景图片'), isEmpty);
+    expect(
+      agentToolNamesForRequest(
+        latestUserText: '解释光合作用并配图',
+        imageGenerationRequested: true,
+      ),
+      ['generate_image'],
+    );
+    expect(
+      agentToolNamesForRequest(latestUserText: '普通问答'),
+      isNot(contains('generate_image')),
+    );
     expect(agentToolNamesForRequest(latestUserText: '运行这段 Python 代码'), [
       'execute_python',
     ]);
@@ -72,6 +107,7 @@ void main() {
     final images = _RecordingImageService(store);
     final runtime = GenkitXiaoqiAgentRuntime(store, images);
     final deltas = <String>[];
+    var imageGenerationStarted = false;
 
     try {
       final answer = await runtime.run(
@@ -86,10 +122,12 @@ void main() {
         },
         onDelta: deltas.add,
         cancellation: CancellationController().token,
+        onImageGenerationStarted: () => imageGenerationStarted = true,
       );
 
-      expect(images.prompt, '生成一张动漫风景图');
+      expect(images.prompt, contains('生成一张动漫风景图'));
       expect(images.count, 1);
+      expect(imageGenerationStarted, isTrue);
       expect(answer, '图片已生成。');
       expect(deltas, ['图片已生成。']);
     } finally {
@@ -121,7 +159,7 @@ void main() {
         cancellation: CancellationController().token,
       );
 
-      expect(images.prompt, '帮我做一张动漫风景图片');
+      expect(images.prompt, contains('帮我做一张动漫风景图片'));
       expect(images.count, 1);
       expect(images.imageUrl, isNull);
       expect(answer, '图片已生成。');
@@ -164,7 +202,7 @@ void main() {
         cancellation: CancellationController().token,
       );
 
-      expect(images.prompt, '修改这张图片，让它变成动漫风格');
+      expect(images.prompt, contains('修改这张图片，让它变成动漫风格'));
       expect(images.imageUrl, sourceImage);
       expect(images.count, 1);
     } finally {

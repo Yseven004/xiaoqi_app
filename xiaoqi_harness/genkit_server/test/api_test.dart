@@ -12,6 +12,7 @@ import 'package:xiaoqi_genkit_server/src/store.dart';
 
 class _FakeRuntime implements XiaoqiAgentRuntime {
   void Function(String tenantId, String taskId)? beforeReturn;
+  bool emitImageGenerationStarted = false;
 
   @override
   Future<String> run({
@@ -20,9 +21,11 @@ class _FakeRuntime implements XiaoqiAgentRuntime {
     required Map<String, dynamic> request,
     required void Function(String) onDelta,
     required CancellationToken cancellation,
+    void Function()? onImageGenerationStarted,
   }) async {
     cancellation.throwIfCancelled();
     onDelta('你好');
+    if (emitImageGenerationStarted) onImageGenerationStarted?.call();
     beforeReturn?.call(tenantId, taskId);
     return '你好';
   }
@@ -42,6 +45,7 @@ class _NetworkRuntime implements XiaoqiAgentRuntime {
     required Map<String, dynamic> request,
     required void Function(String) onDelta,
     required CancellationToken cancellation,
+    void Function()? onImageGenerationStarted,
   }) async {
     cancellation.throwIfCancelled();
     if (!requested) {
@@ -71,6 +75,7 @@ class _FailingRuntime implements XiaoqiAgentRuntime {
     required Map<String, dynamic> request,
     required void Function(String) onDelta,
     required CancellationToken cancellation,
+    void Function()? onImageGenerationStarted,
   }) async {
     throw error;
   }
@@ -199,6 +204,7 @@ void main() {
   );
 
   test('returns generated artifacts in the completed task event', () async {
+    runtime.emitImageGenerationStarted = true;
     runtime.beforeReturn = (tenantId, taskId) {
       final key = 'task/$tenantId/$taskId';
       final current = store.get(key)!;
@@ -242,6 +248,10 @@ void main() {
     }
     final completed = (events['events'] as List).cast<Map>().firstWhere(
       (event) => event['type'] == 'completed',
+    );
+    expect(
+      (events['events'] as List).cast<Map>().map((event) => event['type']),
+      contains('image_generation_started'),
     );
     final artifact = (completed['artifacts'] as List).single as Map;
     expect(artifact['id'], 'image-1');

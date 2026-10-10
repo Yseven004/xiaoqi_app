@@ -164,6 +164,31 @@ final _executeSkillScriptSchema = _objectToolSchema(
   required: const ['script_path', 'language'],
 );
 
+final _generateImageSchema = _objectToolSchema(
+  const {
+    'prompt': {
+      'type': 'string',
+      'minLength': 1,
+      'maxLength': 8000,
+      'description': '图片主体、场景与视觉风格的简洁描述。',
+    },
+  },
+  required: const ['prompt'],
+);
+
+bool _agentRequestsSupplementalImage(String normalized) => RegExp(
+  r'(?:再|还|并|同时)?(?:加|附|配)(?:上)?(?:一张|张|一幅|幅)?(?:图片|图像|示意图|插画|配图|图)|'
+  r'(?:再|还|并(?:且)?|同时|然后).{0,10}(?:生成|生图|画|绘制|创作|制作|做).{0,8}(?:一张|图片|图像|示意图|插画|图)|'
+  r'(?:配图|附图|用图说明|用图片说明|图解|通过图片理解)|'
+  r'(?:图片|图像|示意图).{0,12}(?:更直观|直观地理解|理解)',
+).hasMatch(normalized);
+
+bool agentImageRequestNeedsTextAnswer(String text) {
+  final normalized = text.toLowerCase();
+  return _agentRequestsSupplementalImage(normalized) &&
+      RegExp(r'(解释|说明|介绍|讲清楚|理解|是什么|什么是|原理|为什么|如何|怎么)').hasMatch(normalized);
+}
+
 bool agentShouldGenerateImage(String text) {
   final normalized = text.toLowerCase();
   final requestMarkers = RegExp(r'(帮我|给我|替我|请直接|来一张|做一张|画一张)');
@@ -188,7 +213,10 @@ bool agentShouldGenerateImage(String text) {
   final asksGeneralQuestion = RegExp(
     r'(怎么|如何|为什么|什么意思|是什么|什么是|原理|特点|区别|有什么用)',
   ).hasMatch(normalized);
-  if (asksGeneralQuestion && !directAction) return false;
+  final asksSupplementalImage = _agentRequestsSupplementalImage(normalized);
+  if (asksGeneralQuestion && !directAction && !asksSupplementalImage) {
+    return false;
+  }
 
   return RegExp(
         r'(生成|生图|画|绘制|创作|制作|做|来).{0,12}'
@@ -197,13 +225,30 @@ bool agentShouldGenerateImage(String text) {
         r'\b(generate|create|draw|make|edit|retouch)\b.{0,20}'
         r'\b(image|picture|photo|illustration|diagram)\b',
       ).hasMatch(normalized) ||
+      asksSupplementalImage ||
       (normalized.contains('生图') && (!asksWhether || directAction));
+}
+
+String agentImagePrompt(String request) {
+  final prompt = request.trim();
+  if (prompt.isEmpty) return prompt;
+  final hasExplicitFrame = RegExp(
+    r'(?:\d+\s*(?:[:：/×xX*]|乘)\s*\d+|正方形|方形|横版|横屏|竖版|竖屏|宽屏|'
+    r'portrait|landscape|square|保持原图比例|保持原比例)',
+    caseSensitive: false,
+  ).hasMatch(prompt);
+  const defaultFrame = '\n\n画面比例采用竖版 3:4（宽:高）。';
+  if (hasExplicitFrame || prompt.length + defaultFrame.length > 12000) {
+    return prompt;
+  }
+  return '$prompt$defaultFrame';
 }
 
 List<String> agentToolNamesForRequest({
   required String latestUserText,
   bool capabilitySelected = false,
   bool skillHasScripts = false,
+  bool imageGenerationRequested = false,
 }) {
   final text = latestUserText.toLowerCase();
   final wantsCode =
@@ -216,6 +261,7 @@ List<String> agentToolNamesForRequest({
         r'(保存|导出|生成|写入).{0,8}(文件|csv|xlsx)',
       ).hasMatch(text);
   return [
+    if (imageGenerationRequested) 'generate_image',
     if (wantsCode) 'execute_python',
     if (capabilitySelected && skillHasScripts) 'execute_skill_script',
   ];
@@ -228,6 +274,7 @@ abstract interface class XiaoqiAgentRuntime {
     required Map<String, dynamic> request,
     required void Function(String text) onDelta,
     required CancellationToken cancellation,
+    void Function()? onImageGenerationStarted,
   });
 }
 
@@ -250,6 +297,7 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     required Map<String, dynamic> request,
     required void Function(String text) onDelta,
     required CancellationToken cancellation,
+    void Function()? onImageGenerationStarted,
   }) async {
     cancellation.throwIfCancelled();
     final rawCapability = request['capability'];
@@ -264,13 +312,29 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
       return answer;
     }
     final messages = agentMessagesFromRequest(request['messages']);
-    if (imageGenerationSelected || agentShouldGenerateImage(latestUserText)) {
+    final shouldGenerateImage =
+        imageGenerationSelected || agentShouldGenerateImage(latestUserText);
+    final answerBeforeImage =
+        !imageGenerationSelected &&
+        agentImageRequestNeedsTextAnswer(latestUserText);
+    final imageToolAvailable = shouldGenerateImage && answerBeforeImage;
+    _logAgentRuntime('image_intent_classified', taskId, {
+      'requested': shouldGenerateImage,
+      'answer_before_image': answerBeforeImage,
+      'agent_tool_available': imageToolAvailable,
+    });
+    if (shouldGenerateImage && !answerBeforeImage) {
       // Image generation has billing side effects; explicit requests should not depend on model-emitted tool markup.
       cancellation.throwIfCancelled();
+      _logAgentRuntime('tool_called', taskId, {
+        'tool_name': 'generate_image',
+        'source': imageGenerationSelected ? 'selected_action' : 'intent_router',
+      });
+      onImageGenerationStarted?.call();
       await images.generate(
         taskId: taskId,
         tenantId: tenantId,
-        prompt: latestUserText,
+        prompt: agentImagePrompt(latestUserText),
         count: 1,
         imageUrl: _latestUserImageUrl(request['messages']),
       );
@@ -306,6 +370,7 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     );
 
     NetworkPermissionRequired? pendingPermission;
+    var imageToolCalled = false;
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'execute_python',
       description:
@@ -355,6 +420,42 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
         );
       },
     );
+    if (imageToolAvailable) {
+      ai.defineTool<Map<String, dynamic>, String>(
+        name: 'generate_image',
+        description:
+            '为当前用户明确要求的图片生成真实图片。必须使用此工具完成生图，不要用 SVG、HTML、代码或文字描述代替图片。'
+            'prompt 只写图片画面内容和风格；用户同时要求解释时仍须完整回答解释。',
+        inputSchema: _generateImageSchema,
+        fn: (input, context) async {
+          cancellation.throwIfCancelled();
+          if (imageToolCalled) {
+            return ToolResult.response(
+              jsonEncode({'ok': false, 'message': '本任务已经生成过图片'}),
+            );
+          }
+          imageToolCalled = true;
+          _logAgentRuntime('tool_called', taskId, {
+            'tool_name': 'generate_image',
+            'source': 'genkit_agent',
+          });
+          onImageGenerationStarted?.call();
+          final requestedPrompt = input['prompt']?.toString().trim() ?? '';
+          final combinedPrompt = requestedPrompt.isEmpty
+              ? latestUserText
+              : '$requestedPrompt\n\n用户原始要求：$latestUserText';
+          final result = await images.generate(
+            taskId: taskId,
+            tenantId: tenantId,
+            prompt: agentImagePrompt(combinedPrompt),
+            count: 1,
+            imageUrl: _latestUserImageUrl(request['messages']),
+          );
+          cancellation.throwIfCancelled();
+          return ToolResult.response(jsonEncode(result));
+        },
+      );
+    }
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'execute_skill_script',
       description:
@@ -443,6 +544,7 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
       latestUserText: latestUserText.toLowerCase(),
       capabilitySelected: skillSelected,
       skillHasScripts: hasSkillScripts,
+      imageGenerationRequested: imageToolAvailable,
     );
 
     final skill = skillSelected
@@ -457,6 +559,12 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     );
     if (skill.isNotEmpty) system.write('\n\n当前技能指令：\n$skill');
     if (materialText.isNotEmpty) system.write('\n\n用户提供的资料：\n$materialText');
+    if (imageToolAvailable) {
+      system.write(
+        '\n\n当前用户明确要求生成图片。必须调用 generate_image 工具生成真实图片；'
+        '不要输出 SVG、HTML、代码或图片提示词来代替图片。若同时要求知识解释，也要完整回答文字部分。',
+      );
+    }
 
     final agent = ai.defineAgent(
       name: 'xiaoqi_assistant',
@@ -482,6 +590,22 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     if (pendingPermission != null) throw pendingPermission!;
     final answer = response.text.isNotEmpty ? response.text : output.toString();
     if (answer.isEmpty) throw StateError('模型没有返回文本');
+    if (imageToolAvailable && !imageToolCalled) {
+      cancellation.throwIfCancelled();
+      _logAgentRuntime('tool_called', taskId, {
+        'tool_name': 'generate_image',
+        'source': 'intent_router_fallback',
+      });
+      onImageGenerationStarted?.call();
+      await images.generate(
+        taskId: taskId,
+        tenantId: tenantId,
+        prompt: agentImagePrompt(latestUserText),
+        count: 1,
+        imageUrl: _latestUserImageUrl(request['messages']),
+      );
+      cancellation.throwIfCancelled();
+    }
     return answer;
   }
 
