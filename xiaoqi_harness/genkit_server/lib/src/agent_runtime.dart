@@ -278,8 +278,36 @@ abstract interface class XiaoqiAgentRuntime {
   });
 }
 
+abstract interface class XiaoqiStreamingAgentRuntime {
+  Future<XiaoqiAgentTurnResult> runAgentTurn({
+    required String tenantId,
+    required String taskId,
+    required Map<String, dynamic> request,
+    required List<Message> messages,
+    List<ToolResponsePart>? respond,
+    List<ToolRequestPart>? restart,
+    required void Function(AgentStreamChunk chunk) onChunk,
+    required void Function(Map<String, Object?> event) onProcessEvent,
+    required CancellationToken cancellation,
+    void Function()? onImageGenerationStarted,
+  });
+}
+
+class XiaoqiAgentTurnResult {
+  const XiaoqiAgentTurnResult({
+    required this.text,
+    required this.messages,
+    this.finishReason,
+  });
+
+  final String text;
+  final List<Message> messages;
+  final AgentFinishReason? finishReason;
+}
+
 /// Keeps Genkit's experimental Agent API behind one small server-side boundary.
-class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
+class GenkitXiaoqiAgentRuntime
+    implements XiaoqiAgentRuntime, XiaoqiStreamingAgentRuntime {
   GenkitXiaoqiAgentRuntime(
     this.store,
     this.images, {
@@ -298,6 +326,31 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     required void Function(String text) onDelta,
     required CancellationToken cancellation,
     void Function()? onImageGenerationStarted,
+  }) async => (await runAgentTurn(
+    tenantId: tenantId,
+    taskId: taskId,
+    request: request,
+    messages: agentMessagesFromRequest(request['messages']),
+    onChunk: (_) {},
+    onProcessEvent: (_) {},
+    cancellation: cancellation,
+    onImageGenerationStarted: onImageGenerationStarted,
+    onLegacyDelta: onDelta,
+  )).text;
+
+  @override
+  Future<XiaoqiAgentTurnResult> runAgentTurn({
+    required String tenantId,
+    required String taskId,
+    required Map<String, dynamic> request,
+    required List<Message> messages,
+    List<ToolResponsePart>? respond,
+    List<ToolRequestPart>? restart,
+    required void Function(AgentStreamChunk chunk) onChunk,
+    required void Function(Map<String, Object?> event) onProcessEvent,
+    required CancellationToken cancellation,
+    void Function()? onImageGenerationStarted,
+    void Function(String text)? onLegacyDelta,
   }) async {
     cancellation.throwIfCancelled();
     final rawCapability = request['capability'];
@@ -305,13 +358,22 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
         rawCapability is Map &&
         rawCapability['type'] == 'action' &&
         rawCapability['id'] == 'create-image';
-    final latestUserText = _latestUserText(request['messages']);
+    final legacyMessages = _legacyMessagesFor(messages);
+    final latestUserText = _latestUserText(legacyMessages);
     if (imageGenerationSelected && latestUserText.trim().isEmpty) {
       const answer = '你想生成什么内容的图片？可以描述一下主体、风格或用途。';
-      onDelta(answer);
-      return answer;
+      onLegacyDelta?.call(answer);
+      return XiaoqiAgentTurnResult(
+        text: answer,
+        messages: [
+          ...messages,
+          Message(
+            role: Role.model,
+            content: [TextPart(text: answer)],
+          ),
+        ],
+      );
     }
-    final messages = agentMessagesFromRequest(request['messages']);
     final shouldGenerateImage =
         imageGenerationSelected || agentShouldGenerateImage(latestUserText);
     final answerBeforeImage =
@@ -330,18 +392,33 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
         'tool_name': 'generate_image',
         'source': imageGenerationSelected ? 'selected_action' : 'intent_router',
       });
+      onProcessEvent({'type': 'tool_started', 'tool': 'generate_image'});
       onImageGenerationStarted?.call();
-      await images.generate(
+      final imageResult = await images.generate(
         taskId: taskId,
         tenantId: tenantId,
         prompt: agentImagePrompt(latestUserText),
         count: 1,
-        imageUrl: _latestUserImageUrl(request['messages']),
+        imageUrl: _latestUserImageUrl(legacyMessages),
       );
       cancellation.throwIfCancelled();
       const answer = '图片已生成。';
-      onDelta(answer);
-      return answer;
+      onLegacyDelta?.call(answer);
+      onProcessEvent({
+        'type': 'tool_succeeded',
+        'tool': 'generate_image',
+        'artifacts': imageResult['artifacts'],
+      });
+      return XiaoqiAgentTurnResult(
+        text: answer,
+        messages: [
+          ...messages,
+          Message(
+            role: Role.model,
+            content: [TextPart(text: answer)],
+          ),
+        ],
+      );
     }
 
     final requestedModel = request['model_id']?.toString().trim() ?? '';
@@ -381,6 +458,7 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
           '资料位于 materials/，技能位于 skill/，文件产物写入 output/。',
       inputSchema: _executePythonSchema,
       fn: (input, context) async {
+        onProcessEvent({'type': 'tool_started', 'tool': 'execute_python'});
         _logAgentRuntime('tool_called', taskId, {
           'tool_name': 'execute_python',
           'input_fields': input.keys.toList()..sort(),
@@ -394,30 +472,56 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
           input['purpose']?.toString() ?? '',
         );
         if (permission != null) {
-          pendingPermission = permission;
-          return ToolResult.response(
-            jsonEncode({
-              'status': 'awaiting_network_permission',
+          final approvedDomains = request['remote_agent'] == true
+              ? _resumedAuthorizedDomains(context.resumed, permission)
+              : null;
+          if (request['remote_agent'] == true && approvedDomains == null) {
+            return ToolResult.interrupt({
+              'type': 'network_permission',
+              'tool': 'execute_python',
               'domains': permission.domains,
               'purpose': permission.purpose,
-            }),
-          );
+            });
+          }
+          if (approvedDomains == null) {
+            pendingPermission = permission;
+            return ToolResult.response(
+              jsonEncode({
+                'status': 'awaiting_network_permission',
+                'domains': permission.domains,
+                'purpose': permission.purpose,
+              }),
+            );
+          }
+          _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
         }
         final skillFiles = request['capability'] is Map
             ? _loadSkillFiles(tenantId, request['capability'])
             : <String, List<int>>{};
-        return ToolResult.response(
-          await codeExecutor.execute(
+        try {
+          final result = await codeExecutor.execute(
             tenantId: tenantId,
             taskId: taskId,
             code: input['code']?.toString() ?? '',
             language: 'python',
-            authorizedDomains: _authorizedDomains(tenantId, taskId),
+            authorizedDomains: {
+              ..._authorizedDomains(tenantId, taskId),
+              ...?_resumedAuthorizedDomains(context.resumed, permission),
+            }.toList()..sort(),
             materials: _materials(request['materials']),
             skillFiles: skillFiles,
             cancellation: cancellation,
-          ),
-        );
+          );
+          onProcessEvent({'type': 'tool_succeeded', 'tool': 'execute_python'});
+          return ToolResult.response(result);
+        } on Object catch (error) {
+          onProcessEvent({
+            'type': 'tool_failed',
+            'tool': 'execute_python',
+            'message': _briefToolError(error),
+          });
+          rethrow;
+        }
       },
     );
     if (imageToolAvailable) {
@@ -428,6 +532,7 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
             'prompt 只写图片画面内容和风格；用户同时要求解释时仍须完整回答解释。',
         inputSchema: _generateImageSchema,
         fn: (input, context) async {
+          onProcessEvent({'type': 'tool_started', 'tool': 'generate_image'});
           cancellation.throwIfCancelled();
           if (imageToolCalled) {
             return ToolResult.response(
@@ -444,15 +549,28 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
           final combinedPrompt = requestedPrompt.isEmpty
               ? latestUserText
               : '$requestedPrompt\n\n用户原始要求：$latestUserText';
-          final result = await images.generate(
-            taskId: taskId,
-            tenantId: tenantId,
-            prompt: agentImagePrompt(combinedPrompt),
-            count: 1,
-            imageUrl: _latestUserImageUrl(request['messages']),
-          );
-          cancellation.throwIfCancelled();
-          return ToolResult.response(jsonEncode(result));
+          try {
+            final result = await images.generate(
+              taskId: taskId,
+              tenantId: tenantId,
+              prompt: agentImagePrompt(combinedPrompt),
+              count: 1,
+              imageUrl: _latestUserImageUrl(legacyMessages),
+            );
+            cancellation.throwIfCancelled();
+            onProcessEvent({
+              'type': 'tool_succeeded',
+              'tool': 'generate_image',
+            });
+            return ToolResult.response(jsonEncode(result));
+          } on Object catch (error) {
+            onProcessEvent({
+              'type': 'tool_failed',
+              'tool': 'generate_image',
+              'message': _briefToolError(error),
+            });
+            rethrow;
+          }
         },
       );
     }
@@ -463,6 +581,10 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
           '每个任务仅允许执行一次。脚本只能访问本次任务资料和当前技能文件，默认断网。',
       inputSchema: _executeSkillScriptSchema,
       fn: (input, context) async {
+        onProcessEvent({
+          'type': 'tool_started',
+          'tool': 'execute_skill_script',
+        });
         _logAgentRuntime('tool_called', taskId, {
           'tool_name': 'execute_skill_script',
           'input_fields': input.keys.toList()..sort(),
@@ -477,14 +599,28 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
           input['purpose']?.toString() ?? '',
         );
         if (permission != null) {
-          pendingPermission = permission;
-          return ToolResult.response(
-            jsonEncode({
-              'status': 'awaiting_network_permission',
+          final approvedDomains = request['remote_agent'] == true
+              ? _resumedAuthorizedDomains(context.resumed, permission)
+              : null;
+          if (request['remote_agent'] == true && approvedDomains == null) {
+            return ToolResult.interrupt({
+              'type': 'network_permission',
+              'tool': 'execute_skill_script',
               'domains': permission.domains,
               'purpose': permission.purpose,
-            }),
-          );
+            });
+          }
+          if (approvedDomains == null) {
+            pendingPermission = permission;
+            return ToolResult.response(
+              jsonEncode({
+                'status': 'awaiting_network_permission',
+                'domains': permission.domains,
+                'purpose': permission.purpose,
+              }),
+            );
+          }
+          _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
         }
         final scriptPath = _safeSkillScriptPath(
           input['script_path']?.toString() ?? '',
@@ -508,20 +644,35 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
                 8 * 1024) {
           throw const FormatException('脚本参数不能超过 32 项或 8 KB');
         }
-        return ToolResult.response(
-          await codeExecutor.execute(
+        try {
+          final result = await codeExecutor.execute(
             tenantId: tenantId,
             taskId: taskId,
             code: utf8.decode(scriptBytes),
             language: input['language']?.toString() ?? '',
-            authorizedDomains: _authorizedDomains(tenantId, taskId),
+            authorizedDomains: {
+              ..._authorizedDomains(tenantId, taskId),
+              ...?_resumedAuthorizedDomains(context.resumed, permission),
+            }.toList()..sort(),
             materials: _materials(request['materials']),
             skillFiles: skillFiles,
             cancellation: cancellation,
             scriptPath: scriptPath,
             arguments: arguments,
-          ),
-        );
+          );
+          onProcessEvent({
+            'type': 'tool_succeeded',
+            'tool': 'execute_skill_script',
+          });
+          return ToolResult.response(result);
+        } on Object catch (error) {
+          onProcessEvent({
+            'type': 'tool_failed',
+            'tool': 'execute_skill_script',
+            'message': _briefToolError(error),
+          });
+          rethrow;
+        }
       },
     );
 
@@ -573,23 +724,36 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
       maxTurns: 8,
       toolNames: toolNames,
     );
-    final priorMessages = messages.take(messages.length - 1).toList();
+    final isResume = respond?.isNotEmpty == true || restart?.isNotEmpty == true;
+    final priorMessages = isResume
+        ? messages
+        : messages.take(messages.length - 1).toList();
     final chat = agent.chat(state: SessionState(messages: priorMessages));
-    final turn = chat.sendStream(message: messages.last, cancel: cancellation);
+    final turn = isResume
+        ? chat.resumeStream(
+            respond: respond,
+            restart: restart,
+            cancel: cancellation,
+          )
+        : chat.sendStream(message: messages.last, cancel: cancellation);
     final output = StringBuffer();
     await for (final chunk in turn.stream) {
       cancellation.throwIfCancelled();
+      onChunk(chunk.raw);
       final delta = chunk.text;
       if (delta.isNotEmpty) {
         output.write(delta);
-        onDelta(delta);
+        onLegacyDelta?.call(delta);
       }
     }
     final response = await turn.response;
     response.assertValid();
     if (pendingPermission != null) throw pendingPermission!;
     final answer = response.text.isNotEmpty ? response.text : output.toString();
-    if (answer.isEmpty) throw StateError('模型没有返回文本');
+    if (answer.isEmpty &&
+        response.finishReason != AgentFinishReason.interrupted) {
+      throw StateError('模型没有返回文本');
+    }
     if (imageToolAvailable && !imageToolCalled) {
       cancellation.throwIfCancelled();
       _logAgentRuntime('tool_called', taskId, {
@@ -597,16 +761,22 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
         'source': 'intent_router_fallback',
       });
       onImageGenerationStarted?.call();
+      onProcessEvent({'type': 'tool_started', 'tool': 'generate_image'});
       await images.generate(
         taskId: taskId,
         tenantId: tenantId,
         prompt: agentImagePrompt(latestUserText),
         count: 1,
-        imageUrl: _latestUserImageUrl(request['messages']),
+        imageUrl: _latestUserImageUrl(legacyMessages),
       );
       cancellation.throwIfCancelled();
+      onProcessEvent({'type': 'tool_succeeded', 'tool': 'generate_image'});
     }
-    return answer;
+    return XiaoqiAgentTurnResult(
+      text: answer,
+      messages: List<Message>.unmodifiable(chat.messages),
+      finishReason: response.finishReason,
+    );
   }
 
   String _loadSkill(String tenantId, Object? rawCapability) {
@@ -687,6 +857,56 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
         .toSet()
         .toList()
       ..sort();
+  }
+
+  void _authorizeAgentTaskDomains(
+    String tenantId,
+    String taskId,
+    List<String> domains,
+  ) {
+    final key = 'task/$tenantId/$taskId';
+    for (var attempt = 0; attempt < 8; attempt++) {
+      final current = store.get(key);
+      if (current == null)
+        throw StateError('Agent turn is no longer available.');
+      final authorized = {
+        ...(current.value['authorized_network_domains'] as List? ?? const [])
+            .map((value) => value.toString()),
+        ...domains,
+      }.toList()..sort();
+      try {
+        store.put(key, {
+          ...current.value,
+          'authorized_network_domains': authorized,
+        }, current.revision);
+        return;
+      } on RevisionConflict {
+        if (attempt == 7) rethrow;
+      }
+    }
+  }
+
+  static List<String>? _resumedAuthorizedDomains(
+    Object? resumed,
+    NetworkPermissionRequired? permission,
+  ) {
+    if (resumed is! Map || resumed['approved'] != true || permission == null) {
+      return null;
+    }
+    final provided = (resumed['domains'] as List? ?? const [])
+        .map((value) => value.toString())
+        .toSet();
+    final requested = permission.domains.toSet();
+    if (provided.length != requested.length ||
+        !provided.containsAll(requested)) {
+      return null;
+    }
+    return requested.toList()..sort();
+  }
+
+  static String _briefToolError(Object error) {
+    final value = error.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+    return value.length <= 240 ? value : '${value.substring(0, 240)}…';
   }
 
   static List<String> _normalizeDomains(Object? raw) {
@@ -775,6 +995,30 @@ class GenkitXiaoqiAgentRuntime implements XiaoqiAgentRuntime {
     }
     return '';
   }
+
+  static List<Map<String, Object?>> _legacyMessagesFor(
+    List<Message> messages,
+  ) => [
+    for (final message in messages)
+      {
+        'role': switch (message.role) {
+          Role.system => 'system',
+          Role.user => 'user',
+          Role.model => 'assistant',
+          _ => 'assistant',
+        },
+        'content': [
+          for (final part in message.content)
+            if (part.toJson()['text'] is String)
+              {'type': 'text', 'text': part.toJson()['text']}
+            else if (part.toJson()['media'] is Map)
+              {
+                'type': 'image_url',
+                'image_url': {'url': (part.toJson()['media'] as Map)['url']},
+              },
+        ],
+      },
+  ];
 
   static String? _latestUserImageUrl(Object? rawMessages) {
     if (rawMessages is! List) return null;

@@ -4,7 +4,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../models/book_library_item.dart';
 import '../services/book_library_service.dart';
@@ -545,9 +545,7 @@ class _ReadingTaskSwitcherState extends State<ReadingTaskSwitcher>
                               duration: const Duration(milliseconds: 180),
                               curve: Curves.easeInOut,
                               child: Icon(
-                                PhosphorIcons.caretDown(
-                                  PhosphorIconsStyle.regular,
-                                ),
+                                PhosphorIconsRegular.caretDown,
                                 size: 14,
                                 color: _mutedInk,
                               ),
@@ -694,7 +692,7 @@ class _NewReadingTaskDialogState extends State<_NewReadingTaskDialog> {
                           tooltip: '关闭',
                           onPressed: () => Navigator.of(context).pop(),
                           icon: Icon(
-                            PhosphorIcons.x(PhosphorIconsStyle.regular),
+                            PhosphorIconsRegular.x,
                             size: 18,
                             color: _mutedInk,
                           ),

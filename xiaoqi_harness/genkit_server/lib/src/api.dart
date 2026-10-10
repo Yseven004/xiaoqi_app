@@ -4,8 +4,32 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
-import 'package:genkit/genkit.dart' show CancellationController;
-import 'package:mailer/mailer.dart';
+import 'package:genkit/experimental.dart'
+    show
+        Agent,
+        AgentFinishReason,
+        AgentFnOptions,
+        AgentResult,
+        AgentStreamChunk,
+        Artifact,
+        GenkitAgents,
+        SessionRunner,
+        TurnResult;
+import 'package:genkit/experimental_io.dart' show GenkitRouterAgents;
+import 'package:genkit/genkit.dart'
+    show
+        CancellationController,
+        Genkit,
+        GenkitException,
+        Message,
+        ModelResponseChunk,
+        Role,
+        StatusCode,
+        TextPart;
+import 'package:genkit/io.dart' show GenkitRouter, RequestData;
+import 'package:genkit_shelf/genkit_shelf.dart' show GenkitRouterShelf;
+import 'package:mailer/mailer.dart' hide Message;
+import 'package:mailer/mailer.dart' as mailer;
 import 'package:mailer/smtp_server.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
@@ -15,6 +39,8 @@ import 'agent_runtime.dart';
 import 'chat_completion_service.dart';
 import 'code_execution_service.dart';
 import 'store.dart';
+
+const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
 
 ({String code, String message, String details}) _taskFailurePresentation(
   Object error, {
@@ -239,11 +265,26 @@ String _redactTaskError(String value) {
 
 class XiaoqiApi {
   XiaoqiApi(this.store, this.runtime, {ChatCompletionService? chatCompletions})
-    : chatCompletions = chatCompletions ?? ChatCompletionService();
+    : chatCompletions = chatCompletions ?? ChatCompletionService() {
+    _agentRouter = GenkitRouter();
+    final genkit = Genkit();
+    _remoteAgent = genkit.defineCustomAgent<Map<String, dynamic>>(
+      name: 'xiaoqi_chat_agent',
+      store: CloudSessionStore(store),
+      fn: _runRemoteAgent,
+    );
+    _agentRouter.addAgent(
+      _remoteAgent,
+      path: '/v1/agent/chat',
+      contextProvider: _agentRequestContext,
+    );
+  }
 
   final CloudStore store;
   final XiaoqiAgentRuntime runtime;
   final ChatCompletionService chatCompletions;
+  late final GenkitRouter _agentRouter;
+  late final Agent<Map<String, dynamic>> _remoteAgent;
   final _controllers = <String, CancellationController>{};
   static const _uuid = Uuid();
   static const _maxJsonBytes = 22 * 1024 * 1024;
@@ -361,8 +402,331 @@ class XiaoqiApi {
     return router;
   }
 
-  Handler get handler =>
-      const Pipeline().addMiddleware(logRequests()).addHandler(router.call);
+  Handler get handler => const Pipeline()
+      .addMiddleware(logRequests())
+      .addHandler(
+        Cascade().add(router.call).add(_agentRouter.asShelfHandler()).handler,
+      );
+
+  Map<String, dynamic> _agentRequestContext(RequestData request) {
+    final header = request.headers['authorization'] ?? '';
+    if (!header.startsWith('Bearer ')) {
+      throw GenkitException(
+        '登录状态已失效，请重新登录',
+        status: StatusCode.unauthenticated,
+      );
+    }
+    final token = header.substring(7).trim();
+    if (token.isEmpty || token.length > 512) {
+      throw GenkitException(
+        '登录状态已失效，请重新登录',
+        status: StatusCode.unauthenticated,
+      );
+    }
+    final key = 'device/${sha256.convert(utf8.encode(token))}';
+    final record = store.get(key);
+    if (record == null || record.value['revoked_at'] != null) {
+      throw GenkitException(
+        '登录状态已失效，请重新登录',
+        status: StatusCode.unauthenticated,
+      );
+    }
+    final device = _Device(key, record.value);
+    return {'tenant_id': device.tenant, 'device_id': device.value['device_id']};
+  }
+
+  Future<AgentResult> _runRemoteAgent(
+    SessionRunner<Map<String, dynamic>> session,
+    AgentFnOptions options,
+  ) async {
+    await session.run((input, turnContext) async {
+      final context = options.context ?? const <String, dynamic>{};
+      final tenantId = context['tenant_id']?.toString() ?? '';
+      if (tenantId.isEmpty) {
+        throw GenkitException(
+          '登录状态已失效，请重新登录',
+          status: StatusCode.unauthenticated,
+        );
+      }
+      var messages = session.getMessages();
+      var currentUserIndex = messages.lastIndexWhere(
+        (message) => message.role == Role.user,
+      );
+      if (currentUserIndex < 0) {
+        throw const FormatException('Genkit Agent 当前回合缺少用户消息');
+      }
+      var currentUser = messages[currentUserIndex];
+      final rawConfig = currentUser.metadata?[_remoteAgentTurnMetadataKey];
+      if (rawConfig is! Map) {
+        throw const FormatException('Genkit Agent 回合参数缺失');
+      }
+      final config = Map<String, dynamic>.from(rawConfig);
+      final taskId = _safeId(config['task_id'], '任务 ID');
+
+      final rawLegacyHistory = config['legacy_history'];
+      if (messages.length == 1 && rawLegacyHistory is List) {
+        final seeded = agentMessagesFromRequest([
+          ...rawLegacyHistory,
+          _legacyMessageFor(currentUser),
+        ]);
+        messages = [...seeded.take(seeded.length - 1), currentUser];
+      }
+      final cleanConfig = Map<String, dynamic>.from(config)
+        ..remove('legacy_history');
+      currentUserIndex = messages.lastIndexWhere(
+        (message) => message.role == Role.user,
+      );
+      final latestUser = messages[currentUserIndex];
+      messages[currentUserIndex] = Message(
+        role: latestUser.role,
+        content: latestUser.content,
+        metadata: {
+          ...?latestUser.metadata,
+          _remoteAgentTurnMetadataKey: cleanConfig,
+        },
+      );
+      currentUser = messages[currentUserIndex];
+      session.setMessages(messages);
+
+      final request = Map<String, dynamic>.from(cleanConfig)
+        ..['remote_agent'] = true;
+      _ensureRemoteAgentTask(tenantId, taskId, context['device_id']);
+      session.updateCustom((_) => {'agent_process': <Map<String, dynamic>>[]});
+
+      void addProcessEvent(Map<String, Object?> rawEvent) {
+        final event = <String, dynamic>{
+          ...rawEvent,
+          'created_at': DateTime.now().toUtc().toIso8601String(),
+        };
+        session.updateCustom((current) {
+          final custom = current == null
+              ? <String, dynamic>{}
+              : Map<String, dynamic>.from(current);
+          final events = (custom['agent_process'] as List? ?? const [])
+              .whereType<Map>()
+              .map((item) => Map<String, dynamic>.from(item))
+              .toList();
+          events.add(event);
+          if (events.length > 48) events.removeRange(0, events.length - 48);
+          return {
+            ...custom,
+            'agent_process': events,
+            'current_step': _agentProcessLabel(event),
+          };
+        });
+      }
+
+      final modelMessages = messages.map(_withoutTurnMetadata).toList();
+      late final XiaoqiAgentTurnResult result;
+      try {
+        final activeRuntime = runtime;
+        if (activeRuntime is XiaoqiStreamingAgentRuntime) {
+          result = await (activeRuntime as XiaoqiStreamingAgentRuntime)
+              .runAgentTurn(
+                tenantId: tenantId,
+                taskId: taskId,
+                request: {
+                  ...request,
+                  'messages': [
+                    for (final message in modelMessages)
+                      _legacyMessageFor(message),
+                  ],
+                },
+                messages: modelMessages,
+                respond: input.resume?.respond,
+                restart: input.resume?.restart,
+                onChunk: options.sendChunk,
+                onProcessEvent: addProcessEvent,
+                cancellation: options.cancel ?? CancellationController().token,
+                onImageGenerationStarted: () => addProcessEvent({
+                  'type': 'image_generation_started',
+                  'tool': 'generate_image',
+                }),
+              );
+        } else {
+          final output = StringBuffer();
+          final text = await activeRuntime.run(
+            tenantId: tenantId,
+            taskId: taskId,
+            request: {
+              ...request,
+              'messages': [
+                for (final message in modelMessages) _legacyMessageFor(message),
+              ],
+            },
+            cancellation: options.cancel ?? CancellationController().token,
+            onDelta: (delta) {
+              output.write(delta);
+              options.sendChunk(
+                AgentStreamChunk(
+                  modelChunk: ModelResponseChunk(
+                    role: Role.model,
+                    content: [TextPart(text: delta)],
+                  ),
+                ),
+              );
+            },
+            onImageGenerationStarted: () => addProcessEvent({
+              'type': 'image_generation_started',
+              'tool': 'generate_image',
+            }),
+          );
+          final reply = text.isEmpty ? output.toString() : text;
+          result = XiaoqiAgentTurnResult(
+            text: reply,
+            messages: [
+              ...modelMessages,
+              Message(
+                role: Role.model,
+                content: [TextPart(text: reply)],
+              ),
+            ],
+          );
+        }
+        _setRemoteAgentTaskStatus(
+          tenantId,
+          taskId,
+          result.finishReason == AgentFinishReason.interrupted
+              ? 'awaiting_network_permission'
+              : 'completed',
+        );
+      } on Object {
+        _setRemoteAgentTaskStatus(
+          tenantId,
+          taskId,
+          options.cancel?.isCancelled == true ? 'cancelled' : 'failed',
+        );
+        rethrow;
+      }
+
+      final resultMessages = result.messages.toList();
+      final latestResultUserIndex = resultMessages.lastIndexWhere(
+        (message) => message.role == Role.user,
+      );
+      if (latestResultUserIndex >= 0) {
+        final resultUser = resultMessages[latestResultUserIndex];
+        resultMessages[latestResultUserIndex] = Message(
+          role: resultUser.role,
+          content: resultUser.content,
+          metadata: {
+            ...?resultUser.metadata,
+            _remoteAgentTurnMetadataKey: cleanConfig,
+          },
+        );
+      }
+      session.setMessages(resultMessages);
+
+      final artifacts = _remoteAgentArtifacts(tenantId, taskId);
+      if (artifacts.isNotEmpty) {
+        session.addArtifacts(artifacts);
+        for (final artifact in artifacts) {
+          options.sendChunk(AgentStreamChunk(artifact: artifact));
+        }
+      }
+      return TurnResult(finishReason: result.finishReason);
+    });
+
+    final messages = session.getMessages();
+    final lastMessage = messages.isNotEmpty ? messages.last : null;
+    return AgentResult(
+      message: lastMessage?.role == Role.model ? lastMessage : null,
+      artifacts: session.getArtifacts(),
+      finishReason: session.lastTurnFinishReason,
+    );
+  }
+
+  void _ensureRemoteAgentTask(
+    String tenantId,
+    String taskId,
+    Object? deviceId,
+  ) {
+    final key = 'task/$tenantId/$taskId';
+    final current = store.get(key);
+    if (current != null) {
+      if (current.value['remote_agent_turn'] != true) {
+        throw StateError('任务 ID 已用于其他任务');
+      }
+      return;
+    }
+    store.put(key, {
+      'task_id': taskId,
+      'tenant_id': tenantId,
+      'device_id': deviceId,
+      'remote_agent_turn': true,
+      'status': 'running',
+      'authorized_network_domains': <String>[],
+      'requested_network_domains': <String>[],
+      'artifacts': <Map<String, dynamic>>[],
+      'created_at': _now(),
+      'updated_at': _now(),
+    }, null);
+  }
+
+  void _setRemoteAgentTaskStatus(
+    String tenantId,
+    String taskId,
+    String status,
+  ) {
+    _mutateTask(
+      'task/$tenantId/$taskId',
+      (value) => {...value, 'status': status, 'updated_at': _now()},
+    );
+  }
+
+  List<Artifact> _remoteAgentArtifacts(String tenantId, String taskId) {
+    final raw = store.get('task/$tenantId/$taskId')?.value['artifacts'];
+    if (raw is! List || raw.isEmpty) return const [];
+    final artifacts = raw
+        .whereType<Map>()
+        .map((item) => _publicArtifact(Map<String, dynamic>.from(item), taskId))
+        .toList();
+    if (artifacts.isEmpty) return const [];
+    return [
+      Artifact(
+        name: 'xiaoqi-artifacts-$taskId',
+        parts: const [],
+        metadata: {'task_id': taskId, 'artifacts': artifacts},
+      ),
+    ];
+  }
+
+  static Map<String, Object?> _legacyMessageFor(Message message) => {
+    'role': switch (message.role) {
+      Role.system => 'system',
+      Role.user => 'user',
+      Role.model => 'assistant',
+      _ => 'assistant',
+    },
+    'content': [
+      for (final part in message.content)
+        if (part.toJson()['text'] is String)
+          {'type': 'text', 'text': part.toJson()['text']}
+        else if (part.toJson()['media'] is Map)
+          {
+            'type': 'image_url',
+            'image_url': {'url': (part.toJson()['media'] as Map)['url']},
+          },
+    ],
+  };
+
+  static Message _withoutTurnMetadata(Message message) {
+    final metadata = Map<String, dynamic>.from(message.metadata ?? const {})
+      ..remove(_remoteAgentTurnMetadataKey);
+    return Message(
+      role: message.role,
+      content: message.content,
+      metadata: metadata.isEmpty ? null : metadata,
+    );
+  }
+
+  static String _agentProcessLabel(Map<String, dynamic> event) =>
+      switch (event['type']?.toString()) {
+        'tool_started' => '正在使用 ${event['tool'] ?? '工具'}',
+        'tool_succeeded' => '${event['tool'] ?? '工具'}已完成',
+        'tool_failed' => '${event['tool'] ?? '工具'}遇到问题',
+        'image_generation_started' => '正在生成图片',
+        _ => '正在处理',
+      };
 
   Future<Response> _startEmail(Request request) async {
     try {
@@ -403,7 +767,7 @@ class XiaoqiApi {
           password: config.smtpPassword,
           ssl: config.smtpPort == 465,
         );
-        final message = Message()
+        final message = mailer.Message()
           ..from = Address(config.smtpUsername, '小七')
           ..recipients.add(email)
           ..subject = '小七登录验证码'

@@ -2,7 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../services/home_chat_model_preferences.dart';
 
@@ -266,9 +266,7 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
                                 duration: const Duration(milliseconds: 160),
                                 curve: Curves.easeInOut,
                                 child: Icon(
-                                  PhosphorIcons.caretDown(
-                                    PhosphorIconsStyle.regular,
-                                  ),
+                                  PhosphorIconsRegular.caretDown,
                                   size: 15,
                                   color: _mutedInk,
                                 ),

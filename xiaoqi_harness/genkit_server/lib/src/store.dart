@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
+import 'package:genkit/experimental.dart'
+    show SessionSnapshot, SessionStore, SnapshotMutator, generateUuidV4;
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 
@@ -253,6 +255,160 @@ class CloudStore {
     }
     return key;
   }
+}
+
+/// Persists Genkit agent snapshots in the existing tenant-scoped SQLite store.
+///
+/// Every lookup requires the authenticated tenant in [context]. Snapshot ids
+/// are indexed within that tenant, so a snapshot id from another account is
+/// indistinguishable from a missing snapshot.
+class CloudSessionStore implements SessionStore {
+  CloudSessionStore(this._store);
+
+  final CloudStore _store;
+
+  @override
+  Future<SessionSnapshot?> getSnapshot({
+    String? snapshotId,
+    String? sessionId,
+    Map<String, dynamic>? context,
+  }) async {
+    final tenant = _tenant(context);
+    final hasSnapshot = snapshotId != null && snapshotId.isNotEmpty;
+    final hasSession = sessionId != null && sessionId.isNotEmpty;
+    if (hasSnapshot == hasSession) {
+      throw ArgumentError('Provide exactly one of snapshotId or sessionId.');
+    }
+    if (hasSnapshot) return _readSnapshot(tenant, snapshotId);
+
+    final snapshots = _readSessionSnapshots(tenant, sessionId!);
+    if (snapshots.isEmpty) return null;
+    final parentIds = snapshots.map((snapshot) => snapshot.parentId).toSet();
+    final leaves = snapshots
+        .where((snapshot) => !parentIds.contains(snapshot.snapshotId))
+        .toList();
+    if (leaves.isEmpty) {
+      throw StateError('Agent session contains a cyclic snapshot history.');
+    }
+    leaves.sort((left, right) {
+      final leftTime = DateTime.tryParse(left.createdAt);
+      final rightTime = DateTime.tryParse(right.createdAt);
+      if (leftTime != null && rightTime != null) {
+        return leftTime.compareTo(rightTime);
+      }
+      return left.createdAt.compareTo(right.createdAt);
+    });
+    return leaves.last;
+  }
+
+  @override
+  Future<String?> saveSnapshot(
+    String? snapshotId,
+    SnapshotMutator mutator, {
+    Map<String, dynamic>? context,
+  }) async {
+    final tenant = _tenant(context);
+    final requestedId = snapshotId?.trim();
+    for (var attempt = 0; attempt < 10; attempt++) {
+      final currentDocument = requestedId == null || requestedId.isEmpty
+          ? null
+          : _snapshotDocument(tenant, requestedId);
+      final current = currentDocument == null
+          ? null
+          : SessionSnapshot.fromJson(currentDocument.value);
+      final next = mutator(current);
+      if (next == null) return null;
+
+      final id = requestedId?.isNotEmpty == true
+          ? requestedId!
+          : (next.snapshotId.isNotEmpty ? next.snapshotId : _newSnapshotId());
+      final ownerSessionId = next.sessionId ?? next.state?.sessionId;
+      if (ownerSessionId == null || ownerSessionId.trim().isEmpty) {
+        throw StateError('Genkit snapshot is missing its session id.');
+      }
+      next
+        ..snapshotId = id
+        ..sessionId = ownerSessionId;
+
+      final key = _sessionSnapshotKey(tenant, ownerSessionId, id);
+      try {
+        _writeSnapshotIndex(tenant, id, ownerSessionId);
+        final stored = currentDocument ?? _store.get(key);
+        _store.put(key, next.toJson(), stored?.revision);
+        return id;
+      } on RevisionConflict {
+        if (attempt == 9) rethrow;
+      }
+    }
+    throw StateError('Genkit snapshot update conflicted too many times.');
+  }
+
+  StoredDocument? _snapshotDocument(String tenant, String snapshotId) {
+    if (!_safeAgentId.hasMatch(snapshotId)) return null;
+    final index = _store.get(_snapshotIndexKey(tenant, snapshotId));
+    final sessionId = index?.value['session_id']?.toString();
+    if (sessionId == null || !_safeAgentId.hasMatch(sessionId)) return null;
+    return _store.get(_sessionSnapshotKey(tenant, sessionId, snapshotId));
+  }
+
+  SessionSnapshot? _readSnapshot(String tenant, String snapshotId) {
+    final document = _snapshotDocument(tenant, snapshotId);
+    return document == null ? null : SessionSnapshot.fromJson(document.value);
+  }
+
+  List<SessionSnapshot> _readSessionSnapshots(String tenant, String sessionId) {
+    if (!_safeAgentId.hasMatch(sessionId)) return const [];
+    final prefix = 'genkit/session/$tenant/$sessionId/';
+    final snapshots = <SessionSnapshot>[];
+    String? afterKey;
+    while (true) {
+      final page = _store.list(prefix, limit: 200, afterKey: afterKey);
+      snapshots.addAll(
+        page.map((entry) => SessionSnapshot.fromJson(entry.$2.value)),
+      );
+      if (page.length < 200) break;
+      afterKey = page.last.$1;
+    }
+    return snapshots;
+  }
+
+  void _writeSnapshotIndex(String tenant, String snapshotId, String sessionId) {
+    final key = _snapshotIndexKey(tenant, snapshotId);
+    for (var attempt = 0; attempt < 10; attempt++) {
+      final current = _store.get(key);
+      if (current != null) {
+        if (current.value['session_id'] == sessionId) return;
+        throw StateError('Genkit snapshot id collision.');
+      }
+      try {
+        _store.put(key, {'session_id': sessionId}, null);
+        return;
+      } on RevisionConflict {
+        if (attempt == 9) rethrow;
+      }
+    }
+  }
+
+  static final _safeAgentId = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
+
+  static String _tenant(Map<String, dynamic>? context) {
+    final tenant = context?['tenant_id']?.toString().trim() ?? '';
+    if (!_safeAgentId.hasMatch(tenant)) {
+      throw StateError('Authenticated tenant is required for agent storage.');
+    }
+    return tenant;
+  }
+
+  static String _snapshotIndexKey(String tenant, String snapshotId) =>
+      'genkit/snapshot/$tenant/$snapshotId';
+
+  static String _sessionSnapshotKey(
+    String tenant,
+    String sessionId,
+    String snapshotId,
+  ) => 'genkit/session/$tenant/$sessionId/$snapshotId';
+
+  static String _newSnapshotId() => generateUuidV4();
 }
 
 extension on File {

@@ -2,7 +2,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 /// Skills and MCP capsule styled to match the untouched reading capsule.
 class ComposerActionCapsule extends StatelessWidget {
@@ -90,9 +90,7 @@ class ComposerActionCapsule extends StatelessWidget {
                               duration: const Duration(milliseconds: 180),
                               curve: Curves.easeInOut,
                               child: Icon(
-                                PhosphorIcons.caretDown(
-                                  PhosphorIconsStyle.regular,
-                                ),
+                                PhosphorIconsRegular.caretDown,
                                 size: 14,
                                 color: const Color(0xFF737A84),
                               ),

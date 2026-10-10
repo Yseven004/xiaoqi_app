@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:genkit/experimental_client.dart' as genkit_client;
 import 'package:http/http.dart' as http;
 
 import '../../../config/api_config.dart';
@@ -186,6 +187,7 @@ class CapabilityCloudSync {
   static const _emailKey = 'xiaoqi.auth.email.v1';
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
   final http.Client _client = http.Client();
+  genkit_client.AgentApi<Map<String, dynamic>>? _remoteAgent;
   Future<void>? _syncing;
   bool _syncAgain = false;
 
@@ -596,6 +598,12 @@ class CapabilityCloudSync {
     }
     return decoded;
   }
+
+  genkit_client.AgentApi<Map<String, dynamic>> createRemoteAgent() =>
+      _remoteAgent ??= genkit_client.remoteAgent<Map<String, dynamic>>(
+        url: '$_baseUrl/v1/agent/chat',
+        headers: () async => _headers(await _requireToken()),
+      );
 
   Future<http.Response> _postAgentTask(String token, String body) => _client
       .post(

@@ -11,13 +11,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Priority, SchedulerBinding;
 import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
+import 'package:genkit/experimental_client.dart' as genkit_client;
+import 'package:genkit/genkit.dart' as genkit;
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
@@ -65,6 +67,36 @@ class _AgentTaskFailure extends AiException {
   final bool isImageGeneration;
   final String? errorCode;
   final String? details;
+}
+
+class _AgentStreamPresentation {
+  const _AgentStreamPresentation({
+    this.currentStep = '',
+    this.reasoning = '',
+    this.events = const [],
+    this.expanded = false,
+    this.completed = false,
+  });
+
+  final String currentStep;
+  final String reasoning;
+  final List<Map<String, Object?>> events;
+  final bool expanded;
+  final bool completed;
+
+  _AgentStreamPresentation copyWith({
+    String? currentStep,
+    String? reasoning,
+    List<Map<String, Object?>>? events,
+    bool? expanded,
+    bool? completed,
+  }) => _AgentStreamPresentation(
+    currentStep: currentStep ?? this.currentStep,
+    reasoning: reasoning ?? this.reasoning,
+    events: events ?? this.events,
+    expanded: expanded ?? this.expanded,
+    completed: completed ?? this.completed,
+  );
 }
 
 String _agentTaskFailureMessage(
@@ -118,6 +150,14 @@ String _agentTaskFailureMessage(
       ? '图片生成任务失败：${clean.isEmpty ? '服务端没有返回具体原因。' : clean}'
       : '任务执行失败：${clean.isEmpty ? '服务端没有返回具体原因。' : clean}';
 }
+
+String _agentToolLabel(String name) => switch (name) {
+  'execute_python' => 'Python',
+  'execute_skill_script' => '技能脚本',
+  'generate_image' => '图片生成',
+  'read_task_material' => '读取附件',
+  _ => name,
+};
 
 String? _safeAgentTaskDetails(Object error) {
   final details = error
@@ -295,6 +335,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _composerFocusNode = FocusNode();
   final _messagesScrollController = ScrollController();
   final _streamingReply = ValueNotifier<String>('');
+  final _agentStreamPresentation = ValueNotifier<_AgentStreamPresentation>(
+    const _AgentStreamPresentation(),
+  );
   final _imageGenerationInProgress = ValueNotifier<bool>(false);
   final _streamingReplyBuffer = StringBuffer();
   final _speechService = SpeechRecognitionService.instance;
@@ -361,6 +404,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, Object?>? _activeSkillWorkflow;
   CapabilityDraft? _pendingSkillDraftReview;
   String? _activeCapabilityTaskId;
+  VoidCallback? _abortActiveAgentTurn;
   bool _emailSignedIn = false;
   bool _openingEmailLogin = false;
   final Set<String> _pendingCapabilityTaskCreationIds = <String>{};
@@ -470,7 +514,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _keyboardInsetSettleTimer?.cancel();
     _composerExpansionTimer?.cancel();
     _streamingReplyPublishTimer?.cancel();
+    _abortActiveAgentTurn?.call();
+    _abortActiveAgentTurn = null;
     _streamingReply.dispose();
+    _agentStreamPresentation.dispose();
     _imageGenerationInProgress.dispose();
     _keyboardInsetsChanging.dispose();
     unawaited(_cancelVoiceInput());
@@ -1410,23 +1457,38 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await _appendAssistantReply(
           taskReply.reply,
           parentMessageId: editedQuestion.id,
-          agentTaskId: taskReply.taskId,
+          clearAgentTaskId: true,
           outputArtifacts: taskReply.artifacts,
           skillDocument: taskReply.skillDocument,
           skillFiles: taskReply.skillFiles,
+          agentSessionId: taskReply.agentSessionId,
+          agentSnapshotId: taskReply.agentSnapshotId,
+          agentProcessSummary: taskReply.processSummary,
         );
       } on TimeoutException {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
+          await _savePartialAgentReply(
+            conversationId: conversationId,
+            parentMessageId: editedQuestion.id,
+          );
           _clearStreamingReply();
           _showReplyError('回复超时，请稍后重试');
         }
       } on AiException catch (error) {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
+          await _savePartialAgentReply(
+            conversationId: conversationId,
+            parentMessageId: editedQuestion.id,
+          );
           _clearStreamingReply();
           _showAgentTaskError(error);
         }
       } catch (_) {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
+          await _savePartialAgentReply(
+            conversationId: conversationId,
+            parentMessageId: editedQuestion.id,
+          );
           _clearStreamingReply();
           _showReplyError('回复失败，请稍后重试');
         }
@@ -1626,7 +1688,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _pendingReplyParentId = null;
       return;
     }
-    String? agentTaskId;
     try {
       final taskReply = await _runAgentTaskReply(
         generation: requestGeneration,
@@ -1641,27 +1702,41 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           !_isCurrentRequest(requestGeneration, conversationId)) {
         return;
       }
-      agentTaskId = taskReply.taskId;
       await _appendAssistantReply(
         taskReply.reply,
         parentMessageId: _pendingReplyParentId,
-        agentTaskId: taskReply.taskId,
+        clearAgentTaskId: true,
         outputArtifacts: taskReply.artifacts,
         skillDocument: taskReply.skillDocument,
         skillFiles: taskReply.skillFiles,
+        agentSessionId: taskReply.agentSessionId,
+        agentSnapshotId: taskReply.agentSnapshotId,
+        agentProcessSummary: taskReply.processSummary,
       );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
+        await _savePartialAgentReply(
+          conversationId: conversationId,
+          parentMessageId: userMessage.id,
+        );
         _clearStreamingReply();
         _showReplyError('回复超时，请稍后重试');
       }
     } on AiException catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
+        await _savePartialAgentReply(
+          conversationId: conversationId,
+          parentMessageId: userMessage.id,
+        );
         _clearStreamingReply();
         _showAgentTaskError(error);
       }
     } catch (_) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
+        await _savePartialAgentReply(
+          conversationId: conversationId,
+          parentMessageId: userMessage.id,
+        );
         _clearStreamingReply();
         _showReplyError('回复失败，请稍后重试');
       }
@@ -1670,9 +1745,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         setState(() {
           _isGenerating = false;
         });
-        if (_activeCapabilityTaskId == agentTaskId) {
-          _activeCapabilityTaskId = null;
-        }
       }
       if (requestGeneration == _requestGeneration) {
         _pendingReplyParentId = null;
@@ -1921,9 +1993,256 @@ $materialIndex
       List<Map<String, Object?>> artifacts,
       String? skillDocument,
       Map<String, String>? skillFiles,
+      String? agentSessionId,
+      String? agentSnapshotId,
+      String processSummary,
     })?
   >
   _runAgentTaskReply({
+    required int generation,
+    required String conversationId,
+    required AiConversationMessage question,
+    required List<AiConversationMessage> history,
+    required List<Map<String, Object?>> aiMessages,
+    required String modelId,
+    required String reasoningLevel,
+  }) async {
+    final materials = await _agentTaskMaterials(history);
+    final taskMessages = _agentTaskMessages(aiMessages, materials);
+    final capability = await _agentTaskCapability(question);
+    final isImageGeneration =
+        capability?['type'] == 'action' && capability?['id'] == 'create-image';
+    if (!_isCurrentRequest(generation, conversationId)) return null;
+
+    final taskId = CapabilityCloudSync.newTaskId();
+    _agentStreamPresentation.value = const _AgentStreamPresentation(
+      currentStep: '正在思考',
+    );
+    String? startSessionId = question.agentSessionId;
+    String? startSnapshotId = question.agentSnapshotId;
+    if (startSessionId == null && startSnapshotId == null) {
+      final questionIndex = history.indexWhere(
+        (item) => item.id == question.id,
+      );
+      for (var index = questionIndex - 1; index >= 0; index--) {
+        final previous = history[index];
+        if (!previous.isUser &&
+            (previous.agentSessionId != null ||
+                previous.agentSnapshotId != null)) {
+          startSessionId = previous.agentSessionId;
+          startSnapshotId = previous.agentSnapshotId;
+          break;
+        }
+      }
+    }
+    final latestLegacyMessageIndex = taskMessages.lastIndexWhere(
+      (message) => message['role'] == 'user',
+    );
+    if (latestLegacyMessageIndex < 0) {
+      throw const FormatException('当前回合缺少用户消息');
+    }
+    final latestLegacyMessage = taskMessages[latestLegacyMessageIndex];
+    final turnMetadata = <String, dynamic>{
+      'task_id': taskId,
+      'model_id': modelId,
+      'reasoning_level': reasoningLevel,
+      if (capability case final selectedCapability?)
+        'capability': selectedCapability,
+      'materials': materials,
+      if (startSessionId == null && startSnapshotId == null)
+        'legacy_history': taskMessages
+            .take(latestLegacyMessageIndex)
+            .toList(growable: false),
+    };
+    final userMessage = _messageForAgent(
+      latestLegacyMessage,
+      metadata: {'xiaoqi_agent_turn': turnMetadata},
+    );
+    final agent = CapabilityCloudSync.instance.createRemoteAgent();
+    final chat = agent.chat(
+      snapshotId: startSnapshotId,
+      sessionId: startSnapshotId == null ? startSessionId : null,
+    );
+    var turn = chat.sendStream(message: userMessage);
+    try {
+      late genkit_client.AgentResponse<Map<String, dynamic>> response;
+      while (true) {
+        if (!_isCurrentRequest(generation, conversationId)) {
+          turn.abort();
+          return null;
+        }
+        _abortActiveAgentTurn = turn.abort;
+        try {
+          await for (final chunk in turn.stream) {
+            if (!_isCurrentRequest(generation, conversationId)) {
+              turn.abort();
+              return null;
+            }
+            _handleAgentChunk(
+              chunk,
+              generation: generation,
+              conversationId: conversationId,
+            );
+            final custom = chunk.custom;
+            final events = custom == null ? null : custom['agent_process'];
+            if (events is List) {
+              if (events.any(
+                (event) =>
+                    event is Map && event['type'] == 'image_generation_started',
+              )) {
+                _imageGenerationInProgress.value = true;
+              }
+              if (events.any(
+                (event) =>
+                    event is Map &&
+                    event['type'] == 'tool_succeeded' &&
+                    event['tool'] == 'generate_image',
+              )) {
+                _imageGenerationInProgress.value = false;
+              }
+            }
+          }
+          response = await turn.response;
+        } finally {
+          _abortActiveAgentTurn = null;
+        }
+        if (response.interrupts.isEmpty) break;
+
+        final interrupt = response.interrupts.first;
+        final input = interrupt.input;
+        if (input is! Map || input['type'] != 'network_permission') {
+          throw const AiException('服务端返回了暂不支持的工具权限请求');
+        }
+        final domains = (input['domains'] as List? ?? const [])
+            .map((value) => value.toString())
+            .where((value) => value.isNotEmpty)
+            .toList(growable: false);
+        final purpose = input['purpose']?.toString() ?? '脚本需要访问这些域名';
+        _agentStreamPresentation.value = _agentStreamPresentation.value
+            .copyWith(currentStep: '等待你确认联网权限');
+        final allow = await _confirmAgentNetworkAccess(purpose, domains);
+        if (!_isCurrentRequest(generation, conversationId)) return null;
+        turn = allow
+            ? chat.resumeStream(
+                restart: [
+                  interrupt.restart({'approved': true, 'domains': domains}),
+                ],
+              )
+            : chat.resumeStream(
+                respond: [
+                  interrupt.respond({'approved': false, 'domains': domains}),
+                ],
+              );
+      }
+
+      final finalText = response.text.trimRight();
+      if (finalText.isNotEmpty) {
+        _streamingReplyBuffer
+          ..clear()
+          ..write(finalText);
+      }
+      final reply = _streamingReplyBuffer.toString().trimRight();
+      if (reply.trim().isEmpty) {
+        throw const AiException('AI没有返回可用内容，请重试');
+      }
+      final artifacts = <Map<String, Object?>>[];
+      for (final artifact in response.artifacts) {
+        final metadata = artifact.metadata;
+        if (metadata?['task_id'] == taskId && metadata?['artifacts'] is List) {
+          artifacts.addAll(_taskArtifacts(metadata!['artifacts']));
+        }
+      }
+      final processSummary = _agentProcessSummary();
+      _agentStreamPresentation.value = _agentStreamPresentation.value.copyWith(
+        currentStep: '已完成',
+        completed: true,
+        expanded: false,
+      );
+      _flushStreamingReply(generation, conversationId);
+      return (
+        taskId: taskId,
+        reply: reply,
+        artifacts: artifacts,
+        skillDocument: null,
+        skillFiles: null,
+        agentSessionId: response.sessionId ?? chat.sessionId,
+        agentSnapshotId: response.snapshotId ?? chat.snapshotId,
+        processSummary: processSummary,
+      );
+    } catch (error) {
+      _abortActiveAgentTurn = null;
+      throw _AgentTaskFailure(
+        _agentTaskFailureMessage(error, isImageGeneration: isImageGeneration),
+        taskId: taskId,
+        isImageGeneration: isImageGeneration,
+        details: _safeAgentTaskDetails(error),
+      );
+    } finally {
+      _abortActiveAgentTurn = null;
+    }
+  }
+
+  genkit.Message _messageForAgent(
+    Map<String, Object?> message, {
+    Map<String, dynamic>? metadata,
+  }) {
+    final role = switch (message['role']?.toString()) {
+      'system' => genkit.Role.system,
+      'assistant' => genkit.Role.model,
+      _ => genkit.Role.user,
+    };
+    final content = <genkit.Part>[];
+    final rawContent = message['content'];
+    if (rawContent is String && rawContent.isNotEmpty) {
+      content.add(genkit.TextPart(text: rawContent));
+    } else if (rawContent is List) {
+      for (final rawPart in rawContent.whereType<Map>()) {
+        final part = Map<String, Object?>.from(rawPart);
+        if (part['type'] == 'text' && part['text'] is String) {
+          content.add(genkit.TextPart(text: part['text']! as String));
+        } else if (part['type'] == 'image_url') {
+          final rawImage = part['image_url'];
+          final url = rawImage is Map
+              ? rawImage['url']?.toString()
+              : rawImage?.toString();
+          if (url != null && url.isNotEmpty) {
+            content.add(
+              genkit.MediaPart(
+                media: genkit.Media(
+                  contentType: _agentImageContentType(url),
+                  url: url,
+                ),
+              ),
+            );
+          }
+        }
+      }
+    }
+    return genkit.Message(role: role, content: content, metadata: metadata);
+  }
+
+  String _agentImageContentType(String url) {
+    final dataType = RegExp(r'^data:([^;,]+)').firstMatch(url)?.group(1);
+    if (dataType != null) return dataType;
+    final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+    if (path.endsWith('.png')) return 'image/png';
+    if (path.endsWith('.webp')) return 'image/webp';
+    if (path.endsWith('.gif')) return 'image/gif';
+    return 'image/jpeg';
+  }
+
+  // Legacy task execution remains available for persisted-task recovery only.
+  // ignore: unused_element
+  Future<
+    ({
+      String taskId,
+      String reply,
+      List<Map<String, Object?>> artifacts,
+      String? skillDocument,
+      Map<String, String>? skillFiles,
+    })?
+  >
+  _runLegacyAgentTaskReply({
     required int generation,
     required String conversationId,
     required AiConversationMessage question,
@@ -2617,12 +2936,92 @@ $text''';
     _scrollToLatest(immediate: true, requireFollow: true);
   }
 
+  void _handleAgentChunk(
+    genkit_client.AgentChunk<Map<String, dynamic>> chunk, {
+    required int generation,
+    required String conversationId,
+  }) {
+    if (!_isCurrentRequest(generation, conversationId)) return;
+    if (chunk.text.isNotEmpty) {
+      _streamingReplyBuffer.write(chunk.text);
+      _scheduleStreamingReplyUpdate(generation, conversationId);
+    }
+
+    final current = _agentStreamPresentation.value;
+    var nextEvents = current.events;
+    var nextStep = current.currentStep;
+    final custom = chunk.custom;
+    if (custom != null) {
+      final step = custom['current_step']?.toString().trim();
+      if (step != null && step.isNotEmpty) nextStep = step;
+      final rawEvents = custom['agent_process'];
+      if (rawEvents is List) {
+        nextEvents = rawEvents
+            .whereType<Map>()
+            .map((event) => Map<String, Object?>.from(event))
+            .toList(growable: false);
+      }
+    }
+    if (chunk.toolRequests.isNotEmpty && nextStep.isEmpty) {
+      nextStep =
+          '正在调用 ${_agentToolLabel(chunk.toolRequests.last.toolRequest.name)}';
+    }
+    final reasoningDelta = chunk.reasoning;
+    var reasoning = current.reasoning;
+    if (reasoningDelta.trim().isNotEmpty) {
+      reasoning = '$reasoning$reasoningDelta';
+      if (reasoning.length > 2400) {
+        reasoning = reasoning.substring(reasoning.length - 2400);
+      }
+    }
+    _agentStreamPresentation.value = current.copyWith(
+      currentStep: nextStep,
+      reasoning: reasoning,
+      events: nextEvents,
+    );
+  }
+
+  String _agentProcessSummary() {
+    final tools = <String>{};
+    for (final event in _agentStreamPresentation.value.events) {
+      if (event['type'] == 'tool_started') {
+        final name = event['tool']?.toString();
+        if (name != null && name.isNotEmpty) tools.add(_agentToolLabel(name));
+      }
+    }
+    return tools.isEmpty ? '回复已完成' : '已使用${tools.take(3).join('、')}';
+  }
+
+  void _toggleAgentProcessExpansion() {
+    final current = _agentStreamPresentation.value;
+    _agentStreamPresentation.value = current.copyWith(
+      expanded: !current.expanded,
+    );
+  }
+
+  Future<bool> _savePartialAgentReply({
+    required String conversationId,
+    required String? parentMessageId,
+  }) async {
+    if (_conversation?.id != conversationId) return false;
+    final partial = _streamingReplyBuffer.toString().trimRight();
+    if (partial.trim().isEmpty || parentMessageId == null) return false;
+    return _appendAssistantReply(
+      partial,
+      parentMessageId: parentMessageId,
+      isIncomplete: true,
+      clearAgentTaskId: true,
+      agentProcessSummary: _agentProcessSummary(),
+    );
+  }
+
   void _clearStreamingReply() {
     _streamingReplyPublishTimer?.cancel();
     _streamingReplyPublishTimer = null;
     _streamingReplyBuffer.clear();
     _streamingReply.value = '';
     _imageGenerationInProgress.value = false;
+    _agentStreamPresentation.value = const _AgentStreamPresentation();
   }
 
   Future<void> _persistCapabilityTaskId(
@@ -2901,10 +3300,14 @@ $text''';
     String reply, {
     String? parentMessageId,
     String? agentTaskId,
+    bool clearAgentTaskId = false,
     bool isIncomplete = false,
     List<Map<String, Object?>> outputArtifacts = const [],
     String? skillDocument,
     Map<String, String>? skillFiles,
+    String? agentSessionId,
+    String? agentSnapshotId,
+    String? agentProcessSummary,
   }) async {
     if (!mounted) return false;
     final content = reply.trimRight();
@@ -2915,7 +3318,9 @@ $text''';
     }
     final parentId = parentMessageId ?? current.messages.lastOrNull?.id;
     if (parentId == null) return false;
-    final replyTaskId = agentTaskId ?? current.nodeById(parentId)?.agentTaskId;
+    final replyTaskId = clearAgentTaskId
+        ? null
+        : agentTaskId ?? current.nodeById(parentId)?.agentTaskId;
     CapabilityDraft? skillDraft;
     try {
       skillDraft = isIncomplete
@@ -2948,6 +3353,9 @@ $text''';
             createdAt: now,
             isIncomplete: isIncomplete,
             agentTaskId: replyTaskId,
+            agentSessionId: agentSessionId,
+            agentSnapshotId: agentSnapshotId,
+            agentProcessSummary: agentProcessSummary,
             capabilityMetadata: skillDraft == null
                 ? null
                 : {
@@ -2960,11 +3368,13 @@ $text''';
           ),
         )
         .copyWith(updatedAt: now);
-    if (!isIncomplete && replyTaskId != null) {
+    if (clearAgentTaskId || (!isIncomplete && replyTaskId != null)) {
       updated = updated.copyWith(
         nodes: updated.nodes
             .map(
-              (node) => node.id == parentId && node.agentTaskId == replyTaskId
+              (node) =>
+                  node.id == parentId &&
+                      (clearAgentTaskId || node.agentTaskId == replyTaskId)
                   ? node.copyWith(
                       clearAgentTaskId: true,
                       agentTaskPending: false,
@@ -3018,9 +3428,13 @@ $text''';
     String text, {
     required bool isIncomplete,
     String? agentTaskId,
+    bool clearAgentTaskId = false,
     List<Map<String, Object?>>? outputArtifacts,
     String? skillDocument,
     Map<String, String>? skillFiles,
+    String? agentSessionId,
+    String? agentSnapshotId,
+    String? agentProcessSummary,
   }) async {
     if (!mounted) return false;
     final current = _conversation;
@@ -3033,10 +3447,11 @@ $text''';
         content.trim().isEmpty) {
       return false;
     }
-    final replyTaskId =
-        agentTaskId ??
-        current.nodeById(answer.parentMessageId ?? '')?.agentTaskId ??
-        answer.agentTaskId;
+    final replyTaskId = clearAgentTaskId
+        ? null
+        : agentTaskId ??
+              current.nodeById(answer.parentMessageId ?? '')?.agentTaskId ??
+              answer.agentTaskId;
     CapabilityDraft? skillDraft;
     if (!isIncomplete) {
       skillDraft = await _skillDraftFromReply(
@@ -3063,6 +3478,10 @@ $text''';
                     text: content,
                     isIncomplete: isIncomplete,
                     agentTaskId: replyTaskId,
+                    agentSessionId: agentSessionId ?? answer.agentSessionId,
+                    agentSnapshotId: agentSnapshotId ?? answer.agentSnapshotId,
+                    agentProcessSummary:
+                        agentProcessSummary ?? answer.agentProcessSummary,
                     outputArtifacts: outputArtifacts ?? answer.outputArtifacts,
                     capabilityMetadata: skillDraft == null
                         ? answer.capabilityMetadata
@@ -3078,13 +3497,13 @@ $text''';
           .toList(growable: false),
       updatedAt: now,
     );
-    if (!isIncomplete && replyTaskId != null) {
+    if (clearAgentTaskId || (!isIncomplete && replyTaskId != null)) {
       updated = updated.copyWith(
         nodes: updated.nodes
             .map(
               (node) =>
                   node.id == answer.parentMessageId &&
-                      node.agentTaskId == replyTaskId
+                      (clearAgentTaskId || node.agentTaskId == replyTaskId)
                   ? node.copyWith(
                       clearAgentTaskId: true,
                       agentTaskPending: false,
@@ -3262,6 +3681,8 @@ $text''';
         _activeCapabilityTaskId ?? pendingMessage?.agentTaskId;
     final continuationMessageId = _pendingContinuationMessageId;
     final stoppedGeneration = ++_requestGeneration;
+    _abortActiveAgentTurn?.call();
+    _abortActiveAgentTurn = null;
     _activeCapabilityTaskId = null;
     if (capabilityTaskId != null) {
       final taskIsBeingCreated = _pendingCapabilityTaskCreationIds.contains(
@@ -3308,13 +3729,30 @@ $text''';
 
   void _detachReply() {
     if (!_isGenerating) return;
+    final parentMessageId = _pendingReplyParentId;
+    final partialReply = _streamingReplyBuffer.toString().trimRight();
+    final processSummary = _agentProcessSummary();
+    _abortActiveAgentTurn?.call();
+    _abortActiveAgentTurn = null;
     _requestGeneration++;
     _activeCapabilityTaskId = null;
     _pendingReplyParentId = null;
     _pendingContinuationMessageId = null;
     _continuingReplyId = null;
     _isContinuingReply = false;
-    _clearStreamingReply();
+    if (partialReply.trim().isNotEmpty && parentMessageId != null) {
+      unawaited(
+        _appendAssistantReply(
+          partialReply,
+          parentMessageId: parentMessageId,
+          clearAgentTaskId: true,
+          isIncomplete: true,
+          agentProcessSummary: processSummary,
+        ),
+      );
+    } else {
+      _clearStreamingReply();
+    }
     if (mounted) {
       setState(() {
         _isGenerating = false;
@@ -3339,13 +3777,17 @@ $text''';
           continuationMessageId,
           '${answer.text}$partialReply',
           isIncomplete: true,
+          clearAgentTaskId: true,
+          agentProcessSummary: _agentProcessSummary(),
         );
       }
     } else if (partialReply.trim().isNotEmpty && parentMessageId != null) {
       await _appendAssistantReply(
         partialReply,
         parentMessageId: parentMessageId,
+        clearAgentTaskId: true,
         isIncomplete: true,
+        agentProcessSummary: _agentProcessSummary(),
       );
     }
     if (mounted && _conversation?.id == conversationId) {
@@ -4015,10 +4457,13 @@ $text''';
       await _appendAssistantReply(
         taskReply.reply,
         parentMessageId: questionId,
-        agentTaskId: taskReply.taskId,
+        clearAgentTaskId: true,
         outputArtifacts: taskReply.artifacts,
         skillDocument: taskReply.skillDocument,
         skillFiles: taskReply.skillFiles,
+        agentSessionId: taskReply.agentSessionId,
+        agentSnapshotId: taskReply.agentSnapshotId,
+        agentProcessSummary: taskReply.processSummary,
       );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -4119,12 +4564,16 @@ $text''';
           answer.id,
           '${answer.text}$addedText',
           isIncomplete: true,
+          clearAgentTaskId: true,
+          agentProcessSummary: _agentProcessSummary(),
         );
       }
       return _appendAssistantReply(
         addedText,
         parentMessageId: parentMessageId,
+        clearAgentTaskId: true,
         isIncomplete: true,
+        agentProcessSummary: _agentProcessSummary(),
       );
     }
 
@@ -4164,19 +4613,25 @@ $text''';
           answer.id,
           '${answer.text}${taskReply.reply}',
           isIncomplete: false,
-          agentTaskId: taskReply.taskId,
+          clearAgentTaskId: true,
           outputArtifacts: taskReply.artifacts,
           skillDocument: taskReply.skillDocument,
           skillFiles: taskReply.skillFiles,
+          agentSessionId: taskReply.agentSessionId,
+          agentSnapshotId: taskReply.agentSnapshotId,
+          agentProcessSummary: taskReply.processSummary,
         );
       } else {
         final saved = await _appendAssistantReply(
           taskReply.reply,
           parentMessageId: parentMessageId,
-          agentTaskId: taskReply.taskId,
+          clearAgentTaskId: true,
           outputArtifacts: taskReply.artifacts,
           skillDocument: taskReply.skillDocument,
           skillFiles: taskReply.skillFiles,
+          agentSessionId: taskReply.agentSessionId,
+          agentSnapshotId: taskReply.agentSnapshotId,
+          agentProcessSummary: taskReply.processSummary,
         );
         if (!saved) restoreEmptyStoppedHint();
       }
@@ -4871,6 +5326,10 @@ $text''';
                                         isUserScrollingMessages:
                                             _userScrollingMessages,
                                         streamingReply: _streamingReply,
+                                        agentStreamPresentation:
+                                            _agentStreamPresentation,
+                                        onToggleAgentProcess:
+                                            _toggleAgentProcessExpansion,
                                         imageGenerationInProgress:
                                             _imageGenerationInProgress,
                                         onScrollNotification:
@@ -5229,8 +5688,8 @@ class _SpaceSwitcher extends StatelessWidget {
               const SizedBox(width: 8),
               Icon(
                 expanded
-                    ? PhosphorIcons.caretUp(PhosphorIconsStyle.regular)
-                    : PhosphorIcons.caretDown(PhosphorIconsStyle.regular),
+                    ? PhosphorIconsRegular.caretUp
+                    : PhosphorIconsRegular.caretDown,
                 color: expanded
                     ? const Color(0xFFB0B2B5)
                     : const Color(0xFF65676A),
@@ -6369,6 +6828,193 @@ class _SendButton extends StatelessWidget {
   }
 }
 
+class _AgentProcessPanel extends StatelessWidget {
+  const _AgentProcessPanel({
+    required this.presentation,
+    required this.onToggle,
+  });
+
+  final _AgentStreamPresentation presentation;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final title = presentation.completed
+        ? '已完成'
+        : presentation.currentStep.isEmpty
+        ? '正在处理'
+        : presentation.currentStep;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: onToggle,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              child: Row(
+                children: [
+                  Icon(
+                    presentation.completed
+                        ? Icons.check_circle_outline
+                        : Icons.auto_awesome_outlined,
+                    size: 16,
+                    color: colorScheme.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                        height: 1.35,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    presentation.expanded
+                        ? Icons.expand_less
+                        : Icons.expand_more,
+                    size: 18,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (presentation.expanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(36, 0, 12, 11),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (presentation.reasoning.trim().isNotEmpty) ...[
+                    Text(
+                      '推理片段',
+                      style: TextStyle(
+                        color: colorScheme.onSurfaceVariant,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      presentation.reasoning.trim(),
+                      maxLines: 5,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  for (final event in presentation.events.take(12))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            switch (event['type']) {
+                              'tool_succeeded' => Icons.check,
+                              'tool_failed' => Icons.error_outline,
+                              _ => Icons.circle_outlined,
+                            },
+                            size: 14,
+                            color: event['type'] == 'tool_failed'
+                                ? colorScheme.error
+                                : colorScheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              '${_agentToolLabel(event['tool']?.toString() ?? '工具')} · ${switch (event['type']) {
+                                'tool_succeeded' => '已完成',
+                                'tool_failed' => '遇到问题',
+                                'image_generation_started' => '开始生成',
+                                _ => '进行中',
+                              }}',
+                              style: TextStyle(
+                                color: colorScheme.onSurfaceVariant,
+                                fontSize: 11,
+                                height: 1.35,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SavedAgentProcessSummary extends StatefulWidget {
+  const _SavedAgentProcessSummary({required this.summary});
+
+  final String summary;
+
+  @override
+  State<_SavedAgentProcessSummary> createState() =>
+      _SavedAgentProcessSummaryState();
+}
+
+class _SavedAgentProcessSummaryState extends State<_SavedAgentProcessSummary> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => setState(() => _expanded = !_expanded),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.check_circle_outline, size: 15, color: color),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  _expanded ? widget.summary : '已完成 · ${widget.summary}',
+                  maxLines: _expanded ? 3 : 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: color, fontSize: 11, height: 1.35),
+                ),
+              ),
+              Icon(
+                _expanded ? Icons.expand_less : Icons.expand_more,
+                size: 16,
+                color: color,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ConversationMessages extends StatefulWidget {
   const _ConversationMessages({
     required this.record,
@@ -6383,6 +7029,8 @@ class _ConversationMessages extends StatefulWidget {
     required this.isSelectingVersion,
     required this.isUserScrollingMessages,
     required this.streamingReply,
+    required this.agentStreamPresentation,
+    required this.onToggleAgentProcess,
     required this.imageGenerationInProgress,
     required this.onScrollNotification,
     required this.onCopy,
@@ -6412,6 +7060,8 @@ class _ConversationMessages extends StatefulWidget {
   final bool isSelectingVersion;
   final bool isUserScrollingMessages;
   final ValueListenable<String> streamingReply;
+  final ValueListenable<_AgentStreamPresentation> agentStreamPresentation;
+  final VoidCallback onToggleAgentProcess;
   final ValueListenable<bool> imageGenerationInProgress;
   final bool Function(ScrollNotification) onScrollNotification;
   final Future<void> Function(AiConversationMessage) onCopy;
@@ -7106,42 +7756,63 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                 }
                 final rowIndex = index - 1;
                 if (showSeparateStream && rowIndex >= _messageRows.length) {
-                  final child = ValueListenableBuilder<String>(
-                    valueListenable: widget.streamingReply,
-                    builder: (context, reply, _) =>
-                        ValueListenableBuilder<bool>(
-                          valueListenable: widget.imageGenerationInProgress,
-                          builder: (context, imageInProgress, _) {
-                            if (reply.isNotEmpty || imageInProgress) {
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (reply.isNotEmpty)
-                                    _assistantStreamingText(context, reply),
-                                  if (imageInProgress)
-                                    const Padding(
-                                      padding: EdgeInsets.only(top: 12),
-                                      child: _ImageGenerationProgress(),
+                  final child = ValueListenableBuilder<_AgentStreamPresentation>(
+                    valueListenable: widget.agentStreamPresentation,
+                    builder: (context, process, _) =>
+                        ValueListenableBuilder<String>(
+                          valueListenable: widget.streamingReply,
+                          builder: (context, reply, _) =>
+                              ValueListenableBuilder<bool>(
+                                valueListenable:
+                                    widget.imageGenerationInProgress,
+                                builder: (context, imageInProgress, _) {
+                                  final hasProcess =
+                                      process.currentStep.isNotEmpty ||
+                                      process.reasoning.isNotEmpty ||
+                                      process.events.isNotEmpty;
+                                  if (reply.isNotEmpty ||
+                                      imageInProgress ||
+                                      hasProcess) {
+                                    return Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (hasProcess)
+                                          _AgentProcessPanel(
+                                            presentation: process,
+                                            onToggle:
+                                                widget.onToggleAgentProcess,
+                                          ),
+                                        if (reply.isNotEmpty)
+                                          _assistantStreamingText(
+                                            context,
+                                            reply,
+                                          ),
+                                        if (imageInProgress)
+                                          const Padding(
+                                            padding: EdgeInsets.only(top: 12),
+                                            child: _ImageGenerationProgress(),
+                                          ),
+                                      ],
+                                    );
+                                  }
+                                  if (widget.isContinuingReply) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  return const Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Text(
+                                      '正在思考...',
+                                      style: TextStyle(
+                                        color: Color(0xFF777777),
+                                        fontSize: 15,
+                                        height: 1.4,
+                                      ),
                                     ),
-                                ],
-                              );
-                            }
-                            if (widget.isContinuingReply) {
-                              return const SizedBox.shrink();
-                            }
-                            return const Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                '正在思考...',
-                                style: TextStyle(
-                                  color: Color(0xFF777777),
-                                  fontSize: 15,
-                                  height: 1.4,
-                                ),
+                                  );
+                                },
                               ),
-                            );
-                          },
                         ),
                   );
                   return KeyedSubtree(
@@ -7186,6 +7857,23 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (isStopped) _stoppedReplyStatus(row.message),
+                        if (isContinuing)
+                          ValueListenableBuilder<_AgentStreamPresentation>(
+                            valueListenable: widget.agentStreamPresentation,
+                            builder: (context, process, _) =>
+                                process.currentStep.isEmpty &&
+                                    process.reasoning.isEmpty &&
+                                    process.events.isEmpty
+                                ? const SizedBox.shrink()
+                                : _AgentProcessPanel(
+                                    presentation: process,
+                                    onToggle: widget.onToggleAgentProcess,
+                                  ),
+                          )
+                        else if (row.message.agentProcessSummary != null)
+                          _SavedAgentProcessSummary(
+                            summary: row.message.agentProcessSummary!,
+                          ),
                         if (!isStopped || isExpanded)
                           _messageSelection(
                             row.message,

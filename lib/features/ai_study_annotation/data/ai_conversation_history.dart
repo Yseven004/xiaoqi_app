@@ -28,6 +28,9 @@ class AiConversationMessage {
     this.outputArtifacts = const [],
     this.agentTaskId,
     this.agentTaskPending = false,
+    this.agentSessionId,
+    this.agentSnapshotId,
+    this.agentProcessSummary,
   }) : id = id ?? _newMessageId();
 
   final String id;
@@ -43,6 +46,9 @@ class AiConversationMessage {
   final List<Map<String, Object?>> outputArtifacts;
   final String? agentTaskId;
   final bool agentTaskPending;
+  final String? agentSessionId;
+  final String? agentSnapshotId;
+  final String? agentProcessSummary;
 
   AiConversationMessage copyWith({
     String? id,
@@ -61,6 +67,12 @@ class AiConversationMessage {
     String? agentTaskId,
     bool clearAgentTaskId = false,
     bool? agentTaskPending,
+    String? agentSessionId,
+    bool clearAgentSessionId = false,
+    String? agentSnapshotId,
+    bool clearAgentSnapshotId = false,
+    String? agentProcessSummary,
+    bool clearAgentProcessSummary = false,
   }) => AiConversationMessage(
     id: id ?? this.id,
     parentMessageId: clearParentMessageId
@@ -79,6 +91,15 @@ class AiConversationMessage {
     outputArtifacts: outputArtifacts ?? this.outputArtifacts,
     agentTaskId: clearAgentTaskId ? null : agentTaskId ?? this.agentTaskId,
     agentTaskPending: agentTaskPending ?? this.agentTaskPending,
+    agentSessionId: clearAgentSessionId
+        ? null
+        : agentSessionId ?? this.agentSessionId,
+    agentSnapshotId: clearAgentSnapshotId
+        ? null
+        : agentSnapshotId ?? this.agentSnapshotId,
+    agentProcessSummary: clearAgentProcessSummary
+        ? null
+        : agentProcessSummary ?? this.agentProcessSummary,
   );
 
   Map<String, Object?> toJson() => {
@@ -101,6 +122,10 @@ class AiConversationMessage {
     if (outputArtifacts.isNotEmpty) 'output_artifacts': outputArtifacts,
     if (agentTaskId != null) 'agent_task_id': agentTaskId,
     if (agentTaskPending) 'agent_task_pending': true,
+    if (agentSessionId != null) 'agent_session_id': agentSessionId,
+    if (agentSnapshotId != null) 'agent_snapshot_id': agentSnapshotId,
+    if (agentProcessSummary != null)
+      'agent_process_summary': agentProcessSummary,
   };
 
   factory AiConversationMessage.fromJson(Object? raw) {
@@ -137,6 +162,9 @@ class AiConversationMessage {
           : const [],
       agentTaskId: raw['agent_task_id']?.toString(),
       agentTaskPending: raw['agent_task_pending'] == true,
+      agentSessionId: raw['agent_session_id']?.toString(),
+      agentSnapshotId: raw['agent_snapshot_id']?.toString(),
+      agentProcessSummary: raw['agent_process_summary']?.toString(),
     );
   }
 }

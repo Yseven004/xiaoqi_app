@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../config/book_flow_theme.dart';
@@ -450,8 +450,8 @@ class _BookStudyPageState extends State<BookStudyPage> {
             ListTile(
               leading: Icon(
                 note.isPinned
-                    ? PhosphorIcons.pushPinSlash()
-                    : PhosphorIcons.pushPin(),
+                    ? PhosphorIconsRegular.pushPinSlash
+                    : PhosphorIconsRegular.pushPin,
               ),
               title: Text(note.isPinned ? '取消置顶' : '置顶笔记'),
               onTap: () {
@@ -569,7 +569,7 @@ class _BookStudyPageState extends State<BookStudyPage> {
                     child: _RoundIconButton(
                       tooltip: '返回阅读空间',
                       onTap: widget.onBack,
-                      icon: PhosphorIcons.caretLeft(PhosphorIconsStyle.regular),
+                      icon: PhosphorIconsRegular.caretLeft,
                       size: 44,
                       iconSize: 23,
                     ),
@@ -583,9 +583,7 @@ class _BookStudyPageState extends State<BookStudyPage> {
                         _RoundIconButton(
                           tooltip: '分享书籍',
                           onTap: _shareBook,
-                          icon: PhosphorIcons.export(
-                            PhosphorIconsStyle.regular,
-                          ),
+                          icon: PhosphorIconsRegular.export,
                           size: 44,
                           iconSize: 22,
                           radius: 13,
@@ -595,9 +593,7 @@ class _BookStudyPageState extends State<BookStudyPage> {
                         _RoundIconButton(
                           tooltip: '更多书籍操作',
                           onTap: _showBookActions,
-                          icon: PhosphorIcons.dotsThree(
-                            PhosphorIconsStyle.bold,
-                          ),
+                          icon: PhosphorIconsBold.dotsThree,
                           size: 44,
                           iconSize: 24,
                         ),
@@ -1386,11 +1382,9 @@ class _BookNoteCard extends StatelessWidget {
                   tooltip: note.isPinned ? '取消置顶' : '置顶笔记',
                   onPressed: onTogglePinned,
                   icon: Icon(
-                    PhosphorIcons.pushPin(
-                      note.isPinned
-                          ? PhosphorIconsStyle.fill
-                          : PhosphorIconsStyle.regular,
-                    ),
+                    note.isPinned
+                        ? PhosphorIconsFill.pushPin
+                        : PhosphorIconsRegular.pushPin,
                   ),
                   color: BookFlowTheme.detailPrimary,
                   iconSize: 18,
@@ -1406,7 +1400,7 @@ class _BookNoteCard extends StatelessWidget {
                 child: IconButton(
                   tooltip: '笔记操作',
                   onPressed: onMore,
-                  icon: Icon(PhosphorIcons.dotsThree(PhosphorIconsStyle.bold)),
+                  icon: Icon(PhosphorIconsBold.dotsThree),
                   color: BookFlowTheme.inkSecondary,
                   iconSize: 21,
                   constraints: const BoxConstraints.tightFor(

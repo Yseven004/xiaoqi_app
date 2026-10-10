@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
+import 'package:genkit/experimental.dart';
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
@@ -70,6 +71,74 @@ void main() {
       3,
     ]);
     expect(store.summary(), {'documents': 0, 'objects': 2, 'object_files': 2});
+    store.close();
+  });
+
+  test('persists Genkit snapshots under an authenticated tenant', () async {
+    final store = CloudStore(root: directory.path);
+    final sessions = CloudSessionStore(store);
+    final owner = {'tenant_id': 'owner'};
+    final other = {'tenant_id': 'other'};
+
+    Future<void> save(
+      String tenant,
+      String sessionId,
+      String snapshotId, {
+      String? parentId,
+      String createdAt = '2026-10-10T00:00:00Z',
+    }) async {
+      await sessions.saveSnapshot(
+        snapshotId,
+        (_) => SessionSnapshot(
+          snapshotId: snapshotId,
+          sessionId: sessionId,
+          parentId: parentId,
+          createdAt: createdAt,
+          state: SessionState(sessionId: sessionId, messages: const []),
+        ),
+        context: {'tenant_id': tenant},
+      );
+    }
+
+    await save('owner', 'session-one', 'shared-snapshot');
+    await save(
+      'owner',
+      'session-one',
+      'snapshot-child',
+      parentId: 'shared-snapshot',
+      createdAt: '2026-10-10T00:01:00Z',
+    );
+    await save('other', 'session-two', 'shared-snapshot');
+
+    expect(
+      (await sessions.getSnapshot(
+        snapshotId: 'shared-snapshot',
+        context: owner,
+      ))?.sessionId,
+      'session-one',
+    );
+    expect(
+      (await sessions.getSnapshot(
+        snapshotId: 'shared-snapshot',
+        context: other,
+      ))?.sessionId,
+      'session-two',
+    );
+    expect(
+      await sessions.getSnapshot(snapshotId: 'snapshot-child', context: other),
+      isNull,
+    );
+    expect(
+      (await sessions.getSnapshot(
+        sessionId: 'session-one',
+        context: owner,
+      ))?.snapshotId,
+      'snapshot-child',
+    );
+    expect(
+      await sessions.getSnapshot(sessionId: 'session-one', context: other),
+      isNull,
+    );
     store.close();
   });
 }

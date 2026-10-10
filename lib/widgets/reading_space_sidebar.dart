@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../features/ai_study_annotation/data/ai_conversation_history.dart';
 import '../models/book_library_item.dart';
@@ -243,7 +243,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
           height: 48,
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: _MenuLabel(
-            icon: PhosphorIcons.pushPin(PhosphorIconsStyle.regular),
+            icon: PhosphorIconsRegular.pushPin,
             label: '置顶 / 取消置顶',
             showDivider: true,
           ),
@@ -253,7 +253,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
           height: 48,
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: _MenuLabel(
-            icon: PhosphorIcons.checkCircle(PhosphorIconsStyle.regular),
+            icon: PhosphorIconsRegular.checkCircle,
             label: '多选',
             showDivider: true,
           ),
@@ -263,7 +263,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
           height: 48,
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: _MenuLabel(
-            icon: PhosphorIcons.trash(PhosphorIconsStyle.regular),
+            icon: PhosphorIconsRegular.trash,
             label: '移出在读书籍',
             color: const Color(0xFFB94A45),
           ),
@@ -569,35 +569,35 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
       items: [
         _menuItem(
           _ConversationAction.rename,
-          PhosphorIcons.pencilSimple(PhosphorIconsStyle.regular),
+          PhosphorIconsRegular.pencilSimple,
           '重命名',
         ),
         _menuItem(
           _ConversationAction.select,
-          PhosphorIcons.checkCircle(PhosphorIconsStyle.regular),
+          PhosphorIconsRegular.checkCircle,
           '多选',
         ),
         if (bookId == null)
           _menuItem(
             _ConversationAction.associate,
-            PhosphorIcons.books(PhosphorIconsStyle.regular),
+            PhosphorIconsRegular.books,
             '关联书籍',
           )
         else ...[
           _menuItem(
             _ConversationAction.changeBook,
-            PhosphorIcons.arrowsLeftRight(PhosphorIconsStyle.regular),
+            PhosphorIconsRegular.arrowsLeftRight,
             '更换关联书籍',
           ),
           _menuItem(
             _ConversationAction.detach,
-            PhosphorIcons.linkBreak(PhosphorIconsStyle.regular),
+            PhosphorIconsRegular.linkBreak,
             '解除关联',
           ),
         ],
         _menuItem(
           _ConversationAction.delete,
-          PhosphorIcons.trash(PhosphorIconsStyle.regular),
+          PhosphorIconsRegular.trash,
           '删除',
           destructive: true,
         ),
@@ -805,8 +805,8 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                   : _toggleSelectAll,
               icon: Icon(
                 allSelected
-                    ? PhosphorIcons.checkSquare(PhosphorIconsStyle.fill)
-                    : PhosphorIcons.square(PhosphorIconsStyle.regular),
+                    ? PhosphorIconsFill.checkSquare
+                    : PhosphorIconsRegular.square,
                 size: 19,
               ),
               label: const Text('全选'),
@@ -952,13 +952,13 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
           Builder(
             builder: (context) => _SmallAction(
               label: '更多在读书籍操作',
-              icon: PhosphorIcons.dotsThree(PhosphorIconsStyle.bold),
+              icon: PhosphorIconsBold.dotsThree,
               onTap: () => _showReadingBookMenu(context),
             ),
           ),
           _SmallAction(
             label: '从书库添加',
-            icon: PhosphorIcons.plus(PhosphorIconsStyle.regular),
+            icon: PhosphorIconsRegular.plus,
             onTap: widget.onOpenLibrary,
           ),
         ],
@@ -969,7 +969,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
         if (reading.isEmpty)
           _EmptyRow(
             text: _books.isEmpty ? '暂无在读书籍' : '所有在读书籍已置顶',
-            icon: PhosphorIcons.bookOpen(PhosphorIconsStyle.regular),
+            icon: PhosphorIconsRegular.bookOpen,
           )
         else
           for (final item in reading) _buildBookGroup(item),
@@ -1019,7 +1019,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                 ? null
                 : () => _deleteConversations(selected),
             icon: Icon(
-              PhosphorIcons.trash(PhosphorIconsStyle.regular),
+              PhosphorIconsRegular.trash,
               size: 19,
             ),
             label: const Text('删除'),
@@ -1053,7 +1053,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                 child: TextButton.icon(
                   onPressed: enabled ? _applyBookPinSelection : null,
                   icon: Icon(
-                    PhosphorIcons.pushPin(PhosphorIconsStyle.regular),
+                    PhosphorIconsRegular.pushPin,
                     size: 19,
                   ),
                   label: Text(shouldPin ? '置顶' : '取消置顶'),
@@ -1071,7 +1071,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                 child: TextButton.icon(
                   onPressed: enabled ? _removeSelectedBooksFromReadingSpace : null,
                   icon: Icon(
-                    PhosphorIcons.trash(PhosphorIconsStyle.regular),
+                    PhosphorIconsRegular.trash,
                     size: 19,
                   ),
                   label: const Text('移出在读'),
@@ -1160,7 +1160,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                 children: [
                   _BranchRow(
                     label: '目录',
-                    icon: PhosphorIcons.listBullets(PhosphorIconsStyle.regular),
+                    icon: PhosphorIconsRegular.listBullets,
                     expanded: branch == _ReadingSidebarBranch.toc,
                     onTap: () => _toggleBranch(item, _ReadingSidebarBranch.toc),
                   ),
@@ -1168,7 +1168,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                     _buildTocChildren(item),
                   _BranchRow(
                     label: '对话记录',
-                    icon: PhosphorIcons.chatCircle(PhosphorIconsStyle.regular),
+                    icon: PhosphorIconsRegular.chatCircle,
                     expanded: branch == _ReadingSidebarBranch.conversations,
                     onTap: () => _toggleBranch(
                       item,
@@ -1329,7 +1329,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                       )
                     else if (bookId == null) ...[
                       Icon(
-                        PhosphorIcons.chatCircle(PhosphorIconsStyle.regular),
+                        PhosphorIconsRegular.chatCircle,
                         size: 19,
                         color: _mutedInk,
                       ),
@@ -1412,7 +1412,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
           TextButton.icon(
             onPressed: _load,
             icon: Icon(
-              PhosphorIcons.arrowClockwise(PhosphorIconsStyle.regular),
+              PhosphorIconsRegular.arrowClockwise,
               size: 17,
             ),
             label: const Text('重试'),
@@ -1441,7 +1441,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
             child: TextButton.icon(
               onPressed: () => setState(() => _infoTitle = null),
               icon: Icon(
-                PhosphorIcons.arrowLeft(PhosphorIconsStyle.regular),
+                PhosphorIconsRegular.arrowLeft,
                 size: 19,
               ),
               label: const Text('返回'),
@@ -1540,12 +1540,12 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
               ),
               _SmallAction(
                 label: '通知',
-                icon: PhosphorIcons.bell(PhosphorIconsStyle.regular),
+                icon: PhosphorIconsRegular.bell,
                 onTap: () => _showInfo('通知'),
               ),
               _SmallAction(
                 label: '设置',
-                icon: PhosphorIcons.gear(PhosphorIconsStyle.regular),
+                icon: PhosphorIconsRegular.gear,
                 onTap: () => _showInfo('设置'),
               ),
             ],
@@ -1766,8 +1766,8 @@ class _BookRow extends StatelessWidget {
                   height: 48,
                   child: Icon(
                     expanded
-                        ? PhosphorIcons.caretDown(PhosphorIconsStyle.regular)
-                        : PhosphorIcons.caretRight(PhosphorIconsStyle.regular),
+                        ? PhosphorIconsRegular.caretDown
+                        : PhosphorIconsRegular.caretRight,
                     size: 17,
                     color: const Color(0xFF737A84),
                   ),
@@ -1802,7 +1802,7 @@ class _SidebarCheck extends StatelessWidget {
       ),
       child: selected
           ? Icon(
-              PhosphorIcons.check(PhosphorIconsStyle.bold),
+              PhosphorIconsBold.check,
               size: 14,
               color: Colors.white,
             )
@@ -1863,8 +1863,8 @@ class _BranchRow extends StatelessWidget {
                 ),
                 Icon(
                   expanded
-                      ? PhosphorIcons.caretDown(PhosphorIconsStyle.regular)
-                      : PhosphorIcons.caretRight(PhosphorIconsStyle.regular),
+                      ? PhosphorIconsRegular.caretDown
+                      : PhosphorIconsRegular.caretRight,
                   size: 16,
                   color: const Color(0xFF737A84),
                 ),
@@ -1913,7 +1913,7 @@ class _SourceRow extends StatelessWidget {
             ),
           ),
           Icon(
-            PhosphorIcons.caretDown(PhosphorIconsStyle.regular),
+            PhosphorIconsRegular.caretDown,
             size: 13,
             color: const Color(0xFF858B94),
           ),
