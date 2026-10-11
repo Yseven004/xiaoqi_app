@@ -2809,23 +2809,10 @@ class _NoteEditorPageState extends State<NoteEditorPage>
 
   Future<void> _pickFileAttachments() async {
     try {
-      final result = await FilePicker.pickFiles(
-        allowMultiple: true,
-        type: FileType.any,
-        withReadStream: true,
-      );
-      if (result == null) return;
-      for (final picked in result.files) {
-        final stream =
-            picked.readStream ??
-            (picked.bytes != null
-                ? Stream<List<int>>.value(picked.bytes!)
-                : picked.path != null
-                ? File(picked.path!).openRead()
-                : null);
-        if (stream == null) {
-          throw StateError('所选文件无法读取');
-        }
+      final files = await FilePicker.pickFiles(type: FileType.any);
+      if (files.isEmpty) return;
+      for (final picked in files) {
+        final stream = picked.readAsByteStream();
         final attachment = await _persistAttachment(
           name: picked.name,
           bytes: stream,

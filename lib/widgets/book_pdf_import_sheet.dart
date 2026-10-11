@@ -399,6 +399,7 @@ class _PdfFileCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final format = inferBookSourceFormat(file.name);
     final formatLabel = _formatLabel(file.name);
+    final fileSize = file.lengthSync();
     return DecoratedBox(
       decoration: BoxDecoration(
         color: BookFlowTheme.primarySoft,
@@ -442,7 +443,10 @@ class _PdfFileCard extends StatelessWidget {
                     style: _bookCardTitle,
                   ),
                   const SizedBox(height: 4),
-                  Text(_formatBytes(file.size), style: BookFlowTheme.caption),
+                  Text(
+                    fileSize == null ? '大小未知' : _formatBytes(fileSize),
+                    style: BookFlowTheme.caption,
+                  ),
                 ],
               ),
             ),

@@ -13,10 +13,11 @@ dependencies:
     sdk: flutter
   archive: 4.2.0
   audioplayers: 6.7.1
-  camera: 0.11.4
+  camera: 0.12.1
+  cross_file: 0.3.5+2
   crypto: 3.0.7
   cupertino_icons: 1.0.8
-  file_picker: 11.0.3
+  file_picker: 13.1.0
   flutter_markdown: 0.7.7+1
   flutter_math_fork: 0.7.4
   flutter_quill: 11.5.1
@@ -30,24 +31,24 @@ dependencies:
   image_picker: 1.2.2
   markdown: 7.3.1
   meta: 1.18.3
-  mobile_scanner: 7.4.0
+  mobile_scanner: 7.4.2
   open_filex: 4.7.0
-  opencv_dart: 2.1.0
+  opencv_dart: ^2.2.2
   path: 1.9.1
   path_provider: 2.1.5
   pdfrx: 2.4.8
   permission_handler: 11.4.0
   phosphoricons_flutter: 1.1.1
   photo_manager: 3.12.0
-  receive_sharing_intent: 1.8.1
-  record: 6.2.1
-  sensors_plus: 6.1.2
-  share_plus: 12.0.2
+  receive_sharing_intent: 1.9.0
+  record: 7.1.2
+  sensors_plus: 7.1.1
+  share_plus: 13.3.1
   shared_preferences: 2.5.5
   sherpa_onnx: 1.13.8
   sqflite: 2.4.2+1
   xml: 7.0.1
-  webview_flutter_android: 4.12.0
+  webview_flutter_android: 4.14.1
   webview_flutter_platform_interface: 2.15.1
   webview_flutter_wkwebview: 3.25.1
   genkit_a2ui: 0.4.0
@@ -97,7 +98,7 @@ flutter:
       fonts:
         - asset: assets/fonts/LongCang-Regular.ttf
 dependency_overrides:
-  camera_platform_interface: 2.13.1
+  camera_platform_interface: 2.14.0
   cross_file: 0.3.5+2
   file_selector_linux: 0.9.4
   file_selector_macos: 0.9.5

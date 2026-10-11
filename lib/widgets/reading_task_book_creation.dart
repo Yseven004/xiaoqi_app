@@ -137,13 +137,11 @@ Future<int?> _importBook(
 }
 
 Future<PlatformFile?> _pickBookSource(BuildContext context) async {
-  final result = await FilePicker.pickFiles(
+  final file = await FilePicker.pickFile(
     type: FileType.custom,
     allowedExtensions: supportedBookSourceFileExtensions,
-    withData: true,
   );
-  if (!context.mounted || result == null || result.files.isEmpty) return null;
-  final file = result.files.single;
+  if (!context.mounted || file == null) return null;
   final format = inferBookSourceFormat(file.name);
   if (!supportedBookSourceFormats.contains(format)) {
     AppToast.show(context, '目前支持导入 PDF 或 EPUB 文件');
@@ -159,8 +157,7 @@ Future<String> _ensurePickedFilePath(PlatformFile file) async {
       await File(existingPath).exists()) {
     return existingPath;
   }
-  final bytes = file.bytes;
-  if (bytes == null) throw StateError('无法读取选中的文件');
+  final bytes = await file.readAsBytes();
   final temporary = await getTemporaryDirectory();
   final fallback = File(p.join(temporary.path, file.name));
   await fallback.writeAsBytes(bytes, flush: true);

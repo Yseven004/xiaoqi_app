@@ -105,13 +105,11 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
 
   Future<void> _importBookSource() async {
     if (_importing) return;
-    final result = await FilePicker.pickFiles(
+    final file = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: supportedBookSourceFileExtensions,
-      withData: true,
     );
-    if (!mounted || result == null || result.files.isEmpty) return;
-    final file = result.files.single;
+    if (!mounted || file == null) return;
     final format = inferBookSourceFormat(file.name);
     if (!supportedBookSourceFormats.contains(format)) {
       _showMessage('目前支持导入 PDF 或 EPUB 文件');
@@ -155,8 +153,7 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
         await File(existingPath).exists()) {
       return existingPath;
     }
-    final bytes = file.bytes;
-    if (bytes == null) throw StateError('无法读取选中的文件');
+    final bytes = await file.readAsBytes();
     final temporary = await getTemporaryDirectory();
     final fallback = File(p.join(temporary.path, file.name));
     await fallback.writeAsBytes(bytes, flush: true);

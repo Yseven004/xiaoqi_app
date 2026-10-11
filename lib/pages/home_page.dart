@@ -622,7 +622,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _startConversationForSharedMedia(
     List<SharedMediaFile> sharedFiles,
   ) async {
-    final picked = <PlatformFile>[];
+    final picked = <XFile>[];
     for (final shared in sharedFiles) {
       if (shared.type == SharedMediaType.text ||
           shared.type == SharedMediaType.url) {
@@ -632,13 +632,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final path = uri?.scheme == 'file' ? uri!.toFilePath() : shared.path;
       final file = File(path);
       if (!await file.exists()) continue;
-      picked.add(
-        PlatformFile(
-          name: path.split(Platform.pathSeparator).last,
-          path: path,
-          size: await file.length(),
-        ),
-      );
+      picked.add(XFile(path));
     }
     if (picked.isEmpty) {
       if (mounted) _showReplyError('微信分享中没有可添加的图片或文件');
@@ -816,11 +810,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       await _importPickedFiles(
         [
-          PlatformFile(
-            name: file.path.split(Platform.pathSeparator).last,
-            path: file.path,
-            size: await file.length(),
-          ),
+          XFile(file.path),
         ],
         'image',
         sourceAssetIds: [photo.id],
@@ -871,9 +861,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           );
           if (useSavedFile != true) return;
         }
-        final result = await FilePicker.pickFiles(
-          allowMultiple: true,
-          withData: false,
+        final files = await FilePicker.pickFiles(
           type: FileType.custom,
           allowedExtensions: const [
             'jpg',
@@ -895,8 +883,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             'markdown',
           ],
         );
-        if (result == null) return;
-        await _importPickedFiles(result.files, action == 3 ? 'wechat' : 'file');
+        if (files.isEmpty) return;
+        await _importPickedFiles(
+          files.map((file) => file.xFile).toList(),
+          action == 3 ? 'wechat' : 'file',
+        );
       }
     } catch (error) {
       if (mounted) _showReplyError('添加失败：${error.toString()}');
@@ -907,22 +898,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     Iterable<String> paths,
     String source,
   ) async {
-    final picked = <PlatformFile>[];
+    final picked = <XFile>[];
     for (final path in paths) {
-      final file = File(path);
-      picked.add(
-        PlatformFile(
-          name: path.split(Platform.pathSeparator).last,
-          path: path,
-          size: await file.length(),
-        ),
-      );
+      picked.add(XFile(path));
     }
     await _importPickedFiles(picked, source);
   }
 
   Future<void> _importPickedFiles(
-    List<PlatformFile> files,
+    List<XFile> files,
     String source, {
     List<String?> sourceAssetIds = const [],
   }) async {
@@ -938,11 +922,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     var skipped = 0;
     for (var index = 0; index < files.length; index++) {
       final picked = files[index];
+      final byteLength = await picked.length();
       if (_attachments.length >= 9) {
         skipped += 1;
         continue;
       }
-      if (picked.size > 50 * 1024 * 1024) {
+      if (byteLength > 50 * 1024 * 1024) {
         skipped += 1;
         continue;
       }
@@ -956,13 +941,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final safeName = picked.name.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
       final filePath = '${target.path}/${id}_$safeName';
       final file = File(filePath);
-      if (picked.path != null) {
-        await File(picked.path!).copy(filePath);
-      } else if (picked.bytes != null) {
-        await file.writeAsBytes(picked.bytes!, flush: true);
+      if (picked.path.isNotEmpty && await File(picked.path).exists()) {
+        await File(picked.path).copy(filePath);
       } else {
-        skipped += 1;
-        continue;
+        await file.writeAsBytes(await picked.readAsBytes(), flush: true);
       }
       if (!mounted ||
           _conversation?.id != conversationId ||
@@ -977,7 +959,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         name: picked.name,
         path: filePath,
         mimeType: mime,
-        byteLength: picked.size,
+        byteLength: byteLength,
         source: source,
         sourceAssetId: index < sourceAssetIds.length
             ? sourceAssetIds[index]
