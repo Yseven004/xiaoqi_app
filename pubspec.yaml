@@ -13,7 +13,6 @@ dependencies:
     sdk: flutter
   archive: 4.2.0
   audioplayers: 6.7.1
-  camera: 0.12.1
   cross_file: 0.3.5+2
   crypto: 3.0.7
   cupertino_icons: 1.0.8
@@ -33,7 +32,6 @@ dependencies:
   meta: 1.18.3
   mobile_scanner: 7.4.2
   open_filex: 4.7.0
-  opencv_dart: ^2.2.2
   path: 1.9.1
   path_provider: 2.1.5
   pdfrx: 2.4.8
@@ -98,7 +96,6 @@ flutter:
       fonts:
         - asset: assets/fonts/LongCang-Regular.ttf
 dependency_overrides:
-  camera_platform_interface: 2.14.0
   cross_file: 0.3.5+2
   file_selector_linux: 0.9.4
   file_selector_macos: 0.9.5

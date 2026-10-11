@@ -6,20 +6,17 @@ import 'package:flutter/material.dart';
 
 import '../config/book_flow_theme.dart';
 import '../config/note_page_theme.dart';
-import '../models/captured_page.dart';
 import '../models/note.dart';
 import '../models/page_annotation.dart';
 import '../models/ocr_layout.dart';
 import '../services/book_library_service.dart';
 import '../services/database_service.dart';
-import '../services/note_generation_service.dart';
 import '../services/page_image_asset_store.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/book_page_annotation_view.dart';
 import '../widgets/book_page_document_view.dart';
 import '../widgets/editor_toolbar_asset_button.dart';
 import 'book_page_edit_page.dart';
-import 'viewfinder_camera_page.dart';
 
 /// OCR 书页的统一阅读器。
 ///
@@ -70,7 +67,6 @@ class _BookPageReaderPageState extends State<BookPageReaderPage>
   bool _loading = true;
   bool _saving = false;
   bool _saved = false;
-  bool _addingPage = false;
   bool _hasUnresolvedPages = false;
   late final PageImageAssetStore _imageStore;
 
@@ -343,210 +339,6 @@ class _BookPageReaderPageState extends State<BookPageReaderPage>
     return DatabaseService().upsertNotesByCapturePage(notes);
   }
 
-  Future<void> _openAddPage() async {
-    if (_addingPage) return;
-    final result = await Navigator.of(context).push<CameraCaptureBatch>(
-      MaterialPageRoute(builder: (_) => const ViewfinderCameraPage()),
-    );
-    if (!mounted || result == null || result.pages.isEmpty) return;
-    setState(() => _addingPage = true);
-    try {
-      if (widget.isDraft) {
-        await _appendToDraft(result.pages);
-      } else {
-        await _appendToSavedReader(result.pages);
-      }
-    } catch (error) {
-      if (!mounted) return;
-      setState(() => _addingPage = false);
-      AppToast.show(context, '添加书页失败：$error');
-    }
-  }
-
-  Future<void> _appendToDraft(List<CapturedPage> pages) async {
-    final batchId = widget.draftBatchId;
-    if (batchId == null || batchId.isEmpty) {
-      throw StateError('找不到当前书页草稿');
-    }
-    final orders = await _bookLibrary.appendDraftPages(batchId, pages);
-    final newNotes = <Note>[];
-    var failed = 0;
-    var sequenceOffset = _notes.length;
-    for (final note in _notes) {
-      final sequence = note.captureSequence;
-      if (sequence != null && sequence >= sequenceOffset) {
-        sequenceOffset = sequence + 1;
-      }
-    }
-    for (var index = 0; index < pages.length; index++) {
-      final page = pages[index];
-      final order = orders[index];
-      final pageWithBatch = _pageWithBatch(
-        page,
-        batchId,
-        sequenceOffset + index,
-      );
-      try {
-        var note = await NoteGenerationService.prepareAnnotationNote(
-          pageWithBatch,
-        );
-        final capturePageId = await _bookLibrary.capturePageId(batchId, order);
-        note = note.copyWith(
-          captureBatchId: batchId,
-          captureSequence: sequenceOffset + index,
-          capturePageId: capturePageId,
-        );
-        await _bookLibrary.updateDraftPage(
-          batchId: batchId,
-          pageOrder: order,
-          status: 'processed',
-          processedPath: note.photoPath,
-          originalPath: note.originalPhotoPath,
-          ocrJson: note.annotationsJson,
-          editedText: note.content,
-        );
-        newNotes.add(note);
-      } catch (error) {
-        failed++;
-        await _bookLibrary.updateDraftPage(
-          batchId: batchId,
-          pageOrder: order,
-          status: 'failed',
-          errorMessage: error.toString(),
-        );
-      }
-    }
-    if (!mounted) return;
-    _hasUnresolvedPages = _hasUnresolvedPages || failed > 0;
-    if (newNotes.isNotEmpty) {
-      _replaceReaderNotes(newNotes);
-    } else {
-      setState(() => _addingPage = false);
-    }
-    AppToast.show(
-      context,
-      failed == 0
-          ? '已添加 ${newNotes.length} 页书页'
-          : newNotes.isEmpty
-          ? '新增书页识别失败，已保留草稿'
-          : '已添加 ${newNotes.length} 页，$failed 页已保留草稿',
-    );
-  }
-
-  Future<void> _appendToSavedReader(List<CapturedPage> pages) async {
-    final batchId = await _bookLibrary.createLinkedDraftBatch(
-      parentNote: _notes.first,
-      pages: pages,
-      selectedBookId: widget.bookId,
-    );
-    final newNotes = <Note>[];
-    var sequenceOffset = _notes.length;
-    for (final note in _notes) {
-      final sequence = note.captureSequence;
-      if (sequence != null && sequence >= sequenceOffset) {
-        sequenceOffset = sequence + 1;
-      }
-    }
-    var failed = 0;
-    for (var index = 0; index < pages.length; index++) {
-      final page = pages[index];
-      final pageWithBatch = _pageWithBatch(
-        page,
-        batchId,
-        sequenceOffset + index,
-      );
-      try {
-        var note = await NoteGenerationService.prepareAnnotationNote(
-          pageWithBatch,
-        );
-        final capturePageId = await _bookLibrary.capturePageId(batchId, index);
-        note = note.copyWith(capturePageId: capturePageId);
-        await _bookLibrary.updateDraftPage(
-          batchId: batchId,
-          pageOrder: index,
-          status: 'processed',
-          processedPath: note.photoPath,
-          originalPath: note.originalPhotoPath,
-          ocrJson: note.annotationsJson,
-          editedText: note.content,
-        );
-        newNotes.add(note);
-      } catch (error) {
-        failed++;
-        await _bookLibrary.updateDraftPage(
-          batchId: batchId,
-          pageOrder: index,
-          status: 'failed',
-          errorMessage: error.toString(),
-        );
-      }
-    }
-    if (newNotes.isEmpty) {
-      await _bookLibrary.completeCaptureBatchAfterSaving(
-        batchId,
-        preserveBookAssociation: widget.bookId != null,
-      );
-      if (!mounted) return;
-      setState(() => _addingPage = false);
-      AppToast.show(context, '新增书页识别失败，已保留草稿');
-      return;
-    }
-    final persisted = await _insertNotes(newNotes);
-    if (failed > 0) {
-      await _bookLibrary.completeCaptureBatchAfterSaving(
-        batchId,
-        preserveBookAssociation: widget.bookId != null,
-      );
-    } else {
-      await _bookLibrary.completeCaptureBatch(
-        batchId,
-        preserveBookAssociation: widget.bookId != null,
-      );
-    }
-    if (!mounted) return;
-    _replaceReaderNotes(persisted);
-    AppToast.show(
-      context,
-      failed == 0
-          ? '已添加 ${persisted.length} 页书页'
-          : '已添加 ${persisted.length} 页，$failed 页已保留草稿',
-    );
-  }
-
-  CapturedPage _pageWithBatch(CapturedPage page, String batchId, int sequence) {
-    return CapturedPage(
-      path: page.path,
-      inputKind: page.inputKind,
-      isDoublePage: page.isDoublePage,
-      pageGroupId: page.pageGroupId,
-      pageGroupIndex: page.pageGroupIndex,
-      sourcePhotoPath: page.sourcePhotoPath,
-      capturedAt: page.capturedAt,
-      captureBatchId: batchId,
-      captureSequence: sequence,
-    );
-  }
-
-  void _replaceReaderNotes(List<Note> additions) {
-    final merged = _ordered([..._notes, ...additions]);
-    final target = merged.indexWhere(
-      (note) => _noteIdentity(note) == _noteIdentity(additions.first),
-    );
-    final controller = _pageController;
-    final safeTarget = target < 0 ? 0 : target;
-    setState(() {
-      _notes = merged;
-      _current = safeTarget;
-      _addingPage = false;
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || controller == null || controller != _pageController) {
-        return;
-      }
-      if (controller.hasClients) controller.jumpToPage(safeTarget);
-    });
-  }
-
   Future<void> _showOriginal(int index) async {
     if (index < 0 || index >= _notes.length) return;
     final note = _notes[index];
@@ -689,10 +481,8 @@ class _BookPageReaderPageState extends State<BookPageReaderPage>
                     child: _PageConsole(
                       notes: _notes,
                       current: safeCurrent,
-                      addingPage: _addingPage,
                       imageStore: _imageStore,
                       onSelect: _goTo,
-                      onAddPage: _openAddPage,
                     ),
                   ),
                 ),
@@ -936,18 +726,14 @@ class _PageConsole extends StatelessWidget {
   const _PageConsole({
     required this.notes,
     required this.current,
-    required this.addingPage,
     required this.imageStore,
     required this.onSelect,
-    required this.onAddPage,
   });
 
   final List<Note> notes;
   final int current;
-  final bool addingPage;
   final PageImageAssetStore imageStore;
   final Future<void> Function(int index) onSelect;
-  final VoidCallback onAddPage;
 
   @override
   Widget build(BuildContext context) {
@@ -1014,15 +800,9 @@ class _PageConsole extends StatelessWidget {
                 child: ListView.separated(
                   scrollDirection: Axis.horizontal,
                   padding: EdgeInsets.zero,
-                  itemCount: notes.length + 1,
+                  itemCount: notes.length,
                   separatorBuilder: (_, _) => const SizedBox(width: 14),
                   itemBuilder: (context, index) {
-                    if (index == notes.length) {
-                      return _AddPageTile(
-                        loading: addingPage,
-                        onPressed: onAddPage,
-                      );
-                    }
                     return _PageThumbnail(
                       note: notes[index],
                       index: index,
@@ -1129,68 +909,6 @@ class _PageThumbnail extends StatelessWidget {
                     color: selected
                         ? const Color(0xFF1687C8)
                         : NotePageTheme.inkSecondary,
-                    fontSize: 15,
-                    height: 1.2,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _AddPageTile extends StatelessWidget {
-  const _AddPageTile({required this.loading, required this.onPressed});
-
-  final bool loading;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      label: '添加书页',
-      child: GestureDetector(
-        key: const Key('add_book_page_tile'),
-        onTap: loading ? null : onPressed,
-        child: SizedBox(
-          width: 128,
-          child: Column(
-            children: [
-              Container(
-                height: 150,
-                width: 112,
-                decoration: BoxDecoration(
-                  color: NotePageTheme.canvas,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: NotePageTheme.lineStrong),
-                ),
-                child: Center(
-                  child: loading
-                      ? const Icon(
-                          Icons.hourglass_top,
-                          color: NotePageTheme.muted,
-                        )
-                      : const Icon(
-                          Icons.add_a_photo_outlined,
-                          color: NotePageTheme.green,
-                          size: 32,
-                        ),
-                ),
-              ),
-              const SizedBox(height: 7),
-              const SizedBox(
-                height: 19,
-                child: Text(
-                  '添加书页',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: NotePageTheme.green,
                     fontSize: 15,
                     height: 1.2,
                     fontWeight: FontWeight.w700,

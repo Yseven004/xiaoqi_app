@@ -3,11 +3,11 @@ import '../widgets/app_toast.dart';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import '../config/colors.dart';
 import '../models/note.dart';
-import '../services/camera_service.dart';
 import '../services/database_service.dart';
 import '../services/permission_service.dart';
 
@@ -40,7 +40,7 @@ class _PhotoNoteEditPageState extends State<PhotoNoteEditPage>
   bool _showSuccess = false;
   String? _newPhotoPath;
   final DatabaseService _db = DatabaseService();
-  final CameraService _cameraService = CameraService();
+  final ImagePicker _picker = ImagePicker();
   final PermissionService _permissionService = PermissionService();
 
   double _animProgress = 0.0;
@@ -106,11 +106,12 @@ class _PhotoNoteEditPageState extends State<PhotoNoteEditPage>
         _permissionService.showPermissionDeniedDialog(context, '相机');
         return;
       }
-      final paths = await _cameraService.takePhoto(context);
-      if (paths != null && paths.isNotEmpty && mounted) {
-        setState(() => _newPhotoPath = paths.first);
-        debugPrint('[XiaoQi] PhotoEdit: 更换照片 拍照=${paths.first}');
-      }
+      final image = await _picker.pickImage(source: ImageSource.camera);
+      if (image == null || !mounted) return;
+      final path = await _persistPickedPhoto(image);
+      if (!mounted) return;
+      setState(() => _newPhotoPath = path);
+      debugPrint('[XiaoQi] PhotoEdit: 更换照片 拍照=$path');
     } catch (e) {
       debugPrint('[XiaoQi] PhotoEdit: 拍照失败: $e');
       if (mounted) {
@@ -128,17 +129,30 @@ class _PhotoNoteEditPageState extends State<PhotoNoteEditPage>
         }
         return;
       }
-      final image = await _cameraService.pickFromGallery();
-      if (image != null && mounted) {
-        setState(() => _newPhotoPath = image.path);
-        debugPrint('[XiaoQi] PhotoEdit: 更换照片 相册=${image.path}');
-      }
+      final image = await _picker.pickImage(source: ImageSource.gallery);
+      if (image == null || !mounted) return;
+      final path = await _persistPickedPhoto(image);
+      if (!mounted) return;
+      setState(() => _newPhotoPath = path);
+      debugPrint('[XiaoQi] PhotoEdit: 更换照片 相册=$path');
     } catch (e) {
       debugPrint('[XiaoQi] PhotoEdit: 选图失败: $e');
       if (mounted) {
         AppToast.show(context, '选图失败，请重试');
       }
     }
+  }
+
+  Future<String> _persistPickedPhoto(XFile image) async {
+    final appDir = await getApplicationDocumentsDirectory();
+    final photosDir = Directory(p.join(appDir.path, 'photos', 'temp'));
+    await photosDir.create(recursive: true);
+    final extension = p.extension(image.path).isEmpty
+        ? '.jpg'
+        : p.extension(image.path);
+    final fileName =
+        'photo_${DateTime.now().microsecondsSinceEpoch}_${Random().nextInt(99999)}$extension';
+    return (await File(image.path).copy(p.join(photosDir.path, fileName))).path;
   }
 
   @override

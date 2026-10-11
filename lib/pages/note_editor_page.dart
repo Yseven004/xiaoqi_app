@@ -27,7 +27,6 @@ import '../models/note_attachment.dart';
 import '../models/chat_note_capture.dart';
 import '../models/note_editor_result.dart';
 import '../models/notebook.dart';
-import '../plugins/document_recognition/document_recognition_plugin.dart';
 import '../services/ai_service.dart';
 import '../services/database_service.dart';
 import '../services/note_actions.dart';
@@ -2677,26 +2676,6 @@ class _NoteEditorPageState extends State<NoteEditorPage>
               onClose: () => Navigator.pop(sheetContext),
             ),
             _AddTile(
-              icon: Icons.document_scanner_outlined,
-              title: '拍照分析',
-              subtitle: '拍照或从相册选择，识别后插入正文',
-              color: _ink,
-              onTap: () {
-                Navigator.pop(sheetContext);
-                _choosePhotoAnalysisSource();
-              },
-            ),
-            _AddTile(
-              icon: Icons.text_snippet_outlined,
-              title: '扫描文字',
-              subtitle: '从相册提取文字并插入当前位置',
-              color: _ink,
-              onTap: () {
-                Navigator.pop(sheetContext);
-                _pickAndAnalyze(ImageSource.gallery);
-              },
-            ),
-            _AddTile(
               icon: Icons.format_quote_outlined,
               title: '引用',
               subtitle: '插入引用段落',
@@ -2731,42 +2710,6 @@ class _NoteEditorPageState extends State<NoteEditorPage>
         ),
       ),
     );
-  }
-
-  Future<void> _choosePhotoAnalysisSource() async {
-    final source = await showModalBottomSheet<ImageSource>(
-      context: context,
-      useSafeArea: true,
-      backgroundColor: _surface,
-      builder: (sheetContext) => Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _SheetHeader(
-              title: '拍照分析',
-              color: _ink,
-              onClose: () => Navigator.pop(sheetContext),
-            ),
-            _AddTile(
-              icon: Icons.camera_alt_outlined,
-              title: '拍照',
-              subtitle: '打开相机拍摄书页、文件或白板',
-              color: _ink,
-              onTap: () => Navigator.pop(sheetContext, ImageSource.camera),
-            ),
-            _AddTile(
-              icon: Icons.photo_library_outlined,
-              title: '从相册中选择',
-              subtitle: '使用手机里已有的照片',
-              color: _ink,
-              onTap: () => Navigator.pop(sheetContext, ImageSource.gallery),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (source != null) await _pickAndAnalyze(source);
   }
 
   Future<File> _persistImage(XFile image) async {
@@ -3169,34 +3112,6 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     }
     _removeInlineAttachmentEmbed(relativePath);
     _onContentChanged();
-  }
-
-  Future<void> _pickAndAnalyze(ImageSource source) async {
-    try {
-      final picked = await _picker.pickImage(source: source, imageQuality: 95);
-      if (picked == null || !mounted) return;
-      setState(() => _isProcessing = true);
-      final file = await _persistImage(picked);
-      final result = await resolveDocumentRecognitionPlugin().recognize(
-        file.path,
-      );
-      // 编辑器只插入结构化书页的纯文本视图，不能把兼容 Markdown 源码
-      // 暴露给用户；版面信息由书页识别流程单独持久化。
-      final recognized = result.document.plainText;
-      if (!mounted) return;
-      setState(() {
-        _sourcePhotoPath = file.path;
-        _sourceType = 'photo_analysis';
-      });
-      if (recognized.isNotEmpty) {
-        _insertText('${_plainText().trim().isEmpty ? '' : '\n\n'}$recognized');
-      }
-      AppToast.show(context, recognized.isEmpty ? '未识别到文字，已保留原图' : '已识别并插入笔记');
-    } catch (error) {
-      if (mounted) AppToast.show(context, '图片分析失败，请换一张清晰照片重试');
-    } finally {
-      if (mounted) setState(() => _isProcessing = false);
-    }
   }
 
   Future<void> _pickImageAttachment() async {
