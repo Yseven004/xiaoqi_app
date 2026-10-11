@@ -89,5 +89,6 @@ V1 沿用当前消息模型的单个能力元数据字段：每条消息保留�
 
 ### 实施状态（2026-10-11）
 
-- 源码已修改并补充会话兼容与 API 缺省模式测试；按用户要求，本轮没有运行本地构建、测试或真机视觉验收。
-- ECS 部署未完成：按项目规则完成 `xiaoqi-remote-deploy` OAuth profile 配置后，阿里云 API 与生产 `/health` 地址的 TLS 握手均在本机失败，现有 SSH 连接也因没有可用公钥而拒绝。未连接或修改服务器；持久卷、密钥、当前服务和既有回滚镜像均未触碰。恢复 API TLS 访问后仍需按部署手册先备份、构建、重启并核验健康状态及数据清单。
+- 代码提交为 `3eba11a`。ECS 镜像构建中的 `dart analyze` 与后端 `dart test` 均通过；本地 Flutter 测试、构建及真机视觉验收未执行，按用户要求留待本地 / 真机验收。
+- 2026-10-11 通过 Cloud Assistant 将服务端变更部署到 `cn-hongkong` 实例 `i-j6cdji1nji415swaliji`。新镜像 `sha256:99de98fb643630e873de0564e03e83324f3cbf370617da4c1eedc2220fda1f07` 已运行且容器健康；公网 `/health` 返回 `{"status":"ok"}`，部署前后持久化数据清单一致（115 条文档、63 个对象）。
+- 回滚镜像保存在服务器标签 `xiaoqi-genkit-server:pre-network-switch-20261011`；源码与 6.9 MB 数据卷快照保存在 `/opt/xiaoqi-single-server/backups/network-switch-20261011`。服务环境文件、密钥和数据卷未迁移或改写。
