@@ -4,12 +4,73 @@ import base64
 import io
 import tarfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import server
 
 
 class RunnerValidationTests(unittest.TestCase):
+    def test_disable_task_network_only_kills_owned_proxy_for_task(self) -> None:
+        client = Mock()
+        proxy = Mock()
+        proxy.name = "xq-code-proxy-session"
+        proxy.attrs = {"State": {"Running": True}}
+        client.containers.list.return_value = [proxy]
+
+        with patch.object(server, "_get_client", return_value=client):
+            result = server._disable_task_network("task-1")
+
+        self.assertEqual(result["network"], "off")
+        self.assertEqual(result["terminated_proxies"], 1)
+        client.containers.list.assert_called_once_with(
+            all=True,
+            filters={
+                "label": [
+                    f"{server.OWNER_LABEL}=true",
+                    "com.xiaoqi.task-id=task-1",
+                    "com.xiaoqi.role=network-proxy",
+                ],
+            },
+        )
+        proxy.kill.assert_called_once_with()
+
+    def test_disabled_network_prevents_proxy_creation_for_queued_task(self) -> None:
+        task_id = "task-disabled-before-run"
+        control_client = Mock()
+        control_client.containers.list.return_value = []
+        with patch.object(server, "_get_client", return_value=control_client):
+            server._disable_task_network(task_id)
+
+        execution_client = Mock()
+        volume = Mock()
+        volume.name = "xq-code-volume"
+        execution_client.volumes.create.return_value = volume
+        container = Mock()
+        container.put_archive.return_value = True
+        container.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+        execution_client.containers.create.return_value = container
+        with (
+            patch.object(server, "_get_client", return_value=execution_client),
+            patch.object(server, "_decode_logs", return_value=""),
+            patch.object(server, "_safe_artifacts", return_value=[]),
+        ):
+            result = server._run_sandbox(
+                {
+                    "task_id": task_id,
+                    "code": "print('hello')",
+                    "language": "python",
+                    "authorized_domains": ["example.com"],
+                },
+                Mock(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(execution_client.containers.create.call_count, 1)
+        self.assertEqual(
+            execution_client.containers.create.call_args.kwargs["image"],
+            server.SANDBOX_IMAGE,
+        )
+
     def test_task_network_has_no_host_bridge_gateway(self) -> None:
         client = Mock()
         labels = {server.OWNER_LABEL: "true"}

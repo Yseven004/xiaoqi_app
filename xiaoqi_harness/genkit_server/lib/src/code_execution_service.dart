@@ -28,6 +28,14 @@ class DockerCodeExecutionService {
   final String? _workerPath;
   final _uuid = const Uuid();
 
+  bool get isConfigured {
+    final worker =
+        _workerPath ??
+        Platform.environment['SANDBOX_WORKER_PATH'] ??
+        _defaultWorkerPath();
+    return File(worker).existsSync();
+  }
+
   Future<String> execute({
     required String tenantId,
     required String taskId,
@@ -114,7 +122,7 @@ class DockerCodeExecutionService {
 
     try {
       final request = <String, dynamic>{
-        'task_id': taskId,
+        'task_id': _runnerTaskId(tenantId, taskId),
         'code': code,
         'language': language,
         'authorized_domains': authorizedDomains,
@@ -176,6 +184,60 @@ class DockerCodeExecutionService {
     }
   }
 
+  Future<void> disableNetwork({
+    required String tenantId,
+    required String taskId,
+  }) async {
+    final executable =
+        _pythonExecutable ??
+        Platform.environment['SANDBOX_WORKER_PYTHON'] ??
+        (Platform.isWindows ? 'python' : 'python3');
+    final worker =
+        _workerPath ??
+        Platform.environment['SANDBOX_WORKER_PATH'] ??
+        _defaultWorkerPath();
+    if (!File(worker).existsSync()) {
+      throw StateError('本机 Docker 沙箱执行桥接文件不存在');
+    }
+
+    final process = await Process.start(executable, [worker]);
+    final outputFuture = process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .toList();
+    unawaited(process.stderr.drain<void>());
+    process.stdin.writeln(
+      jsonEncode({
+        'action': 'disable_network',
+        'task_id': _runnerTaskId(tenantId, taskId),
+      }),
+    );
+    await process.stdin.close();
+    final exitCode = await process.exitCode.timeout(
+      const Duration(seconds: 35),
+      onTimeout: () {
+        process.kill(ProcessSignal.sigterm);
+        throw TimeoutException('撤销运行中脚本的公网代理超时');
+      },
+    );
+    final lines = await outputFuture.timeout(const Duration(seconds: 2));
+    Map<String, dynamic>? result;
+    for (final line in lines.reversed) {
+      try {
+        final decoded = jsonDecode(line);
+        if (decoded is Map) {
+          result = decoded.cast<String, dynamic>();
+          break;
+        }
+      } on FormatException {
+        continue;
+      }
+    }
+    if (exitCode != 0 || result?['ok'] != true) {
+      throw StateError(result?['error']?.toString() ?? '无法撤销运行中脚本的公网代理');
+    }
+  }
+
   void _claimSkillScript(String tenantId, String taskId) {
     final key = 'task/$tenantId/$taskId';
     for (var attempt = 0; attempt < 8; attempt++) {
@@ -197,6 +259,9 @@ class DockerCodeExecutionService {
     }
     throw StateError('无法锁定技能脚本执行次数');
   }
+
+  String _runnerTaskId(String tenantId, String taskId) =>
+      sha256.convert(utf8.encode('$tenantId/$taskId')).toString();
 
   Future<List<String>> _saveArtifacts(
     String tenantId,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -23,12 +24,27 @@ import 'package:xiaoqi_genkit_server/src/api.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
 class _StreamingRuntime
-    implements XiaoqiAgentRuntime, XiaoqiStreamingAgentRuntime {
+    implements
+        XiaoqiAgentRuntime,
+        XiaoqiStreamingAgentRuntime,
+        XiaoqiTaskNetworkController {
   _StreamingRuntime();
 
   bool interruptFirstTurn = false;
   var turnCount = 0;
   List<ToolRequestPart>? lastRestart;
+  Completer<void>? pauseBeforeReturn;
+  Completer<void>? turnStarted;
+  final disabledNetworkTasks = <String>[];
+
+  @override
+  Future<void> disableTaskNetwork({
+    required String tenantId,
+    required String taskId,
+  }) async {
+    expect(tenantId, 'personal');
+    disabledNetworkTasks.add(taskId);
+  }
 
   @override
   Future<String> run({
@@ -113,6 +129,8 @@ class _StreamingRuntime
       ),
     );
     onProcessEvent({'type': 'tool_succeeded', 'tool': 'execute_python'});
+    turnStarted?.complete();
+    await pauseBeforeReturn?.future;
     return XiaoqiAgentTurnResult(
       text: '你好',
       messages: [
@@ -267,4 +285,141 @@ void main() {
       'authorized_network_domains': ['example.com'],
     });
   });
+
+  test(
+    'accepts ordered, idempotent steering while an agent task is running',
+    () async {
+      const taskId = 'steering-task';
+      const messageId = 'steering-message-1';
+      runtime.pauseBeforeReturn = Completer<void>();
+      runtime.turnStarted = Completer<void>();
+      final chat = ownerAgent.chat();
+      final turn = chat.sendStream(message: userMessage('请整理这份资料', taskId));
+      final streamDone = turn.stream.drain<void>();
+      await runtime.turnStarted!.future;
+
+      Future<(int, Map<String, dynamic>)> postInstruction(
+        String content,
+      ) async {
+        final client = HttpClient();
+        try {
+          final request = await client.postUrl(
+            Uri.parse(
+              'http://127.0.0.1:${server.port}/v1/agent/tasks/$taskId/instructions',
+            ),
+          );
+          request.headers
+            ..contentType = ContentType.json
+            ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
+          request.write(
+            jsonEncode({
+              'message_id': messageId,
+              'sequence': 1,
+              'content': content,
+            }),
+          );
+          final response = await request.close();
+          final body =
+              (jsonDecode(await utf8.decoder.bind(response).join()) as Map)
+                  .cast<String, dynamic>();
+          return (response.statusCode, body);
+        } finally {
+          client.close(force: true);
+        }
+      }
+
+      final accepted = await postInstruction('只整理标题和要点');
+      expect(accepted.$1, 200);
+      expect(accepted.$2['status'], 'received');
+
+      final duplicate = await postInstruction('只整理标题和要点');
+      expect(duplicate.$1, 200);
+      expect(duplicate.$2['duplicate'], isTrue);
+
+      final conflictingDuplicate = await postInstruction('改成另一条内容');
+      expect(conflictingDuplicate.$1, 409);
+
+      runtime.pauseBeforeReturn!.complete();
+      await streamDone;
+      await turn.response;
+    },
+  );
+
+  test('revokes running task network access when mode changes to off', () async {
+    const taskId = 'network-mode-task';
+    runtime.pauseBeforeReturn = Completer<void>();
+    runtime.turnStarted = Completer<void>();
+    final chat = ownerAgent.chat();
+    final turn = chat.sendStream(message: userMessage('搜索这个主题', taskId));
+    final streamDone = turn.stream.drain<void>();
+    await runtime.turnStarted!.future;
+
+    final client = HttpClient();
+    try {
+      final request = await client.postUrl(
+        Uri.parse(
+          'http://127.0.0.1:${server.port}/v1/agent/tasks/$taskId/network-mode',
+        ),
+      );
+      request.headers
+        ..contentType = ContentType.json
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
+      request.write(jsonEncode({'mode': 'off'}));
+      final response = await request.close();
+      final body = (jsonDecode(await utf8.decoder.bind(response).join()) as Map)
+          .cast<String, dynamic>();
+
+      expect(response.statusCode, 200);
+      expect(body['mode'], 'off');
+      expect(body['network_revoked'], isTrue);
+      expect(runtime.disabledNetworkTasks, [taskId]);
+      expect(store.get('task/personal/$taskId')!.value['network_mode'], 'off');
+    } finally {
+      client.close(force: true);
+      runtime.pauseBeforeReturn!.complete();
+      await streamDone;
+      await turn.response;
+    }
+  });
+
+  test(
+    'directs late steering to the next turn in the same conversation',
+    () async {
+      const taskId = 'completed-steering-task';
+      final chat = ownerAgent.chat();
+      final turn = chat.sendStream(message: userMessage('请总结这段资料', taskId));
+      await turn.stream.drain<void>();
+      final completed = await turn.response;
+      expect(completed.text, '你好');
+
+      final client = HttpClient();
+      try {
+        final request = await client.postUrl(
+          Uri.parse(
+            'http://127.0.0.1:${server.port}/v1/agent/tasks/$taskId/instructions',
+          ),
+        );
+        request.headers
+          ..contentType = ContentType.json
+          ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
+        request.write(
+          jsonEncode({
+            'message_id': 'late-steering-message',
+            'sequence': 1,
+            'content': '补充说明第二点',
+          }),
+        );
+        final response = await request.close();
+        final body =
+            (jsonDecode(await utf8.decoder.bind(response).join()) as Map)
+                .cast<String, dynamic>();
+
+        expect(response.statusCode, 409);
+        final error = body['error'];
+        expect(error is Map ? error['message'] : error, contains('下一条消息发送'));
+      } finally {
+        client.close(force: true);
+      }
+    },
+  );
 }

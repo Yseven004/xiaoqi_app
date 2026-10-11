@@ -48,6 +48,54 @@ RUNNER_PORT = int(os.environ.get("SANDBOX_RUNNER_PORT", "8090"))
 
 _docker: docker.DockerClient | None = None
 _slots = threading.BoundedSemaphore(1)
+_network_policy_lock = threading.Lock()
+_disabled_task_networks: dict[str, float] = {}
+
+
+def _task_network_is_disabled(task_id: str) -> bool:
+    now = time.monotonic()
+    with _network_policy_lock:
+        expires_at = _disabled_task_networks.get(task_id)
+        if expires_at is None:
+            return False
+        if expires_at <= now:
+            _disabled_task_networks.pop(task_id, None)
+            return False
+        return True
+
+
+def _disable_task_network(task_id: str) -> dict[str, Any]:
+    client = _get_client()
+    with _network_policy_lock:
+        # Keep the deny in place briefly so a queued execute request cannot
+        # recreate its proxy after this control request wins the race.
+        expires_at = time.monotonic() + MAX_RUN_SECONDS + 180
+        for old_task_id, old_expiry in list(_disabled_task_networks.items()):
+            if old_expiry <= time.monotonic():
+                _disabled_task_networks.pop(old_task_id, None)
+        _disabled_task_networks[task_id] = expires_at
+        proxies = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{OWNER_LABEL}=true",
+                    f"com.xiaoqi.task-id={task_id}",
+                    "com.xiaoqi.role=network-proxy",
+                ],
+            },
+        )
+        stopped = 0
+        for proxy in proxies:
+            if not str(getattr(proxy, "name", "")).startswith("xq-code-proxy-"):
+                continue
+            try:
+                proxy.reload()
+            except NotFound:
+                continue
+            if proxy.attrs.get("State", {}).get("Running"):
+                proxy.kill()
+                stopped += 1
+    return {"ok": True, "network": "off", "terminated_proxies": stopped}
 
 
 class RequestError(ValueError):
@@ -337,27 +385,34 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
             "LANG": "C.UTF-8",
         }
         if domains:
-            network = _create_task_network(client, f"xq-code-net-{suffix}", labels)
-            proxy = client.containers.create(
-                image=PROXY_IMAGE,
-                name=f"xq-code-proxy-{suffix}",
-                environment={"XIAOQI_ALLOWED_DOMAINS": json.dumps(domains)},
-                network="bridge",
-                read_only=True,
-                tmpfs={"/tmp": "rw,nosuid,nodev,size=16m"},
-                user="10001:10001",
-                cap_drop=["ALL"],
-                security_opt=["no-new-privileges:true"],
-                pids_limit=32,
-                mem_limit="64m",
-                nano_cpus=100_000_000,
-                labels=labels,
-                log_config=docker.types.LogConfig(type="json-file", config={"max-size": "64k", "max-file": "1"}),
-            )
-            network.connect(proxy, aliases=["sandbox-proxy"])
-            proxy.start()
-            if not _wait_for_proxy(proxy):
-                raise RuntimeError("服务器本机联网代理启动失败")
+            with _network_policy_lock:
+                disabled_until = _disabled_task_networks.get(task_id, 0)
+                if disabled_until <= time.monotonic():
+                    _disabled_task_networks.pop(task_id, None)
+                    disabled_until = 0
+                if disabled_until == 0:
+                    network = _create_task_network(client, f"xq-code-net-{suffix}", labels)
+                    proxy = client.containers.create(
+                        image=PROXY_IMAGE,
+                        name=f"xq-code-proxy-{suffix}",
+                        environment={"XIAOQI_ALLOWED_DOMAINS": json.dumps(domains)},
+                        network="bridge",
+                        read_only=True,
+                        tmpfs={"/tmp": "rw,nosuid,nodev,size=16m"},
+                        user="10001:10001",
+                        cap_drop=["ALL"],
+                        security_opt=["no-new-privileges:true"],
+                        pids_limit=32,
+                        mem_limit="64m",
+                        nano_cpus=100_000_000,
+                        labels={**labels, "com.xiaoqi.role": "network-proxy"},
+                        log_config=docker.types.LogConfig(type="json-file", config={"max-size": "64k", "max-file": "1"}),
+                    )
+                    network.connect(proxy, aliases=["sandbox-proxy"])
+                    proxy.start()
+            if proxy is not None:
+                if not _wait_for_proxy(proxy) and not _task_network_is_disabled(task_id):
+                    raise RuntimeError("服务器本机联网代理启动失败")
             environment.update({
                 "HTTP_PROXY": "http://sandbox-proxy:3128",
                 "HTTPS_PROXY": "http://sandbox-proxy:3128",
@@ -438,6 +493,8 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
                     resource.remove(force=True)
             except DockerException:
                 cleanup_pending = True
+        with _network_policy_lock:
+            _disabled_task_networks.pop(task_id, None)
 
     return {
         "type": "result",
@@ -523,7 +580,11 @@ class RunnerHandler(BaseHTTPRequestHandler):
             self._json_response(503, {"status": "unavailable"})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/execute":
+        disable_match = re.fullmatch(
+            r"/v1/tasks/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/network/off",
+            self.path,
+        )
+        if self.path != "/v1/execute" and disable_match is None:
             self._json_response(404, {"error": "not found"})
             return
         if not _authorized(self):
@@ -543,6 +604,17 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 raise RequestError("沙箱请求格式无效")
         except (json.JSONDecodeError, UnicodeDecodeError, RequestError) as error:
             self._json_response(400, {"error": str(error)})
+            return
+        if disable_match is not None:
+            task_id = disable_match.group(1)
+            if request.get("task_id") != task_id:
+                self._json_response(400, {"error": "task ID does not match request path"})
+                return
+            try:
+                result = _disable_task_network(task_id)
+                self._json_response(200, result)
+            except (DockerException, RuntimeError) as error:
+                self._json_response(503, {"error": str(error)[:300]})
             return
         if not _slots.acquire(timeout=180):
             self._json_response(429, {"error": "服务器代码沙箱正在处理其他任务，请稍后重试"})

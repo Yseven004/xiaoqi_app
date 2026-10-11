@@ -42,6 +42,12 @@ import 'store.dart';
 
 const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
 
+String _networkMode(Object? value) => switch (value?.toString()) {
+  'on' => 'on',
+  'off' => 'off',
+  _ => 'auto',
+};
+
 ({String code, String message, String details}) _taskFailurePresentation(
   Object error, {
   required bool imageGeneration,
@@ -388,6 +394,20 @@ class XiaoqiApi {
         ),
       )
       ..post(
+        '/v1/agent/tasks/<id>/network-mode',
+        (request, id) => _authenticated(
+          request,
+          (device) => _setAgentTaskNetworkMode(request, device, id),
+        ),
+      )
+      ..post(
+        '/v1/agent/tasks/<id>/instructions',
+        (request, id) => _authenticated(
+          request,
+          (device) => _sendAgentTaskInstruction(request, device, id),
+        ),
+      )
+      ..post(
         '/v1/agent/tasks/<id>/resume',
         (request, id) =>
             _authenticated(request, (device) => _resumeTask(device, id)),
@@ -490,7 +510,12 @@ class XiaoqiApi {
 
       final request = Map<String, dynamic>.from(cleanConfig)
         ..['remote_agent'] = true;
-      _ensureRemoteAgentTask(tenantId, taskId, context['device_id']);
+      _ensureRemoteAgentTask(
+        tenantId,
+        taskId,
+        context['device_id'],
+        request['network_mode'],
+      );
       session.updateCustom((_) => {'agent_process': <Map<String, dynamic>>[]});
 
       void addProcessEvent(Map<String, Object?> rawEvent) {
@@ -600,6 +625,42 @@ class XiaoqiApi {
       }
 
       final resultMessages = result.messages.toList();
+      final webSources =
+          (store.get('task/$tenantId/$taskId')?.value['web_sources'] as List? ??
+                  const [])
+              .whereType<Map>()
+              .map((source) => Map<String, Object?>.from(source))
+              .where(
+                (source) =>
+                    source['url'] is String && source['title'] is String,
+              )
+              .toList(growable: false);
+      if (webSources.isNotEmpty &&
+          result.finishReason != AgentFinishReason.interrupted) {
+        final lastModelIndex = resultMessages.lastIndexWhere(
+          (message) => message.role == Role.model,
+        );
+        if (lastModelIndex >= 0) {
+          final lastModel = resultMessages[lastModelIndex];
+          final citations = webSources
+              .map((source) {
+                final title = (source['title']?.toString() ?? '网页来源')
+                    .replaceAll(RegExp(r'[\[\]()]'), ' ')
+                    .replaceAll('\n', ' ');
+                final url = source['url']!.toString();
+                return '- [$title](<$url>)';
+              })
+              .join('\n');
+          resultMessages[lastModelIndex] = Message(
+            role: lastModel.role,
+            content: [
+              ...lastModel.content,
+              TextPart(text: '\n\n参考来源：\n$citations'),
+            ],
+            metadata: lastModel.metadata,
+          );
+        }
+      }
       final latestResultUserIndex = resultMessages.lastIndexWhere(
         (message) => message.role == Role.user,
       );
@@ -639,6 +700,7 @@ class XiaoqiApi {
     String tenantId,
     String taskId,
     Object? deviceId,
+    Object? rawNetworkMode,
   ) {
     final key = 'task/$tenantId/$taskId';
     final current = store.get(key);
@@ -654,8 +716,10 @@ class XiaoqiApi {
       'device_id': deviceId,
       'remote_agent_turn': true,
       'status': 'running',
+      'network_mode': _networkMode(rawNetworkMode),
       'authorized_network_domains': <String>[],
       'requested_network_domains': <String>[],
+      'steering_instructions': <Map<String, dynamic>>[],
       'artifacts': <Map<String, dynamic>>[],
       'created_at': _now(),
       'updated_at': _now(),
@@ -725,6 +789,7 @@ class XiaoqiApi {
         'tool_succeeded' => '${event['tool'] ?? '工具'}已完成',
         'tool_failed' => '${event['tool'] ?? '工具'}遇到问题',
         'image_generation_started' => '正在生成图片',
+        'steering_applied' => '正在应用补充指令',
         _ => '正在处理',
       };
 
@@ -1510,6 +1575,160 @@ class XiaoqiApi {
       return _error(error.message, 400);
     } on Object {
       return _error('授权联网失败', 503);
+    }
+  }
+
+  Future<Response> _setAgentTaskNetworkMode(
+    Request request,
+    _Device device,
+    String id,
+  ) async {
+    try {
+      final body = await _body(request, 1024);
+      final mode = _networkMode(body['mode']);
+      if (body['mode'] != mode) return _error('联网模式无效', 400);
+      final taskId = _safeId(id, '任务 ID');
+      final key = 'task/${device.tenant}/$taskId';
+      final current = store.get(key);
+      if (current == null || current.value['remote_agent_turn'] != true) {
+        return _error('Agent 任务不存在', 404);
+      }
+      if (!const {'queued', 'running'}.contains(current.value['status'])) {
+        return _error('任务已结束，无法修改联网模式', 409);
+      }
+      _mutateTask(
+        key,
+        (value) => {...value, 'network_mode': mode, 'updated_at': _now()},
+      );
+      _appendEvent(key, {'type': 'network_mode', 'mode': mode});
+      if (mode == 'off') {
+        final controller = runtime;
+        if (controller is! XiaoqiTaskNetworkController) {
+          _appendEvent(key, {
+            'type': 'network_revocation_failed',
+            'reason': 'runtime_control_unavailable',
+          });
+          return _json({
+            'ok': false,
+            'mode': mode,
+            'network_revoked': false,
+            'error': '联网模式已关闭，但服务不支持撤销运行中脚本的公网代理',
+          }, 503);
+        }
+        try {
+          await (controller as XiaoqiTaskNetworkController).disableTaskNetwork(
+            tenantId: device.tenant,
+            taskId: taskId,
+          );
+        } on Object {
+          _appendEvent(key, {
+            'type': 'network_revocation_failed',
+            'reason': 'sandbox_control_failed',
+          });
+          return _json({
+            'ok': false,
+            'mode': mode,
+            'network_revoked': false,
+            'error': '联网模式已关闭，但运行中脚本的公网代理未能撤销',
+          }, 503);
+        }
+        _appendEvent(key, {
+          'type': 'network_revoked',
+          'mode': mode,
+          'scope': 'running_script_proxy',
+        });
+      }
+      return _json({
+        'ok': true,
+        'mode': mode,
+        if (mode == 'off') 'network_revoked': true,
+      });
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('更新任务联网模式失败', 503);
+    }
+  }
+
+  Future<Response> _sendAgentTaskInstruction(
+    Request request,
+    _Device device,
+    String id,
+  ) async {
+    try {
+      final body = await _body(request, 8192);
+      final taskId = _safeId(id, '任务 ID');
+      final messageId = _safeId(body['message_id'], '消息 ID');
+      final sequence = body['sequence'] is num
+          ? (body['sequence'] as num).toInt()
+          : 0;
+      final content = body['content']?.toString().trim() ?? '';
+      if (sequence < 1 || content.isEmpty || content.length > 4000) {
+        return _error('补充指令无效或超过 4000 字', 400);
+      }
+      final key = 'task/${device.tenant}/$taskId';
+      final current = store.get(key);
+      if (current == null || current.value['remote_agent_turn'] != true) {
+        return _error('Agent 任务不存在', 404);
+      }
+      if (!const {'queued', 'running'}.contains(current.value['status'])) {
+        return _error('任务已结束；请将补充内容作为下一条消息发送', 409);
+      }
+      final instructions =
+          (current.value['steering_instructions'] as List? ?? const [])
+              .whereType<Map>()
+              .map((item) => Map<String, dynamic>.from(item))
+              .toList();
+      final duplicate = instructions
+          .where((item) => item['message_id'] == messageId)
+          .firstOrNull;
+      if (duplicate != null) {
+        if (duplicate['content'] != content ||
+            duplicate['sequence'] != sequence) {
+          return _error('消息 ID 已用于其他补充指令', 409);
+        }
+        return _json({
+          'ok': true,
+          'status': duplicate['status'] ?? 'received',
+          'sequence': sequence,
+          'duplicate': true,
+        });
+      }
+      final latestSequence = instructions.fold<int>(
+        0,
+        (latest, item) => max(
+          latest,
+          item['sequence'] is num ? (item['sequence'] as num).toInt() : 0,
+        ),
+      );
+      if (sequence != latestSequence + 1) {
+        return _error('补充指令顺序已变化，请重试', 409);
+      }
+      final instruction = <String, dynamic>{
+        'message_id': messageId,
+        'sequence': sequence,
+        'content': content,
+        'status': 'received',
+        'created_at': _now(),
+      };
+      _mutateTask(
+        key,
+        (value) => {
+          ...value,
+          'steering_instructions': [...instructions, instruction],
+          'updated_at': _now(),
+        },
+      );
+      _appendEvent(key, {
+        'type': 'steering_received',
+        'message_id': messageId,
+        'sequence': sequence,
+      });
+      return _json({'ok': true, 'status': 'received', 'sequence': sequence});
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('发送补充指令失败', 503);
     }
   }
 

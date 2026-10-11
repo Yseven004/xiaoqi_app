@@ -11,6 +11,10 @@ void main() {
   late CloudStore store;
   late File worker;
 
+  String pythonExecutable() =>
+      Platform.environment['XIAOQI_TEST_PYTHON'] ??
+      (Platform.isWindows ? 'python' : 'python3');
+
   setUp(() {
     directory = Directory.systemTemp.createTempSync('xiaoqi-code-test-');
     store = CloudStore(root: directory.path);
@@ -43,7 +47,7 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
     () async {
       final service = DockerCodeExecutionService(
         store,
-        pythonExecutable: Platform.isWindows ? 'python' : 'python3',
+        pythonExecutable: pythonExecutable(),
         workerPath: worker.path,
       );
       final output = await service.execute(
@@ -75,7 +79,7 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   test('limits a skill script to one execution per task', () async {
     final service = DockerCodeExecutionService(
       store,
-      pythonExecutable: Platform.isWindows ? 'python' : 'python3',
+      pythonExecutable: pythonExecutable(),
       workerPath: worker.path,
     );
     Future<String> runScript() => service.execute(
@@ -94,5 +98,23 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
 
     await runScript();
     await expectLater(runScript(), throwsA(isA<StateError>()));
+  });
+
+  test('asks the runner to revoke an active task network proxy', () async {
+    worker.writeAsStringSync('''
+import json
+import sys
+request = json.loads(sys.stdin.readline())
+assert request["action"] == "disable_network"
+assert len(request["task_id"]) == 64
+print(json.dumps({"type": "result", "ok": True, "network": "off"}), flush=True)
+''');
+    final service = DockerCodeExecutionService(
+      store,
+      pythonExecutable: pythonExecutable(),
+      workerPath: worker.path,
+    );
+
+    await service.disableNetwork(tenantId: 'personal', taskId: 'task-code');
   });
 }

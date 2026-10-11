@@ -8,7 +8,9 @@ dependencies:
   archive: ^4.3.0
   crypto: ^3.0.7
   genkit: 1.0.0
+  genkit_a2ui: 0.4.0
   genkit_mcp: 1.0.0
+  genkit_middleware: 1.0.0
   genkit_openai: 1.0.0
   genkit_shelf: 1.0.0
   http: ^1.6.0

@@ -177,11 +177,27 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.0"
+  genkit_a2ui:
+    dependency: "direct main"
+    description:
+      name: genkit_a2ui
+      sha256: f5fea7457cbe15437fc1e475eccd351b8af444343be772cfece76f56e7f1f9c0
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.4.0"
   genkit_mcp:
     dependency: "direct main"
     description:
       name: genkit_mcp
       sha256: c237210706875930e447b8473e48e9476f8e68cf76e5e1dc9bbf8cb9af5dd66d
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.0"
+  genkit_middleware:
+    dependency: "direct main"
+    description:
+      name: genkit_middleware
+      sha256: "145ae6dd369ca9395a7929d4472454d464b877bf8b52bf41188a636e5e4fd77b"
       url: "https://pub.dev"
     source: hosted
     version: "1.0.0"

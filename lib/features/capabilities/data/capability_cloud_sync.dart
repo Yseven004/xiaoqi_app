@@ -601,7 +601,8 @@ class CapabilityCloudSync {
 
   genkit_client.AgentApi<Map<String, dynamic>> createRemoteAgent() =>
       _remoteAgent ??= genkit_client.remoteAgent<Map<String, dynamic>>(
-        url: '$_baseUrl/v1/agent/chat',
+        // _baseUrl already includes /v1, like the other capability endpoints.
+        url: '$_baseUrl/agent/chat',
         headers: () async => _headers(await _requireToken()),
       );
 
@@ -839,6 +840,59 @@ class CapabilityCloudSync {
       body: jsonEncode({'domains': domains}),
     );
     _checked(response);
+  }
+
+  Future<bool> updateAgentTaskNetworkMode(String taskId, String mode) async {
+    if (!const {'auto', 'on', 'off'}.contains(mode)) {
+      throw const FormatException('联网模式无效');
+    }
+    final token = await _requireToken();
+    for (var attempt = 0; attempt < 6; attempt++) {
+      final response = await _client.post(
+        Uri.parse('$_baseUrl/agent/tasks/$taskId/network-mode'),
+        headers: _headers(token),
+        body: jsonEncode({'mode': mode}),
+      );
+      if (response.statusCode == 404 && attempt < 5) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        continue;
+      }
+      if (response.statusCode == 409 &&
+          _errorMessage(_decode(response), '云端请求失败').startsWith('任务已结束')) {
+        return false;
+      }
+      _checked(response);
+      return true;
+    }
+    throw StateError('同步联网模式失败');
+  }
+
+  Future<bool> sendAgentTaskSteering({
+    required String taskId,
+    required String messageId,
+    required int sequence,
+    required String content,
+  }) async {
+    final text = content.trim();
+    if (text.isEmpty || text.length > 4000 || sequence < 1) {
+      throw const FormatException('补充指令无效或超过 4000 字');
+    }
+    final token = await _requireToken();
+    final response = await _client.post(
+      Uri.parse('$_baseUrl/agent/tasks/$taskId/instructions'),
+      headers: _headers(token),
+      body: jsonEncode({
+        'message_id': messageId,
+        'sequence': sequence,
+        'content': text,
+      }),
+    );
+    if (response.statusCode == 409 &&
+        _errorMessage(_decode(response), '云端请求失败').startsWith('任务已结束')) {
+      return false;
+    }
+    _checked(response);
+    return true;
   }
 
   Future<void> resumeTask(String taskId) async {

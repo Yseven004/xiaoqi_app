@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -35,19 +36,48 @@ def main() -> int:
         return 1
 
     payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    disable_network = request.get("action") == "disable_network"
+    task_id = request.get("task_id")
+    if disable_network and (
+        not isinstance(task_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", task_id)
+    ):
+        _emit({"type": "result", "ok": False, "error": "任务 ID 无效"})
+        return 1
+    endpoint = (
+        f"{base_url}/v1/tasks/{task_id}/network/off"
+        if disable_network
+        else f"{base_url}/v1/execute"
+    )
     outgoing = urllib.request.Request(
-        f"{base_url}/v1/execute",
+        endpoint,
         data=payload,
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            "Accept": "application/x-ndjson",
+            "Accept": "application/json" if disable_network else "application/x-ndjson",
         },
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(outgoing, timeout=270) as response:
+        with opener.open(outgoing, timeout=30 if disable_network else 270) as response:
+            if disable_network:
+                try:
+                    result = json.loads(response.read(1024 * 1024))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    result = {"ok": False, "error": "本机 Docker 沙箱返回了无效的联网控制响应"}
+                if not isinstance(result, dict) or result.get("ok") is not True:
+                    _emit({
+                        "type": "result",
+                        "ok": False,
+                        "error": result.get("error", "无法撤销运行中脚本的公网代理")
+                        if isinstance(result, dict)
+                        else "本机 Docker 沙箱返回了无效的联网控制响应",
+                    })
+                    return 1
+                _emit({"type": "result", "ok": True, **result})
+                return 0
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:

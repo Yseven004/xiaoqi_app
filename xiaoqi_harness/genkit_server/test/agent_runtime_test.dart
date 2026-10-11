@@ -64,7 +64,7 @@ void main() {
     },
   );
 
-  test('keeps ordinary conversation away from optional tools', () {
+  test('does not infer tool availability from user keywords', () {
     expect(
       agentToolNamesForRequest(latestUserText: '你好，讲解一下马斯克第一性原理'),
       isEmpty,
@@ -73,29 +73,37 @@ void main() {
     expect(agentToolNamesForRequest(latestUserText: '请问可以生成图片吗？'), isEmpty);
   });
 
-  test('only exposes image generation for explicit image requests', () {
-    expect(agentToolNamesForRequest(latestUserText: '帮我做一张动漫风景图片'), isEmpty);
-    expect(
-      agentToolNamesForRequest(
-        latestUserText: '解释光合作用并配图',
-        imageGenerationRequested: true,
-      ),
-      ['generate_image'],
+  test('exposes configured tools regardless of the current user wording', () {
+    final ordinary = agentToolNamesForRequest(
+      latestUserText: '你好，讲解一下第一性原理',
+      imageGenerationAvailable: true,
+      codeExecutionAvailable: true,
+      webSearchAvailable: true,
+      skillsAvailable: true,
     );
-    expect(
-      agentToolNamesForRequest(latestUserText: '普通问答'),
-      isNot(contains('generate_image')),
+    final codeQuestion = agentToolNamesForRequest(
+      latestUserText: 'Python 是什么？',
+      imageGenerationAvailable: true,
+      codeExecutionAvailable: true,
+      webSearchAvailable: true,
+      skillsAvailable: true,
     );
-    expect(agentToolNamesForRequest(latestUserText: '运行这段 Python 代码'), [
+    expect(ordinary, [
       'execute_python',
+      'generate_image',
+      'execute_skill_script',
+      'read_skill_resource',
+      'web_search',
+      'use_skill',
     ]);
+    expect(codeQuestion, ordinary);
     expect(
       agentToolNamesForRequest(
-        latestUserText: '按选中的技能处理',
-        capabilitySelected: true,
-        skillHasScripts: true,
+        latestUserText: '普通问答',
+        imageGenerationAvailable: false,
+        codeExecutionAvailable: false,
       ),
-      ['execute_python', 'execute_skill_script'],
+      isEmpty,
     );
   });
 

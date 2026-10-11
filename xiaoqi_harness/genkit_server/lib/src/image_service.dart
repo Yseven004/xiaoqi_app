@@ -34,6 +34,14 @@ class ImageService {
   final String? _model;
   final Duration _apiTimeout;
 
+  bool get isConfigured =>
+      (_apiKey ?? Platform.environment['ARK_API_KEY'] ?? '').isNotEmpty;
+
+  String get modelId =>
+      _model ??
+      Platform.environment['ARK_IMAGE_MODEL'] ??
+      'doubao-seedream-5-0-260128';
+
   Future<Map<String, dynamic>> generate({
     required String taskId,
     required String prompt,

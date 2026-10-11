@@ -200,6 +200,7 @@ class AiConversationRecord {
     this.webSources = const [],
     this.modelId,
     this.reasoningLevel,
+    this.networkMode = 'auto',
     this.titleRevision = -1,
   }) : nodes = nodes == null
            ? List<AiConversationMessage>.unmodifiable(
@@ -224,6 +225,9 @@ class AiConversationRecord {
   final List<AiWebSource> webSources;
   final String? modelId;
   final String? reasoningLevel;
+
+  /// Per-conversation web access policy: auto, on, or off.
+  final String networkMode;
 
   /// -1 marks records saved before automatic titles, 0 is eligible,
   /// 1 is an attempted title request, and 2+ is a finalized title.
@@ -583,6 +587,11 @@ class AiConversationRecord {
           : const [],
       modelId: raw['model_id']?.toString(),
       reasoningLevel: raw['reasoning_level']?.toString(),
+      networkMode: switch (raw['network_mode']?.toString()) {
+        'on' => 'on',
+        'off' => 'off',
+        _ => 'auto',
+      },
       titleRevision: raw['title_revision'] is int
           ? raw['title_revision'] as int
           : -1,
@@ -598,6 +607,7 @@ class AiConversationRecord {
     List<AiWebSource>? webSources,
     String? modelId,
     String? reasoningLevel,
+    String? networkMode,
     List<AiConversationMessage>? nodes,
     Map<String, String>? selectedChildren,
     int? titleRevision,
@@ -624,6 +634,7 @@ class AiConversationRecord {
       webSources: webSources ?? this.webSources,
       modelId: modelId ?? this.modelId,
       reasoningLevel: reasoningLevel ?? this.reasoningLevel,
+      networkMode: networkMode ?? this.networkMode,
       titleRevision: titleRevision ?? this.titleRevision,
     );
   }
@@ -644,6 +655,7 @@ class AiConversationRecord {
     'web_sources': webSources.map((source) => source.toJson()).toList(),
     'model_id': modelId,
     'reasoning_level': reasoningLevel,
+    'network_mode': networkMode,
     'title_revision': titleRevision,
   };
 

@@ -21,6 +21,8 @@ class SkillsPluginsComposerControls extends StatefulWidget {
     this.onRequestLogin,
     required this.isSignedIn,
     required this.onSessionChanged,
+    required this.networkMode,
+    required this.onNetworkModeChanged,
     this.reviewDraft,
     this.leadingControl,
     super.key,
@@ -36,6 +38,8 @@ class SkillsPluginsComposerControls extends StatefulWidget {
   final Future<bool> Function()? onRequestLogin;
   final bool isSignedIn;
   final ValueChanged<bool> onSessionChanged;
+  final String networkMode;
+  final ValueChanged<String> onNetworkModeChanged;
   final Widget? leadingControl;
 
   @override
@@ -401,12 +405,11 @@ class _SkillsPluginsComposerControlsState
             '可视化呈现任何内容',
             () => _selectAction('create-image', '创建图像'),
           ),
-          _featureRow(
-            'web_search',
-            '联网搜索',
-            '联网查找实时资料和信息',
-            () => _showStatus('联网搜索入口已保留，尚未开放'),
-          ),
+          _featureRow('web_search', '联网搜索', switch (widget.networkMode) {
+            'on' => '已开启：优先搜索实时资料',
+            'off' => '已关闭：本会话不访问网页',
+            _ => '按需联网：回答需要实时信息时搜索',
+          }, _cycleNetworkMode),
           _featureRow(
             'brush',
             '绘图',
@@ -449,6 +452,16 @@ class _SkillsPluginsComposerControlsState
         ],
       ),
     );
+  }
+
+  void _cycleNetworkMode() {
+    final next = switch (widget.networkMode) {
+      'auto' => 'on',
+      'on' => 'off',
+      _ => 'auto',
+    };
+    widget.onNetworkModeChanged(next);
+    _closeMenu();
   }
 
   Widget _managePanel() {
@@ -768,6 +781,17 @@ class _SkillsPluginsComposerControlsState
                     onTap: _toggleMenu,
                   ),
                 ),
+              ),
+              const SizedBox(width: 8),
+              _pill(
+                label: switch (widget.networkMode) {
+                  'on' => '联网已开',
+                  'off' => '联网关闭',
+                  _ => '联网按需',
+                },
+                icon: 'web_search',
+                expanded: false,
+                onTap: _cycleNetworkMode,
               ),
               const SizedBox(width: 8),
               _pill(
