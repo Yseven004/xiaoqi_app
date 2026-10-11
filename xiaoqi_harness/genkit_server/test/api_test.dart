@@ -129,6 +129,27 @@ void main() {
     expect(response.statusCode, 401);
   });
 
+  test('defaults new and legacy auto agent tasks to network off', () async {
+    Future<void> createTask(String taskId, {String? networkMode}) async {
+      final body = <String, Object?>{
+        'task_id': taskId,
+        'messages': [
+          {'role': 'user', 'content': '你好'},
+        ],
+        'model_id': 'deepseek-flash',
+        'reasoning_level': 'medium',
+        'materials': [],
+        if (networkMode != null) 'network_mode': networkMode,
+      };
+      final response = await call('POST', '/v1/agent/tasks', body: body);
+      expect(response.statusCode, 202);
+      expect(store.get('task/personal/$taskId')!.value['network_mode'], 'off');
+    }
+
+    await createTask('task-network-default');
+    await createTask('task-network-legacy', networkMode: 'auto');
+  });
+
   test('requires owner device authentication for chat completions', () async {
     final response = await call(
       'POST',

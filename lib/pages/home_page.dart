@@ -193,6 +193,19 @@ String _agentToolLabel(String name) => switch (name) {
   _ => name,
 };
 
+String _agentProcessEventLabel(Map<String, Object?> event) {
+  final tool = event['temporary_network'] == true
+      ? '为${event['capability_name'] ?? '技能'}临时联网'
+      : _agentToolLabel(event['tool']?.toString() ?? '工具');
+  final status = switch (event['type']) {
+    'tool_succeeded' => '已完成',
+    'tool_failed' => '遇到问题',
+    'image_generation_started' => '开始生成',
+    _ => '进行中',
+  };
+  return '$tool · $status';
+}
+
 String? _safeAgentTaskDetails(Object error) {
   final details = error
       .toString()
@@ -1240,7 +1253,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _setNetworkMode(String mode) {
-    if (!const {'auto', 'on', 'off'}.contains(mode)) return;
+    if (!const {'on', 'off'}.contains(mode)) return;
     final current =
         _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
     if (current.networkMode == mode) return;
@@ -1616,13 +1629,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final rawText = _composerController.messageText;
     final text = rawText.trim();
-    if (RegExp(r'^(不再联网|不要再联网|停止联网|关闭联网|别再联网|不要联网)').hasMatch(text)) {
-      _setNetworkMode('off');
-    } else if (RegExp(
-      r'^(开启|打开|继续使用|继续).{0,8}(联网|联网搜索)|^联网搜索',
-    ).hasMatch(text)) {
-      _setNetworkMode('on');
-    }
     final selectedCapability = _composerController.messageMetadata();
     _normalizeCapabilityTextOffset(selectedCapability, rawText, text);
     final capabilityForMessage = selectedCapability ?? _activeSkillWorkflow;
@@ -1842,28 +1848,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final messageId = _pendingAgentSteeringMessageId!;
     final sequence = _pendingAgentSteeringSequence!;
-    final networkMode =
-        RegExp(r'^(不再联网|不要再联网|停止联网|关闭联网|别再联网|不要联网)').hasMatch(text)
-        ? 'off'
-        : RegExp(r'^(开启|打开|继续使用|继续).{0,8}(联网|联网搜索)|^联网搜索').hasMatch(text)
-        ? 'on'
-        : null;
     try {
-      var taskStillRunning = true;
-      if (networkMode != null) {
-        _setNetworkMode(networkMode);
-        taskStillRunning = await CapabilityCloudSync.instance
-            .updateAgentTaskNetworkMode(taskId, networkMode);
-      }
-      if (taskStillRunning) {
-        taskStillRunning = await CapabilityCloudSync.instance
-            .sendAgentTaskSteering(
-              taskId: taskId,
-              messageId: messageId,
-              sequence: sequence,
-              content: text,
-            );
-      }
+      var taskStillRunning = await CapabilityCloudSync.instance
+          .sendAgentTaskSteering(
+            taskId: taskId,
+            messageId: messageId,
+            sequence: sequence,
+            content: text,
+          );
       if (!taskStillRunning) {
         if (conversationId == null) {
           throw StateError('无法确定补充指令所属的会话');
@@ -2229,7 +2221,7 @@ $materialIndex
       'task_id': taskId,
       'model_id': modelId,
       'reasoning_level': reasoningLevel,
-      'network_mode': _conversation?.networkMode ?? 'auto',
+      'network_mode': _conversation?.networkMode ?? 'off',
       if (capability case final selectedCapability?)
         'capability': selectedCapability,
       'materials': materials,
@@ -3242,8 +3234,12 @@ $text''';
     final tools = <String>{};
     for (final event in _agentStreamPresentation.value.events) {
       if (event['type'] == 'tool_started') {
-        final name = event['tool']?.toString();
-        if (name != null && name.isNotEmpty) tools.add(_agentToolLabel(name));
+        if (event['temporary_network'] == true) {
+          tools.add('${event['capability_name'] ?? '技能'}临时联网');
+        } else {
+          final name = event['tool']?.toString();
+          if (name != null && name.isNotEmpty) tools.add(_agentToolLabel(name));
+        }
       }
     }
     return tools.isEmpty ? '回复已完成' : '已使用${tools.take(3).join('、')}';
@@ -5664,7 +5660,7 @@ $text''';
                                             modelSelection: _selectedModel,
                                             networkMode:
                                                 _conversation?.networkMode ??
-                                                'auto',
+                                                'off',
                                             onNetworkModeChanged:
                                                 _setNetworkMode,
                                             onCapabilitySelected: (capability) {
@@ -7269,12 +7265,7 @@ class _AgentProcessPanel extends StatelessWidget {
                           const SizedBox(width: 6),
                           Expanded(
                             child: Text(
-                              '${_agentToolLabel(event['tool']?.toString() ?? '工具')} · ${switch (event['type']) {
-                                'tool_succeeded' => '已完成',
-                                'tool_failed' => '遇到问题',
-                                'image_generation_started' => '开始生成',
-                                _ => '进行中',
-                              }}',
+                              _agentProcessEventLabel(event),
                               style: TextStyle(
                                 color: colorScheme.onSurfaceVariant,
                                 fontSize: 11,

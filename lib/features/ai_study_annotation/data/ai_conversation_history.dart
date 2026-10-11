@@ -200,7 +200,7 @@ class AiConversationRecord {
     this.webSources = const [],
     this.modelId,
     this.reasoningLevel,
-    this.networkMode = 'auto',
+    this.networkMode = 'off',
     this.titleRevision = -1,
   }) : nodes = nodes == null
            ? List<AiConversationMessage>.unmodifiable(
@@ -226,7 +226,7 @@ class AiConversationRecord {
   final String? modelId;
   final String? reasoningLevel;
 
-  /// Per-conversation web access policy: auto, on, or off.
+  /// Per-conversation web access policy: on or off.
   final String networkMode;
 
   /// -1 marks records saved before automatic titles, 0 is eligible,
@@ -589,8 +589,7 @@ class AiConversationRecord {
       reasoningLevel: raw['reasoning_level']?.toString(),
       networkMode: switch (raw['network_mode']?.toString()) {
         'on' => 'on',
-        'off' => 'off',
-        _ => 'auto',
+        _ => 'off',
       },
       titleRevision: raw['title_revision'] is int
           ? raw['title_revision'] as int

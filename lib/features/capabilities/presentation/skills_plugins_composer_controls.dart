@@ -282,6 +282,76 @@ class _SkillsPluginsComposerControlsState
     ),
   );
 
+  Widget _networkFeatureRow() {
+    final enabled = widget.networkMode == 'on';
+    void toggle() => widget.onNetworkModeChanged(enabled ? 'off' : 'on');
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: toggle,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 34,
+                        child: Center(child: _icon('web_search', size: 29)),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              '联网搜索',
+                              style: TextStyle(
+                                color: Color(0xFF111111),
+                                fontSize: 16,
+                                height: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              enabled
+                                  ? '优先搜索实时资料'
+                                  : '技能需要时可临时联网',
+                              style: const TextStyle(
+                                color: Color(0xFF758099),
+                                fontSize: 13,
+                                height: 1.25,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          MergeSemantics(
+            child: Semantics(
+              label: '联网搜索',
+              child: Switch(
+                value: enabled,
+                onChanged: (value) =>
+                    widget.onNetworkModeChanged(value ? 'on' : 'off'),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _recordRow(
     CapabilityRecord record, {
     required bool managing,
@@ -405,11 +475,7 @@ class _SkillsPluginsComposerControlsState
             '可视化呈现任何内容',
             () => _selectAction('create-image', '创建图像'),
           ),
-          _featureRow('web_search', '联网搜索', switch (widget.networkMode) {
-            'on' => '已开启：优先搜索实时资料',
-            'off' => '已关闭：本会话不访问网页',
-            _ => '按需联网：回答需要实时信息时搜索',
-          }, _cycleNetworkMode),
+          _networkFeatureRow(),
           _featureRow(
             'brush',
             '绘图',
@@ -452,16 +518,6 @@ class _SkillsPluginsComposerControlsState
         ],
       ),
     );
-  }
-
-  void _cycleNetworkMode() {
-    final next = switch (widget.networkMode) {
-      'auto' => 'on',
-      'on' => 'off',
-      _ => 'auto',
-    };
-    widget.onNetworkModeChanged(next);
-    _closeMenu();
   }
 
   Widget _managePanel() {
@@ -781,17 +837,6 @@ class _SkillsPluginsComposerControlsState
                     onTap: _toggleMenu,
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              _pill(
-                label: switch (widget.networkMode) {
-                  'on' => '联网已开',
-                  'off' => '联网关闭',
-                  _ => '联网按需',
-                },
-                icon: 'web_search',
-                expanded: false,
-                onTap: _cycleNetworkMode,
               ),
               const SizedBox(width: 8),
               _pill(

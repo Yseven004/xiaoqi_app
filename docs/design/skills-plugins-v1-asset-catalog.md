@@ -13,7 +13,7 @@
 | 最终 SVG | 上游图标 / 来源 | viewBox | 计划显示尺寸 | 状态映射 | 消费组件 |
 |---|---|---:|---:|---|---|
 | assets/icons/capabilities/image.svg | 用户原型图标裁图 `codex-clipboard-78ddc408-6a3d-40b5-a7b8-bcff49403057.png`：相框、圆点与山形，按轮廓重绘 | 0 0 24 24 | 29 dp | 常态 | 创建图像入口 |
-| assets/icons/capabilities/web_search.svg | 用户原型中的地球图标，按经纬线轮廓重绘；本次按用户要求移除放大镜 | 0 0 24 24 | 29 dp（预览 64×64） | 常态 | 联网搜索入口 |
+| assets/icons/capabilities/web_search.svg | 用户原型中的地球图标，按经纬线轮廓重绘；本次按用户要求移除放大镜 | 0 0 24 24 | 29 dp（预览 64×64） | 常态；启用状态由右侧原生 Switch 表示 | 联网搜索菜单行 |
 | assets/icons/capabilities/brush.svg | 用户原型图标裁图 `codex-clipboard-78ddc408-6a3d-40b5-a7b8-bcff49403057.png`：细线斜置铅笔，按轮廓重绘 | 0 0 24 24 | 29 dp | 常态 | 绘图入口 |
 | assets/icons/capabilities/auto_stories.svg | auto_stories — [Google SVG](https://fonts.gstatic.com/s/i/materialiconsoutlined/auto_stories/v12/24px.svg) | 0 0 24 24 | 28–32 dp | 技能常态 | 技能分组行 |
 | assets/icons/capabilities/description.svg | description — [Google SVG](https://fonts.gstatic.com/s/i/materialiconsoutlined/description/v12/24px.svg) | 0 0 24 24 | 28–32 dp | 插件常态 | 插件分组行 |
@@ -40,3 +40,5 @@
 | 用户冻结菜单截图（当前聊天附件） | [skills-plugins-v1-review.svg](skills-plugins-v1-review.svg)；第二张截图确认输入框上方轻量面板与黑白灰色调 | 0 0 1240 540 | 交互样稿已按确认稿调整；页面仍待同 viewport 视觉验收 | `SkillsPluginsComposerControls`、`_HomeComposer` |
 
 菜单五项图标均按 80×80 独立预览；功能菜单图标按 29 dp 显示，管理图标 26 dp。“创建技能 / 插件”功能行和底部胶囊保留拼图图标；已保存能力条目、输入标签和已发送消息标签使用侧边栏扳手图标，能力条目和内联标签中的扳手均为 18 dp。输入标签和消息气泡中的能力名称使用浅粉色强调，菜单标题保留原色。MCP 胶囊保持与阅读任务一致的点击反馈。创建图像、联网搜索、绘图图标已接入菜单；对应能力仍显示未开放反馈。冻结截图中的「Documents」「书本变童话」只是参考例子，不会写入默认数据。阅读任务胶囊及其 `apps.svg` 资产不在本次修改范围内。
+
+联网搜索行在 `SkillsPluginsComposerControls` 中消费现有 `web_search.svg`；同一菜单行的 Flutter `Switch` 提供开启 / 关闭状态，不新增或栅格化视觉资产。

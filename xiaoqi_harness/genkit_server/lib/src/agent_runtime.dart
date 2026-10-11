@@ -278,6 +278,7 @@ SchemanticType<Map<String, dynamic>> _objectToolSchema(
 final _executePythonSchema = _objectToolSchema(
   const {
     'code': {'type': 'string', 'minLength': 1, 'maxLength': 65536},
+    'skill_id': {'type': 'string', 'minLength': 1, 'maxLength': 128},
     'domains': {
       'type': 'array',
       'items': {'type': 'string'},
@@ -327,6 +328,8 @@ final _webSearchSchema = _objectToolSchema(
       'maxLength': 2000,
       'description': '只发送完成检索所需的最短查询词。',
     },
+    'skill_id': {'type': 'string', 'minLength': 1, 'maxLength': 128},
+    'purpose': {'type': 'string', 'maxLength': 300},
   },
   required: const ['query'],
 );
@@ -662,24 +665,85 @@ class GenkitXiaoqiAgentRuntime
       description:
           '在服务器隔离的 Docker 沙箱执行 Python 代码。仅用于用户明确要求执行代码、'
           '处理文件或对资料做程序化操作时。默认断网。'
-          '只有确实需要联网时才在 domains 中列出精确域名，并用 purpose 说明用途；'
-          '用户授权后任务会恢复。工作目录为 /workspace，'
+          '普通代码执行不得联网。当前技能确需访问公网时，须提供本技能 skill_id、domains 精确域名和 purpose；'
+          '联网开关已打开时沿用任务域名授权。工作目录为 /workspace，'
           '资料位于 materials/，技能位于 skill/，文件产物写入 output/。',
       inputSchema: _executePythonSchema,
       fn: (input, context) async {
-        onProcessEvent({'type': 'tool_started', 'tool': 'execute_python'});
+        final networkMode = _taskNetworkMode(
+          tenantId,
+          taskId,
+          request['network_mode'],
+        );
+        final requestedDomains = _normalizeDomains(input['domains']);
+        final selected = request['capability'];
+        final hasSelectedSkill =
+            selected is Map && selected['type'] != 'action';
+        final skillId = input['skill_id']?.toString().trim() ?? '';
+        final skillReference = skillId.isNotEmpty || hasSelectedSkill
+            ? _resolveSkillCapability(
+                tenantId,
+                selected,
+                input,
+                availableVersions: stagedSkillVersions,
+              )
+            : null;
+        final temporaryNetwork =
+            networkMode == 'off' &&
+            requestedDomains.isNotEmpty &&
+            skillReference != null;
+        if (networkMode == 'off' &&
+            requestedDomains.isNotEmpty &&
+            !temporaryNetwork) {
+          onProcessEvent({
+            'type': 'tool_failed',
+            'tool': 'execute_python',
+            'message': '联网搜索已关闭；只有技能确需联网时才能临时联网。',
+          });
+          return ToolResult.response(
+            jsonEncode({
+              'status': 'blocked',
+              'message': '普通代码执行不能联网。请开启联网开关，或由当前技能说明其联网用途。',
+            }),
+          );
+        }
+        final purpose = input['purpose']?.toString().trim() ?? '';
+        if (temporaryNetwork && purpose.isEmpty) {
+          onProcessEvent({
+            'type': 'tool_failed',
+            'tool': 'execute_python',
+            'message': '技能申请临时联网时必须说明用途。',
+          });
+          return ToolResult.response(
+            jsonEncode({'status': 'blocked', 'message': '缺少技能联网用途。'}),
+          );
+        }
+        final skillName = temporaryNetwork
+            ? _stagedSkillName(skillReference, stagedSkills.entries)
+            : null;
+        final skillFiles = skillReference == null
+            ? <String, List<int>>{}
+            : _loadSkillFiles(tenantId, skillReference);
+        onProcessEvent({
+          'type': 'tool_started',
+          'tool': 'execute_python',
+          if (temporaryNetwork) 'temporary_network': true,
+          if (skillName != null) 'capability_name': skillName,
+        });
         _logAgentRuntime('tool_called', taskId, {
           'tool_name': 'execute_python',
           'input_fields': input.keys.toList()..sort(),
           'code_bytes': utf8.encode(input['code']?.toString() ?? '').length,
-          'domain_count': (input['domains'] as List? ?? const []).length,
+          'domain_count': requestedDomains.length,
         });
-        final permission = _networkPermission(
-          tenantId,
-          taskId,
-          input['domains'],
-          input['purpose']?.toString() ?? '',
-        );
+        final permission = temporaryNetwork
+            ? null
+            : _networkPermission(
+                tenantId,
+                taskId,
+                requestedDomains,
+                input['purpose']?.toString() ?? '',
+              );
         if (permission != null) {
           final approvedDomains = request['remote_agent'] == true
               ? _resumedAuthorizedDomains(context.resumed, permission)
@@ -704,9 +768,6 @@ class GenkitXiaoqiAgentRuntime
           }
           _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
         }
-        final skillFiles = request['capability'] is Map
-            ? _loadSkillFiles(tenantId, request['capability'])
-            : <String, List<int>>{};
         try {
           final result = await codeExecutor.execute(
             tenantId: tenantId,
@@ -716,18 +777,26 @@ class GenkitXiaoqiAgentRuntime
             authorizedDomains: {
               ..._authorizedDomainsForExecution(tenantId, taskId),
               ...?_resumedAuthorizedDomains(context.resumed, permission),
+              if (temporaryNetwork) ...requestedDomains,
             }.toList()..sort(),
             materials: _materials(request['materials']),
             skillFiles: skillFiles,
             cancellation: cancellation,
           );
-          onProcessEvent({'type': 'tool_succeeded', 'tool': 'execute_python'});
+          onProcessEvent({
+            'type': 'tool_succeeded',
+            'tool': 'execute_python',
+            if (temporaryNetwork) 'temporary_network': true,
+            if (skillName != null) 'capability_name': skillName,
+          });
           return ToolResult.response(result);
         } on Object catch (error) {
           onProcessEvent({
             'type': 'tool_failed',
             'tool': 'execute_python',
             'message': _briefToolError(error),
+            if (temporaryNetwork) 'temporary_network': true,
+            if (skillName != null) 'capability_name': skillName,
           });
           rethrow;
         }
@@ -737,36 +806,61 @@ class GenkitXiaoqiAgentRuntime
       ai.defineTool<Map<String, dynamic>, String>(
         name: 'web_search',
         description:
-            '检索当前公开网页并返回可验证来源。自动联网模式下，仅在问题需要实时或外部资料时调用；'
-            '用户已开启联网搜索时，先检索本轮事实问题再回答。只发送最短必要查询词。'
-            '网络关闭时服务端会拒绝请求。',
+            '检索当前公开网页并返回可验证来源。联网开启时，只在本轮事实问题需要时调用。'
+            '联网关闭时，仅在已启用技能确需网页资料时调用，并提供精确 skill_id 和简短 purpose。'
+            '普通问答不得通过技能参数绕过联网开关。只发送最短必要查询词。',
         inputSchema: _webSearchSchema,
         fn: (input, context) async {
           final query = input['query']?.toString().trim() ?? '';
-          onProcessEvent({'type': 'tool_started', 'tool': 'web_search'});
-          _logAgentRuntime('tool_called', taskId, {
-            'tool_name': 'web_search',
-            'query_bytes': utf8.encode(query).length,
-            'network_mode': _taskNetworkMode(
-              tenantId,
-              taskId,
-              request['network_mode'],
-            ),
-          });
-          if (_taskNetworkMode(tenantId, taskId, request['network_mode']) ==
-              'off') {
+          final networkMode = _taskNetworkMode(
+            tenantId,
+            taskId,
+            request['network_mode'],
+          );
+          final skillId = input['skill_id']?.toString().trim() ?? '';
+          final selectedCapability = request['capability'];
+          final hasSelectedSkill =
+              selectedCapability is Map &&
+              selectedCapability['type'] != 'action';
+          final skillReference = skillId.isNotEmpty || hasSelectedSkill
+              ? _resolveSkillCapability(
+                  tenantId,
+                  selectedCapability,
+                  input,
+                  availableVersions: stagedSkillVersions,
+                )
+              : null;
+          final temporaryNetwork = networkMode == 'off';
+          final purpose = input['purpose']?.toString().trim() ?? '';
+          if (temporaryNetwork &&
+              (skillReference == null || purpose.isEmpty)) {
             onProcessEvent({
               'type': 'tool_failed',
               'tool': 'web_search',
-              'message': '本会话已关闭联网搜索',
+              'message': '联网搜索已关闭；当前技能尚未说明需要联网的原因。',
             });
             return ToolResult.response(
               jsonEncode({
                 'status': 'blocked',
-                'message': '本会话已关闭联网搜索。请只根据现有资料回答，并说明无法核验实时信息。',
+                'message': '普通聊天不能联网。请在确有技能联网需要时，提供有效 skill_id 和 purpose。',
               }),
             );
           }
+          final skillName = temporaryNetwork
+              ? _stagedSkillName(skillReference, stagedSkills.entries)
+              : null;
+          onProcessEvent({
+            'type': 'tool_started',
+            'tool': 'web_search',
+            if (temporaryNetwork) 'temporary_network': true,
+            if (skillName != null) 'capability_name': skillName,
+          });
+          _logAgentRuntime('tool_called', taskId, {
+            'tool_name': 'web_search',
+            'query_bytes': utf8.encode(query).length,
+            'network_mode': networkMode,
+            if (skillReference != null) 'skill_id': skillReference['id'],
+          });
           try {
             final result = await webSearch.search(query);
             _recordWebSources(
@@ -778,6 +872,8 @@ class GenkitXiaoqiAgentRuntime
               'type': 'tool_succeeded',
               'tool': 'web_search',
               'source_count': result.sources.length,
+              if (temporaryNetwork) 'temporary_network': true,
+              if (skillName != null) 'capability_name': skillName,
             });
             return ToolResult.response(jsonEncode(result.toJson()));
           } on Object catch (error) {
@@ -786,6 +882,8 @@ class GenkitXiaoqiAgentRuntime
               'type': 'tool_failed',
               'tool': 'web_search',
               'message': message,
+              if (temporaryNetwork) 'temporary_network': true,
+              if (skillName != null) 'capability_name': skillName,
             });
             return ToolResult.response(
               jsonEncode({'status': 'unavailable', 'message': message}),
@@ -852,10 +950,6 @@ class GenkitXiaoqiAgentRuntime
           '每个任务仅允许执行一次。脚本只能访问本次任务资料和当前技能文件，默认断网。',
       inputSchema: _executeSkillScriptSchema,
       fn: (input, context) async {
-        onProcessEvent({
-          'type': 'tool_started',
-          'tool': 'execute_skill_script',
-        });
         _logAgentRuntime('tool_called', taskId, {
           'tool_name': 'execute_skill_script',
           'input_fields': input.keys.toList()..sort(),
@@ -863,6 +957,8 @@ class GenkitXiaoqiAgentRuntime
           'argument_count': (input['arguments'] as List? ?? const []).length,
           'domain_count': (input['domains'] as List? ?? const []).length,
         });
+        String? temporaryNetworkCapability;
+        var temporaryNetworkStarted = false;
         try {
           final scriptPath = _safeSkillScriptPath(
             input['script_path']?.toString() ?? '',
@@ -875,6 +971,22 @@ class GenkitXiaoqiAgentRuntime
             availableVersions: stagedSkillVersions,
           );
           final skillFiles = _loadSkillFiles(tenantId, skillReference);
+          final networkMode = _taskNetworkMode(
+            tenantId,
+            taskId,
+            request['network_mode'],
+          );
+          final requestedDomains = _normalizeDomains(input['domains']);
+          final temporaryNetwork =
+              networkMode == 'off' && requestedDomains.isNotEmpty;
+          final purpose = input['purpose']?.toString().trim() ?? '';
+          if (temporaryNetwork && purpose.isEmpty) {
+            throw const FormatException('技能脚本申请临时联网时必须说明用途');
+          }
+          final skillName = _stagedSkillName(
+            skillReference,
+            stagedSkills.entries,
+          );
           final scriptBytes = skillFiles[scriptPath];
           if (scriptBytes == null) throw StateError('脚本不在当前技能版本中');
           final rawArguments = input['arguments'];
@@ -897,12 +1009,14 @@ class GenkitXiaoqiAgentRuntime
           }
 
           // Validate the exact skill and script before granting any task egress.
-          final permission = _networkPermission(
-            tenantId,
-            taskId,
-            input['domains'],
-            input['purpose']?.toString() ?? '',
-          );
+          final permission = temporaryNetwork
+              ? null
+              : _networkPermission(
+                  tenantId,
+                  taskId,
+                  requestedDomains,
+                  input['purpose']?.toString() ?? '',
+                );
           if (permission != null) {
             final approvedDomains = request['remote_agent'] == true
                 ? _resumedAuthorizedDomains(context.resumed, permission)
@@ -927,6 +1041,14 @@ class GenkitXiaoqiAgentRuntime
             }
             _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
           }
+          temporaryNetworkStarted = temporaryNetwork;
+          temporaryNetworkCapability = skillName;
+          onProcessEvent({
+            'type': 'tool_started',
+            'tool': 'execute_skill_script',
+            if (temporaryNetwork) 'temporary_network': true,
+            if (temporaryNetwork) 'capability_name': skillName,
+          });
           final result = await codeExecutor.execute(
             tenantId: tenantId,
             taskId: taskId,
@@ -935,6 +1057,7 @@ class GenkitXiaoqiAgentRuntime
             authorizedDomains: {
               ..._authorizedDomainsForExecution(tenantId, taskId),
               ...?_resumedAuthorizedDomains(context.resumed, permission),
+              if (temporaryNetwork) ...requestedDomains,
             }.toList()..sort(),
             materials: _materials(request['materials']),
             skillFiles: skillFiles,
@@ -945,6 +1068,8 @@ class GenkitXiaoqiAgentRuntime
           onProcessEvent({
             'type': 'tool_succeeded',
             'tool': 'execute_skill_script',
+            if (temporaryNetwork) 'temporary_network': true,
+            if (temporaryNetwork) 'capability_name': skillName,
           });
           return ToolResult.response(result);
         } on Object catch (error) {
@@ -954,6 +1079,9 @@ class GenkitXiaoqiAgentRuntime
             'type': 'tool_failed',
             'tool': 'execute_skill_script',
             'message': message,
+            if (temporaryNetworkStarted) 'temporary_network': true,
+            if (temporaryNetworkCapability != null)
+              'capability_name': temporaryNetworkCapability,
           });
           return ToolResult.response(
             jsonEncode({'ok': false, 'error': message}),
@@ -1089,13 +1217,14 @@ class GenkitXiaoqiAgentRuntime
         '\n\n用户明确开启了联网搜索。对本轮需要事实信息的请求先调用 web_search，再结合返回的来源作答；'
         '问候、纯创作或不需要事实的信息不必搜索。',
       );
-    } else if (networkMode == 'off') {
-      system.write(
-        '\n\n用户已关闭联网。不得调用 web_search，不得请求或使用技能脚本公网连接；'
-        '如问题需要实时网页信息，说明当前无法联网核验。',
-      );
     } else {
-      system.write('\n\n按需联网模式：只在问题依赖近期变化或外部公开资料时调用 web_search。');
+      system.write(
+        '\n\n联网默认关闭。普通聊天、知识问答、写作和普通代码执行不得访问公网；'
+        '不得仅因用户问题需要实时信息而搜索。只有已验证的技能确实需要公开网页或脚本联网完成本任务时，'
+        '才可以调用 web_search、execute_python 或 execute_skill_script 临时联网；调用时必须提供精确 skill_id、'
+        '最短必要查询词或明确用途与精确域名。技能 ID 必须来自当前账号可用的技能目录，'
+        '不得把普通问题伪装成技能任务。临时联网只限本次工具调用，不能保留域名授权。',
+      );
     }
 
     final steering = ai.defineGenerateMiddleware<void>(
@@ -1332,13 +1461,29 @@ class GenkitXiaoqiAgentRuntime
     return switch (raw?.toString()) {
       'on' => 'on',
       'off' => 'off',
-      _ => 'auto',
+      _ => 'off',
     };
   }
 
   List<String> _authorizedDomainsForExecution(String tenantId, String taskId) {
     if (_taskNetworkMode(tenantId, taskId, null) == 'off') return const [];
     return _authorizedDomains(tenantId, taskId);
+  }
+
+  String _stagedSkillName(
+    Map<String, Object?>? reference,
+    List<Map<String, String>> entries,
+  ) {
+    final id = reference?['id']?.toString() ?? '';
+    final versionId = reference?['version_id']?.toString() ?? '';
+    for (final entry in entries) {
+      if (entry['id'] != id) continue;
+      if (entry['version_id'] != versionId) {
+        throw StateError('技能版本在任务运行期间发生变化，请重新开始任务。');
+      }
+      return entry['name'] ?? id;
+    }
+    throw StateError('该技能未包含在本轮可用技能目录中。');
   }
 
   void _recordWebSources(

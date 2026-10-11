@@ -76,3 +76,18 @@ V1 沿用当前消息模型的单个能力元数据字段：每条消息保留�
 - 面板横向贴合当前聊天可用宽度，随键盘和安全区变化；列表过长时只在列表区域滚动。
 - 同步冲突时「保留双方」是默认安全路径；任何覆盖或删除操作都由用户显式触发。
 - 菜单与底栏仍依据冻结截图；布局在 Flutter 落地时适配当前页面安全区、键盘与小屏宽度。
+
+## 联网搜索两态开关（2026-10-11 补充，覆盖旧三态文案）
+
+- 移除输入框上方独立联网按钮；在技能 / 插件菜单的“联网搜索”行右侧使用 Flutter `Switch`。点行或开关切换，菜单保持展开；说明文案分别为“优先搜索实时资料”和“技能需要时可临时联网”。
+- 新会话默认为 `off`；历史 `on` / `off` 保持原值，`auto` 与缺省字段读为 `off`。用户只通过可见开关更改状态，普通消息中的“打开 / 关闭联网”文字不更改设置。
+- `on` 模式只在事实请求需要时优先搜索。`off` 模式下普通对话不联网；经过账号和当前版本校验的技能确需网页搜索或脚本出网时，agent 可为本次工具调用临时开放网络。
+- 搜索调用必须归属到有效技能并携带用途；脚本出网还须提供经域名格式校验的精确域名与用途。临时技能域名只传入本次沙箱执行请求，不写入任务的持久允许列表；关闭开关时继续使用服务端现有代理撤销路径。MCP 尚未接入，本次不增加连接器。
+- 状态变化通过现有任务事件展示“正在为〈技能名〉临时联网”；普通失败按工具错误事件反馈。工具调用结束后，临时域名不复用到下一次调用。
+- 不增加依赖。实现基于 Flutter 3.47.5（SDK revision `6a19cca564`）的原生 Material `Switch`，Flutter SDK 为 BSD-3-Clause；Dart 服务复用已锁定 `genkit` 1.0.0（SHA-256 `478f914efde52c6c1c0f2177b5a1632c2e5dc39e88cab29b48930d80137c1a2a`，Apache-2.0）。Flutter 仅用其既有开关组件；Genkit 仅参考工具调用 / 权限边界，不复制上游代码。[Flutter Switch API](https://api.flutter.dev/flutter/material/Switch-class.html) · [Flutter 3.47.5 Switch 源码](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/material/switch.dart) · [Flutter 许可证](https://github.com/flutter/flutter/blob/6a19cca564/LICENSE) · [Genkit Dart 1.0.0](https://pub.dev/packages/genkit/versions/1.0.0) · [Genkit Dart 源码](https://github.com/genkit-ai/genkit-dart) · [Genkit 授权文档](https://genkit.dev/docs/js/deployment/authorization/)。
+- 验收覆盖会话默认与历史兼容、开关和行点击、手动状态保存、普通对话拒绝出网、有效技能临时搜索 / 脚本出网、非法 / 跨账号技能拒绝、取消和失败后的授权清理。代码、自动化、同状态视觉对比、真机和部署状态分别记录；本轮不把未执行的本地或真机检查标为通过。
+
+### 实施状态（2026-10-11）
+
+- 源码已修改并补充会话兼容与 API 缺省模式测试；按用户要求，本轮没有运行本地构建、测试或真机视觉验收。
+- ECS 部署未完成：按项目规则完成 `xiaoqi-remote-deploy` OAuth profile 配置后，阿里云 API 与生产 `/health` 地址的 TLS 握手均在本机失败，现有 SSH 连接也因没有可用公钥而拒绝。未连接或修改服务器；持久卷、密钥、当前服务和既有回滚镜像均未触碰。恢复 API TLS 访问后仍需按部署手册先备份、构建、重启并核验健康状态及数据清单。

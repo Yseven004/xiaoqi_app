@@ -843,7 +843,7 @@ class CapabilityCloudSync {
   }
 
   Future<bool> updateAgentTaskNetworkMode(String taskId, String mode) async {
-    if (!const {'auto', 'on', 'off'}.contains(mode)) {
+    if (!const {'on', 'off'}.contains(mode)) {
       throw const FormatException('联网模式无效');
     }
     final token = await _requireToken();

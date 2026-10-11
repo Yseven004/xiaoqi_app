@@ -44,8 +44,7 @@ const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
 
 String _networkMode(Object? value) => switch (value?.toString()) {
   'on' => 'on',
-  'off' => 'off',
-  _ => 'auto',
+  _ => 'off',
 };
 
 ({String code, String message, String details}) _taskFailurePresentation(
@@ -785,6 +784,8 @@ class XiaoqiApi {
 
   static String _agentProcessLabel(Map<String, dynamic> event) =>
       switch (event['type']?.toString()) {
+        'tool_started' when event['temporary_network'] == true =>
+          '正在为${event['capability_name'] ?? '技能'}临时联网',
         'tool_started' => '正在使用 ${event['tool'] ?? '工具'}',
         'tool_succeeded' => '${event['tool'] ?? '工具'}已完成',
         'tool_failed' => '${event['tool'] ?? '工具'}遇到问题',
@@ -1585,8 +1586,11 @@ class XiaoqiApi {
   ) async {
     try {
       final body = await _body(request, 1024);
-      final mode = _networkMode(body['mode']);
-      if (body['mode'] != mode) return _error('联网模式无效', 400);
+      final rawMode = body['mode']?.toString();
+      if (!const {'auto', 'on', 'off'}.contains(rawMode)) {
+        return _error('联网模式无效', 400);
+      }
+      final mode = _networkMode(rawMode);
       final taskId = _safeId(id, '任务 ID');
       final key = 'task/${device.tenant}/$taskId';
       final current = store.get(key);
