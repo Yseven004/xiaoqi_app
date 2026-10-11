@@ -460,17 +460,17 @@ class _RecentPhotoThumbnailState extends State<_RecentPhotoThumbnail> {
   void _loadThumbnail() {
     _thumbnailFailed = false;
     _thumbnail = widget.photo
-        .thumbnailDataWithSize(
-          const ThumbnailSize.square(160),
-          quality: 80,
-        )
-        .then<Uint8List?>((bytes) {
-          _thumbnailFailed = bytes == null;
-          return bytes;
-        }, onError: (Object _, StackTrace __) {
-          _thumbnailFailed = true;
-          return null;
-        });
+        .thumbnailDataWithSize(const ThumbnailSize.square(160), quality: 80)
+        .then<Uint8List?>(
+          (bytes) {
+            _thumbnailFailed = bytes == null;
+            return bytes;
+          },
+          onError: (Object _, StackTrace __) {
+            _thumbnailFailed = true;
+            return null;
+          },
+        );
   }
 
   @override

@@ -63,7 +63,6 @@ class PdfPageCanvas extends StatelessWidget {
     required this.controller,
     required this.document,
     required this.initialPageNumber,
-    this.pageLocked = false,
     this.editable = false,
     this.editableTextBuilder,
     this.activeTextBlockIdListenable,
@@ -90,7 +89,6 @@ class PdfPageCanvas extends StatelessWidget {
   final PdfViewerController controller;
   final BookPageDocument document;
   final int initialPageNumber;
-  final bool pageLocked;
   final bool editable;
   final BookPageDocumentTextBuilder? editableTextBuilder;
   final ValueNotifier<int?>? activeTextBlockIdListenable;
@@ -109,7 +107,7 @@ class PdfPageCanvas extends StatelessWidget {
   final PdfViewerErrorBannerBuilder? errorBannerBuilder;
   final PdfPageTextFocusCallback? onTextFocus;
   final Widget? Function(BuildContext context, Rect pageRect, PdfPage page)?
-      annotationLayerBuilder;
+  annotationLayerBuilder;
   final double? verticalCacheExtent;
   final double margin;
 
@@ -126,11 +124,6 @@ class PdfPageCanvas extends StatelessWidget {
       pageAnchorEnd: horizontal ? PdfPageAnchor.center : PdfPageAnchor.bottom,
       underflowAnchor: horizontal ? PdfPageAnchor.center : null,
       panAxis: horizontal ? PanAxis.aligned : PanAxis.free,
-      // Drawing tools own the pointer stream. Keeping the viewer's pan and
-      // scale recognizers active at the same time makes a stroke look like a
-      // page swipe and can move the annotation onto another physical page.
-      panEnabled: !pageLocked,
-      scaleEnabled: !pageLocked,
       scrollHorizontallyByMouseWheel: horizontal,
       horizontalCacheExtent: horizontal ? 1.5 : 1.0,
       verticalCacheExtent: horizontal ? .25 : (verticalCacheExtent ?? 1.0),
@@ -170,57 +163,52 @@ class PdfPageCanvas extends StatelessWidget {
   ) {
     final pageNumber = page.pageNumber;
     final documentPageNumber = int.tryParse(document.pageNumber?.trim() ?? '');
-    final isDocumentPage =
-        pageNumber == (documentPageNumber ?? initialPageNumber);
+    if (pageNumber != (documentPageNumber ?? initialPageNumber)) {
+      return const <Widget>[];
+    }
     final widgets = <Widget>[];
-    // The PDF physical page is the identity of the drawing surface. OCR may
-    // contain a printed page label (or a temporary page value), so a mismatch
-    // must suppress only document text patches; it must not remove the
-    // annotation input layer itself.
-    if (isDocumentPage) {
-      final originalById = <int, OcrBlock>{
-        for (final block in document.blocks) block.id: block,
-      };
-      final edited = document.editedBlocks;
-      if (edited != null) {
-        for (final block in edited) {
-          final original = originalById[block.id];
-          if (original == null ||
-              original.text == block.text ||
-              block.isFigure ||
-              block.isTable ||
-              block.width <= 0 ||
-              block.height <= 0) {
-            continue;
-          }
-          final height = block.height * pageRect.height;
-          widgets.add(
-            Positioned(
-              left: block.x * pageRect.width,
-              top: block.y * pageRect.height,
-              width: block.width * pageRect.width,
-              height: block.height * pageRect.height,
-              child: IgnorePointer(
-                child: ColoredBox(
-                  color: Colors.white,
-                  child: Align(
-                    alignment: Alignment.topLeft,
-                    child: Text(
-                      block.text,
-                      maxLines: null,
-                      overflow: TextOverflow.clip,
-                      style: pdfPageTextStyle(
-                        block,
-                        height,
-                        color: NotePageTheme.bookText,
-                      ),
+    final originalById = <int, OcrBlock>{
+      for (final block in document.blocks) block.id: block,
+    };
+    final edited = document.editedBlocks;
+    if (edited != null) {
+      for (final block in edited) {
+        final original = originalById[block.id];
+        if (original == null ||
+            original.text == block.text ||
+            block.isFigure ||
+            block.isTable ||
+            block.width <= 0 ||
+            block.height <= 0) {
+          continue;
+        }
+        final height = block.height * pageRect.height;
+        widgets.add(
+          Positioned(
+            left: block.x * pageRect.width,
+            top: block.y * pageRect.height,
+            width: block.width * pageRect.width,
+            height: block.height * pageRect.height,
+            child: IgnorePointer(
+              child: ColoredBox(
+                color: Colors.white,
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  child: Text(
+                    block.text,
+                    maxLines: null,
+                    overflow: TextOverflow.clip,
+                    style: pdfPageTextStyle(
+                      block,
+                      height,
+                      color: NotePageTheme.bookText,
                     ),
                   ),
                 ),
               ),
             ),
-          );
-        }
+          ),
+        );
       }
     }
     void addAnnotationLayer() {
@@ -233,11 +221,8 @@ class PdfPageCanvas extends StatelessWidget {
         widgets.add(Positioned.fill(child: annotationLayer));
       }
     }
+
     if (!editable || editableTextBuilder == null) {
-      addAnnotationLayer();
-      return widgets;
-    }
-    if (!isDocumentPage) {
       addAnnotationLayer();
       return widgets;
     }
@@ -258,6 +243,7 @@ class PdfPageCanvas extends StatelessWidget {
         activeTextBlockIdListenable!.value = blockId;
         return true;
       }
+
       widgets.add(
         Positioned.fill(
           child: PdfOverlayInteractionRegion(
@@ -295,7 +281,7 @@ class PdfPageCanvas extends StatelessWidget {
           top: block.y * pageRect.height,
           width: math.max(width, 24).toDouble(),
           child: _PdfEditableTextRegion(
-            key: ValueKey('pdf-edit-${pageNumber}-${block.id}'),
+            key: ValueKey('pdf-edit-$pageNumber-${block.id}'),
             block: block,
             style: pdfPageTextStyle(block, height),
             minimumWidth: math.max(width, 24).toDouble(),
@@ -336,8 +322,9 @@ class PdfPageCanvas extends StatelessWidget {
     const hitPadding = .012;
     final matches = document.renderBlocks
         .where((block) {
-          if (block.isFigure || block.isTable || block.isFurniture)
+          if (block.isFigure || block.isTable || block.isFurniture) {
             return false;
+          }
           if (block.text.trim().isEmpty) return false;
           return normalized.dx >= block.x - hitPadding &&
               normalized.dx <= block.x + block.width + hitPadding &&

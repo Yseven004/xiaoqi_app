@@ -138,8 +138,9 @@ class BookPageDocumentProjection {
           block.attributes['figure_aspect_ratio'] ??
           '',
     );
-    if (explicit != null && explicit > 0)
+    if (explicit != null && explicit > 0) {
       return explicit.clamp(.5, 4).toDouble();
+    }
     return 1.6;
   }
 

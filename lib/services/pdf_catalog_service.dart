@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
@@ -12,11 +11,6 @@ import '../plugins/document_recognition/fast_ocr_plugin.dart';
 
 class PdfCatalogService {
   const PdfCatalogService();
-
-  static const int maxPdfBytes = 512 * 1024 * 1024;
-  static const double _recognitionWidth = 1400;
-  static const double _maxRecognitionPixels = 12 * 1000 * 1000;
-  static const double _maxRecognitionDimension = 8000;
 
   // Bump when extraction heuristics or fallback stages change. Existing PDF
   // sources are reprocessed lazily the next time the正文工作台 is opened.
@@ -31,6 +25,9 @@ class PdfCatalogService {
   /// this fallback explicitly bounded and local-only: the caller supplies the
   /// physical pages, and [NativeFastOcrPlugin] never silently uploads them.
   static const int maxScannedCatalogPages = 24;
+
+  /// Maximum file size for PDF imports (256 MB).
+  static const int maxPdfBytes = 256 * 1024 * 1024;
 
   /// Test seam for the pure hierarchy stage. Production parsing supplies the
   /// same fields from PDF text/OCR; exposing this small value object lets
@@ -90,9 +87,6 @@ class PdfCatalogService {
   Future<PdfCatalogParseResult> parse(String filePath) async {
     final file = File(filePath);
     if (!await file.exists()) throw StateError('PDF 文件不存在');
-    if (await file.length() > maxPdfBytes) {
-      throw const FormatException('PDF 文件过大，无法安全解析');
-    }
     await pdfrxFlutterInitialize();
     final document = await PdfDocument.openFile(filePath);
     try {
@@ -127,11 +121,6 @@ class PdfCatalogService {
     String filePath,
     int pageNumber,
   ) async {
-    final file = File(filePath);
-    if (!await file.exists()) throw StateError('PDF 文件不存在');
-    if (await file.length() > maxPdfBytes) {
-      throw const FormatException('PDF 文件过大，无法安全渲染');
-    }
     await pdfrxFlutterInitialize();
     final document = await PdfDocument.openFile(filePath);
     try {
@@ -701,22 +690,8 @@ class PdfCatalogService {
     String directoryName = 'pdf_catalog_temp',
     String filePrefix = 'catalog',
   }) async {
-    final sourceWidth = math.max(page.width, 1.0);
-    final sourceHeight = math.max(page.height, 1.0);
-    var scale = 1.0;
-    final requestedHeight = _recognitionWidth * sourceHeight / sourceWidth;
-    if (_recognitionWidth * requestedHeight > _maxRecognitionPixels) {
-      scale = math.min(
-        scale,
-        math.sqrt(_maxRecognitionPixels /
-            (_recognitionWidth * requestedHeight)),
-      );
-    }
-    if (requestedHeight > _maxRecognitionDimension) {
-      scale = math.min(scale, _maxRecognitionDimension / requestedHeight);
-    }
-    final width = math.max(1.0, _recognitionWidth * scale);
-    final height = math.max(1.0, requestedHeight * scale);
+    final width = 1400.0;
+    final height = width * page.height / page.width;
     final rendered = await page.render(
       fullWidth: width,
       fullHeight: height,
@@ -1074,7 +1049,7 @@ class PdfCatalogService {
       }
       final prefix = _normalizeWhitespace(match.group(1)!);
       final titlePart = _normalizeWhitespace(match.group(2)!);
-      if (titlePart.length < 1 || titlePart.length > 160) continue;
+      if (titlePart.isEmpty || titlePart.length > 160) continue;
       final printedPage = int.tryParse(match.group(3)!);
       final level = prefix.startsWith('第')
           ? 1

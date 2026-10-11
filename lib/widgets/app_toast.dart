@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 
@@ -75,67 +74,45 @@ class _ToastWidgetState extends State<_ToastWidget>
 
   @override
   Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: AnimatedBuilder(
-        animation: _opacity,
-        builder: (context, child) {
-          return Opacity(
-            opacity: _opacity.value,
-            child: Material(
-              color: Colors.transparent,
-              child: Center(
-                child: Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 24),
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 360),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(24),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: const Color.fromRGBO(42, 42, 46, 0.62),
-                            borderRadius: BorderRadius.circular(24),
-                            border: Border.all(
-                              color: const Color(0x29FFFFFF),
-                              width: 0.8,
-                            ),
-                            boxShadow: const [
-                              BoxShadow(
-                                color: Color(0x26000000),
-                                blurRadius: 20,
-                                offset: Offset(0, 8),
-                              ),
-                            ],
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 22,
-                              vertical: 12,
-                            ),
-                            child: Semantics(
-                              liveRegion: true,
-                              child: Text(
-                                widget.message,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w400,
-                                ),
-                                textAlign: TextAlign.center,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+    return AnimatedBuilder(
+      animation: _opacity,
+      builder: (context, child) {
+        return Opacity(
+          opacity: _opacity.value,
+          child: Material(
+            color: Colors.transparent,
+            child: Center(
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 40),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xE6000000), // 90% black
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x40000000),
+                      blurRadius: 16,
+                      offset: Offset(0, 6),
                     ),
+                  ],
+                ),
+                child: Text(
+                  widget.message,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w400,
                   ),
+                  textAlign: TextAlign.center,
                 ),
               ),
             ),
-          );
-        },
-      ),
+          ),
+        );
+      },
     );
   }
 }

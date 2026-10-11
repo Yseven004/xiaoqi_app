@@ -321,9 +321,7 @@ class _SkillsPluginsComposerControlsState
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              enabled
-                                  ? '优先搜索实时资料'
-                                  : '技能需要时可临时联网',
+                              enabled ? '优先搜索实时资料' : '技能需要时可临时联网',
                               style: const TextStyle(
                                 color: Color(0xFF758099),
                                 fontSize: 13,
@@ -467,9 +465,9 @@ class _SkillsPluginsComposerControlsState
         children: [
           _featureRow(
             'skill_plugin_capsule',
-            '创建技能 / 插件',
-            '创造有趣的技能和插件',
-            () => _selectAction('create-skill', '创建技能 / 插件'),
+            '创建技能',
+            '根据描述生成有趣的技能',
+            () => _selectAction('create-skill', '创建技能'),
           ),
           _featureRow(
             'image',

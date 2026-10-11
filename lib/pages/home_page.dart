@@ -825,9 +825,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         return;
       }
       await _importPickedFiles(
-        [
-          XFile(file.path),
-        ],
+        [XFile(file.path)],
         'image',
         sourceAssetIds: [photo.id],
       );
@@ -2394,9 +2392,9 @@ $materialIndex
       'model_id': modelId,
       'reasoning_level': reasoningLevel,
       'network_mode': _conversation?.networkMode ?? 'off',
-      if (capability case final selectedCapability?)
-        'capability': selectedCapability,
+      'capability': ?capability,
       'materials': materials,
+      'current_turn_text': question.text.trim(), // 本轮真实用户输入
       if (startSessionId == null && startSnapshotId == null)
         'legacy_history': taskMessages
             .take(latestLegacyMessageIndex)
@@ -2900,7 +2898,7 @@ ${version.content}''';
     final metadata = message.capabilityMetadata;
     if (!message.isUser) return text;
     if (metadata?['type'] == 'action' && metadata?['id'] == 'create-skill') {
-      return '''【用户选择的入口：创建技能 / 插件】
+      return '''【用户选择的入口：创建技能】
 这是帮助用户创建技能的入口。用户询问这个入口能做什么时，先解释创建能力并给出简短例子；不能因尚无草稿而要求用户提供已有技能名称。结合对话理解以下请求：
 $text''';
     }
@@ -2924,7 +2922,7 @@ $text''';
     final id = metadata['id']?.toString();
     final name = metadata['name']?.toString() ?? '技能';
     if (type == 'action' && id == 'create-skill') {
-      return '我选择了“创建技能 / 插件”。请结合当前对话判断我想创建什么；信息不足时简短询问。';
+      return '我选择了“创建技能”。请结合当前对话判断我想创建什么；信息不足时简短询问。';
     }
     if (type == 'action' && id == 'revise-skill') {
       return '我选择修改技能“$name”，请结合当前对话中最新的修改建议处理。';

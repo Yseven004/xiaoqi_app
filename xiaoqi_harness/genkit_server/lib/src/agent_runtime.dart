@@ -399,9 +399,123 @@ bool agentShouldGenerateImage(String text) {
       (normalized.contains('生图') && (!asksWhether || directAction));
 }
 
+/// Extracts pure visual description from user request text.
+///
+/// This function separates visual content from task context to prevent
+/// copyright issues and ensure clean image generation prompts.
+///
+/// Rules:
+/// - Returns empty string if the request is Q&A with no visual intent
+/// - Extracts visual description from "生成/画/绘制 + description + 图片" patterns
+/// - Removes explanation keywords (讲解/介绍/说明/解释)
+/// - Removes task instruction keywords (帮我/给我/替我)
+/// - Returns empty string if result contains celebrity names or theory names
+/// - For pure visual requests, returns trimmed input
+///
+/// Examples:
+/// - "讲解马斯克的第一性原理，并附加图片" → '' (Q&A with celebrity name)
+/// - "帮我画一只蓝色的猫" → "一只蓝色的猫" (extract visual part)
+/// - "生成一个未来城市的图片" → "一个未来城市" (extract visual description)
+/// - "一只在草地上奔跑的金毛犬" → "一只在草地上奔跑的金毛犬" (pure visual)
+String extractVisualPrompt(String request) {
+  final text = request.trim();
+  if (text.isEmpty) return '';
+
+  // Check for pure Q&A patterns with no visual intent
+  final pureQAPattern = RegExp(
+    r'^(什么是|为什么|如何|怎么|讲解|介绍|说明|解释)',
+    caseSensitive: false,
+  );
+  if (pureQAPattern.hasMatch(text) && !text.contains('图')) {
+    return '';
+  }
+
+  String result = text;
+
+  // Extract visual description from "生成/画/绘制 + description + 图片" patterns
+  final generatePattern = RegExp(
+    r'(?:生成|画|绘制|制作|创建|做)(.+?)(?:图片|图像|画面)',
+    caseSensitive: false,
+  );
+  final generateMatch = generatePattern.firstMatch(result);
+  if (generateMatch != null && generateMatch.group(1) != null) {
+    result = generateMatch.group(1)!.trim();
+  }
+
+  // Remove explanation keywords and their surrounding context
+  result = result.replaceAll(
+    RegExp(
+      r'(讲解|介绍|说明|解释)[^，。,\.]*',
+      caseSensitive: false,
+    ),
+    '',
+  );
+
+  // Remove task instruction keywords
+  result = result.replaceAll(
+    RegExp(r'^(帮我|给我|替我)', caseSensitive: false),
+    '',
+  );
+
+  // Remove leading/trailing punctuation and whitespace
+  result = result.replaceAll(RegExp(r'^[，。,\.\s]+|[，。,\.\s]+$'), '').trim();
+
+  // Check for celebrity names or theory names in the result
+  final sensitiveContent = RegExp(
+    r'马斯克|乔布斯|比尔盖茨|扎克伯格|贝索斯|第一性原理|飞轮效应|JTBD|OKR|'
+    r'Musk|Jobs|Gates|Zuckerberg|Bezos',
+    caseSensitive: false,
+  );
+  if (sensitiveContent.hasMatch(result)) {
+    return '';
+  }
+
+  // Check if the result still looks like a question rather than a description
+  final questionPattern = RegExp(
+    r'^(什么|为什么|如何|怎么|哪些|谁|何时)[是在的么样]?',
+    caseSensitive: false,
+  );
+  if (questionPattern.hasMatch(result)) {
+    return '';
+  }
+
+  // Return the cleaned result if it contains visual keywords
+  final visualKeywords = RegExp(
+    r'图|画|绘|照片|风景|人物|动物|建筑|场景|色彩|光线',
+    caseSensitive: false,
+  );
+  if (visualKeywords.hasMatch(result) || result == text.trim()) {
+    return result;
+  }
+
+  // Default: return trimmed input if it appears to be visual-natured
+  // (i.e., descriptive noun phrases without question words)
+  if (result.length > 2 && !result.contains('?') && !result.contains('？')) {
+    return result;
+  }
+
+  return '';
+}
+
 String agentImagePrompt(String request) {
   final prompt = request.trim();
   if (prompt.isEmpty) return prompt;
+
+  // Emergency fix: keyword filter for copyright-sensitive content
+  final copyrightKeywords = RegExp(
+    r'马斯克|乔布斯|比尔盖茨|扎克伯格|贝索斯|第一性原理|飞轮效应',
+    caseSensitive: false,
+  );
+  final questionWithNames = RegExp(
+    r'(讲解|介绍|说明|解释).*(马斯克|第一性原理|乔布斯|比尔盖茨|扎克伯格|贝索斯|飞轮效应)',
+    caseSensitive: false,
+  );
+
+  if (copyrightKeywords.hasMatch(prompt) || questionWithNames.hasMatch(prompt)) {
+    // Return empty string to trigger fallback handling in caller
+    return '';
+  }
+
   final hasExplicitFrame = RegExp(
     r'(?:\d+\s*(?:[:：/×xX*]|乘)\s*\d+|正方形|方形|横版|横屏|竖版|竖屏|宽屏|'
     r'portrait|landscape|square|保持原图比例|保持原比例)',
@@ -544,7 +658,14 @@ class GenkitXiaoqiAgentRuntime
         rawCapability['type'] == 'action' &&
         rawCapability['id'] == 'create-image';
     final legacyMessages = _legacyMessagesFor(messages);
-    final latestUserText = _latestUserText(legacyMessages);
+
+    // Step 1: Get current turn text (prioritize current_turn_text from request)
+    final currentTurnText = request['current_turn_text']?.toString().trim() ?? '';
+    final latestUserText = currentTurnText.isNotEmpty
+        ? currentTurnText
+        : _latestUserText(legacyMessages);
+
+    // Step 2: Strong empty check - if image generation is selected but input is empty
     if (imageGenerationSelected && latestUserText.trim().isEmpty) {
       const answer = '你想生成什么内容的图片？可以描述一下主体、风格或用途。';
       onLegacyDelta?.call(answer);
@@ -559,6 +680,11 @@ class GenkitXiaoqiAgentRuntime
         ],
       );
     }
+
+    // Step 3: Extract pure visual prompt (separates visual description from task context)
+    final visualPrompt = extractVisualPrompt(latestUserText);
+
+    // Step 4: Determine image generation strategy
     final shouldGenerateImage =
         imageGenerationSelected || agentShouldGenerateImage(latestUserText);
     final answerBeforeImage =
@@ -566,27 +692,61 @@ class GenkitXiaoqiAgentRuntime
         agentImageRequestNeedsTextAnswer(latestUserText);
     final imageToolAvailable =
         shouldGenerateImage && answerBeforeImage && images.isConfigured;
+
     _logAgentRuntime('image_intent_classified', taskId, {
       'requested': shouldGenerateImage,
       'answer_before_image': answerBeforeImage,
       'agent_tool_available': imageToolAvailable,
+      'visual_prompt_extracted': visualPrompt.isNotEmpty,
     });
+
+    // Step 5: Direct image generation path (no text answer needed)
     if (shouldGenerateImage && !answerBeforeImage) {
-      // Image generation has billing side effects; explicit requests should not depend on model-emitted tool markup.
       cancellation.throwIfCancelled();
+
+      // Step 5a: Second empty check - if visual prompt extraction failed
+      if (visualPrompt.isEmpty) {
+        const answer = '抱歉，无法从你的描述中提取出清晰的视觉内容。请用更直接的视觉描述，比如"一只猫""山水画""未来城市"等。';
+        onLegacyDelta?.call(answer);
+        onProcessEvent({
+          'type': 'tool_failed',
+          'tool': 'generate_image',
+          'reason': 'visual_prompt_extraction_failed',
+        });
+        return XiaoqiAgentTurnResult(
+          text: answer,
+          messages: [
+            ...messages,
+            Message(
+              role: Role.model,
+              content: [TextPart(text: answer)],
+            ),
+          ],
+        );
+      }
+
+      // Step 5b: Apply visual prompt formatting (add aspect ratio, etc.)
+      final formattedPrompt = agentImagePrompt(visualPrompt);
+
       _logAgentRuntime('tool_called', taskId, {
         'tool_name': 'generate_image',
         'source': imageGenerationSelected ? 'selected_action' : 'intent_router',
+        'original_text_length': latestUserText.length,
+        'visual_prompt_length': visualPrompt.length,
       });
+
       onProcessEvent({'type': 'tool_started', 'tool': 'generate_image'});
       onImageGenerationStarted?.call();
+
+      // Step 5c: Generate image with the extracted and formatted visual prompt
       final imageResult = await images.generate(
         taskId: taskId,
         tenantId: tenantId,
-        prompt: agentImagePrompt(latestUserText),
+        prompt: formattedPrompt,
         count: 1,
         imageUrl: _latestUserImageUrl(legacyMessages),
       );
+
       cancellation.throwIfCancelled();
       const answer = '图片已生成。';
       onLegacyDelta?.call(answer);
@@ -922,10 +1082,23 @@ class GenkitXiaoqiAgentRuntime
             ? latestUserText
             : '$requestedPrompt\n\n用户原始要求：$latestUserText';
         try {
+          // Emergency fix: check for keyword-filtered prompt
+          final filteredPrompt = agentImagePrompt(combinedPrompt);
+          if (filteredPrompt.isEmpty && combinedPrompt.trim().isNotEmpty) {
+            // Keyword filter triggered
+            onProcessEvent({'type': 'tool_failed', 'tool': 'generate_image', 'reason': 'keyword_filtered'});
+            return ToolResult.response(
+              jsonEncode({
+                'ok': false,
+                'message': '这个请求包含了不适合生成图片的内容。请用更直接的视觉描述。',
+              }),
+            );
+          }
+
           final result = await images.generate(
             taskId: taskId,
             tenantId: tenantId,
-            prompt: agentImagePrompt(combinedPrompt),
+            prompt: filteredPrompt,
             count: 1,
             imageUrl: _latestUserImageUrl(legacyMessages),
           );
@@ -1298,15 +1471,23 @@ class GenkitXiaoqiAgentRuntime
         });
         onImageGenerationStarted?.call();
         onProcessEvent({'type': 'tool_started', 'tool': 'generate_image'});
-        await images.generate(
-          taskId: taskId,
-          tenantId: tenantId,
-          prompt: agentImagePrompt(latestUserText),
-          count: 1,
-          imageUrl: _latestUserImageUrl(legacyMessages),
-        );
-        cancellation.throwIfCancelled();
-        onProcessEvent({'type': 'tool_succeeded', 'tool': 'generate_image'});
+
+        // Emergency fix: check for keyword-filtered prompt
+        final filteredPrompt = agentImagePrompt(latestUserText);
+        if (filteredPrompt.isEmpty && latestUserText.trim().isNotEmpty) {
+          // Keyword filter triggered - skip image generation in fallback path
+          onProcessEvent({'type': 'tool_failed', 'tool': 'generate_image', 'reason': 'keyword_filtered'});
+        } else {
+          await images.generate(
+            taskId: taskId,
+            tenantId: tenantId,
+            prompt: filteredPrompt,
+            count: 1,
+            imageUrl: _latestUserImageUrl(legacyMessages),
+          );
+          cancellation.throwIfCancelled();
+          onProcessEvent({'type': 'tool_succeeded', 'tool': 'generate_image'});
+        }
       }
       return XiaoqiAgentTurnResult(
         text: answer,

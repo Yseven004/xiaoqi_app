@@ -230,7 +230,7 @@ class _BlockView extends StatelessWidget {
 }
 
 class BookPageDocumentFigureView extends StatelessWidget {
-  const BookPageDocumentFigureView({required this.block, this.style});
+  const BookPageDocumentFigureView({super.key, required this.block, this.style});
 
   final OcrBlock block;
   final TextStyle? style;
@@ -264,7 +264,7 @@ class BookPageDocumentFigureView extends StatelessWidget {
               ? _FormulaFigureView(block: block, style: effectiveStyle)
               : hasInlineImage
               ? Image.memory(
-                  inlineBytes!,
+                  inlineBytes,
                   fit: BoxFit.contain,
                   width: double.infinity,
                   filterQuality: FilterQuality.medium,

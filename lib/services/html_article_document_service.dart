@@ -369,7 +369,7 @@ class HtmlArticleDocumentService {
         text: text,
         level: level,
         sourceLocator: locator,
-        attributes: {if (href != null) 'link': href},
+        attributes: {'link': ?href},
       ),
     );
   }

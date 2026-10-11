@@ -69,6 +69,7 @@ class BookPageEditPage extends StatefulWidget {
   final String? bookName;
   final PageImageAssetStore? imageStore;
   final Future<void> Function(int pageIndex)? onOriginalPage;
+
   /// Called after a draft save queue completes. Structured source editors use
   /// this to persist the document revision while the route is still open.
   final Future<void> Function(List<Note> notes)? onDraftSaved;
@@ -76,7 +77,8 @@ class BookPageEditPage extends StatefulWidget {
     VoidCallback onClose,
     ValueChanged<int> onSelectPage,
     VoidCallback onFinishEditor,
-  )? catalogDrawerBuilder;
+  )?
+  catalogDrawerBuilder;
   final ValueListenable<int>? catalogDrawerVersionListenable;
   final PdfDocumentRef? pdfDocumentRef;
   final int? pdfPageNumber;
@@ -503,8 +505,9 @@ class _BookPageEditPageState extends State<BookPageEditPage>
               _normalizePdfNoteForPage(note, _pdfPageNumber),
           ];
     _pages = [for (final note in notes) _BookPageDraft(note)];
-    _pdfAnnotationPageNumber =
-        widget.pdfDocumentRef == null ? null : _pdfPageNumber;
+    _pdfAnnotationPageNumber = widget.pdfDocumentRef == null
+        ? null
+        : _pdfPageNumber;
     _pdfPageStateListenable.value = (current: _pdfPageNumber, total: null);
     if (widget.pdfDocumentRef != null) {
       _pdfViewerController = PdfViewerController();
@@ -1233,6 +1236,7 @@ class _BookPageEditPageState extends State<BookPageEditPage>
         _pdfPageNumber = pageNumber;
         _pdfAnnotationPageNumber = pageNumber;
       }
+
       if (mounted) {
         setState(restoreActivePage);
       } else {
@@ -1251,6 +1255,7 @@ class _BookPageEditPageState extends State<BookPageEditPage>
       _pdfPageNumber = pageNumber;
       _pdfAnnotationPageNumber = null;
     }
+
     if (mounted) {
       setState(clearActiveOverlay);
     } else {
@@ -1422,6 +1427,7 @@ class _BookPageEditPageState extends State<BookPageEditPage>
         _pdfAnnotationPageNumber = null;
       }
     }
+
     if (mounted) {
       setState(updatePageState);
       _schedulePdfOverlayRefresh(_pdfViewerController!);
@@ -1631,9 +1637,9 @@ class _BookPageEditPageState extends State<BookPageEditPage>
       }
       if (!_saveError && dirty.isNotEmpty && widget.onDraftSaved != null) {
         try {
-          await widget.onDraftSaved!(
-            [for (final page in _pages) _materialize(page)],
-          );
+          await widget.onDraftSaved!([
+            for (final page in _pages) _materialize(page),
+          ]);
         } catch (error) {
           debugPrint('[BookPageEdit] 草稿资料保存失败: $error');
           // The page notes were only materialized in memory. Keep the changed
@@ -2370,8 +2376,8 @@ class _BookPageEditPageState extends State<BookPageEditPage>
         // the previous page's annotation document follow that viewport.
         annotationDocument:
             _isPdfEditor && _pdfAnnotationPageNumber != _pdfPageNumber
-                ? PageAnnotationDocument()
-                : _pages[index].annotations,
+            ? PageAnnotationDocument()
+            : _pages[index].annotations,
         imageStore: _imageStore,
         imageEditor: _imageEditor,
         // The annotation layer must remain interactive while a PDF page
@@ -4294,7 +4300,7 @@ class _InkColorPickerDialogState extends State<_InkColorPickerDialog> {
       _hue = nextHue;
       _saturation = nextSaturation;
       _value = nextValue;
-      _color = color.value | 0xFF000000;
+      _color = color.toARGB32() | 0xFF000000;
       _hexController.text = _hex(_color);
     });
   }
@@ -5413,259 +5419,266 @@ class _EditorCanvas extends StatelessWidget {
               fit: StackFit.passthrough,
               clipBehavior: Clip.none,
               children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    minHeight: stableContentMinHeight,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Expanded(
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                '${_formatDate(page.note.updatedAt)} · $saveLabel',
-                                key: Key(
-                                  'book_page_editor_save_state_$pageIndex',
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                textAlign: TextAlign.left,
-                                style: const TextStyle(
-                                  color: NotePageTheme.muted,
-                                  fontSize: 13,
-                                  height: 1.2,
-                                ),
-                              ),
-                            ),
-                          ),
-                          Expanded(
-                            child: Align(
-                              alignment: Alignment.centerRight,
-                              child: TextButton(
-                                key: Key('book_page_editor_source_$pageIndex'),
-                                onPressed: onOriginal,
-                                style: TextButton.styleFrom(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 4,
-                                  ),
-                                  minimumSize: const Size(0, 36),
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                ),
-                                child: Text.rich(
-                                  TextSpan(
-                                    children: [
-                                      TextSpan(
-                                        text:
-                                            '来源：书页 ${pageNumber.isNotEmpty ? pageNumber : '未标页码'}  ',
-                                      ),
-                                      const TextSpan(
-                                        text: '查看原文',
-                                        style: TextStyle(
-                                          color: NotePageTheme.gold,
-                                          decoration: TextDecoration.underline,
-                                        ),
-                                      ),
-                                    ],
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minHeight: stableContentMinHeight,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  '${_formatDate(page.note.updatedAt)} · $saveLabel',
+                                  key: Key(
+                                    'book_page_editor_save_state_$pageIndex',
                                   ),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  textAlign: TextAlign.right,
+                                  textAlign: TextAlign.left,
                                   style: const TextStyle(
-                                    color: NotePageTheme.inkSecondary,
-                                    fontSize: 12,
+                                    color: NotePageTheme.muted,
+                                    fontSize: 13,
+                                    height: 1.2,
                                   ),
                                 ),
+                              ),
+                            ),
+                            Expanded(
+                              child: Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton(
+                                  key: Key(
+                                    'book_page_editor_source_$pageIndex',
+                                  ),
+                                  onPressed: onOriginal,
+                                  style: TextButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                    ),
+                                    minimumSize: const Size(0, 36),
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: Text.rich(
+                                    TextSpan(
+                                      children: [
+                                        TextSpan(
+                                          text:
+                                              '来源：书页 ${pageNumber.isNotEmpty ? pageNumber : '未标页码'}  ',
+                                        ),
+                                        const TextSpan(
+                                          text: '查看原文',
+                                          style: TextStyle(
+                                            color: NotePageTheme.gold,
+                                            decoration:
+                                                TextDecoration.underline,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.right,
+                                    style: const TextStyle(
+                                      color: NotePageTheme.inkSecondary,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (page.hasUnsupportedLayout) ...[
+                          SizedBox(
+                            key: bodyFieldKey,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                              ),
+                              child: BookPageDocumentView(
+                                document: page.document,
+                                editableTextBuilder: isActivePage
+                                    ? _editableBlock
+                                    : null,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            page.editableBlockCount >
+                                    page.liveEditableBlockIds.length
+                                ? '图表、图片、表格和公式保持原位。这一章内容很长，为保持流畅正文按需进入编辑状态：点一下要修改的段落即可编辑。'
+                                : '图表、图片、表格和公式保持原位，前后文字可直接修改。',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: NotePageTheme.muted,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ] else ...[
+                          if (isActivePage)
+                            BookTextSelectionBackdrop(
+                              controller: page.titleController,
+                              child: TextSelectionTheme(
+                                data: const TextSelectionThemeData(
+                                  selectionColor:
+                                      BookPencilTextSelectionControls
+                                          .editableSelectionColor,
+                                ),
+                                child: TextField(
+                                  key: Key('book_page_editor_title_$pageIndex'),
+                                  controller: page.titleController,
+                                  readOnly:
+                                      drawingEnabled &&
+                                      !annotationTools.isBrowseMode,
+                                  maxLines: null,
+                                  style: titleStyle,
+                                  showCursor: true,
+                                  cursorColor: BookPencilTextSelectionControls
+                                      .cursorColor,
+                                  cursorWidth: 1.5,
+                                  cursorRadius: Radius.zero,
+                                  selectionControls:
+                                      bookPencilTextSelectionControls,
+                                  selectionHeightStyle: ui.BoxHeightStyle.tight,
+                                  selectionWidthStyle: ui.BoxWidthStyle.tight,
+                                  scrollPadding: EdgeInsets.zero,
+                                  decoration: const InputDecoration.collapsed(
+                                    hintText: '书页标题',
+                                    hintStyle: TextStyle(
+                                      color: NotePageTheme.muted,
+                                      fontFamily: NotePageTheme.bookFont,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            )
+                          else
+                            Text(
+                              page.titleController.text,
+                              key: Key('book_page_editor_title_$pageIndex'),
+                              style: titleStyle,
+                            ),
+                          const SizedBox(height: 22),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            child: isActivePage
+                                ? SizedBox(
+                                    key: bodyFieldKey,
+                                    child: BookTextSelectionBackdrop(
+                                      controller: page.bodyController,
+                                      child: TextSelectionTheme(
+                                        data: const TextSelectionThemeData(
+                                          selectionColor:
+                                              BookPencilTextSelectionControls
+                                                  .editableSelectionColor,
+                                        ),
+                                        child: TextField(
+                                          key: Key(
+                                            'book_page_editor_body_$pageIndex',
+                                          ),
+                                          controller: page.bodyController,
+                                          readOnly:
+                                              drawingEnabled &&
+                                              !annotationTools.isBrowseMode,
+                                          maxLines: null,
+                                          minLines: 13,
+                                          style: bodyStyle,
+                                          showCursor: true,
+                                          cursorColor:
+                                              BookPencilTextSelectionControls
+                                                  .cursorColor,
+                                          cursorWidth: 1.5,
+                                          cursorRadius: Radius.zero,
+                                          selectionControls:
+                                              bookPencilTextSelectionControls,
+                                          selectionHeightStyle:
+                                              ui.BoxHeightStyle.tight,
+                                          selectionWidthStyle:
+                                              ui.BoxWidthStyle.tight,
+                                          scrollPadding: EdgeInsets.zero,
+                                          textAlignVertical:
+                                              TextAlignVertical.top,
+                                          decoration: const InputDecoration(
+                                            hintText: '正文',
+                                            hintStyle: TextStyle(
+                                              color: NotePageTheme.muted,
+                                              fontFamily:
+                                                  NotePageTheme.bookFont,
+                                            ),
+                                            border: InputBorder.none,
+                                            contentPadding: EdgeInsets.zero,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                : ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      minHeight: 13 * 17 * 1.8,
+                                    ),
+                                    child: Text(
+                                      page.bodyController.text,
+                                      key: Key(
+                                        'book_page_editor_body_$pageIndex',
+                                      ),
+                                      style: bodyStyle,
+                                    ),
+                                  ),
+                          ),
+                        ],
+                        const SizedBox(height: 28),
+                        if (pageNumber.isNotEmpty) ...[
+                          const SizedBox(height: 24),
+                          Center(
+                            child: Text(
+                              '— $pageNumber —',
+                              style: const TextStyle(
+                                color: NotePageTheme.muted,
+                                fontFamily: NotePageTheme.bookFont,
+                                fontSize: 13,
+                                letterSpacing: 1.4,
                               ),
                             ),
                           ),
                         ],
-                      ),
-                      if (page.hasUnsupportedLayout) ...[
-                        SizedBox(
-                          key: bodyFieldKey,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24),
-                            child: BookPageDocumentView(
-                              document: page.document,
-                              editableTextBuilder: isActivePage
-                                  ? _editableBlock
-                                  : null,
+                        ValueListenableBuilder<double>(
+                          valueListenable: keyboardInsetListenable,
+                          builder: (context, inset, _) => SizedBox(
+                            key: Key(
+                              'book_page_editor_keyboard_space_$pageIndex',
                             ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          page.editableBlockCount >
-                                  page.liveEditableBlockIds.length
-                              ? '图表、图片、表格和公式保持原位。这一章内容很长，为保持流畅正文按需进入编辑状态：点一下要修改的段落即可编辑。'
-                              : '图表、图片、表格和公式保持原位，前后文字可直接修改。',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: NotePageTheme.muted,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ] else ...[
-                        if (isActivePage)
-                          BookTextSelectionBackdrop(
-                            controller: page.titleController,
-                            child: TextSelectionTheme(
-                              data: const TextSelectionThemeData(
-                                selectionColor: BookPencilTextSelectionControls
-                                    .editableSelectionColor,
-                              ),
-                              child: TextField(
-                                key: Key('book_page_editor_title_$pageIndex'),
-                                controller: page.titleController,
-                                readOnly:
-                                    drawingEnabled &&
-                                    !annotationTools.isBrowseMode,
-                                maxLines: null,
-                                style: titleStyle,
-                                showCursor: true,
-                                cursorColor:
-                                    BookPencilTextSelectionControls.cursorColor,
-                                cursorWidth: 1.5,
-                                cursorRadius: Radius.zero,
-                                selectionControls:
-                                    bookPencilTextSelectionControls,
-                                selectionHeightStyle: ui.BoxHeightStyle.tight,
-                                selectionWidthStyle: ui.BoxWidthStyle.tight,
-                                scrollPadding: EdgeInsets.zero,
-                                decoration: const InputDecoration.collapsed(
-                                  hintText: '书页标题',
-                                  hintStyle: TextStyle(
-                                    color: NotePageTheme.muted,
-                                    fontFamily: NotePageTheme.bookFont,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          )
-                        else
-                          Text(
-                            page.titleController.text,
-                            key: Key('book_page_editor_title_$pageIndex'),
-                            style: titleStyle,
-                          ),
-                        const SizedBox(height: 22),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 24),
-                          child: isActivePage
-                              ? SizedBox(
-                                  key: bodyFieldKey,
-                                  child: BookTextSelectionBackdrop(
-                                    controller: page.bodyController,
-                                    child: TextSelectionTheme(
-                                      data: const TextSelectionThemeData(
-                                        selectionColor:
-                                            BookPencilTextSelectionControls
-                                                .editableSelectionColor,
-                                      ),
-                                      child: TextField(
-                                        key: Key(
-                                          'book_page_editor_body_$pageIndex',
-                                        ),
-                                        controller: page.bodyController,
-                                        readOnly:
-                                            drawingEnabled &&
-                                            !annotationTools.isBrowseMode,
-                                        maxLines: null,
-                                        minLines: 13,
-                                        style: bodyStyle,
-                                        showCursor: true,
-                                        cursorColor:
-                                            BookPencilTextSelectionControls
-                                                .cursorColor,
-                                        cursorWidth: 1.5,
-                                        cursorRadius: Radius.zero,
-                                        selectionControls:
-                                            bookPencilTextSelectionControls,
-                                        selectionHeightStyle:
-                                            ui.BoxHeightStyle.tight,
-                                        selectionWidthStyle:
-                                            ui.BoxWidthStyle.tight,
-                                        scrollPadding: EdgeInsets.zero,
-                                        textAlignVertical:
-                                            TextAlignVertical.top,
-                                        decoration: const InputDecoration(
-                                          hintText: '正文',
-                                          hintStyle: TextStyle(
-                                            color: NotePageTheme.muted,
-                                            fontFamily: NotePageTheme.bookFont,
-                                          ),
-                                          border: InputBorder.none,
-                                          contentPadding: EdgeInsets.zero,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                )
-                              : ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    minHeight: 13 * 17 * 1.8,
-                                  ),
-                                  child: Text(
-                                    page.bodyController.text,
-                                    key: Key(
-                                      'book_page_editor_body_$pageIndex',
-                                    ),
-                                    style: bodyStyle,
-                                  ),
-                                ),
-                        ),
-                      ],
-                      const SizedBox(height: 28),
-                      if (pageNumber.isNotEmpty) ...[
-                        const SizedBox(height: 24),
-                        Center(
-                          child: Text(
-                            '— $pageNumber —',
-                            style: const TextStyle(
-                              color: NotePageTheme.muted,
-                              fontFamily: NotePageTheme.bookFont,
-                              fontSize: 13,
-                              letterSpacing: 1.4,
-                            ),
+                            height: pageLocked ? 0 : inset,
                           ),
                         ),
                       ],
-                      ValueListenableBuilder<double>(
-                        valueListenable: keyboardInsetListenable,
-                        builder: (context, inset, _) => SizedBox(
-                          key: Key(
-                            'book_page_editor_keyboard_space_$pageIndex',
-                          ),
-                          height: pageLocked ? 0 : inset,
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ),
-              ),
-              Positioned.fill(
-                child: _PageAnnotationLayer(
-                  layerKey: annotationLayerKey,
-                  document: annotationDocument,
-                  controller: annotationTools,
-                  imageStore: imageStore,
-                  imageEditor: imageEditor,
-                  enabled: drawingEnabled,
-                  isActivePage: isActivePage,
-                  onChanged: onAnnotationChanged,
-                  onAction: onAnnotationAction,
-                  onLaserSelection: onLaserSelection,
+                Positioned.fill(
+                  child: _PageAnnotationLayer(
+                    layerKey: annotationLayerKey,
+                    document: annotationDocument,
+                    controller: annotationTools,
+                    imageStore: imageStore,
+                    imageEditor: imageEditor,
+                    enabled: drawingEnabled,
+                    isActivePage: isActivePage,
+                    onChanged: onAnnotationChanged,
+                    onAction: onAnnotationAction,
+                    onLaserSelection: onLaserSelection,
+                  ),
                 ),
-              ),
-            ],
+              ],
             ),
           ),
         ),
@@ -5747,7 +5760,6 @@ class _PdfEditorCanvas extends StatelessWidget {
               controller: pdfController,
               document: page.document,
               initialPageNumber: pdfPageNumber,
-              pageLocked: pageLocked,
               margin: 0,
               horizontal: horizontal,
               layoutPages: horizontal ? horizontalPdfPageLayout : null,
@@ -6001,9 +6013,8 @@ class _PageAnnotationLayerState extends State<_PageAnnotationLayer> {
       // the parent acknowledges its id.
       if (_pendingCommittedStrokeIds.isNotEmpty) {
         final acknowledged = _pendingCommittedStrokeIds.every(
-          (pendingId) => widget.document.strokes.any(
-            (stroke) => stroke.id == pendingId,
-          ),
+          (pendingId) =>
+              widget.document.strokes.any((stroke) => stroke.id == pendingId),
         );
         if (!acknowledged) return;
         _pendingCommittedStrokeIds.clear();
@@ -6930,7 +6941,8 @@ class _PageAnnotationLayerState extends State<_PageAnnotationLayer> {
                               // still painted. Once the draft is cleared, a
                               // pending parent acknowledgement must not make
                               // the permanent stroke invisible.
-                              skipStrokeId: _draftPoints.isNotEmpty &&
+                              skipStrokeId:
+                                  _draftPoints.isNotEmpty &&
                                       _pendingCommittedStrokeIds.isNotEmpty
                                   ? _pendingCommittedStrokeIds.last
                                   : null,

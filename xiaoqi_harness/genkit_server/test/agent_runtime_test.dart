@@ -167,7 +167,7 @@ void main() {
         cancellation: CancellationController().token,
       );
 
-      expect(images.prompt, contains('帮我做一张动漫风景图片'));
+      expect(images.prompt, contains('动漫风景'));
       expect(images.count, 1);
       expect(images.imageUrl, isNull);
       expect(answer, '图片已生成。');
