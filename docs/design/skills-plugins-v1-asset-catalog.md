@@ -42,3 +42,19 @@
 菜单五项图标均按 80×80 独立预览；功能菜单图标按 29 dp 显示，管理图标 26 dp。“创建技能 / 插件”功能行和底部胶囊保留拼图图标；已保存能力条目、输入标签和已发送消息标签使用侧边栏扳手图标，能力条目和内联标签中的扳手均为 18 dp。输入标签和消息气泡中的能力名称使用浅粉色强调，菜单标题保留原色。MCP 胶囊保持与阅读任务一致的点击反馈。创建图像、联网搜索、绘图图标已接入菜单；对应能力仍显示未开放反馈。冻结截图中的「Documents」「书本变童话」只是参考例子，不会写入默认数据。阅读任务胶囊及其 `apps.svg` 资产不在本次修改范围内。
 
 联网搜索行在 `SkillsPluginsComposerControls` 中消费现有 `web_search.svg`；同一菜单行的 Flutter `Switch` 提供开启 / 关闭状态，不新增或栅格化视觉资产。
+
+## 绘图画板工具图标
+
+| 最终 SVG | 上游图标 / 来源与许可证 | viewBox | 显示尺寸 | 状态映射 | 消费组件 |
+|---|---|---:|---:|---|---|
+| assets/icons/drawing/mouse-pointer-2.svg | `mouse-pointer-2` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/mouse-pointer-2.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 21 dp | 选择工具启用时使用主题色 | `DrawingBoardPage` 工具栏 |
+| assets/icons/drawing/shapes.svg | `shapes` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/shapes.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 21 dp | 形状工具启用时使用主题色 | `DrawingBoardPage` 形状菜单 |
+| assets/icons/drawing/eraser.svg | `eraser` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/eraser.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 21 dp | 橡皮擦启用时使用主题色 | `DrawingBoardPage` 工具栏 |
+| assets/icons/drawing/check.svg | `check` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/check.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 23 dp | 完成按钮白色；处理中由现有按钮内小圈反馈 | `DrawingBoardPage` 完成按钮 |
+| assets/icons/capabilities/brush.svg | 项目既有“绘图”入口 SVG，见本表上方的原型重绘记录 | 0 0 24 24 | 21 dp | 手绘启用时使用主题色 | `DrawingBoardPage` 工具栏 |
+| assets/icons/chat_note_editor/text-aa.svg | 项目既有文字工具 SVG | 0 0 24 24 | 21 dp | 文字启用时使用主题色 | `DrawingBoardPage` 工具栏 |
+| assets/icons/chat_note_editor/arrow-counter-clockwise.svg；arrow-clockwise.svg | 项目既有撤销 / 重做 SVG | 0 0 24 24；0 0 256 256 | 21 dp | 无历史动作时浅灰禁用 | `DrawingBoardPage` 工具栏 |
+| assets/icons/capabilities/image.svg | 项目既有图像入口 SVG | 0 0 24 24 | 21 dp | 常态 | `DrawingBoardPage` 导入底图按钮 |
+| assets/icons/chat_note_editor/x.svg | 项目既有关闭 SVG | 0 0 256 256 | 22 dp | 常态 | `DrawingBoardPage` 关闭按钮 |
+
+四个 Lucide SVG 在 `assets/icons/drawing/icon-preview.html` 以 64×64 CSS 像素独立预览；所有画板工具图标均作为独立矢量文件接入，不使用截图裁片或业务代码绘制替代。

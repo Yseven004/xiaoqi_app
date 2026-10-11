@@ -14,6 +14,7 @@ import '../data/capability_store.dart';
 class SkillsPluginsComposerControls extends StatefulWidget {
   const SkillsPluginsComposerControls({
     required this.onCapabilitySelected,
+    required this.onDrawingSelected,
     required this.onSaveReviewDraft,
     required this.onReviseReviewDraft,
     required this.onDismissReviewDraft,
@@ -29,6 +30,7 @@ class SkillsPluginsComposerControls extends StatefulWidget {
   });
 
   final ValueChanged<Map<String, Object?>> onCapabilitySelected;
+  final VoidCallback onDrawingSelected;
   final CapabilityDraft? reviewDraft;
   final Future<void> Function(CapabilityDraft draft, bool showInMenu)
   onSaveReviewDraft;
@@ -476,12 +478,10 @@ class _SkillsPluginsComposerControlsState
             () => _selectAction('create-image', '创建图像'),
           ),
           _networkFeatureRow(),
-          _featureRow(
-            'brush',
-            '绘图',
-            '用绘图更直观地表达想法',
-            () => _showStatus('绘图入口已保留，尚未开放'),
-          ),
+          _featureRow('brush', '绘图', '用绘图更直观地表达想法', () {
+            _closeMenu();
+            widget.onDrawingSelected();
+          }),
           if (hasSavedCapabilities) ...[
             const Divider(height: 18, color: Color(0xFFE2E4E8)),
             if (skills.isNotEmpty) ...[

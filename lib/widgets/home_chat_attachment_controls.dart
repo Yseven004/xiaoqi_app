@@ -11,11 +11,13 @@ class HomeChatAttachmentTray extends StatelessWidget {
   const HomeChatAttachmentTray({
     required this.attachments,
     required this.onRemove,
+    this.onEditDrawing,
     super.key,
   });
 
   final List<HomeChatAttachment> attachments;
   final ValueChanged<HomeChatAttachment> onRemove;
+  final ValueChanged<HomeChatAttachment>? onEditDrawing;
 
   @override
   Widget build(BuildContext context) {
@@ -30,86 +32,126 @@ class HomeChatAttachmentTray extends StatelessWidget {
           separatorBuilder: (_, __) => const SizedBox(width: 8),
           itemBuilder: (context, index) {
             final item = attachments[index];
-            return Stack(
-              children: [
-                GestureDetector(
-                  onTap: item.isImage ? () => _showImage(context, item) : null,
-                  child: Container(
-                    width: item.isImage ? 64 : 150,
-                    height: 68,
-                    padding: item.isImage
-                        ? EdgeInsets.zero
-                        : const EdgeInsets.fromLTRB(10, 7, 23, 7),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF4F4F4),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: item.isImage
-                        ? Image.file(File(item.path), fit: BoxFit.cover)
-                        : Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
-                                item.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  color: Color(0xFF303134),
-                                ),
-                              ),
-                              const SizedBox(height: 3),
-                              Text(
-                                '${item.name.split('.').last.toUpperCase()} · ${_size(item.byteLength)}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 10,
-                                  color: Color(0xFF777777),
-                                ),
-                              ),
-                            ],
+            final canEditDrawing =
+                item.source == 'drawing' &&
+                item.drawingDraftPath != null &&
+                onEditDrawing != null;
+            final preview = GestureDetector(
+              onTap: canEditDrawing
+                  ? () => onEditDrawing!(item)
+                  : item.isImage
+                  ? () => _showImage(context, item)
+                  : null,
+              child: Container(
+                width: item.isImage ? 64 : 150,
+                height: 68,
+                padding: item.isImage
+                    ? EdgeInsets.zero
+                    : const EdgeInsets.fromLTRB(10, 7, 23, 7),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF4F4F4),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: item.isImage
+                    ? Image.file(File(item.path), fit: BoxFit.cover)
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            item.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF303134),
+                            ),
                           ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '${item.name.split('.').last.toUpperCase()} · ${_size(item.byteLength)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: Color(0xFF777777),
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+            );
+            final editBadge = Positioned(
+              right: 5,
+              bottom: 5,
+              child: IgnorePointer(
+                child: Container(
+                  width: 22,
+                  height: 22,
+                  decoration: const BoxDecoration(
+                    color: Color(0xCCFFFFFF),
+                    shape: BoxShape.circle,
+                  ),
+                  padding: const EdgeInsets.all(4),
+                  child: SvgPicture.asset(
+                    'assets/icons/capabilities/edit.svg',
+                    excludeFromSemantics: true,
                   ),
                 ),
-                Positioned(
-                  top: 0,
-                  right: 0,
-                  child: Semantics(
-                    button: true,
-                    label: '移除${item.name}',
-                    child: Tooltip(
-                      message: '移除${item.name}',
-                      child: SizedBox(
-                        width: 44,
-                        height: 44,
-                        child: Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            customBorder: const CircleBorder(),
-                            onTap: () => onRemove(item),
-                            child: Align(
-                              alignment: Alignment.topRight,
-                              child: Padding(
-                                padding: const EdgeInsets.all(3),
-                                child: CircleAvatar(
-                                  radius: 10,
-                                  backgroundColor: const Color(0xCC555555),
-                                  child: const Icon(
-                                    Icons.close,
-                                    size: 12,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ),
+              ),
+            );
+            Widget removeButton(Alignment alignment) => Semantics(
+              button: true,
+              label: '移除${item.name}',
+              child: Tooltip(
+                message: '移除${item.name}',
+                child: SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: () => onRemove(item),
+                      child: Align(
+                        alignment: alignment,
+                        child: Padding(
+                          padding: const EdgeInsets.all(3),
+                          child: CircleAvatar(
+                            radius: 10,
+                            backgroundColor: const Color(0xCC555555),
+                            child: const Icon(
+                              Icons.close,
+                              size: 12,
+                              color: Colors.white,
                             ),
                           ),
                         ),
                       ),
                     ),
                   ),
+                ),
+              ),
+            );
+
+            if (canEditDrawing) {
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Stack(children: [preview, editBadge]),
+                  removeButton(Alignment.topLeft),
+                ],
+              );
+            }
+            return Stack(
+              children: [
+                preview,
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: removeButton(Alignment.topRight),
                 ),
               ],
             );

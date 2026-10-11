@@ -12,6 +12,7 @@ import 'package:flutter/scheduler.dart' show Priority, SchedulerBinding;
 import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:a2ui_core/a2ui_core.dart' as a2ui_core;
+import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental_client.dart' as genkit_client;
 import 'package:genkit/genkit.dart' as genkit;
 import 'package:genkit_a2ui/client.dart' as genkit_a2ui;
@@ -43,6 +44,7 @@ import '../services/book_library_service.dart';
 import '../services/ai_service.dart';
 import '../services/database_service.dart';
 import '../services/home_chat_attachment_reader.dart';
+import '../services/home_chat_drawing_draft_store.dart';
 import '../services/home_chat_model_preferences.dart';
 import '../services/speech_recognition_service.dart';
 import '../widgets/reading_task_book_creation.dart';
@@ -56,6 +58,7 @@ import '../widgets/add_chat_note_sheet.dart';
 import 'email_login_page.dart';
 import 'note_editor_page.dart';
 import 'book_learning_shell_page.dart';
+import 'drawing_board_page.dart';
 
 class _AgentTaskFailure extends AiException {
   const _AgentTaskFailure(
@@ -1000,9 +1003,167 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       try {
         await File(attachment.path).delete();
       } catch (_) {}
+      final draftPath = attachment.drawingDraftPath;
+      if (draftPath != null) {
+        try {
+          await HomeChatDrawingDraftStore(
+            accountScope: attachment.drawingDraftScope ?? 'local',
+          ).delete(_conversation?.id ?? '', draftPath);
+        } catch (_) {}
+      }
     }
     if (mounted) setState(() {});
     await _persistAttachments();
+  }
+
+  Future<void> _openDrawingBoard({HomeChatAttachment? editing}) async {
+    final conversation = _conversation;
+    if (conversation == null) return;
+    if (editing == null && _attachments.length >= 9) {
+      _showReplyError('每个会话最多添加 9 个文件');
+      return;
+    }
+    if (editing != null &&
+        !_attachments.any((attachment) => attachment.id == editing.id)) {
+      return;
+    }
+    _dismissComposerFocus();
+    final accountScope =
+        editing?.drawingDraftScope ?? await _currentDrawingAccountScope();
+    if (!mounted || _conversation?.id != conversation.id) return;
+    final draftStore = HomeChatDrawingDraftStore(accountScope: accountScope);
+    final result = await Navigator.of(context).push<HomeChatDrawingResult>(
+      PageRouteBuilder<HomeChatDrawingResult>(
+        opaque: false,
+        barrierDismissible: false,
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => DrawingBoardPage(
+          conversationId: conversation.id,
+          accountScope: accountScope,
+          draftPath: editing?.drawingDraftPath,
+        ),
+        transitionsBuilder: (_, _, _, child) => child,
+      ),
+    );
+    if (result == null) return;
+    Future<void> restoreDraftForRecovery() async {
+      try {
+        await draftStore.reactivate(conversation.id, result.draftPath);
+      } catch (_) {}
+    }
+
+    if (!mounted || _conversation?.id != conversation.id) {
+      await restoreDraftForRecovery();
+      return;
+    }
+    if (result.pngBytes.length > 5 * 1024 * 1024) {
+      _showReplyError('绘图图片超过 5 MB，请缩小底图后重试');
+      await restoreDraftForRecovery();
+      return;
+    }
+    final id =
+        editing?.id ?? 'drawing_${DateTime.now().microsecondsSinceEpoch}';
+    File? file;
+    File? tempFile;
+    List<HomeChatAttachment>? previousAttachments;
+    try {
+      final root = await getApplicationSupportDirectory();
+      final target = Directory(
+        '${root.path}/home_chat_attachments/${conversation.id}',
+      );
+      await target.create(recursive: true);
+      file = File(
+        '${target.path}/${id}_${DateTime.now().microsecondsSinceEpoch}.png',
+      );
+      tempFile = File('${file.path}.tmp');
+      await tempFile.writeAsBytes(result.pngBytes, flush: true);
+      await tempFile.rename(file.path);
+
+      if (!mounted || _conversation?.id != conversation.id) {
+        await file.delete();
+        await restoreDraftForRecovery();
+        return;
+      }
+
+      final updated = HomeChatAttachment(
+        id: id,
+        name: '绘图.png',
+        path: file.path,
+        mimeType: 'image/png',
+        byteLength: result.pngBytes.length,
+        source: 'drawing',
+        drawingDraftPath: result.draftPath,
+        drawingDraftScope: accountScope,
+      );
+      previousAttachments = _attachments;
+      if (editing == null) {
+        _attachments = [..._attachments, updated];
+        if (_editingQuestion != null) {
+          _messageEditAddedAttachments[id] = updated;
+        }
+      } else {
+        _attachments = _attachments
+            .map(
+              (attachment) =>
+                  attachment.id == editing.id ? updated : attachment,
+            )
+            .toList(growable: false);
+      }
+      if (mounted) setState(() {});
+      await _persistAttachments();
+      try {
+        await draftStore.finish(conversation.id, result.draftPath);
+      } catch (error) {
+        _showReplyError('绘图已加入输入框，草稿清理失败：$error');
+      }
+      final oldPath = editing?.path;
+      if (oldPath != null && oldPath != file.path) {
+        try {
+          await File(oldPath).delete();
+        } catch (_) {}
+      }
+    } catch (error) {
+      if (previousAttachments != null) {
+        _attachments = previousAttachments;
+        if (mounted) setState(() {});
+      }
+      if (file != null && await file.exists()) {
+        try {
+          await file.delete();
+        } catch (_) {}
+      }
+      if (tempFile != null && await tempFile.exists()) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
+      await restoreDraftForRecovery();
+      _showReplyError('保存绘图图片失败：$error');
+    }
+  }
+
+  Future<void> _deleteDrawingDrafts(
+    String conversationId,
+    Iterable<HomeChatAttachment> attachments,
+  ) async {
+    for (final attachment in attachments) {
+      final path = attachment.drawingDraftPath;
+      if (path == null) continue;
+      try {
+        await HomeChatDrawingDraftStore(
+          accountScope: attachment.drawingDraftScope ?? 'local',
+        ).delete(conversationId, path);
+      } catch (_) {}
+    }
+  }
+
+  Future<String> _currentDrawingAccountScope() async {
+    final cloud = CapabilityCloudSync.instance;
+    if (!await cloud.hasEmailSession) return 'local';
+    final email = (await cloud.signedInEmail)?.trim().toLowerCase() ?? '';
+    if (email.isEmpty) return 'local';
+    return 'account_${sha256.convert(utf8.encode(email))}';
   }
 
   String? _attachmentMime(String extension) => switch (extension) {
@@ -1378,6 +1539,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await File(attachment.path).delete();
       } catch (_) {}
     }
+    await _deleteDrawingDrafts(_conversation?.id ?? '', attachments);
   }
 
   Future<void> _saveMessageEdit() async {
@@ -1468,6 +1630,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
         return;
       }
+      await _deleteDrawingDrafts(current.id, selectedAttachments);
       if (!mounted) {
         _messageEditAddedAttachments.clear();
         return;
@@ -1607,6 +1770,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       prepared.add(
         attachment.copyWith(
           extractedText: chunks.join('\r\n\r\n'),
+          drawingDraftPath: null,
+          drawingDraftScope: null,
           pageImagePaths: await _attachmentReader.readScannedPageImages(
             attachment,
           ),
@@ -1748,6 +1913,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _pendingReplyParentId = null;
       return;
     }
+    await _deleteDrawingDrafts(conversationId, selectedAttachments);
     if (!_isCurrentRequest(requestGeneration, conversationId)) return;
 
     late final List<Map<String, Object?>> aiMessages;
@@ -1990,8 +2156,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (final message in history.where((item) => !item.isDeletedMarker)) {
       final attachments = message.attachments;
       final emptyMessage = _emptyCapabilityIntent(message);
+      final drawingOnly =
+          message.isUser &&
+          attachments.isNotEmpty &&
+          attachments.every((attachment) => attachment.source == 'drawing');
       final text = message.text.isNotEmpty
           ? message.text
+          : drawingOnly
+          ? '请理解绘图附件表达的意图、对象关系与标注，并据此完成需求；如图示存在歧义，请简短询问我。'
           : emptyMessage.isNotEmpty
           ? emptyMessage
           : attachments.isEmpty
@@ -5663,6 +5835,8 @@ $text''';
                                                 'off',
                                             onNetworkModeChanged:
                                                 _setNetworkMode,
+                                            onDrawingSelected: () =>
+                                                unawaited(_openDrawingBoard()),
                                             onCapabilitySelected: (capability) {
                                               _activeSkillWorkflow = null;
                                               _composerController
@@ -5740,6 +5914,12 @@ $text''';
                                             onAddRecentPhoto: _addRecentPhoto,
                                             onRemoveAttachment:
                                                 _removeAttachment,
+                                            onEditDrawing: (attachment) =>
+                                                unawaited(
+                                                  _openDrawingBoard(
+                                                    editing: attachment,
+                                                  ),
+                                                ),
                                             onVoiceLongPressStart:
                                                 _startVoiceInput,
                                             onVoiceLongPressMove:
@@ -6104,6 +6284,8 @@ class _HomeComposer extends StatefulWidget {
     required this.networkMode,
     required this.onNetworkModeChanged,
     required this.onCapabilitySelected,
+    required this.onDrawingSelected,
+    required this.onEditDrawing,
     required this.pendingSkillDraftReview,
     required this.onSaveSkillDraft,
     required this.onReviseSkillDraft,
@@ -6159,6 +6341,8 @@ class _HomeComposer extends StatefulWidget {
   final String networkMode;
   final ValueChanged<String> onNetworkModeChanged;
   final ValueChanged<Map<String, Object?>> onCapabilitySelected;
+  final VoidCallback onDrawingSelected;
+  final ValueChanged<HomeChatAttachment> onEditDrawing;
   final CapabilityDraft? pendingSkillDraftReview;
   final Future<void> Function(CapabilityDraft draft, bool showInMenu)
   onSaveSkillDraft;
@@ -6451,6 +6635,9 @@ class _HomeComposerState extends State<_HomeComposer> {
                             HomeChatAttachmentTray(
                               attachments: widget.attachments,
                               onRemove: widget.onRemoveAttachment,
+                              onEditDrawing: widget.isEditingMessage
+                                  ? null
+                                  : widget.onEditDrawing,
                             ),
                           Flexible(
                             fit: widget.expanded
@@ -6791,6 +6978,7 @@ class _HomeComposerState extends State<_HomeComposer> {
             networkMode: widget.networkMode,
             onNetworkModeChanged: widget.onNetworkModeChanged,
             onCapabilitySelected: widget.onCapabilitySelected,
+            onDrawingSelected: widget.onDrawingSelected,
             reviewDraft: widget.pendingSkillDraftReview,
             onSaveReviewDraft: widget.onSaveSkillDraft,
             onReviseReviewDraft: widget.onReviseSkillDraft,

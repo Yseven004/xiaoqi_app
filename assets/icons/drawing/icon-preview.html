@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>绘图工具 SVG 预览</title>
+  <style>
+    body { margin: 24px; color: #252525; font: 14px system-ui, sans-serif; }
+    main { display: flex; flex-wrap: wrap; gap: 16px; }
+    figure { width: 112px; margin: 0; display: grid; justify-items: center; gap: 8px; }
+    .preview { width: 64px; height: 64px; display: grid; place-items: center; border: 1px solid #d8dadd; border-radius: 12px; }
+    img { width: 64px; height: 64px; }
+    figcaption { text-align: center; }
+  </style>
+  <main>
+    <figure><div class="preview"><img src="mouse-pointer-2.svg" alt="" /></div><figcaption>选择</figcaption></figure>
+    <figure><div class="preview"><img src="shapes.svg" alt="" /></div><figcaption>形状</figcaption></figure>
+    <figure><div class="preview"><img src="eraser.svg" alt="" /></div><figcaption>橡皮擦</figcaption></figure>
+    <figure><div class="preview"><img src="check.svg" alt="" /></div><figcaption>完成</figcaption></figure>
+  </main>
+</html>

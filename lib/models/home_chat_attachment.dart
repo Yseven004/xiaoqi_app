@@ -2,6 +2,8 @@ import 'dart:io';
 
 /// A private local copy attached to a home chat message.
 class HomeChatAttachment {
+  static const Object _unchanged = Object();
+
   const HomeChatAttachment({
     required this.id,
     required this.name,
@@ -13,6 +15,8 @@ class HomeChatAttachment {
     this.extractedText = '',
     this.sourceLabel = '',
     this.pageImagePaths = const [],
+    this.drawingDraftPath,
+    this.drawingDraftScope,
   });
 
   final String id;
@@ -25,6 +29,8 @@ class HomeChatAttachment {
   final String extractedText;
   final String sourceLabel;
   final List<String> pageImagePaths;
+  final String? drawingDraftPath;
+  final String? drawingDraftScope;
 
   bool get isImage => mimeType.startsWith('image/');
   bool get exists => File(path).existsSync();
@@ -40,6 +46,8 @@ class HomeChatAttachment {
     'extracted_text': extractedText,
     'source_label': sourceLabel,
     'page_image_paths': pageImagePaths,
+    'drawing_draft_path': drawingDraftPath,
+    'drawing_draft_scope': drawingDraftScope,
   };
 
   factory HomeChatAttachment.fromJson(Object? raw) {
@@ -59,6 +67,8 @@ class HomeChatAttachment {
                 .map((path) => path.toString())
                 .toList()
           : const [],
+      drawingDraftPath: raw['drawing_draft_path']?.toString(),
+      drawingDraftScope: raw['drawing_draft_scope']?.toString(),
     );
   }
 
@@ -66,6 +76,8 @@ class HomeChatAttachment {
     String? extractedText,
     String? sourceLabel,
     List<String>? pageImagePaths,
+    Object? drawingDraftPath = _unchanged,
+    Object? drawingDraftScope = _unchanged,
   }) => HomeChatAttachment(
     id: id,
     name: name,
@@ -77,5 +89,11 @@ class HomeChatAttachment {
     extractedText: extractedText ?? this.extractedText,
     sourceLabel: sourceLabel ?? this.sourceLabel,
     pageImagePaths: pageImagePaths ?? this.pageImagePaths,
+    drawingDraftPath: identical(drawingDraftPath, _unchanged)
+        ? this.drawingDraftPath
+        : drawingDraftPath as String?,
+    drawingDraftScope: identical(drawingDraftScope, _unchanged)
+        ? this.drawingDraftScope
+        : drawingDraftScope as String?,
   );
 }
