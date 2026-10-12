@@ -22,6 +22,7 @@ class _RecordingImageService extends ImageService {
     int count = 1,
     String? size,
     String? tenantId,
+    String? idempotencyKey,
     ArtifactRecorder? recordArtifact,
   }) async {
     this.prompt = prompt;
@@ -52,10 +53,7 @@ void main() {
       );
       expect(agentImageRequestNeedsTextAnswer('帮我做一张动漫风景图片'), isFalse);
       expect(agentImageRequestNeedsTextAnswer('解释光合作用，然后画一张图'), isTrue);
-      expect(
-        agentImageRequestNeedsTextAnswer('生成一张图片给我讲解一下牛顿的第一定律'),
-        isTrue,
-      );
+      expect(agentImageRequestNeedsTextAnswer('生成一张图片给我讲解一下牛顿的第一定律'), isTrue);
     },
   );
 

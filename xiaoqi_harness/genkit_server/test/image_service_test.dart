@@ -125,8 +125,16 @@ void main() {
       policyService.generate(taskId: 't', prompt: 'x'),
       throwsA(
         isA<ImageProviderException>()
-            .having((error) => error.category, 'category', 'image_policy_blocked')
-            .having((error) => error.providerCode, 'provider code', contains('PolicyViolation'))
+            .having(
+              (error) => error.category,
+              'category',
+              'image_policy_blocked',
+            )
+            .having(
+              (error) => error.providerCode,
+              'provider code',
+              contains('PolicyViolation'),
+            )
             .having((error) => error.requestId, 'request id', 'policy-request'),
       ),
     );
@@ -145,4 +153,40 @@ void main() {
     );
     expect(hanging.postCount, 1);
   });
+
+  test(
+    'reuses a completed image attempt for the same idempotency key',
+    () async {
+      store.put('task/personal/idempotent-image', {
+        'task_id': 'idempotent-image',
+        'status': 'running',
+        'events': [],
+        'artifacts': [],
+      }, null);
+      final client = _ImageClient(
+        http.Response(
+          jsonEncode({
+            'data': [
+              {'url': 'https://ark.example/image.png'},
+            ],
+          }),
+          200,
+        ),
+      );
+      final service = ImageService(store, client: client, apiKey: 'test-key');
+      final first = await service.generate(
+        taskId: 'idempotent-image',
+        prompt: 'a quiet lake',
+        idempotencyKey: 'brief-hash',
+      );
+      final second = await service.generate(
+        taskId: 'idempotent-image',
+        prompt: 'a quiet lake',
+        idempotencyKey: 'brief-hash',
+      );
+
+      expect(client.postCount, 1);
+      expect(second, first);
+    },
+  );
 }

@@ -87,6 +87,7 @@ class ImageService {
     int count = 1,
     String? size,
     String? tenantId,
+    String? idempotencyKey,
     ArtifactRecorder? recordArtifact,
   }) async {
     final apiKey = _apiKey ?? Platform.environment['ARK_API_KEY'] ?? '';
@@ -110,6 +111,32 @@ class ImageService {
         'sequential_image_generation_options': {'max_images': imageCount},
       if (imageUrl != null && imageUrl.isNotEmpty) 'image': imageUrl,
     };
+    final attemptKey = idempotencyKey?.trim();
+    if (attemptKey != null && attemptKey.isNotEmpty) {
+      final previous = _readImageAttempt(
+        tenantId ?? 'personal',
+        taskId,
+        attemptKey,
+      );
+      final previousStatus = previous?['status']?.toString();
+      final previousResult = previous?['result'];
+      if (previousStatus == 'completed' && previousResult is Map) {
+        return Map<String, dynamic>.from(previousResult);
+      }
+      if (previousStatus == 'started' &&
+          _isRecentAttempt(previous?['started_at'])) {
+        throw ImageProviderException(
+          httpStatus: null,
+          providerMessage: '同一图片请求仍在处理中，请稍后查看任务结果。',
+          category: 'image_attempt_in_progress',
+          retryable: false,
+        );
+      }
+      _writeImageAttempt(tenantId ?? 'personal', taskId, attemptKey, {
+        'status': 'started',
+        'started_at': _nowSeconds(),
+      });
+    }
     final attempts = _maxAttempts;
     late http.Response response;
     for (var attempt = 1; attempt <= attempts; attempt++) {
@@ -137,7 +164,16 @@ class ImageService {
       }
       if (response.statusCode >= 200 && response.statusCode < 300) break;
       final providerError = _providerError(response.statusCode, response.body);
-      if (!providerError.retryable || attempt == attempts) throw providerError;
+      if (!providerError.retryable || attempt == attempts) {
+        if (attemptKey != null && attemptKey.isNotEmpty) {
+          _writeImageAttempt(tenantId ?? 'personal', taskId, attemptKey, {
+            'status': 'failed',
+            'failed_at': _nowSeconds(),
+            'category': providerError.category,
+          });
+        }
+        throw providerError;
+      }
       await Future<void>.delayed(_retryBaseDelay * attempt);
     }
     final payload = jsonDecode(response.body);
@@ -168,11 +204,66 @@ class ImageService {
       }
       artifacts.add(artifact);
     }
-    return {
+    final result = <String, dynamic>{
       'ok': true,
       'count': artifacts.length,
       'artifacts': [for (final item in artifacts) _publicArtifact(item)],
     };
+    if (attemptKey != null && attemptKey.isNotEmpty) {
+      _writeImageAttempt(tenantId ?? 'personal', taskId, attemptKey, {
+        'status': 'completed',
+        'completed_at': _nowSeconds(),
+        'result': result,
+      });
+    }
+    return result;
+  }
+
+  Map<String, dynamic>? _readImageAttempt(
+    String tenantId,
+    String taskId,
+    String attemptKey,
+  ) {
+    final value = store.get('task/$tenantId/$taskId')?.value;
+    final attempts = value?['image_attempts'];
+    if (attempts is! Map) return null;
+    final attempt = attempts[attemptKey];
+    return attempt is Map ? Map<String, dynamic>.from(attempt) : null;
+  }
+
+  void _writeImageAttempt(
+    String tenantId,
+    String taskId,
+    String attemptKey,
+    Map<String, dynamic> update,
+  ) {
+    final key = 'task/$tenantId/$taskId';
+    for (var attempt = 0; attempt < 8; attempt++) {
+      final current = store.get(key);
+      if (current == null) return;
+      final value = current.value;
+      final attempts = <String, dynamic>{
+        if (value['image_attempts'] is Map)
+          ...Map<String, dynamic>.from(value['image_attempts'] as Map),
+      };
+      attempts[attemptKey] = update;
+      try {
+        store.put(key, {
+          ...value,
+          'image_attempts': attempts,
+        }, current.revision);
+        return;
+      } on RevisionConflict {
+        continue;
+      }
+    }
+  }
+
+  static int _nowSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+  static bool _isRecentAttempt(Object? startedAt) {
+    final seconds = startedAt is num ? startedAt.toInt() : 0;
+    return seconds > 0 && _nowSeconds() - seconds < 15 * 60;
   }
 
   Future<_ImageData> _imageBytes(Map entry) async {
@@ -223,7 +314,8 @@ class ImageService {
     final message = details['message']?.toString();
     final requestId = details['request_id']?.toString();
     final normalized = '${code ?? ''} ${message ?? ''}'.toLowerCase();
-    final policy = normalized.contains('sensitive') ||
+    final policy =
+        normalized.contains('sensitive') ||
         normalized.contains('copyright') ||
         normalized.contains('policy');
     return ImageProviderException(
@@ -245,10 +337,12 @@ class ImageService {
       final message = map['message'] ?? map['detail'] ?? payload['message'];
       final code = map['code'] ?? map['type'] ?? payload['code'];
       final rawRequestId = map['request_id'] ?? payload['request_id'];
-      final requestId = rawRequestId?.toString() ??
-          RegExp(r'Request id:\s*([A-Za-z0-9_-]+)', caseSensitive: false)
-              .firstMatch(body)
-              ?.group(1);
+      final requestId =
+          rawRequestId?.toString() ??
+          RegExp(
+            r'Request id:\s*([A-Za-z0-9_-]+)',
+            caseSensitive: false,
+          ).firstMatch(body)?.group(1);
       return {
         if (message != null) 'message': message.toString(),
         if (code != null) 'code': code.toString(),

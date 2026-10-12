@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental.dart';
 import 'package:genkit/genkit.dart';
 import 'package:genkit_a2ui/a2ui.dart';
@@ -475,17 +476,18 @@ VisualBrief compileVisualBrief(
     );
   }
 
-  final mixed = supplementalExplanation || agentImageRequestNeedsTextAnswer(original);
+  final mixed =
+      supplementalExplanation || agentImageRequestNeedsTextAnswer(original);
   final explicitPortrait = RegExp(
     r'(肖像|头像|证件照|真人|长相|外貌|脸部|面孔|半身像|全身像|人物照片|照片级|写实人像)',
   ).hasMatch(original);
   final depictionType = explicitPortrait
       ? 'portrait'
       : mixed
-          ? 'infographic'
-          : RegExp(r'(示意图|流程图|结构图|关系图|图解|信息图)').hasMatch(original)
-              ? 'diagram'
-              : 'illustration';
+      ? 'infographic'
+      : RegExp(r'(示意图|流程图|结构图|关系图|图解|信息图)').hasMatch(original)
+      ? 'diagram'
+      : 'illustration';
 
   var topic = _visualTopic(original, mixed: mixed);
   final attribution = <String>[];
@@ -529,31 +531,23 @@ String agentImagePrompt(String request) =>
 
 String _visualTopic(String request, {required bool mixed}) {
   var value = request.trim();
-  final explanation = RegExp(
-    r'(?:讲解|解释|说明|介绍|阐述)(.+?)(?:(?:，|,|。|；|;)|(?:顺便|并且|然后|同时|并)(?=生成|生图|画|绘制|制作|做|配))',
-  ).firstMatch(value) ??
+  final explanation =
+      RegExp(
+        r'(?:讲解|解释|说明|介绍|阐述)(.+?)(?:(?:，|,|。|；|;)|(?:顺便|并且|然后|同时|并)(?=生成|生图|画|绘制|制作|做|配))',
+      ).firstMatch(value) ??
       RegExp(r'(?:讲解|解释|说明|介绍|阐述)(.+)$').firstMatch(value);
   if (explanation != null) value = explanation.group(1) ?? value;
   value = value
       .replaceFirst(RegExp(r'^(?:一下|下)\s*'), '')
-      .replaceFirst(
-        RegExp(r'^(?:请|麻烦|帮我|给我|替我|我想|我要|直接)?\s*'),
-        '',
-      )
-      .replaceFirst(
-        RegExp(r'^(?:生成|生图|画|绘制|创作|制作|做|来)\s*'),
-        '',
-      )
+      .replaceFirst(RegExp(r'^(?:请|麻烦|帮我|给我|替我|我想|我要|直接)?\s*'), '')
+      .replaceFirst(RegExp(r'^(?:生成|生图|画|绘制|创作|制作|做|来)\s*'), '')
       .replaceFirst(
         RegExp(r'^(?:一张|一幅|一个|一份)?\s*(?:图片|图像|图片|插画|海报|示意图|信息图)?\s*'),
         '',
       );
   if (mixed) {
     value = value
-        .replaceAll(
-          RegExp(r'(?:顺便|并且|然后|同时)(?:再)?(?:生成|生图|画|绘制|制作|做).*'),
-          '',
-        )
+        .replaceAll(RegExp(r'(?:顺便|并且|然后|同时)(?:再)?(?:生成|生图|画|绘制|制作|做).*'), '')
         .replaceAll(RegExp(r'(?:给我|让我|帮助我)(?:更)?(?:直观地)?(?:理解|了解)'), '')
         .replaceFirst(RegExp(r'[，,。；;].*'), '');
   }
@@ -579,10 +573,11 @@ String _providerPrompt(
   required bool mixed,
 }) {
   if (topic.isEmpty) return '';
-  final frame = RegExp(
-    r'(?:\d+\s*(?:[:：/×xX*]|乘)\s*\d+|正方形|方形|横版|横屏|竖版|竖屏|宽屏|portrait|landscape|square)',
-    caseSensitive: false,
-  ).hasMatch(topic)
+  final frame =
+      RegExp(
+        r'(?:\d+\s*(?:[:：/×xX*]|乘)\s*\d+|正方形|方形|横版|横屏|竖版|竖屏|宽屏|portrait|landscape|square)',
+        caseSensitive: false,
+      ).hasMatch(topic)
       ? ''
       : '画面比例采用竖版 3:4。';
   if (explicitPortrait) return _compactPrompt('$topic。$frame');
@@ -599,6 +594,14 @@ String _compactPrompt(String value) {
   final normalized = value.replaceAll(RegExp(r'\s+'), ' ').trim();
   return normalized.length <= 300 ? normalized : normalized.substring(0, 300);
 }
+
+String _imageIdempotencyKey(
+  String taskId,
+  String providerPrompt,
+  String model,
+) => sha256
+    .convert(utf8.encode('$taskId|image-1|$providerPrompt|$model'))
+    .toString();
 
 List<String> agentToolNamesForRequest({
   String latestUserText = '',
@@ -820,6 +823,11 @@ class GenkitXiaoqiAgentRuntime
         taskId: taskId,
         tenantId: tenantId,
         prompt: formattedPrompt,
+        idempotencyKey: _imageIdempotencyKey(
+          taskId,
+          formattedPrompt,
+          images.modelId,
+        ),
         count: 1,
         imageUrl: _latestUserImageUrl(legacyMessages),
       );
@@ -1164,12 +1172,17 @@ class GenkitXiaoqiAgentRuntime
           );
         }
         try {
-        final brief = compileVisualBrief(requestedPrompt);
-        final filteredPrompt = brief.providerPrompt;
+          final brief = compileVisualBrief(requestedPrompt);
+          final filteredPrompt = brief.providerPrompt;
           final result = await images.generate(
             taskId: taskId,
             tenantId: tenantId,
             prompt: filteredPrompt,
+            idempotencyKey: _imageIdempotencyKey(
+              taskId,
+              filteredPrompt,
+              images.modelId,
+            ),
             count: 1,
             imageUrl: _latestUserImageUrl(legacyMessages),
           );
@@ -1503,8 +1516,7 @@ class GenkitXiaoqiAgentRuntime
       use: [
         steering(),
         if (skillSelected) skillToolRecovery(),
-        if (skillSelected)
-          skills(skillPaths: [stagedSkills.directory.path]),
+        if (skillSelected) skills(skillPaths: [stagedSkills.directory.path]),
         a2ui(catalog: _clarificationCatalogId, validate: 'strict'),
       ],
     );
@@ -1567,6 +1579,11 @@ class GenkitXiaoqiAgentRuntime
             taskId: taskId,
             tenantId: tenantId,
             prompt: brief.providerPrompt,
+            idempotencyKey: _imageIdempotencyKey(
+              taskId,
+              brief.providerPrompt,
+              images.modelId,
+            ),
             count: 1,
             imageUrl: _latestUserImageUrl(legacyMessages),
           );
@@ -1933,15 +1950,11 @@ class GenkitXiaoqiAgentRuntime
       if (current == null) return;
       final event = _imageFailureEvent(error);
       try {
-        store.put(
-          key,
-          {
-            ...current.value,
-            'image_failure': event,
-            'updated_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
-          },
-          current.revision,
-        );
+        store.put(key, {
+          ...current.value,
+          'image_failure': event,
+          'updated_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        }, current.revision);
         return;
       } on RevisionConflict {
         continue;
