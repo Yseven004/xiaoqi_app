@@ -355,8 +355,14 @@ bool _agentRequestsSupplementalImage(String normalized) => RegExp(
 
 bool agentImageRequestNeedsTextAnswer(String text) {
   final normalized = text.toLowerCase();
-  return _agentRequestsSupplementalImage(normalized) &&
-      RegExp(r'(解释|说明|介绍|讲清楚|理解|是什么|什么是|原理|为什么|如何|怎么)').hasMatch(normalized);
+  final asksForExplanation = RegExp(
+    r'(解释|说明|介绍|讲解|讲清楚|理解|是什么|什么是|原理|为什么|如何|怎么)',
+  ).hasMatch(normalized);
+  final imageAndExplanation = RegExp(
+    r'(图片|图像|示意图|插画|配图|图).{0,24}(解释|说明|介绍|讲解|理解|原理)',
+  ).hasMatch(normalized);
+  return asksForExplanation &&
+      (_agentRequestsSupplementalImage(normalized) || imageAndExplanation);
 }
 
 bool agentShouldGenerateImage(String text) {
@@ -399,26 +405,199 @@ bool agentShouldGenerateImage(String text) {
       (normalized.contains('生图') && (!asksWhether || directAction));
 }
 
-/// Keeps the complete user meaning for direct image generation. Prompt
-/// compilation must not drop a subject, concept, or explanation target.
+/// The image provider receives a visual deliverable, never the complete user
+/// request. This keeps explanation instructions and knowledge attribution out
+/// of a provider prompt while preserving them for the text answer.
+class VisualBrief {
+  const VisualBrief({
+    required this.semanticGoal,
+    required this.subjects,
+    required this.relations,
+    required this.requiredFacts,
+    required this.requiredText,
+    required this.depictionType,
+    required this.people,
+    required this.likenessRequired,
+    required this.attributionContext,
+    required this.forbiddenChanges,
+    required this.providerPrompt,
+  });
+
+  final String semanticGoal;
+  final List<String> subjects;
+  final List<String> relations;
+  final List<String> requiredFacts;
+  final List<String> requiredText;
+  final String depictionType;
+  final String people;
+  final bool likenessRequired;
+  final List<String> attributionContext;
+  final List<String> forbiddenChanges;
+  final String providerPrompt;
+
+  Map<String, Object?> toJson() => {
+    'semantic_goal': semanticGoal,
+    'subjects': subjects,
+    'relations': relations,
+    'required_facts': requiredFacts,
+    'required_text': requiredText,
+    'depiction_type': depictionType,
+    'people': people,
+    'likeness_required': likenessRequired,
+    'attribution_context': attributionContext,
+    'forbidden_changes': forbiddenChanges,
+    'provider_prompt': providerPrompt,
+  };
+}
+
 String extractVisualPrompt(String request) => request.trim();
 
 String preserveVisualPrompt(String request) => extractVisualPrompt(request);
 
-String agentImagePrompt(String request) {
-  final prompt = request.trim();
-  if (prompt.isEmpty) return prompt;
-
-  final hasExplicitFrame = RegExp(
-    r'(?:\d+\s*(?:[:：/×xX*]|乘)\s*\d+|正方形|方形|横版|横屏|竖版|竖屏|宽屏|'
-    r'portrait|landscape|square|保持原图比例|保持原比例)',
-    caseSensitive: false,
-  ).hasMatch(prompt);
-  const defaultFrame = '\n\n画面比例采用竖版 3:4（宽:高）。';
-  if (hasExplicitFrame || prompt.length + defaultFrame.length > 12000) {
-    return prompt;
+VisualBrief compileVisualBrief(
+  String request, {
+  bool supplementalExplanation = false,
+}) {
+  final original = request.trim();
+  if (original.isEmpty) {
+    return const VisualBrief(
+      semanticGoal: '',
+      subjects: [],
+      relations: [],
+      requiredFacts: [],
+      requiredText: [],
+      depictionType: 'illustration',
+      people: 'none',
+      likenessRequired: false,
+      attributionContext: [],
+      forbiddenChanges: [],
+      providerPrompt: '',
+    );
   }
-  return '将以下用户主题转化为清晰、准确的教学信息图或概念插画：$prompt$defaultFrame';
+
+  final mixed = supplementalExplanation || agentImageRequestNeedsTextAnswer(original);
+  final explicitPortrait = RegExp(
+    r'(肖像|头像|证件照|真人|长相|外貌|脸部|面孔|半身像|全身像|人物照片|照片级|写实人像)',
+  ).hasMatch(original);
+  final depictionType = explicitPortrait
+      ? 'portrait'
+      : mixed
+          ? 'infographic'
+          : RegExp(r'(示意图|流程图|结构图|关系图|图解|信息图)').hasMatch(original)
+              ? 'diagram'
+              : 'illustration';
+
+  var topic = _visualTopic(original, mixed: mixed);
+  final attribution = <String>[];
+  if (mixed && !explicitPortrait) {
+    final stripped = _stripKnowledgeAttribution(topic);
+    if (stripped.topic != topic && stripped.source.isNotEmpty) {
+      attribution.add(stripped.source);
+      topic = stripped.topic;
+    }
+  }
+  topic = _compactPrompt(topic);
+  final semanticGoal = topic.isEmpty ? _compactPrompt(original) : topic;
+  final people = explicitPortrait ? 'named_public_figure' : 'none';
+  final likenessRequired = explicitPortrait;
+  final providerPrompt = _providerPrompt(
+    semanticGoal,
+    depictionType: depictionType,
+    explicitPortrait: explicitPortrait,
+    mixed: mixed,
+  );
+
+  return VisualBrief(
+    semanticGoal: semanticGoal,
+    subjects: semanticGoal.isEmpty ? const [] : [semanticGoal],
+    relations: mixed ? const ['概念步骤与因果关系'] : const [],
+    requiredFacts: semanticGoal.isEmpty ? const [] : [semanticGoal],
+    requiredText: const [],
+    depictionType: depictionType,
+    people: people,
+    likenessRequired: likenessRequired,
+    attributionContext: attribution,
+    forbiddenChanges: mixed && !explicitPortrait
+        ? const ['不添加真人肖像', '不添加人物姓名', '不添加品牌标志']
+        : const [],
+    providerPrompt: providerPrompt,
+  );
+}
+
+String agentImagePrompt(String request) =>
+    compileVisualBrief(request).providerPrompt;
+
+String _visualTopic(String request, {required bool mixed}) {
+  var value = request.trim();
+  final explanation = RegExp(
+    r'(?:讲解|解释|说明|介绍|阐述)(.+?)(?:(?:，|,|。|；|;)|(?:顺便|并且|然后|同时|并)(?=生成|生图|画|绘制|制作|做|配))',
+  ).firstMatch(value) ??
+      RegExp(r'(?:讲解|解释|说明|介绍|阐述)(.+)$').firstMatch(value);
+  if (explanation != null) value = explanation.group(1) ?? value;
+  value = value
+      .replaceFirst(RegExp(r'^(?:一下|下)\s*'), '')
+      .replaceFirst(
+        RegExp(r'^(?:请|麻烦|帮我|给我|替我|我想|我要|直接)?\s*'),
+        '',
+      )
+      .replaceFirst(
+        RegExp(r'^(?:生成|生图|画|绘制|创作|制作|做|来)\s*'),
+        '',
+      )
+      .replaceFirst(
+        RegExp(r'^(?:一张|一幅|一个|一份)?\s*(?:图片|图像|图片|插画|海报|示意图|信息图)?\s*'),
+        '',
+      );
+  if (mixed) {
+    value = value
+        .replaceAll(
+          RegExp(r'(?:顺便|并且|然后|同时)(?:再)?(?:生成|生图|画|绘制|制作|做).*'),
+          '',
+        )
+        .replaceAll(RegExp(r'(?:给我|让我|帮助我)(?:更)?(?:直观地)?(?:理解|了解)'), '')
+        .replaceFirst(RegExp(r'[，,。；;].*'), '');
+  }
+  return value.trim();
+}
+
+({String source, String topic}) _stripKnowledgeAttribution(String topic) {
+  final explicit = RegExp(
+    r'^(.{2,10}?)(?:的)?(?=(第一性原理|第一定律|第二定律|第三定律|相对论|进化论))',
+  ).firstMatch(topic);
+  if (explicit == null) return (source: '', topic: topic);
+  final source = explicit.group(1)?.trim() ?? '';
+  final rest = topic.substring(explicit.end).trim();
+  return source.isEmpty || rest.isEmpty
+      ? (source: '', topic: topic)
+      : (source: source, topic: rest);
+}
+
+String _providerPrompt(
+  String topic, {
+  required String depictionType,
+  required bool explicitPortrait,
+  required bool mixed,
+}) {
+  if (topic.isEmpty) return '';
+  final frame = RegExp(
+    r'(?:\d+\s*(?:[:：/×xX*]|乘)\s*\d+|正方形|方形|横版|横屏|竖版|竖屏|宽屏|portrait|landscape|square)',
+    caseSensitive: false,
+  ).hasMatch(topic)
+      ? ''
+      : '画面比例采用竖版 3:4。';
+  if (explicitPortrait) return _compactPrompt('$topic。$frame');
+  if (mixed) {
+    return _compactPrompt(
+      '教育信息图，主题：$topic。用清晰模块、箭头和简短标签展示核心步骤、结构或因果关系；'
+      '现代简洁风格，清晰对比，适合教学阅读。不出现真人肖像、人物姓名或品牌标志。$frame',
+    );
+  }
+  return _compactPrompt('画面主体：$topic。$frame');
+}
+
+String _compactPrompt(String value) {
+  final normalized = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+  return normalized.length <= 300 ? normalized : normalized.substring(0, 300);
 }
 
 List<String> agentToolNamesForRequest({
@@ -439,7 +618,7 @@ List<String> agentToolNamesForRequest({
     if (skillsAvailable) 'execute_skill_script',
     if (skillsAvailable) 'read_skill_resource',
     if (webSearchAvailable) 'web_search',
-    if (skillsAvailable) 'use_skill',
+    if (skillsAvailable && !capabilitySelected) 'use_skill',
   ];
 }
 
@@ -575,13 +754,18 @@ class GenkitXiaoqiAgentRuntime
       );
     }
 
-    // Step 3: Extract pure visual prompt (separates visual description from task context)
-    final visualPrompt = preserveVisualPrompt(latestUserText);
+    // Step 3: Classify the dependent text deliverable before compiling the
+    // visual brief. The brief is the only value that reaches the provider.
+    final answerBeforeImage = agentImageRequestNeedsTextAnswer(latestUserText);
+    final visualBrief = compileVisualBrief(
+      latestUserText,
+      supplementalExplanation: answerBeforeImage,
+    );
+    final visualPrompt = visualBrief.providerPrompt;
 
     // Step 4: Determine image generation strategy
     final shouldGenerateImage =
         imageGenerationSelected || agentShouldGenerateImage(latestUserText);
-    final answerBeforeImage = agentImageRequestNeedsTextAnswer(latestUserText);
     final imageToolAvailable =
         shouldGenerateImage && answerBeforeImage && images.isConfigured;
 
@@ -590,6 +774,7 @@ class GenkitXiaoqiAgentRuntime
       'answer_before_image': answerBeforeImage,
       'agent_tool_available': imageToolAvailable,
       'visual_prompt_extracted': visualPrompt.isNotEmpty,
+      'visual_brief': visualBrief.toJson(),
     });
 
     // Step 5: Direct image generation path (no text answer needed)
@@ -618,7 +803,7 @@ class GenkitXiaoqiAgentRuntime
       }
 
       // Step 5b: Apply visual prompt formatting (add aspect ratio, etc.)
-      final formattedPrompt = agentImagePrompt(visualPrompt);
+      final formattedPrompt = visualPrompt;
 
       _logAgentRuntime('tool_called', taskId, {
         'tool_name': 'generate_image',
@@ -979,7 +1164,8 @@ class GenkitXiaoqiAgentRuntime
           );
         }
         try {
-          final filteredPrompt = agentImagePrompt(requestedPrompt);
+        final brief = compileVisualBrief(requestedPrompt);
+        final filteredPrompt = brief.providerPrompt;
           final result = await images.generate(
             taskId: taskId,
             tenantId: tenantId,
@@ -992,10 +1178,11 @@ class GenkitXiaoqiAgentRuntime
           onProcessEvent({'type': 'tool_succeeded', 'tool': 'generate_image'});
           return ToolResult.response(jsonEncode(result));
         } on Object catch (error) {
+          _recordImageFailure(tenantId, taskId, error);
           onProcessEvent({
             'type': 'tool_failed',
             'tool': 'generate_image',
-            'message': _briefToolError(error),
+            ..._imageFailureEvent(error),
           });
           rethrow;
         }
@@ -1222,7 +1409,8 @@ class GenkitXiaoqiAgentRuntime
           images.isConfigured && shouldGenerateImage && !answerBeforeImage,
       codeExecutionAvailable: codeExecutor.isConfigured,
       webSearchAvailable: searchAvailable,
-      skillsAvailable: stagedSkills.entries.isNotEmpty,
+      capabilitySelected: skillSelected,
+      skillsAvailable: skillSelected,
     );
 
     final skill = skillSelected
@@ -1314,8 +1502,8 @@ class GenkitXiaoqiAgentRuntime
       toolNames: toolNames,
       use: [
         steering(),
-        if (stagedSkills.entries.isNotEmpty) skillToolRecovery(),
-        if (stagedSkills.entries.isNotEmpty)
+        if (skillSelected) skillToolRecovery(),
+        if (skillSelected)
           skills(skillPaths: [stagedSkills.directory.path]),
         a2ui(catalog: _clarificationCatalogId, validate: 'strict'),
       ],
@@ -1366,14 +1554,19 @@ class GenkitXiaoqiAgentRuntime
         onImageGenerationStarted?.call();
         onProcessEvent({'type': 'tool_started', 'tool': 'generate_image'});
 
-        final filteredPrompt = agentImagePrompt(
-          preserveVisualPrompt(latestUserText),
+        final brief = compileVisualBrief(
+          latestUserText,
+          supplementalExplanation: true,
         );
+        onProcessEvent({
+          'type': 'visual_brief_compiled',
+          'brief': brief.toJson(),
+        });
         try {
           await images.generate(
             taskId: taskId,
             tenantId: tenantId,
-            prompt: filteredPrompt,
+            prompt: brief.providerPrompt,
             count: 1,
             imageUrl: _latestUserImageUrl(legacyMessages),
           );
@@ -1383,10 +1576,11 @@ class GenkitXiaoqiAgentRuntime
         } on Object catch (error) {
           // Keep the completed text answer. The task layer will expose this as
           // partially completed when the requested image has no artifact.
+          _recordImageFailure(tenantId, taskId, error);
           onProcessEvent({
             'type': 'tool_failed',
             'tool': 'generate_image',
-            'message': _briefToolError(error),
+            ..._imageFailureEvent(error),
           });
         }
       }
@@ -1716,6 +1910,43 @@ class GenkitXiaoqiAgentRuntime
   static String _briefToolError(Object error) {
     final value = error.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
     return value.length <= 240 ? value : '${value.substring(0, 240)}…';
+  }
+
+  static Map<String, Object?> _imageFailureEvent(Object error) {
+    if (error is ImageProviderException) {
+      return {
+        'message': error.safeMessage,
+        'category': error.category,
+        'retryable': error.retryable,
+        if (error.providerCode != null) 'provider_code': error.providerCode,
+        if (error.requestId != null) 'provider_request_id': error.requestId,
+        if (error.httpStatus != null) 'http_status': error.httpStatus,
+      };
+    }
+    return {'message': _briefToolError(error)};
+  }
+
+  void _recordImageFailure(String tenantId, String taskId, Object error) {
+    final key = 'task/$tenantId/$taskId';
+    for (var attempt = 0; attempt < 8; attempt++) {
+      final current = store.get(key);
+      if (current == null) return;
+      final event = _imageFailureEvent(error);
+      try {
+        store.put(
+          key,
+          {
+            ...current.value,
+            'image_failure': event,
+            'updated_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          },
+          current.revision,
+        );
+        return;
+      } on RevisionConflict {
+        continue;
+      }
+    }
   }
 
   static String _recoverableSkillError(Object error) {

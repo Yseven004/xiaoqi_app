@@ -38,6 +38,7 @@ import 'package:uuid/uuid.dart';
 import 'agent_runtime.dart';
 import 'chat_completion_service.dart';
 import 'code_execution_service.dart';
+import 'image_service.dart';
 import 'store.dart';
 
 const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
@@ -53,16 +54,21 @@ bool _requestRequiresImage(Map<String, dynamic> body) {
       capability is Map &&
       capability['type'] == 'action' &&
       capability['id'] == 'create-image';
-  final rawText = body.containsKey('current_turn_text')
-      ? body['current_turn_text']?.toString() ?? ''
+  final rawContent = body.containsKey('current_turn_text')
+      ? body['current_turn_text']
       : ((body['messages'] as List? ?? const [])
-                .whereType<Map>()
-                .lastWhere(
-                  (message) => message['role'] == 'user',
-                  orElse: () => const {},
-                )['content']
-                ?.toString() ??
-            '');
+            .whereType<Map>()
+            .lastWhere(
+              (message) => message['role'] == 'user',
+              orElse: () => const {},
+            )['content']);
+  final rawText = rawContent is List
+      ? rawContent
+            .whereType<Map>()
+            .map((part) => part['text']?.toString() ?? '')
+            .where((part) => part.isNotEmpty)
+            .join('\n')
+      : rawContent?.toString() ?? '';
   return rawText.trim().isNotEmpty &&
       (selectedImageAction || agentShouldGenerateImage(rawText));
 }
@@ -71,7 +77,16 @@ bool _requestRequiresImage(Map<String, dynamic> body) {
   Object error, {
   required bool imageGeneration,
 }) {
-  final details = _redactTaskError(error.toString());
+  final details = error is ImageProviderException
+      ? _redactTaskError(
+          [
+            error.toString(),
+            if (error.providerMessage != null) error.providerMessage!,
+            if (error.providerCode != null) error.providerCode!,
+            if (error.requestId != null) 'Request id: ${error.requestId}',
+          ].join(' '),
+        )
+      : _redactTaskError(error.toString());
   final normalized = details.toLowerCase();
   final isArkFailure =
       normalized.contains('seedream') ||
@@ -93,6 +108,18 @@ bool _requestRequiresImage(Map<String, dynamic> body) {
     return (
       code: 'text_model_billing_required',
       message: '任务失败：文字模型服务提示账户欠费或余额不足，请在对应服务商控制台处理账单后重试。',
+      details: details,
+    );
+  }
+
+  if (imageGeneration &&
+      error is ImageProviderException &&
+      error.category == 'image_policy_blocked') {
+    return (
+      code: 'image_policy_blocked',
+      message:
+          '图片内容被当前供应商的安全或版权策略拒绝；文字内容已经完成。'
+          '请改为描述需要表达的概念、结构或过程，避免要求生成真人相似肖像。',
       details: details,
     );
   }
@@ -516,6 +543,14 @@ class XiaoqiApi {
         (message) => message.role == Role.user,
       );
       final latestUser = messages[currentUserIndex];
+      final latestUserContent = _legacyMessageFor(latestUser)['content'];
+      cleanConfig['current_turn_text'] = latestUserContent is List
+          ? latestUserContent
+                .whereType<Map>()
+                .map((part) => part['text']?.toString() ?? '')
+                .where((part) => part.isNotEmpty)
+                .join('\n')
+          : latestUserContent?.toString() ?? '';
       messages[currentUserIndex] = Message(
         role: latestUser.role,
         content: latestUser.content,
@@ -627,13 +662,6 @@ class XiaoqiApi {
             ],
           );
         }
-        _setRemoteAgentTaskStatus(
-          tenantId,
-          taskId,
-          result.finishReason == AgentFinishReason.interrupted
-              ? 'awaiting_network_permission'
-              : 'completed',
-        );
       } on Object {
         _setRemoteAgentTaskStatus(
           tenantId,
@@ -703,6 +731,32 @@ class XiaoqiApi {
           options.sendChunk(AgentStreamChunk(artifact: artifact));
         }
       }
+      final taskValue = store.get('task/$tenantId/$taskId')?.value ?? const {};
+      final requestedImage = _requestRequiresImage(request);
+      final storedArtifacts = (taskValue['artifacts'] as List? ?? const [])
+          .whereType<Map>()
+          .toList();
+      final partialImage =
+          result.finishReason != AgentFinishReason.interrupted &&
+          requestedImage &&
+          storedArtifacts.isEmpty;
+      final resultText = partialImage
+          ? '${result.text}\n\n图片未生成，文字内容已完成。你可以单独重试图片。'
+          : result.text;
+      _setRemoteAgentTaskStatus(
+        tenantId,
+        taskId,
+        result.finishReason == AgentFinishReason.interrupted
+            ? 'awaiting_network_permission'
+            : partialImage
+                ? 'partially_completed'
+                : 'completed',
+        result: resultText,
+        partialReason: partialImage
+            ? ((taskValue['image_failure'] as Map?)?['category']?.toString() ??
+                'requested_image_missing')
+            : null,
+      );
       return TurnResult(finishReason: result.finishReason);
     });
 
@@ -749,10 +803,17 @@ class XiaoqiApi {
     String tenantId,
     String taskId,
     String status,
+    {String? result, String? partialReason}
   ) {
     _mutateTask(
       'task/$tenantId/$taskId',
-      (value) => {...value, 'status': status, 'updated_at': _now()},
+      (value) => {
+        ...value,
+        'status': status,
+        if (result != null) 'result': result,
+        if (partialReason != null) 'partial_reason': partialReason,
+        'updated_at': _now(),
+      },
     );
   }
 
@@ -1306,6 +1367,10 @@ class XiaoqiApi {
             .map((item) => Map<String, dynamic>.from(item))
             .toList();
         final partial = _requestRequiresImage(body) && artifacts.isEmpty;
+        final imageFailure = current.value['image_failure'];
+        final partialReason = imageFailure is Map
+            ? imageFailure['category']?.toString()
+            : null;
         final resultText = partial
             ? '$answer\n\n图片未生成，文字内容已完成。你可以单独重试图片。'
             : answer;
@@ -1315,7 +1380,8 @@ class XiaoqiApi {
             ...value,
             'status': partial ? 'partially_completed' : 'completed',
             'result': resultText,
-            if (partial) 'partial_reason': 'requested_image_missing',
+            if (partial)
+              'partial_reason': partialReason ?? 'requested_image_missing',
             'updated_at': _now(),
           },
         );
@@ -1326,6 +1392,8 @@ class XiaoqiApi {
           'type': 'completed',
           'status': partial ? 'partially_completed' : 'completed',
           'text': resultText,
+          if (partial)
+            'partial_reason': partialReason ?? 'requested_image_missing',
           'draft': null,
           'files': {},
           'artifacts': publicArtifacts,
@@ -1462,6 +1530,8 @@ class XiaoqiApi {
         'error': value['error'],
         'error_code': value['error_code'],
         'error_details': value['error_details'],
+        'partial_reason': value['partial_reason'],
+        'image_failure': value['image_failure'],
         'result': value['result'],
         'draft': files['SKILL.md'],
         'files': encoded,

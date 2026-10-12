@@ -10,6 +10,38 @@ import 'store.dart';
 
 typedef ArtifactRecorder = Future<void> Function(Map<String, dynamic> artifact);
 
+class ImageProviderException extends HttpException {
+  ImageProviderException({
+    required this.httpStatus,
+    required this.providerMessage,
+    this.providerCode,
+    this.requestId,
+    required this.category,
+    required this.retryable,
+  }) : safeMessage = _safeMessage(providerMessage),
+       super(
+         '生图服务返回错误 (${httpStatus ?? 'unknown'})'
+         '${providerCode == null ? '' : ': $providerCode'}'
+         '${requestId == null ? '' : ' (request_id: $requestId)'}',
+       );
+
+  final int? httpStatus;
+  final String? providerCode;
+  final String? requestId;
+  final String? providerMessage;
+  final String category;
+  final bool retryable;
+  final String safeMessage;
+
+  static String _safeMessage(String? value) {
+    final normalized = value?.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+    if (normalized.isEmpty) return '图片供应商拒绝了本次请求。';
+    return normalized.length <= 240
+        ? normalized
+        : '${normalized.substring(0, 240)}…';
+  }
+}
+
 /// Calls Ark once per image request and stores returned bytes in the protected
 /// task object store. Timeouts are deliberately not retried because billing may
 /// have succeeded even when the response was lost.
@@ -21,11 +53,15 @@ class ImageService {
     String? apiUrl,
     String? model,
     Duration apiTimeout = const Duration(minutes: 3),
+    int maxAttempts = 3,
+    Duration retryBaseDelay = const Duration(milliseconds: 250),
   }) : _client = client ?? http.Client(),
        _apiKey = apiKey,
        _apiUrl = apiUrl,
        _model = model,
-       _apiTimeout = apiTimeout;
+       _apiTimeout = apiTimeout,
+       _maxAttempts = maxAttempts.clamp(1, 3).toInt(),
+       _retryBaseDelay = retryBaseDelay;
 
   final CloudStore store;
   final http.Client _client;
@@ -33,6 +69,8 @@ class ImageService {
   final String? _apiUrl;
   final String? _model;
   final Duration _apiTimeout;
+  final int _maxAttempts;
+  final Duration _retryBaseDelay;
 
   bool get isConfigured =>
       (_apiKey ?? Platform.environment['ARK_API_KEY'] ?? '').isNotEmpty;
@@ -72,35 +110,35 @@ class ImageService {
         'sequential_image_generation_options': {'max_images': imageCount},
       if (imageUrl != null && imageUrl.isNotEmpty) 'image': imageUrl,
     };
-    late final http.Response response;
-    try {
-      response = await _client
-          .post(
-            Uri.parse(
-              _apiUrl ??
-                  Platform.environment['ARK_IMAGE_API_URL'] ??
-                  'https://ark.cn-beijing.volces.com/api/v3/images/generations',
-            ),
-            headers: {
-              HttpHeaders.authorizationHeader: 'Bearer $apiKey',
-              HttpHeaders.contentTypeHeader: 'application/json',
-            },
-            body: jsonEncode(body),
-          )
-          .timeout(_apiTimeout);
-    } on TimeoutException {
-      throw TimeoutException('Seedream 图片生成请求超时');
-    } on SocketException catch (error) {
-      throw HttpException('Seedream 图片生成网络连接失败：${error.message}');
-    } on http.ClientException catch (error) {
-      throw HttpException('Seedream 图片生成请求失败：${error.message}');
-    }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final detail = _providerErrorMessage(response.body);
-      throw HttpException(
-        '生图服务返回错误 (${response.statusCode})'
-        '${detail == null ? '' : ': $detail'}',
-      );
+    final attempts = _maxAttempts;
+    late http.Response response;
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        response = await _client
+            .post(
+              Uri.parse(
+                _apiUrl ??
+                    Platform.environment['ARK_IMAGE_API_URL'] ??
+                    'https://ark.cn-beijing.volces.com/api/v3/images/generations',
+              ),
+              headers: {
+                HttpHeaders.authorizationHeader: 'Bearer $apiKey',
+                HttpHeaders.contentTypeHeader: 'application/json',
+              },
+              body: jsonEncode(body),
+            )
+            .timeout(_apiTimeout);
+      } on TimeoutException {
+        throw TimeoutException('Seedream 图片生成请求超时');
+      } on SocketException catch (error) {
+        throw HttpException('Seedream 图片生成网络连接失败：${error.message}');
+      } on http.ClientException catch (error) {
+        throw HttpException('Seedream 图片生成请求失败：${error.message}');
+      }
+      if (response.statusCode >= 200 && response.statusCode < 300) break;
+      final providerError = _providerError(response.statusCode, response.body);
+      if (!providerError.retryable || attempt == attempts) throw providerError;
+      await Future<void>.delayed(_retryBaseDelay * attempt);
     }
     final payload = jsonDecode(response.body);
     final entries = payload is Map && payload['data'] is List
@@ -179,21 +217,45 @@ class ImageService {
     return allowed.contains(normalized) ? normalized! : '2k';
   }
 
-  static String? _providerErrorMessage(String body) {
+  static ImageProviderException _providerError(int status, String body) {
+    final details = _providerErrorDetails(body);
+    final code = details['code']?.toString();
+    final message = details['message']?.toString();
+    final requestId = details['request_id']?.toString();
+    final normalized = '${code ?? ''} ${message ?? ''}'.toLowerCase();
+    final policy = normalized.contains('sensitive') ||
+        normalized.contains('copyright') ||
+        normalized.contains('policy');
+    return ImageProviderException(
+      httpStatus: status,
+      providerCode: code,
+      requestId: requestId,
+      providerMessage: message,
+      category: policy ? 'image_policy_blocked' : 'image_provider_error',
+      retryable: status == 429 || status >= 500,
+    );
+  }
+
+  static Map<String, Object?> _providerErrorDetails(String body) {
     try {
       final payload = jsonDecode(body);
-      if (payload is! Map) return null;
+      if (payload is! Map) return const {};
       final error = payload['error'];
-      final message = error is Map
-          ? error['message'] ?? error['detail']
-          : error ?? payload['message'];
-      final normalized = message?.toString().trim();
-      if (normalized == null || normalized.isEmpty) return null;
-      return normalized.length <= 240
-          ? normalized
-          : '${normalized.substring(0, 240)}…';
+      final map = error is Map ? error : payload;
+      final message = map['message'] ?? map['detail'] ?? payload['message'];
+      final code = map['code'] ?? map['type'] ?? payload['code'];
+      final rawRequestId = map['request_id'] ?? payload['request_id'];
+      final requestId = rawRequestId?.toString() ??
+          RegExp(r'Request id:\s*([A-Za-z0-9_-]+)', caseSensitive: false)
+              .firstMatch(body)
+              ?.group(1);
+      return {
+        if (message != null) 'message': message.toString(),
+        if (code != null) 'code': code.toString(),
+        if (requestId != null && requestId.isNotEmpty) 'request_id': requestId,
+      };
     } on FormatException {
-      return null;
+      return const {};
     }
   }
 

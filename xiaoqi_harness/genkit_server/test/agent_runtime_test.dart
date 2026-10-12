@@ -52,6 +52,10 @@ void main() {
       );
       expect(agentImageRequestNeedsTextAnswer('帮我做一张动漫风景图片'), isFalse);
       expect(agentImageRequestNeedsTextAnswer('解释光合作用，然后画一张图'), isTrue);
+      expect(
+        agentImageRequestNeedsTextAnswer('生成一张图片给我讲解一下牛顿的第一定律'),
+        isTrue,
+      );
     },
   );
 
@@ -66,8 +70,23 @@ void main() {
 
   test('keeps the complete topic when compiling a visual prompt', () {
     const request = '生成图片给我讲解一下牛顿的第一定律';
-    expect(preserveVisualPrompt(request), request);
-    expect(agentImagePrompt(request), contains('牛顿的第一定律'));
+    final brief = compileVisualBrief(request, supplementalExplanation: true);
+    expect(brief.attributionContext, contains('牛顿'));
+    expect(brief.providerPrompt, contains('第一定律'));
+    expect(brief.providerPrompt, isNot(contains('牛顿')));
+    expect(brief.providerPrompt, isNot(contains('生成图片')));
+  });
+
+  test('compiles public-figure attribution as a generic concept brief', () {
+    final brief = compileVisualBrief(
+      '给我讲解马斯克第一性原理，顺便生成一张图片给我加以理解',
+      supplementalExplanation: true,
+    );
+    expect(brief.attributionContext, contains('马斯克'));
+    expect(brief.providerPrompt, contains('第一性原理'));
+    expect(brief.providerPrompt, isNot(contains('马斯克')));
+    expect(brief.people, 'none');
+    expect(brief.likenessRequired, isFalse);
   });
 
   test('does not infer tool availability from user keywords', () {
@@ -139,7 +158,8 @@ void main() {
         onImageGenerationStarted: () => imageGenerationStarted = true,
       );
 
-      expect(images.prompt, contains('生成一张动漫风景图'));
+      expect(images.prompt, contains('动漫风景图'));
+      expect(images.prompt, isNot(contains('生成一张')));
       expect(images.count, 1);
       expect(imageGenerationStarted, isTrue);
       expect(answer, '图片已生成。');

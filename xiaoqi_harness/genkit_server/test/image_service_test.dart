@@ -89,14 +89,48 @@ void main() {
     },
   );
 
-  test('does not retry Ark errors or uncertain timeouts', () async {
+  test('retries bounded transient Ark errors but not policy errors', () async {
     final failing = _ImageClient(http.Response('busy', 429));
-    final service = ImageService(store, client: failing, apiKey: 'test-key');
+    final service = ImageService(
+      store,
+      client: failing,
+      apiKey: 'test-key',
+      retryBaseDelay: const Duration(milliseconds: 1),
+    );
     await expectLater(
       service.generate(taskId: 't', prompt: 'x'),
       throwsA(isA<HttpException>()),
     );
-    expect(failing.postCount, 1);
+    expect(failing.postCount, 3);
+
+    final policy = _ImageClient(
+      http.Response(
+        jsonEncode({
+          'error': {
+            'code': 'InputTextSensitiveContentDetected.PolicyViolation',
+            'message': 'input text may be related to copyright restrictions',
+            'request_id': 'policy-request',
+          },
+        }),
+        400,
+      ),
+    );
+    final policyService = ImageService(
+      store,
+      client: policy,
+      apiKey: 'test-key',
+      retryBaseDelay: const Duration(milliseconds: 1),
+    );
+    await expectLater(
+      policyService.generate(taskId: 't', prompt: 'x'),
+      throwsA(
+        isA<ImageProviderException>()
+            .having((error) => error.category, 'category', 'image_policy_blocked')
+            .having((error) => error.providerCode, 'provider code', contains('PolicyViolation'))
+            .having((error) => error.requestId, 'request id', 'policy-request'),
+      ),
+    );
+    expect(policy.postCount, 1);
 
     final hanging = _HangingClient();
     final timeoutService = ImageService(

@@ -279,6 +279,40 @@ void main() {
     expect(artifact.containsKey('object_key'), isFalse);
   });
 
+  test('keeps text and marks an image-only miss as partially completed', () async {
+    runtime.emitImageGenerationStarted = true;
+    await call(
+      'POST',
+      '/v1/agent/tasks',
+      body: {
+        'task_id': 'task-image-partial',
+        'messages': [
+          {'role': 'user', 'content': '生成一张图片'},
+        ],
+        'model_id': 'deepseek-flash',
+        'reasoning_level': 'medium',
+        'materials': [],
+      },
+    );
+
+    Map<String, dynamic> task = {};
+    for (var i = 0; i < 40; i++) {
+      final response = await call(
+        'GET',
+        '/v1/agent/tasks/task-image-partial',
+      );
+      task = Map<String, dynamic>.from(
+        jsonDecode(await response.readAsString()) as Map,
+      );
+      if (task['status'] == 'partially_completed') break;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(task['status'], 'partially_completed');
+    expect(task['partial_reason'], 'requested_image_missing');
+    expect(task['result'], contains('你好'));
+    expect(task['result'], contains('图片未生成'));
+  });
+
   test(
     'explains Ark overdue balance for an automatically called image tool',
     () async {
