@@ -47,14 +47,11 @@
 
 | 最终 SVG | 上游图标 / 来源与许可证 | viewBox | 显示尺寸 | 状态映射 | 消费组件 |
 |---|---|---:|---:|---|---|
-| assets/icons/drawing/mouse-pointer-2.svg | `mouse-pointer-2` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/mouse-pointer-2.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 21 dp | 选择工具启用时使用主题色 | `DrawingBoardPage` 工具栏 |
-| assets/icons/drawing/shapes.svg | `shapes` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/shapes.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 21 dp | 形状工具启用时使用主题色 | `DrawingBoardPage` 形状菜单 |
-| assets/icons/drawing/eraser.svg | `eraser` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/eraser.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 21 dp | 橡皮擦启用时使用主题色 | `DrawingBoardPage` 工具栏 |
-| assets/icons/drawing/check.svg | `check` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/check.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 23 dp | 完成按钮白色；处理中由现有按钮内小圈反馈 | `DrawingBoardPage` 完成按钮 |
-| assets/icons/capabilities/brush.svg | 项目既有“绘图”入口 SVG，见本表上方的原型重绘记录 | 0 0 24 24 | 21 dp | 手绘启用时使用主题色 | `DrawingBoardPage` 工具栏 |
-| assets/icons/chat_note_editor/text-aa.svg | 项目既有文字工具 SVG | 0 0 24 24 | 21 dp | 文字启用时使用主题色 | `DrawingBoardPage` 工具栏 |
-| assets/icons/chat_note_editor/arrow-counter-clockwise.svg；arrow-clockwise.svg | 项目既有撤销 / 重做 SVG | 0 0 24 24；0 0 256 256 | 21 dp | 无历史动作时浅灰禁用 | `DrawingBoardPage` 工具栏 |
-| assets/icons/capabilities/image.svg | 项目既有图像入口 SVG | 0 0 24 24 | 21 dp | 常态 | `DrawingBoardPage` 导入底图按钮 |
-| assets/icons/chat_note_editor/x.svg | 项目既有关闭 SVG | 0 0 256 256 | 22 dp | 常态 | `DrawingBoardPage` 关闭按钮 |
+| assets/icons/drawing/eraser.svg | `eraser` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/eraser.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 23 dp | SVG 显式墨色描边；选中时由 `ColorFilter` 映射为蓝色 | `DrawingBoardPage` 工具栏 |
+| assets/icons/drawing/check.svg | `check` — [Lucide Icons](https://github.com/lucide-icons/lucide/blob/main/icons/check.svg)，MIT — [许可证](https://github.com/lucide-icons/lucide/blob/main/LICENSE) | 0 0 24 24 | 22 dp | 显式墨色描边；禁用时中灰仍可见，处理中由按钮内小圈反馈 | `DrawingBoardPage` 右下角完成按钮 |
+| assets/icons/capabilities/brush.svg | 项目既有“绘图”入口 SVG，见本表上方的原型重绘记录 | 0 0 24 24 | 23 dp | 选中态蓝色，常态墨色 | `DrawingBoardPage` 工具栏 |
+| assets/icons/chat_note_editor/text-aa.svg | 项目既有文字工具 SVG | 0 0 24 24 | 23 dp | 选中态蓝色，常态墨色 | `DrawingBoardPage` 工具栏 |
+| assets/icons/chat_note_editor/arrow-counter-clockwise.svg；arrow-clockwise.svg | 项目既有撤销 / 重做 SVG | 0 0 24 24；0 0 256 256 | 23 dp | 无历史动作时中灰禁用 | `DrawingBoardPage` 顶部左侧 |
+| assets/icons/capabilities/image.svg | 项目既有图像入口 SVG | 0 0 24 24 | 23 dp；弹层 21 dp | 工具栏墨色；图片菜单与拍照图标对齐 | `DrawingBoardPage` 图片工具与选择弹层 |
 
-四个 Lucide SVG 在 `assets/icons/drawing/icon-preview.html` 以 64×64 CSS 像素独立预览；所有画板工具图标均作为独立矢量文件接入，不使用截图裁片或业务代码绘制替代。
+`eraser.svg` 与 `check.svg` 的轮廓未改，仅将 Flutter SVG 渲染不稳定的 `currentColor` 改为显式 `#252525`；两者在 `assets/icons/drawing/icon-preview.html` 以 64×64 CSS 像素独立预览。其他工具复用项目既有独立 SVG，不使用截图裁片或近似图标替代。

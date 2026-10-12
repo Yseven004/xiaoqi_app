@@ -105,6 +105,15 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.2"
+  box_transform:
+    dependency: "direct overridden"
+    description:
+      path: "packages/box_transform"
+      ref: "912492e67448ca7e5ac482a389a91b10836b8bbe"
+      resolved-ref: "912492e67448ca7e5ac482a389a91b10836b8bbe"
+      url: "https://github.com/hyper-designed/box_transform.git"
+    source: git
+    version: "0.4.4"
   characters:
     dependency: transitive
     description:
@@ -342,6 +351,15 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_box_transform:
+    dependency: "direct main"
+    description:
+      path: "packages/flutter_box_transform"
+      ref: "912492e67448ca7e5ac482a389a91b10836b8bbe"
+      resolved-ref: "912492e67448ca7e5ac482a389a91b10836b8bbe"
+      url: "https://github.com/hyper-designed/box_transform.git"
+    source: git
+    version: "0.4.7"
   flutter_colorpicker:
     dependency: transitive
     description:

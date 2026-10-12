@@ -1030,24 +1030,38 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         editing?.drawingDraftScope ?? await _currentDrawingAccountScope();
     if (!mounted || _conversation?.id != conversation.id) return;
     final draftStore = HomeChatDrawingDraftStore(accountScope: accountScope);
-    final result = await Navigator.of(context).push<HomeChatDrawingResult>(
-      PageRouteBuilder<HomeChatDrawingResult>(
-        opaque: false,
-        barrierDismissible: false,
-        transitionDuration: Duration.zero,
-        reverseTransitionDuration: Duration.zero,
-        pageBuilder: (_, _, _) => DrawingBoardPage(
-          conversationId: conversation.id,
-          accountScope: accountScope,
-          draftPath: editing?.drawingDraftPath,
+    // The drawing route is a transparent overlay. Keep the home composer
+    // layout locked while its text field owns the IME; otherwise the home
+    // Scaffold sees the keyboard inset and shifts the composer underneath the
+    // already-fixed drawing card.
+    if (!_keyboardOverlayLayoutLocked && mounted) {
+      setState(() => _keyboardOverlayLayoutLocked = true);
+    }
+    HomeChatDrawingResult? result;
+    try {
+      result = await Navigator.of(context).push<HomeChatDrawingResult>(
+        PageRouteBuilder<HomeChatDrawingResult>(
+          opaque: false,
+          barrierDismissible: false,
+          transitionDuration: Duration.zero,
+          reverseTransitionDuration: Duration.zero,
+          pageBuilder: (_, _, _) => DrawingBoardPage(
+            conversationId: conversation.id,
+            accountScope: accountScope,
+            draftPath: editing?.drawingDraftPath,
+            draftStore: draftStore,
+          ),
+          transitionsBuilder: (_, _, _, child) => child,
         ),
-        transitionsBuilder: (_, _, _, child) => child,
-      ),
-    );
+      );
+    } finally {
+      _releaseKeyboardOverlayLayoutLockSafely();
+    }
     if (result == null) return;
+    final completedResult = result;
     Future<void> restoreDraftForRecovery() async {
       try {
-        await draftStore.reactivate(conversation.id, result.draftPath);
+        await draftStore.reactivate(conversation.id, completedResult.draftPath);
       } catch (_) {}
     }
 
@@ -1055,7 +1069,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await restoreDraftForRecovery();
       return;
     }
-    if (result.pngBytes.length > 5 * 1024 * 1024) {
+    if (completedResult.pngBytes.length > 5 * 1024 * 1024) {
       _showReplyError('绘图图片超过 5 MB，请缩小底图后重试');
       await restoreDraftForRecovery();
       return;
@@ -1075,7 +1089,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         '${target.path}/${id}_${DateTime.now().microsecondsSinceEpoch}.png',
       );
       tempFile = File('${file.path}.tmp');
-      await tempFile.writeAsBytes(result.pngBytes, flush: true);
+      await tempFile.writeAsBytes(completedResult.pngBytes, flush: true);
       await tempFile.rename(file.path);
 
       if (!mounted || _conversation?.id != conversation.id) {
@@ -1089,9 +1103,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         name: '绘图.png',
         path: file.path,
         mimeType: 'image/png',
-        byteLength: result.pngBytes.length,
+        byteLength: completedResult.pngBytes.length,
         source: 'drawing',
-        drawingDraftPath: result.draftPath,
+        drawingDraftPath: completedResult.draftPath,
         drawingDraftScope: accountScope,
       );
       previousAttachments = _attachments;
@@ -1111,7 +1125,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) setState(() {});
       await _persistAttachments();
       try {
-        await draftStore.finish(conversation.id, result.draftPath);
+        await draftStore.finish(conversation.id, completedResult.draftPath);
       } catch (error) {
         _showReplyError('绘图已加入输入框，草稿清理失败：$error');
       }

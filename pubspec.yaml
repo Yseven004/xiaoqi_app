@@ -20,6 +20,11 @@ dependencies:
   flutter_markdown: 0.7.7+1
   flutter_math_fork: 0.7.4
   flutter_painter: 2.1.0
+  flutter_box_transform:
+    git:
+      url: https://github.com/hyper-designed/box_transform.git
+      ref: 912492e67448ca7e5ac482a389a91b10836b8bbe
+      path: packages/flutter_box_transform
   flutter_quill: 11.5.1
   flutter_svg: 2.3.0
   flutter_secure_storage: 10.2.0
@@ -69,6 +74,7 @@ flutter:
     - assets/icons/
     - assets/icons/capabilities/
     - assets/icons/chat_note_editor/
+    - assets/icons/drawing/
     - assets/icons/editor/
     - assets/icons/note_format/
     - assets/speech_models/
@@ -97,6 +103,11 @@ flutter:
       fonts:
         - asset: assets/fonts/LongCang-Regular.ttf
 dependency_overrides:
+  box_transform:
+    git:
+      url: https://github.com/hyper-designed/box_transform.git
+      ref: 912492e67448ca7e5ac482a389a91b10836b8bbe
+      path: packages/box_transform
   cross_file: 0.3.5+2
   file_selector_linux: 0.9.4
   file_selector_macos: 0.9.5
