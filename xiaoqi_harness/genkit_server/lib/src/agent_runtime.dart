@@ -1354,6 +1354,10 @@ class GenkitXiaoqiAgentRuntime
         throw StateError('模型没有返回文本');
       }
       if (imageToolAvailable && !imageToolCalled) {
+        // The text deliverable is complete before the dependent media step.
+        // Consumers can persist this checkpoint and render the image as a
+        // later artifact without replacing or hiding the answer.
+        onProcessEvent({'type': 'text_completed'});
         cancellation.throwIfCancelled();
         _logAgentRuntime('tool_called', taskId, {
           'tool_name': 'generate_image',
