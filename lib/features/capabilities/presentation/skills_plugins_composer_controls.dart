@@ -340,10 +340,18 @@ class _SkillsPluginsComposerControlsState
           MergeSemantics(
             child: Semantics(
               label: '联网搜索',
-              child: Switch(
-                value: enabled,
-                onChanged: (value) =>
-                    widget.onNetworkModeChanged(value ? 'on' : 'off'),
+              child: Transform.scale(
+                scale: 0.82,
+                child: Switch(
+                  value: enabled,
+                  activeTrackColor: const Color(0xCC5B82F6),
+                  activeThumbColor: Colors.white,
+                  inactiveTrackColor: const Color(0xBDECE7E2),
+                  inactiveThumbColor: const Color(0xFF9F958C),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  onChanged: (value) =>
+                      widget.onNetworkModeChanged(value ? 'on' : 'off'),
+                ),
               ),
             ),
           ),
