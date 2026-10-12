@@ -6,6 +6,12 @@ class AppColors {
   // 主背景色（暖米色）
   static const Color background = Color(0xFFFFF8F2);
 
+  // 呼吸背景色阶：从安静档到最亮档保持暖米色体系，避免动效改变页面基调。
+  static const Color backgroundCalm = Color(0xFFF3E9DF);
+  static const Color backgroundBreathNormal = Color(0xFFFFF4EA);
+  static const Color backgroundBreathBright = Color(0xFFFFFBF6);
+  static const Color backgroundBreathMax = Color(0xFFFFFFFF);
+
   // 卡片背景色
   static const Color card = Color(0xFFFFFFFF);
 
@@ -36,6 +42,10 @@ class AppColors {
   // 卡片阴影
   static const Color shadow = Color(0x1F000000);
 
+  // 情绪机器人外壳与投影
+  static const Color robotShell = Color(0xFFE4D5C7);
+  static const Color robotShadow = Color(0x26000000);
+
   // 笔记本纸张色（主界面背景）
   static const Color notebookPaper = Color(0xFFF5F3EF);
 
@@ -55,15 +65,15 @@ class AppColors {
   static const Color cardMuted = Color(0xFFF0EDE8);
 
   // 批注气泡颜色
-  static const Color bubbleL1 = Color(0xFFFFF8E1);         // 暖黄（解释、问答）
+  static const Color bubbleL1 = Color(0xFFFFF8E1); // 暖黄（解释、问答）
   static const Color bubbleL1Border = Color(0xFFFFE082);
-  static const Color bubbleL2 = Color(0xFFF5F5F5);         // 灰色（默认/物理标记）
+  static const Color bubbleL2 = Color(0xFFF5F5F5); // 灰色（默认/物理标记）
   static const Color bubbleL2Border = Color(0xFFE0E0E0);
-  static const Color bubbleL3 = Color(0xFFF3E5F5);         // 浅紫（质疑、追问、总结）
+  static const Color bubbleL3 = Color(0xFFF3E5F5); // 浅紫（质疑、追问、总结）
   static const Color bubbleL3Border = Color(0xFFCE93D8);
-  static const Color annotationRed = Color(0xFFE53935);    // 标注红色（下划线、圈词）
-  static const Color pageBackground = Color(0xFFFBFAF8);   // 书页底色
-  static const Color numberingColor = Color(0xFFFF7043);   // 编号/星号橙色
+  static const Color annotationRed = Color(0xFFE53935); // 标注红色（下划线、圈词）
+  static const Color pageBackground = Color(0xFFFBFAF8); // 书页底色
+  static const Color numberingColor = Color(0xFFFF7043); // 编号/星号橙色
 
   /// 扫描取景跟踪框描边（对齐扫描王青绿）
   static const Color scanTrack = Color(0xFF4ADE80);
