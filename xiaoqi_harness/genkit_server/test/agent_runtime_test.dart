@@ -64,6 +64,12 @@ void main() {
     },
   );
 
+  test('keeps the complete topic when compiling a visual prompt', () {
+    const request = '生成图片给我讲解一下牛顿的第一定律';
+    expect(preserveVisualPrompt(request), request);
+    expect(agentImagePrompt(request), contains('牛顿的第一定律'));
+  });
+
   test('does not infer tool availability from user keywords', () {
     expect(
       agentToolNamesForRequest(latestUserText: '你好，讲解一下马斯克第一性原理'),
@@ -143,6 +149,41 @@ void main() {
       directory.deleteSync(recursive: true);
     }
   });
+
+  test(
+    'selected create-image action with empty current input asks first',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'xiaoqi-agent-empty-image-test-',
+      );
+      final store = CloudStore(root: directory.path);
+      final images = _RecordingImageService(store);
+      final runtime = GenkitXiaoqiAgentRuntime(store, images);
+
+      try {
+        final answer = await runtime.run(
+          tenantId: 'personal',
+          taskId: 'empty-image-action-test',
+          request: {
+            'model_id': 'deepseek-flash',
+            'capability': {'type': 'action', 'id': 'create-image'},
+            'current_turn_text': '',
+            'messages': [
+              {'role': 'user', 'content': '我选择了“创建图像”，请结合当前对话继续。'},
+            ],
+          },
+          onDelta: (_) {},
+          cancellation: CancellationController().token,
+        );
+
+        expect(answer, contains('你想生成什么内容的图片'));
+        expect(images.prompt, isNull);
+      } finally {
+        store.close();
+        directory.deleteSync(recursive: true);
+      }
+    },
+  );
 
   test('normal image requests call the image service directly', () async {
     final directory = Directory.systemTemp.createTempSync(

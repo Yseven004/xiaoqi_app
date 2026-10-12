@@ -47,6 +47,26 @@ String _networkMode(Object? value) => switch (value?.toString()) {
   _ => 'off',
 };
 
+bool _requestRequiresImage(Map<String, dynamic> body) {
+  final capability = body['capability'];
+  final selectedImageAction =
+      capability is Map &&
+      capability['type'] == 'action' &&
+      capability['id'] == 'create-image';
+  final rawText = body.containsKey('current_turn_text')
+      ? body['current_turn_text']?.toString() ?? ''
+      : ((body['messages'] as List? ?? const [])
+                .whereType<Map>()
+                .lastWhere(
+                  (message) => message['role'] == 'user',
+                  orElse: () => const {},
+                )['content']
+                ?.toString() ??
+            '');
+  return rawText.trim().isNotEmpty &&
+      (selectedImageAction || agentShouldGenerateImage(rawText));
+}
+
 ({String code, String message, String details}) _taskFailurePresentation(
   Object error, {
   required bool imageGeneration,
@@ -1192,6 +1212,7 @@ class XiaoqiApi {
         'device_id': device.value['device_id'],
         'status': 'queued',
         'attempt': 1,
+        'network_mode': _networkMode(body['network_mode']),
         'events': [
           {'seq': 0, 'type': 'status', 'status': 'queued', 'created_at': now},
         ],
@@ -1280,31 +1301,38 @@ class XiaoqiApi {
           'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
         });
       } else {
+        final artifacts = (current.value['artifacts'] as List? ?? const [])
+            .whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item))
+            .toList();
+        final partial = _requestRequiresImage(body) && artifacts.isEmpty;
+        final resultText = partial
+            ? '$answer\n\n图片未生成，文字内容已完成。你可以单独重试图片。'
+            : answer;
         _mutateTask(
           key,
           (value) => {
             ...value,
-            'status': 'completed',
-            'result': answer,
+            'status': partial ? 'partially_completed' : 'completed',
+            'result': resultText,
+            if (partial) 'partial_reason': 'requested_image_missing',
             'updated_at': _now(),
           },
         );
-        final artifacts = (current.value['artifacts'] as List? ?? const [])
-            .whereType<Map>()
-            .map(
-              (item) =>
-                  _publicArtifact(Map<String, dynamic>.from(item), taskId),
-            )
+        final publicArtifacts = artifacts
+            .map((item) => _publicArtifact(item, taskId))
             .toList();
         _appendEvent(key, {
           'type': 'completed',
-          'text': answer,
+          'status': partial ? 'partially_completed' : 'completed',
+          'text': resultText,
           'draft': null,
           'files': {},
-          'artifacts': artifacts,
+          'artifacts': publicArtifacts,
         });
         _logTaskEvent('finished', taskId, {
-          'status': 'completed',
+          'status': partial ? 'partially_completed' : 'completed',
+          'partial_reason': partial ? 'requested_image_missing' : null,
           'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
         });
       }

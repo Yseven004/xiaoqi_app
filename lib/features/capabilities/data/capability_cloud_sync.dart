@@ -696,10 +696,13 @@ class CapabilityCloudSync {
       if (!cleanupPending &&
           (status == 'completed' ||
               status == 'succeeded' ||
+              status == 'partially_completed' ||
               status == 'failed' ||
               status == 'cancelled')) {
         if (!completionReceived &&
-            (status == 'completed' || status == 'succeeded')) {
+            (status == 'completed' ||
+                status == 'succeeded' ||
+                status == 'partially_completed')) {
           final task = await getTask(taskId);
           yield {
             'type': 'completed',
