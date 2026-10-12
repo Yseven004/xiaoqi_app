@@ -813,6 +813,7 @@ class CapabilityCloudSync {
         value == 'cancelled' ||
         value == 'completed' ||
         value == 'succeeded' ||
+        value == 'partially_completed' ||
         value == 'failed';
     while ((!isTerminal(status) || cleanupPending) &&
         DateTime.now().isBefore(deadline)) {
