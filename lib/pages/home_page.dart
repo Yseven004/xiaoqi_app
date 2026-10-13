@@ -49,6 +49,7 @@ import '../services/speech_recognition_service.dart';
 import '../widgets/reading_task_book_creation.dart';
 import '../widgets/reading_space_sidebar.dart';
 import '../widgets/reading_task_switcher.dart';
+import '../widgets/composer_action_capsule.dart';
 import '../widgets/home_chat_attachment_controls.dart';
 import '../widgets/home_chat_model_selector.dart';
 import '../widgets/message_selection_action_card.dart';
@@ -7017,6 +7018,7 @@ class _HomeComposerState extends State<_HomeComposer> {
       children: [
         if (!widget.expanded)
           SkillsPluginsComposerControls(
+            isReadingSpace: widget.showReadingTasks,
             onRequestLogin: widget.onRequestLogin,
             isSignedIn: widget.isSignedIn,
             onSessionChanged: widget.onSessionChanged,
@@ -7024,21 +7026,30 @@ class _HomeComposerState extends State<_HomeComposer> {
             onNetworkModeChanged: widget.onNetworkModeChanged,
             onCapabilitySelected: widget.onCapabilitySelected,
             onDrawingSelected: widget.onDrawingSelected,
-            reviewDraft: widget.pendingSkillDraftReview,
+            reviewDraft: widget.showReadingTasks
+                ? widget.pendingSkillDraftReview
+                : null,
             onSaveReviewDraft: widget.onSaveSkillDraft,
             onReviseReviewDraft: widget.onReviseSkillDraft,
             onDismissReviewDraft: widget.onDismissSkillDraftReview,
             onDeleteReviewDraft: widget.onDeleteSkillDraft,
-            leadingControl: ReadingTaskSwitcher(
-              library: widget.bookLibrary,
-              composerFocusNode: widget.focusNode,
-              selectedBookId: widget.selectedBookId,
-              selectedBookName: widget.selectedBookName,
-              onSelectBook: widget.onSelectReadingBook,
-              onSearchFocusChanged: widget.onReadingTaskSearchFocusChanged,
-              onStartIndependent: widget.onStartIndependent,
-              onAddBook: widget.onAddReadingBook,
-            ),
+            leadingControl: widget.showReadingTasks
+                ? ReadingTaskSwitcher(
+                    library: widget.bookLibrary,
+                    composerFocusNode: widget.focusNode,
+                    selectedBookId: widget.selectedBookId,
+                    selectedBookName: widget.selectedBookName,
+                    onSelectBook: widget.onSelectReadingBook,
+                    onSearchFocusChanged:
+                        widget.onReadingTaskSearchFocusChanged,
+                    onStartIndependent: widget.onStartIndependent,
+                    onAddBook: widget.onAddReadingBook,
+                  )
+                : const ComposerActionCapsule(
+                    label: '学习任务',
+                    iconAsset: 'assets/images/reading_task_book.svg',
+                    expanded: false,
+                  ),
           ),
         ...children,
       ],

@@ -13,6 +13,7 @@ import '../data/capability_store.dart';
 /// Compact, inline capability picker anchored above the chat composer.
 class SkillsPluginsComposerControls extends StatefulWidget {
   const SkillsPluginsComposerControls({
+    required this.isReadingSpace,
     required this.onCapabilitySelected,
     required this.onDrawingSelected,
     required this.onSaveReviewDraft,
@@ -29,6 +30,7 @@ class SkillsPluginsComposerControls extends StatefulWidget {
     super.key,
   });
 
+  final bool isReadingSpace;
   final ValueChanged<Map<String, Object?>> onCapabilitySelected;
   final VoidCallback onDrawingSelected;
   final CapabilityDraft? reviewDraft;
@@ -68,6 +70,18 @@ class _SkillsPluginsComposerControlsState
   @override
   void didUpdateWidget(covariant SkillsPluginsComposerControls oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.isReadingSpace != widget.isReadingSpace) {
+      _pendingDeleteId = null;
+      if (widget.isReadingSpace) {
+        unawaited(_refresh());
+      } else {
+        _menuPortal.hide();
+        _open = false;
+        _manage = false;
+        _records = const [];
+        _drafts = const [];
+      }
+    }
     final nextId = widget.reviewDraft?.id;
     if (nextId != _reviewDraftId) {
       _reviewDraftId = nextId;
@@ -78,13 +92,14 @@ class _SkillsPluginsComposerControlsState
   @override
   void initState() {
     super.initState();
-    _refresh();
+    if (widget.isReadingSpace) unawaited(_refresh());
   }
 
   Future<void> _refresh() async {
+    if (!widget.isReadingSpace) return;
     final records = await _store.list();
     final drafts = await _store.drafts();
-    if (!mounted) return;
+    if (!mounted || !widget.isReadingSpace) return;
     setState(() {
       _records = records;
       _drafts = drafts;
@@ -137,6 +152,7 @@ class _SkillsPluginsComposerControlsState
   }
 
   void _toggleMenu() {
+    if (!widget.isReadingSpace) return;
     if (_open) {
       _closeMenu();
       return;
@@ -224,7 +240,7 @@ class _SkillsPluginsComposerControlsState
     required String label,
     required String icon,
     required bool expanded,
-    required VoidCallback onTap,
+    required VoidCallback? onTap,
   }) => ComposerActionCapsule(
     label: label,
     iconAsset: 'assets/icons/capabilities/$icon.svg',
@@ -821,7 +837,8 @@ class _SkillsPluginsComposerControlsState
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (widget.reviewDraft != null) _draftReviewPanel(widget.reviewDraft!),
+        if (widget.isReadingSpace && widget.reviewDraft != null)
+          _draftReviewPanel(widget.reviewDraft!),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(
@@ -840,7 +857,7 @@ class _SkillsPluginsComposerControlsState
                     label: '技能 / 插件',
                     icon: 'skill_plugin_capsule',
                     expanded: _open,
-                    onTap: _toggleMenu,
+                    onTap: widget.isReadingSpace ? _toggleMenu : null,
                   ),
                 ),
               ),
@@ -849,7 +866,9 @@ class _SkillsPluginsComposerControlsState
                 label: 'MCP 连接器',
                 icon: 'mcp_connector',
                 expanded: false,
-                onTap: () => _showStatus('MCP 连接器入口已保留，尚未开放'),
+                onTap: widget.isReadingSpace
+                    ? () => _showStatus('MCP 连接器入口已保留，尚未开放')
+                    : null,
               ),
             ],
           ),

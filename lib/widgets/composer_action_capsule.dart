@@ -10,20 +10,21 @@ class ComposerActionCapsule extends StatelessWidget {
     required this.label,
     required this.iconAsset,
     required this.expanded,
-    required this.onTap,
+    this.onTap,
     super.key,
   });
 
   final String label;
   final String iconAsset;
   final bool expanded;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: 8),
     child: Semantics(
       button: true,
+      enabled: onTap != null,
       expanded: expanded,
       label: label,
       child: Material(
