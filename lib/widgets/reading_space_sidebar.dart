@@ -1196,12 +1196,13 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
       children: [
         const _SourceRow(label: '主资料'),
         if (entries.isEmpty)
-          const _ChildTextRow(text: '暂无目录')
+          const _ChildTextRow(text: '暂无目录', selected: false)
         else
           for (final entry in entries)
             _ChildTextRow(
               text: entry.title,
               indent: entry.level > 1 ? (entry.level - 1) * 10 : 0,
+              selected: false,
               onTap: () => widget.onOpenChapter(item, entry),
             ),
       ],
@@ -1213,7 +1214,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     return _ChildList(
       children: [
         if (conversations.isEmpty)
-          const _ChildTextRow(text: '暂无对话记录')
+          const _ChildTextRow(text: '暂无对话记录', selected: false)
         else
           ..._buildDatedConversationRows(
             conversations,
@@ -1928,7 +1929,7 @@ class _ChildTextRow extends StatelessWidget {
   const _ChildTextRow({
     required this.text,
     this.indent = 0,
-    this.selected = false,
+    required this.selected,
     this.onTap,
   });
 

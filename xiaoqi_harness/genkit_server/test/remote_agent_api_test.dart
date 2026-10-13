@@ -33,6 +33,7 @@ class _StreamingRuntime
   bool interruptFirstTurn = false;
   var turnCount = 0;
   List<ToolRequestPart>? lastRestart;
+  Map<String, dynamic>? lastRequest;
   Completer<void>? pauseBeforeReturn;
   Completer<void>? turnStarted;
   final disabledNetworkTasks = <String>[];
@@ -72,6 +73,7 @@ class _StreamingRuntime
     cancellation.throwIfCancelled();
     turnCount++;
     lastRestart = restart;
+    lastRequest = Map<String, dynamic>.from(request);
 
     if (interruptFirstTurn && restart == null) {
       final permissionRequest = ToolRequestPart(
@@ -253,6 +255,55 @@ void main() {
       expect(nextResponse.text, '你好');
       expect(nextResponse.sessionId, response.sessionId);
       expect(nextResponse.snapshotId, isNot(response.snapshotId));
+    },
+  );
+
+  test(
+    'inherits turn metadata when an A2UI action message omits app metadata',
+    () async {
+      final chat = ownerAgent.chat();
+      final first = chat.sendStream(
+        message: userMessage('先展示一个选项', 'a2ui-metadata-task'),
+      );
+      await first.stream.drain<void>();
+      final firstResponse = await first.response;
+
+      final action = chat.sendStream(
+        message: Message(
+          role: Role.user,
+          content: [TextPart(text: '用户点击了选项')],
+        ),
+      );
+      await action.stream.drain<void>();
+      final actionResponse = await action.response;
+
+      expect(actionResponse.text, '你好');
+      expect(actionResponse.sessionId, firstResponse.sessionId);
+      expect(actionResponse.snapshotId, isNot(firstResponse.snapshotId));
+    },
+  );
+
+  test(
+    'preserves an explicit empty image turn instead of deriving a prompt',
+    () async {
+      final chat = ownerAgent.chat();
+      final turn = chat.sendStream(
+        message: Message(
+          role: Role.user,
+          content: [TextPart(text: '我选择了“创建图像”，请结合当前对话继续。')],
+          metadata: {
+            'xiaoqi_agent_turn': {
+              'task_id': 'empty-image-contract-task',
+              'capability': {'type': 'action', 'id': 'create-image'},
+              'current_turn_text': '',
+            },
+          },
+        ),
+      );
+      await turn.stream.drain<void>();
+      await turn.response;
+
+      expect(runtime.lastRequest?['current_turn_text'], '');
     },
   );
 

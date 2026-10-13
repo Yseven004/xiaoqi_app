@@ -25,23 +25,26 @@ sed -i "s/^SANDBOX_RUNNER_TOKEN=.*/SANDBOX_RUNNER_TOKEN=$(openssl rand -hex 32)/
 
 令牌只保存在服务器的 `single-server.env`。`XIAOQI_PUBLIC_HOST` 设为已经指向这台 ECS 的域名；示例使用 `47-76-60-77.sslip.io`。密钥不返回 Flutter，也不要提交 `single-server.env`。
 
-## 备份、构建与启动
+## 一键部署与自动恢复
 
-在目标服务器执行以下步骤。先构建新镜像，再停止 API 并备份数据：
+在单人开发阶段，AI 修改了服务端代码、部署配置或客户端/服务端接口后，应在测试通过后自动运行下面的命令，不需要用户手动部署。只改 Flutter 界面、文档或测试时不部署：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\xiaoqi_harness\deploy\deploy_current.ps1
+```
+
+这个命令保留为 AI 的标准入口和紧急手工入口。AI 必须根据实际代码差异判断是否需要部署，并在交付时明确说明“已部署并验证”或“不需要部署”及原因。
+
+脚本先在后台构建新镜像，旧服务继续运行。构建成功后，它会保存上一版源码、镜像和数据，再切换到新版本；健康检查或数据核对失败时自动恢复上一版。成功后只保留当前运行版本和一份 `latest-good` 应急恢复点，旧镜像、旧备份和上传临时文件会被清理。服务器密钥始终留在 `/opt/xiaoqi-single-server/config/single-server.env`，不会打进发布包。
+
+需要手工查看或恢复时，通过阿里云助手执行服务器上的固定脚本：
 
 ```sh
-cd xiaoqi_harness/deploy
-mkdir -p backups
-docker compose --env-file ./single-server.env build app sandbox-runner
-docker compose --env-file ./single-server.env --profile build-only build sandbox-image sandbox-proxy-image
-docker compose --env-file ./single-server.env stop app
-docker run --rm -v xiaoqi-single-server_xiaoqi-data:/data:ro -v "$PWD/backups:/backup" alpine:3.22 sh -c 'tar -czf /backup/xiaoqi-data-before-genkit.tgz -C /data .'
-docker run --rm -v xiaoqi-single-server_xiaoqi-data:/data:ro -v "$PWD:/deploy:ro" -v "$PWD/backups:/backup" python:3.12-slim python /deploy/verify_store.py --root /data --output /backup/genkit-before.json
-docker compose --env-file ./single-server.env --profile https up -d --remove-orphans app sandbox-runner caddy
-docker compose --env-file ./single-server.env ps
-curl --fail https://47-76-60-77.sslip.io/health
-docker run --rm -v xiaoqi-single-server_xiaoqi-data:/data:ro -v "$PWD:/deploy:ro" -v "$PWD/backups:/backup" python:3.12-slim python /deploy/verify_store.py --root /data --output /tmp/genkit-after.json --compare /backup/genkit-before.json
+/opt/xiaoqi-single-server/release_manager.sh status
+/opt/xiaoqi-single-server/release_manager.sh rollback
 ```
+
+不要使用 `docker compose down -v`，它会删除业务数据卷。
 
 Genkit 服务复用现有 `xiaoqi-data` 卷，SQLite 表结构及 `objects/` 文件布局保持一致，不复制或重写用户数据。Compose 只声明业务数据卷和 Caddy 证书卷。不要用 `docker compose down -v` 删除这些卷。代码执行镜像会在服务器构建；每个任务使用独立容器、临时卷和网络。默认网络关闭；用户为任务授权域名后，执行器才会创建该任务专属网络和 Squid 出口代理，代理只放行授权域名的 80/443 端口。任务结束或取消时会删除容器、代理、网络和临时卷。
 
@@ -53,7 +56,7 @@ Agent 会话使用 `on`、`off` 两种联网模式；新会话和缺省值为 `o
 
 目标服务器应验证 `/health`、邮箱登录、连续聊天与流式事件、任务取消/恢复、技能云同步和草稿冲突、MCP 登录鉴权，以及容器重启后的数据读取。笔记分析、图片笔记分析、文字改写和会话标题通过带邮箱会话鉴权的 `/v1/chat/completions` 进入 Genkit；模型密钥与默认文字模型只从服务器环境读取。代码执行还应验证 Python、JavaScript、TypeScript、默认断网、未授权域名被拒、已授权域名可访问、取消后资源清理和产物下载；沙箱无需第三方账号或服务密钥。图片生成验收推迟到本次架构迁移完成后。
 
-升级前的压缩备份用于恢复 SQLite 与对象文件。需要恢复时，先停止 `app`，将备份解压回 `xiaoqi-data` 卷，再启动服务；恢复会覆盖同名文件，执行前先另存当前卷备份。新镜像使用部署步骤里的命令重建；Caddy 的证书数据仍在 `caddy-data` 与 `caddy-config` 卷中。
+每次成功部署后只保留一份 `latest-good`。手工执行 `release_manager.sh rollback` 会停止当前服务，恢复上一版源码、四个业务镜像和升级前数据，再重新执行健康检查。这个机制处理“新代码或新镜像部署失败”；如果整台 ECS 或云盘损坏，仍需阿里云磁盘快照等异机备份，项目脚本无法从已经丢失的磁盘自行恢复。
 
 ## 参考资料
 

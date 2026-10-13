@@ -1,4 +1,18 @@
 pluginManagement {
+    // Flutter 3.47.5 double-escapes Windows plugin paths in this generated JSON.
+    // Normalize it before the Flutter plugin loader resolves the native folders.
+    val flutterPluginDependencies = java.io.File(
+        settingsDir.parentFile,
+        ".flutter-plugins-dependencies",
+    )
+    if (flutterPluginDependencies.isFile) {
+        val content = flutterPluginDependencies.readText()
+        val normalized = content.replace("\\".repeat(4), "\\".repeat(2))
+        if (normalized != content) {
+            flutterPluginDependencies.writeText(normalized)
+        }
+    }
+
     val flutterSdkPath =
         run {
             val properties = java.util.Properties()

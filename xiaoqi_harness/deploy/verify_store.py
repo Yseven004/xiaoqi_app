@@ -16,7 +16,10 @@ def manifest(root: Path) -> dict[str, object]:
     if not database.is_file():
         raise FileNotFoundError(f"SQLite database not found: {database}")
 
-    connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    # Deployment verification runs against a stopped, read-only volume snapshot.
+    connection = sqlite3.connect(
+        f"file:{database.as_posix()}?mode=ro&immutable=1", uri=True
+    )
     try:
         documents = [
             [str(row[0]), int(row[1])]

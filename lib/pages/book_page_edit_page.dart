@@ -373,6 +373,10 @@ Note _mergePdfPageAnnotations(Note loaded, Note cached) {
   }
 }
 
+class _RepaintNotifier extends ChangeNotifier {
+  void request() => notifyListeners();
+}
+
 class _BookPageEditPageState extends State<BookPageEditPage>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   static const _caretKeyboardGap = 24.0;
@@ -5898,8 +5902,8 @@ class _PageAnnotationLayerState extends State<_PageAnnotationLayer> {
 
   late PageAnnotationDocument _workingDocument;
   final _draftPoints = <Offset>[];
-  final ChangeNotifier _draftRepaint = ChangeNotifier();
-  final ChangeNotifier _historyRepaint = ChangeNotifier();
+  final _RepaintNotifier _draftRepaint = _RepaintNotifier();
+  final _RepaintNotifier _historyRepaint = _RepaintNotifier();
   late final StreamSubscription<InkPointerPacket> _inkSubscription;
   final _nativePointers = <int>{};
   final _nativeLastSampleTimes = <int, int>{};
@@ -5914,7 +5918,7 @@ class _PageAnnotationLayerState extends State<_PageAnnotationLayer> {
     // RenderCustomPaint already coalesces markNeedsPaint calls until the next
     // frame. Waiting for a scheduled frame here would add an avoidable frame
     // of ink latency, especially when platform prediction is active.
-    _draftRepaint.notifyListeners();
+    _draftRepaint.request();
   }
 
   PageAnnotationDocument? _gestureBeforeDocument;
@@ -6086,7 +6090,7 @@ class _PageAnnotationLayerState extends State<_PageAnnotationLayer> {
     _transformStartBounds = null;
     _draftGeometryGeneration++;
     if (!hadPreview) return;
-    _historyRepaint.notifyListeners();
+    _historyRepaint.request();
     _requestDraftRepaint();
   }
 
@@ -7102,7 +7106,7 @@ class _PageAnnotationLayerState extends State<_PageAnnotationLayer> {
     final changed = widget.controller.eraserMode == EraserMode.free
         ? _eraseLocallyAt(point, size)
         : _removeIntersectedStrokes(point, size);
-    if (changed) _historyRepaint.notifyListeners();
+    if (changed) _historyRepaint.request();
     _requestDraftRepaint();
   }
 
@@ -7329,7 +7333,7 @@ class _PageAnnotationLayerState extends State<_PageAnnotationLayer> {
       final changed = widget.controller.eraserMode == EraserMode.free
           ? _eraseLocallyAt(point, size)
           : _removeIntersectedStrokes(point, size);
-      if (changed) _historyRepaint.notifyListeners();
+      if (changed) _historyRepaint.request();
       _requestDraftRepaint();
       return;
     }

@@ -127,7 +127,7 @@ class PdfCatalogService {
       if (pageNumber < 1 || pageNumber > document.pages.length) {
         throw RangeError('PDF 第 $pageNumber 页不存在');
       }
-      return _renderPageForRecognition(
+      return await _renderPageForRecognition(
         document.pages[pageNumber - 1],
         pageNumber,
         directoryName: 'pdf_edit_temp',

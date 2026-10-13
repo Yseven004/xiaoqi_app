@@ -905,6 +905,13 @@ class GenkitXiaoqiAgentRuntime
 
     NetworkPermissionRequired? pendingPermission;
     var imageToolCalled = false;
+    // shortcut: one repair retry for safe script errors; use a dedicated
+    // workflow before raising this for long-running coding tasks.
+    var executePythonFailures = 0;
+    // shortcut: two distinct searches per turn; explicit research mode can
+    // later opt into a larger server-side budget.
+    var webSearchCalls = 0;
+    final webSearchCache = <String, Map<String, Object?>>{};
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'execute_python',
       description:
@@ -915,6 +922,19 @@ class GenkitXiaoqiAgentRuntime
           '资料位于 materials/，技能位于 skill/，文件产物写入 output/。',
       inputSchema: _executePythonSchema,
       fn: (input, context) async {
+        if (executePythonFailures >= 2) {
+          onProcessEvent({
+            'type': 'tool_skipped',
+            'tool': 'execute_python',
+            'reason': 'script_retry_budget_exhausted',
+          });
+          return ToolResult.response(
+            jsonEncode({
+              'status': 'budget_exhausted',
+              'message': '脚本纠正次数已用完。请使用已有结果完成回答，不要再次执行脚本。',
+            }),
+          );
+        }
         final networkMode = _taskNetworkMode(
           tenantId,
           taskId,
@@ -1036,14 +1056,29 @@ class GenkitXiaoqiAgentRuntime
           });
           return ToolResult.response(result);
         } on Object catch (error) {
+          if (cancellation.isCancelled) rethrow;
+          executePythonFailures++;
+          final message = _briefToolError(error);
+          final retryable = executePythonFailures == 1;
           onProcessEvent({
             'type': 'tool_failed',
             'tool': 'execute_python',
-            'message': _briefToolError(error),
+            'message': message,
+            'retryable': retryable,
             if (temporaryNetwork) 'temporary_network': true,
             if (skillName != null) 'capability_name': skillName,
           });
-          rethrow;
+          return ToolResult.response(
+            jsonEncode({
+              'status': 'script_error',
+              'code': 'script_error',
+              'retryable': retryable,
+              'message': message,
+              'instruction': retryable
+                  ? '脚本执行失败。只修正一次后重试；不要重复相同代码。'
+                  : '脚本已失败两次。不要再次调用 execute_python，请基于已有结果完成回答或明确说明无法执行。',
+            }),
+          );
         }
       },
     );
@@ -1057,6 +1092,35 @@ class GenkitXiaoqiAgentRuntime
         inputSchema: _webSearchSchema,
         fn: (input, context) async {
           final query = input['query']?.toString().trim() ?? '';
+          if (query.isEmpty) {
+            return ToolResult.response(
+              jsonEncode({'status': 'invalid_query', 'message': '搜索词不能为空。'}),
+            );
+          }
+          final cacheKey = query.toLowerCase();
+          final cached = webSearchCache[cacheKey];
+          if (cached != null) {
+            onProcessEvent({
+              'type': 'tool_succeeded',
+              'tool': 'web_search',
+              'cached': true,
+              'source_count': (cached['sources'] as List?)?.length ?? 0,
+            });
+            return ToolResult.response(jsonEncode(cached));
+          }
+          if (webSearchCalls >= 2) {
+            onProcessEvent({
+              'type': 'tool_skipped',
+              'tool': 'web_search',
+              'reason': 'search_budget_exhausted',
+            });
+            return ToolResult.response(
+              jsonEncode({
+                'status': 'budget_exhausted',
+                'message': '本轮联网搜索次数已用完。请使用已有来源回答；无法核验时明确说明。',
+              }),
+            );
+          }
           final networkMode = _taskNetworkMode(
             tenantId,
             taskId,
@@ -1093,6 +1157,7 @@ class GenkitXiaoqiAgentRuntime
           final skillName = temporaryNetwork
               ? _stagedSkillName(skillReference, stagedSkills.entries)
               : null;
+          webSearchCalls++;
           onProcessEvent({
             'type': 'tool_started',
             'tool': 'web_search',
@@ -1112,6 +1177,8 @@ class GenkitXiaoqiAgentRuntime
               taskId,
               result.sources.map((source) => source.toJson()).toList(),
             );
+            final encodedResult = result.toJson();
+            webSearchCache[cacheKey] = encodedResult;
             onProcessEvent({
               'type': 'tool_succeeded',
               'tool': 'web_search',
@@ -1119,8 +1186,9 @@ class GenkitXiaoqiAgentRuntime
               if (temporaryNetwork) 'temporary_network': true,
               if (skillName != null) 'capability_name': skillName,
             });
-            return ToolResult.response(jsonEncode(result.toJson()));
+            return ToolResult.response(jsonEncode(encodedResult));
           } on Object catch (error) {
+            if (cancellation.isCancelled) rethrow;
             final message = _briefToolError(error);
             onProcessEvent({
               'type': 'tool_failed',

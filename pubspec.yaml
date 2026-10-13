@@ -108,6 +108,8 @@ dependency_overrides:
       url: https://github.com/hyper-designed/box_transform.git
       ref: 912492e67448ca7e5ac482a389a91b10836b8bbe
       path: packages/box_transform
+  photo_manager:
+    path: third_party/photo_manager
   cross_file: 0.3.5+2
   file_selector_linux: 0.9.4
   file_selector_macos: 0.9.5

@@ -777,7 +777,6 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   bool _hasBodyContent() {
     if (_plainText().trim().isNotEmpty) return true;
     return _quillController.document.toDelta().toJson().any((operation) {
-      if (operation is! Map) return true;
       return operation['insert'] is! String;
     });
   }
@@ -2872,7 +2871,6 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   Set<String> _inlineAttachmentPaths() {
     final paths = <String>{};
     for (final operation in _quillController.document.toDelta().toJson()) {
-      if (operation is! Map) continue;
       final insert = operation['insert'];
       if (insert is! Map || insert['custom'] is! String) continue;
       try {
@@ -2897,7 +2895,6 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     final offsets = <int>[];
     var offset = 0;
     for (final operation in _quillController.document.toDelta().toJson()) {
-      if (operation is! Map) continue;
       final insert = operation['insert'];
       if (insert is String) {
         offset += insert.length;

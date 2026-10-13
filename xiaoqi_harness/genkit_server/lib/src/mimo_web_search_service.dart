@@ -97,20 +97,21 @@ class MimoWebSearchService {
                 {'role': 'system', 'content': '只检索用户给出的查询词，返回简洁、可核验的实时公开网页结果。'},
                 {'role': 'user', 'content': query},
               ],
-              'max_completion_tokens': 900,
+              'max_completion_tokens': 500,
               'stream': false,
+              'thinking': {'type': 'disabled'},
               'tools': [
                 {
                   'type': 'web_search',
-                  'max_keyword': 3,
+                  'max_keyword': 1,
                   'force_search': true,
-                  'limit': 5,
+                  'limit': 3,
                 },
               ],
               'tool_choice': 'auto',
             }),
           )
-          .timeout(const Duration(seconds: 35));
+          .timeout(const Duration(seconds: 15));
     } on TimeoutException {
       throw const MimoWebSearchException('联网搜索超时，请稍后重试。');
     } on Object {
@@ -164,7 +165,7 @@ class MimoWebSearchService {
     }
     return MimoWebSearchResult(
       summary: _bounded(message['content'], 6000),
-      sources: List.unmodifiable(sources.take(5)),
+      sources: List.unmodifiable(sources.take(3)),
     );
   }
 

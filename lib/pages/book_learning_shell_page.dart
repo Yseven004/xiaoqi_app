@@ -39,7 +39,6 @@ class BookLearningShellPage extends StatefulWidget {
   @override
   State<BookLearningShellPage> createState() => _BookLearningShellPageState();
 }
-
 class _BookLearningShellPageState extends State<BookLearningShellPage> {
   late final BookLibraryService _library;
   late final BookRecognitionRepository _recognition;
@@ -334,12 +333,5 @@ class _BookPageTransition extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-extension<T> on Iterable<T> {
-  T? get firstOrNull {
-    final iterator = this.iterator;
-    return iterator.moveNext() ? iterator.current : null;
   }
 }

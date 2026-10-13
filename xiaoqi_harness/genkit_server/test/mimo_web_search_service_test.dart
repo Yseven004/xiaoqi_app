@@ -54,11 +54,13 @@ void main() {
       expect(captured?['tools'], [
         {
           'type': 'web_search',
-          'max_keyword': 3,
+          'max_keyword': 1,
           'force_search': true,
-          'limit': 5,
+          'limit': 3,
         },
       ]);
+      expect(captured?['thinking'], {'type': 'disabled'});
+      expect(captured?['max_completion_tokens'], 500);
       expect(captured?['messages'], hasLength(2));
       expect(jsonEncode(captured), contains('2026 年 Genkit Dart A2UI 文档'));
       expect(jsonEncode(captured), isNot(contains('legacy_history')));

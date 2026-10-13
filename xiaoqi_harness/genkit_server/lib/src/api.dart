@@ -56,12 +56,10 @@ bool _requestRequiresImage(Map<String, dynamic> body) {
       capability['id'] == 'create-image';
   final rawContent = body.containsKey('current_turn_text')
       ? body['current_turn_text']
-      : ((body['messages'] as List? ?? const [])
-            .whereType<Map>()
-            .lastWhere(
-              (message) => message['role'] == 'user',
-              orElse: () => const {},
-            )['content']);
+      : ((body['messages'] as List? ?? const []).whereType<Map>().lastWhere(
+          (message) => message['role'] == 'user',
+          orElse: () => const {},
+        )['content']);
   final rawText = rawContent is List
       ? rawContent
             .whereType<Map>()
@@ -523,10 +521,24 @@ class XiaoqiApi {
       }
       var currentUser = messages[currentUserIndex];
       final rawConfig = currentUser.metadata?[_remoteAgentTurnMetadataKey];
-      if (rawConfig is! Map) {
+      Map<String, dynamic>? config = rawConfig is Map
+          ? Map<String, dynamic>.from(rawConfig)
+          : null;
+      if (config == null) {
+        // A2UI's actionToMessage helper only carries the action payload. The
+        // app-level turn metadata belongs to the preceding user turn, so
+        // inherit it when a client sends a structurally valid action message.
+        for (final message in messages.reversed.skip(1)) {
+          final previous = message.metadata?[_remoteAgentTurnMetadataKey];
+          if (previous is Map) {
+            config = Map<String, dynamic>.from(previous);
+            break;
+          }
+        }
+      }
+      if (config == null) {
         throw const FormatException('Genkit Agent 回合参数缺失');
       }
-      final config = Map<String, dynamic>.from(rawConfig);
       final taskId = _safeId(config['task_id'], '任务 ID');
 
       final rawLegacyHistory = config['legacy_history'];
@@ -544,13 +556,16 @@ class XiaoqiApi {
       );
       final latestUser = messages[currentUserIndex];
       final latestUserContent = _legacyMessageFor(latestUser)['content'];
-      cleanConfig['current_turn_text'] = latestUserContent is List
-          ? latestUserContent
-                .whereType<Map>()
-                .map((part) => part['text']?.toString() ?? '')
-                .where((part) => part.isNotEmpty)
-                .join('\n')
-          : latestUserContent?.toString() ?? '';
+      if (!cleanConfig.containsKey('current_turn_text')) {
+        final derivedTurnText = latestUserContent is List
+            ? latestUserContent
+                  .whereType<Map>()
+                  .map((part) => part['text']?.toString() ?? '')
+                  .where((part) => part.isNotEmpty)
+                  .join('\n')
+            : latestUserContent?.toString() ?? '';
+        cleanConfig['current_turn_text'] = derivedTurnText;
+      }
       messages[currentUserIndex] = Message(
         role: latestUser.role,
         content: latestUser.content,
@@ -749,12 +764,12 @@ class XiaoqiApi {
         result.finishReason == AgentFinishReason.interrupted
             ? 'awaiting_network_permission'
             : partialImage
-                ? 'partially_completed'
-                : 'completed',
+            ? 'partially_completed'
+            : 'completed',
         result: resultText,
         partialReason: partialImage
             ? ((taskValue['image_failure'] as Map?)?['category']?.toString() ??
-                'requested_image_missing')
+                  'requested_image_missing')
             : null,
       );
       return TurnResult(finishReason: result.finishReason);
@@ -802,9 +817,10 @@ class XiaoqiApi {
   void _setRemoteAgentTaskStatus(
     String tenantId,
     String taskId,
-    String status,
-    {String? result, String? partialReason}
-  ) {
+    String status, {
+    String? result,
+    String? partialReason,
+  }) {
     _mutateTask(
       'task/$tenantId/$taskId',
       (value) => {

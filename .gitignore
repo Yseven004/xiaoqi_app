@@ -59,6 +59,7 @@ app.*.map.json
 **/build/
 **/Generated.xcconfig
 **/node_modules/
+**/.pytest_cache/
 xiaoqi_harness/dsh_manager/ui/dist/
 
 # impeccable-ignore-start

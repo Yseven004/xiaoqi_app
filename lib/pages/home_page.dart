@@ -8,7 +8,6 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/gestures.dart'
     show LongPressGestureRecognizer, PointerDownEvent;
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart' show Priority, SchedulerBinding;
 import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:a2ui_core/a2ui_core.dart' as a2ui_core;
@@ -135,6 +134,18 @@ final _agentClarificationCatalog = genui.Catalog(
   functions: genui.BasicFunctions.all,
   catalogId: _agentClarificationCatalogId,
 );
+
+bool _a2uiEnvelopeNeedsInput(Map<String, dynamic> envelope) {
+  final update = envelope['updateComponents'];
+  if (update is! Map || update['components'] is! List) return false;
+  return (update['components'] as List).whereType<Map>().any(
+    (component) => const {
+      'Button',
+      'TextField',
+      'CheckBox',
+    }.contains(component['component']?.toString()),
+  );
+}
 
 String _agentTaskFailureMessage(
   Object error, {
@@ -495,7 +506,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _composerFocusNode.addListener(_onComposerFocusChanged);
     _messagesScrollController.addListener(_onMessagesScrolled);
     _listenForSharedMedia();
-    _scheduleSpeechModelPreparation();
   }
 
   Future<void> _refreshEmailSession() async {
@@ -603,7 +613,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       unawaited(_cancelVoiceInput());
     }
     if (state == AppLifecycleState.resumed) {
-      _scheduleSpeechModelPreparation();
       unawaited(_retryCapabilitySyncOnResume());
     }
   }
@@ -2426,15 +2435,22 @@ $materialIndex
     final surfaceController = genui.SurfaceController(
       catalogs: [_agentClarificationCatalog],
     );
-    final clarificationAction = Completer<genkit_a2ui.A2uiClientAction>();
+    Completer<genkit_a2ui.A2uiClientAction>? clarificationAction;
+    final clarificationCancellation = Completer<void>();
     var clarificationPending = false;
+    var keepSurface = false;
+    _agentClarification.value?.controller.dispose();
+    _agentClarification.value = null;
     final submitSubscription = surfaceController.onSubmit.listen((message) {
       for (final part in message.parts.uiInteractionParts) {
         try {
           final envelope = jsonDecode(part.interaction);
           final rawAction = envelope is Map ? envelope['action'] : null;
-          if (rawAction is Map && !clarificationAction.isCompleted) {
-            clarificationAction.complete(
+          final pendingAction = clarificationAction;
+          if (rawAction is Map &&
+              pendingAction != null &&
+              !pendingAction.isCompleted) {
+            pendingAction.complete(
               genkit_a2ui.A2uiClientAction.fromJson(
                 Map<String, dynamic>.from(rawAction),
               ),
@@ -2473,7 +2489,7 @@ $materialIndex
               surfaceController.handleMessage(
                 a2ui_core.A2uiMessage.fromJson(envelope),
               );
-              if (envelope.containsKey('createSurface')) {
+              if (_a2uiEnvelopeNeedsInput(envelope)) {
                 clarificationPending = true;
               }
               final surfaceIds = surfaceController.activeSurfaceIds.toList(
@@ -2517,7 +2533,20 @@ $materialIndex
             ),
             status: '请补充信息后继续',
           );
-          final action = await clarificationAction.future;
+          final actionCompleter = Completer<genkit_a2ui.A2uiClientAction>();
+          clarificationAction = actionCompleter;
+          _abortActiveAgentTurn = () {
+            if (!clarificationCancellation.isCompleted) {
+              clarificationCancellation.complete();
+            }
+          };
+          final actionResult = await Future.any<Object?>([
+            actionCompleter.future,
+            clarificationCancellation.future,
+          ]);
+          clarificationAction = null;
+          if (actionResult == null) return null;
+          final action = actionResult as genkit_a2ui.A2uiClientAction;
           clarificationPending = false;
           final summary = action.context.entries
               .map((entry) => '${entry.key}：${entry.value}')
@@ -2528,7 +2557,19 @@ $materialIndex
             status: '已收到，正在继续',
             answerSummary: summary.isEmpty ? action.name : summary,
           );
-          turn = chat.sendStream(message: genkit_a2ui.actionToMessage(action));
+          final actionMessage = genkit_a2ui.actionToMessage(action);
+          turn = chat.sendStream(
+            message: genkit.Message(
+              role: actionMessage.role,
+              content: actionMessage.content,
+              metadata: {
+                'xiaoqi_agent_turn': {
+                  ...turnMetadata,
+                  'a2ui_action': action.toJson(),
+                },
+              },
+            ),
+          );
           continue;
         }
         if (response.interrupts.isEmpty) break;
@@ -2566,7 +2607,22 @@ $materialIndex
           ..clear()
           ..write(finalText);
       }
-      final reply = _streamingReplyBuffer.toString().trimRight();
+      if (!clarificationPending && _agentClarification.value != null) {
+        final clarification = _agentClarification.value!;
+        _agentClarification.value = _AgentClarification(
+          controller: clarification.controller,
+          surfaceIds: clarification.surfaceIds,
+          status: '已完成',
+          answerSummary: clarification.answerSummary,
+        );
+        keepSurface = true;
+      }
+      var reply = _streamingReplyBuffer.toString().trimRight();
+      if (reply.isEmpty && keepSurface) {
+        // A valid UI-only response still needs a persisted assistant row so
+        // the completed surface has a stable parent in the conversation.
+        reply = '已生成交互界面。';
+      }
       if (reply.trim().isEmpty) {
         throw const AiException('AI没有返回可用内容，请重试');
       }
@@ -2610,8 +2666,10 @@ $materialIndex
         if (mounted) setState(() {});
       }
       await submitSubscription.cancel();
-      surfaceController.dispose();
-      _agentClarification.value = null;
+      if (!keepSurface) {
+        surfaceController.dispose();
+        _agentClarification.value = null;
+      }
     }
   }
 
@@ -2675,6 +2733,7 @@ $materialIndex
       Map<String, String>? skillFiles,
     })?
   >
+  // ignore: unused_element
   _runLegacyAgentTaskReply({
     required int generation,
     required String conversationId,
@@ -5113,32 +5172,6 @@ $text''';
       !kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.android ||
           defaultTargetPlatform == TargetPlatform.iOS);
-
-  void _scheduleSpeechModelPreparation() {
-    if (!_supportsVoiceInput) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted ||
-          WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
-        return;
-      }
-      SchedulerBinding.instance.scheduleTask<void>(
-        () {
-          if (!mounted ||
-              WidgetsBinding.instance.lifecycleState !=
-                  AppLifecycleState.resumed) {
-            return;
-          }
-          unawaited(
-            _speechService.prepare().catchError((Object error) {
-              _speechService.reportException(this, error, phase: 'idle_warmup');
-            }),
-          );
-        },
-        Priority.idle,
-        debugLabel: 'prepare local speech models',
-      );
-    });
-  }
 
   bool _isCurrentVoiceSession(int session) =>
       mounted && _voicePanelVisible && session == _voiceSession;
@@ -8278,7 +8311,8 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       child: Builder(
         builder: (context) {
           final showSeparateStream =
-              widget.isGenerating && widget.continuingReplyId == null;
+              (widget.isGenerating && widget.continuingReplyId == null) ||
+              widget.agentClarification.value != null;
           final itemKeys = <Key>[const ValueKey<String>('ai-disclaimer')];
           for (final row in _messageRows) {
             itemKeys.add(

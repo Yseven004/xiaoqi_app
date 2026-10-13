@@ -249,7 +249,7 @@ class AiService {
         '[XiaoQi] AiService: 开始调用FC代理, 类型=${note.type}, 内容长度=${truncatedContent.length}',
       );
 
-      return _callApi(prompt);
+      return await _callApi(prompt);
     } on TimeoutException {
       rethrow;
     } on AiException {
