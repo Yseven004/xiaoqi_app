@@ -3,7 +3,6 @@ import 'package:flutter_quill/flutter_quill.dart' as quill;
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'config/colors.dart';
-import 'features/capabilities/data/capability_cloud_sync.dart';
 import 'pages/home_page.dart';
 
 Future<void> main() async {
@@ -46,58 +45,7 @@ class MyApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const _AuthGate(),
+      home: const HomePage(),
     );
-  }
-}
-
-class _AuthGate extends StatefulWidget {
-  const _AuthGate();
-
-  @override
-  State<_AuthGate> createState() => _AuthGateState();
-}
-
-class _AuthGateState extends State<_AuthGate> {
-  bool _checking = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _restoreSession();
-  }
-
-  Future<void> _restoreSession() async {
-    final cloud = CapabilityCloudSync.instance;
-    if (!await cloud.hasLocalEmailSession) {
-      if (mounted) setState(() => _checking = false);
-      return;
-    }
-    try {
-      await cloud.validateEmailSession();
-      if (mounted) setState(() => _checking = false);
-    } catch (_) {
-      // A previously authenticated user can still open local content offline.
-      if (mounted) setState(() => _checking = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_checking) {
-      return const Scaffold(
-        body: Center(
-          child: Text(
-            '小七',
-            style: TextStyle(
-              color: AppColors.textPrimary,
-              fontSize: 26,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-      );
-    }
-    return const HomePage();
   }
 }
