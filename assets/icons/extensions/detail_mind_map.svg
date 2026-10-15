@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" role="img" aria-label="思维导图示意图">
+  <rect x="18" y="26" width="70" height="128" rx="8" fill="#FFF" stroke="#75859A" stroke-width="2"/>
+  <path d="M34 47h39M34 61h30M34 75h40M34 95h37M34 109h30M34 123h39" stroke="#D4DBE4" stroke-width="7" stroke-linecap="round"/>
+  <path d="M104 91h43" stroke="#1D272E" stroke-width="3" stroke-linecap="round"/>
+  <path d="m132 80 15 11-15 11" fill="none" stroke="#1D272E" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="151" y="72" width="45" height="38" rx="8" fill="#C6F0CA" stroke="#4B8D56" stroke-width="2"/>
+  <path d="M196 91h26M222 91V49h21M222 91v42h21" fill="none" stroke="#1D272E" stroke-width="3" stroke-linecap="round"/>
+  <rect x="243" y="34" width="60" height="30" rx="8" fill="#F0FFF1" stroke="#83C58A" stroke-width="2"/>
+  <rect x="243" y="118" width="60" height="30" rx="8" fill="#F0FFF1" stroke="#83C58A" stroke-width="2"/>
+  <path d="M257 48h32M257 132h32" stroke="#83C58A" stroke-width="6" stroke-linecap="round"/>
+</svg>

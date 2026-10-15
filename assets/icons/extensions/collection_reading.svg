@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" role="img" aria-label="高效阅读与学习">
+  <g opacity=".88">
+    <path d="M198 49 283 75l-16 105h-88Z" fill="#F6D98B"/>
+    <path d="m172 66 87 20-15 94h-88Z" fill="#FFFDF8" stroke="#D7A85C" stroke-width="2"/>
+    <path d="m203 39 80 17 5 124h-84Z" fill="#FFFDF8" stroke="#1D2732" stroke-width="2"/>
+    <path d="M220 71h48M220 88h45M220 105h34M220 122h34" stroke="#BCA685" stroke-width="2" stroke-linecap="round"/>
+    <rect x="236" y="136" width="25" height="25" rx="4" fill="#F5C95C"/>
+  </g>
+</svg>

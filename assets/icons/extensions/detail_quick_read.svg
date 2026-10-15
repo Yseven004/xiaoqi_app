@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360" role="img" aria-label="快速精读示意图">
+  <path d="m44 57 52-16 24 263-44 16Z" fill="#F6D575" stroke="#D7A84F" stroke-width="2"/>
+  <rect x="73" y="42" width="214" height="276" rx="7" fill="#FFF" stroke="#4C5A6A" stroke-width="2"/>
+  <text x="96" y="77" fill="#1E2935" font-family="Arial" font-size="16">Research Paper</text>
+  <path d="M96 100h156M96 115h145M96 130h110" stroke="#D8DEE5" stroke-width="7" stroke-linecap="round"/>
+  <rect x="96" y="146" width="158" height="53" rx="7" fill="#FFE6A0"/>
+  <path d="M105 160h130M105 175h122M105 190h92" stroke="#F0B73A" stroke-width="7" stroke-linecap="round"/>
+  <path d="M96 220h156M96 235h141M96 250h155M96 265h136M96 280h104" stroke="#D8DEE5" stroke-width="7" stroke-linecap="round"/>
+  <path d="M292 202c31-5 39-23 56-31" fill="none" stroke="#1E2935" stroke-width="2" stroke-dasharray="7 5"/>
+  <rect x="342" y="148" width="111" height="137" rx="7" fill="#FFF" stroke="#4C5A6A" stroke-width="2"/>
+  <rect x="360" y="165" width="20" height="20" rx="2" fill="#FFE18A" stroke="#1E2935" stroke-width="2"/>
+  <text x="388" y="181" fill="#1E2935" font-family="Arial" font-size="13">要点摘要</text>
+  <circle cx="367" cy="210" r="4" fill="#F4C531"/><path d="M381 210h55M381 226h40" stroke="#F4C531" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="367" cy="246" r="4" fill="#F4C531"/><path d="M381 246h50M381 262h32" stroke="#F4C531" stroke-width="7" stroke-linecap="round"/>
+  <path d="m316 90 10-18m5 28 15-10" stroke="#1E2935" stroke-width="3" stroke-linecap="round"/>
+</svg>

@@ -37,6 +37,7 @@ class ReadingSpaceSidebar extends StatefulWidget {
     required this.onOpenChapter,
     required this.onOpenConversation,
     required this.onOpenLibrary,
+    required this.onOpenExtensionMarket,
     this.onConversationChanged,
     this.onBeforeConversationDeleted,
     this.onConversationDeleted,
@@ -49,6 +50,7 @@ class ReadingSpaceSidebar extends StatefulWidget {
   final void Function(BookLibraryItem item, BookTocEntry entry) onOpenChapter;
   final ValueChanged<AiConversationRecord> onOpenConversation;
   final VoidCallback onOpenLibrary;
+  final VoidCallback onOpenExtensionMarket;
   final ValueChanged<AiConversationRecord>? onConversationChanged;
   final ValueChanged<AiConversationRecord>? onBeforeConversationDeleted;
   final ValueChanged<AiConversationRecord>? onConversationDeleted;
@@ -911,7 +913,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
         _QuickAction(
           label: '技能·插件',
           asset: 'assets/images/reading_sidebar_wrench.svg',
-          onTap: () => _showInfo('技能·插件'),
+          onTap: widget.onOpenExtensionMarket,
         ),
         _QuickAction(
           label: '书库',

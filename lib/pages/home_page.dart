@@ -59,6 +59,7 @@ import 'email_login_page.dart';
 import 'note_editor_page.dart';
 import 'book_learning_shell_page.dart';
 import 'drawing_board_page.dart';
+import 'extension_market_page.dart';
 
 class _AgentTaskFailure extends AiException {
   const _AgentTaskFailure(
@@ -5492,6 +5493,7 @@ $text''';
     if (_space != _HomeSpace.reading) return;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _dismissComposerFocus();
+    Future<void> Function()? actionAfterClose;
     await showGeneralDialog<void>(
       context: context,
       barrierDismissible: true,
@@ -5513,12 +5515,12 @@ $text''';
                 Navigator.of(dialogContext).pop();
               },
               onOpenBook: (item) {
+                actionAfterClose = () => _openBookFromSidebar(item);
                 Navigator.of(dialogContext).pop();
-                unawaited(_openBookFromSidebar(item));
               },
               onOpenChapter: (item, _) {
+                actionAfterClose = () => _openBookFromSidebar(item);
                 Navigator.of(dialogContext).pop();
-                unawaited(_openBookFromSidebar(item));
               },
               onOpenConversation: (record) {
                 _openConversationFromSidebar(record);
@@ -5536,8 +5538,16 @@ $text''';
               onBeforeConversationDeleted: _cancelReplyBeforeConversationDelete,
               onConversationDeleted: _clearDeletedConversation,
               onOpenLibrary: () {
+                actionAfterClose = _openBookLibraryFromSidebar;
                 Navigator.of(dialogContext).pop();
-                unawaited(_openBookLibraryFromSidebar());
+              },
+              onOpenExtensionMarket: () {
+                actionAfterClose = () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const ExtensionMarketPage(),
+                  ),
+                );
+                Navigator.of(dialogContext).pop();
               },
             ),
           ),
@@ -5551,6 +5561,9 @@ $text''';
         return SlideTransition(position: position, child: child);
       },
     );
+    if (!mounted) return;
+    final action = actionAfterClose;
+    if (action != null) await action();
   }
 
   void _openConversationFromSidebar(AiConversationRecord record) {

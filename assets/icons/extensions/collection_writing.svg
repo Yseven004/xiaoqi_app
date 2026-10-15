@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" role="img" aria-label="创作与表达">
+  <g opacity=".9">
+    <path d="M184 41 294 56l-9 124H176Z" fill="#DDEBFF"/>
+    <path d="M196 47h79v133h-79Z" fill="#FFFFFF" stroke="#183D7A" stroke-width="2"/>
+    <path d="M213 75h45M213 91h40M213 107h34M213 123h30" stroke="#2F72C9" stroke-width="2" stroke-linecap="round"/>
+    <path d="m144 155 59-82 17 12-60 83-24 8Z" fill="#8DB8F1" stroke="#142F68" stroke-width="2" stroke-linejoin="round"/>
+    <path d="m202 72 17 12 12-17-18-13Z" fill="#D2E4FF" stroke="#142F68" stroke-width="2"/>
+    <circle cx="160" cy="41" r="8" fill="#C5DAFF"/>
+  </g>
+</svg>

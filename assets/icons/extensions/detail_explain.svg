@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" role="img" aria-label="重点解读示意图">
+  <rect x="18" y="25" width="150" height="134" rx="8" fill="#FFF" stroke="#75859A" stroke-width="2"/>
+  <path d="M39 48h107M39 61h89M39 82h112M39 99h115M39 116h83" stroke="#D4DBE4" stroke-width="7" stroke-linecap="round"/>
+  <rect x="39" y="68" width="104" height="19" rx="5" fill="#9BD0FF" opacity=".85"/>
+  <path d="M171 78c26 0 28-22 47-22" fill="none" stroke="#263746" stroke-width="2" stroke-dasharray="5 4"/>
+  <rect x="218" y="38" width="85" height="90" rx="8" fill="#FFF" stroke="#75859A" stroke-width="2"/>
+  <circle cx="237" cy="60" r="9" fill="#FFE477" stroke="#111" stroke-width="2"/>
+  <text x="252" y="65" fill="#1E2935" font-family="Arial" font-size="12">通俗解释</text>
+  <path d="M232 83h55M232 98h45M232 113h35" stroke="#B6D9F7" stroke-width="7" stroke-linecap="round"/>
+</svg>

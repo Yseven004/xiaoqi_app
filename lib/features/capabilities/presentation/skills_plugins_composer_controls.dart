@@ -169,6 +169,12 @@ class _SkillsPluginsComposerControlsState
     AppToast.show(context, message);
   }
 
+  @override
+  void dispose() {
+    _menuPortal.hide();
+    super.dispose();
+  }
+
   Future<void> _delete(CapabilityRecord record) async {
     if (_pendingDeleteId != record.id) {
       setState(() => _pendingDeleteId = record.id);
@@ -651,18 +657,22 @@ class _SkillsPluginsComposerControlsState
         .toDouble();
     final left = anchorX - width / 2;
     final safeTop = MediaQuery.paddingOf(context).top + 12;
-    final availableHeight = (target.top - safeTop - 12).clamp(120.0, 460.0);
+    // 不强制最小高度，否则键盘或窄屏把触发器推到顶部时，Positioned
+    // 会被算到屏幕外；滚动容器本身可以处理更小的可用高度。
+    final availableHeight = (target.top - safeTop - 12)
+        .clamp(1.0, 460.0)
+        .toDouble();
     return Positioned(
       left: left,
-      top: safeTop,
       bottom: info.overlaySize.height - target.top + 8,
       width: width,
+      height: availableHeight,
       child: Align(
         alignment: Alignment.bottomCenter,
         child: TapRegion(
           groupId: _menuTapRegionGroup,
           child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: availableHeight.toDouble()),
+            constraints: BoxConstraints(maxHeight: availableHeight),
             child: SingleChildScrollView(child: _panel()),
           ),
         ),

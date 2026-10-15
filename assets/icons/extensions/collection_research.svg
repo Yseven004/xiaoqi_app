@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" role="img" aria-label="研究与探索">
+  <g opacity=".88">
+    <circle cx="230" cy="63" r="17" fill="#C9F0D5"/>
+    <path d="M246 80 294 128" stroke="#3E9B6C" stroke-width="18" stroke-linecap="round"/>
+    <circle cx="199" cy="103" r="37" fill="#FFF" stroke="#3B9769" stroke-width="6"/>
+    <circle cx="199" cy="103" r="25" fill="#E8F9ED"/>
+    <path d="M217 131 233 147" stroke="#1E6243" stroke-width="5" stroke-linecap="round"/>
+    <path d="M250 35h48M250 50h39M250 65h31M250 80h44M250 95h35" stroke="#83C99D" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>

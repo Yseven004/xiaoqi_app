@@ -7,22 +7,44 @@ class AppToast {
 
   /// 居中弹出 Toast，1秒后自动消失
   static void show(BuildContext context, String message) {
-    final overlay = Overlay.of(context);
+    // 先在调用方仍然有效的当前 frame 捕获 Overlay。这样“提示后立即
+    // Navigator.pop”的调用仍能显示 Toast，同时不会在 teardown 期间再做
+    // 祖先查找。
+    final overlay = context.mounted ? Overlay.maybeOf(context) : null;
+    if (overlay == null || !overlay.mounted) return;
+
     late OverlayEntry entry;
+    var inserted = false;
+    var dismissed = false;
+
+    void dismiss() {
+      if (dismissed) return;
+      dismissed = true;
+      if (!inserted) {
+        entry.dispose();
+        return;
+      }
+      entry.remove();
+      // OverlayEntry 的 Element 要到移除后的 frame 才完成 teardown。
+      WidgetsBinding.instance.addPostFrameCallback((_) => entry.dispose());
+    }
 
     entry = OverlayEntry(
       builder: (ctx) {
-        return _ToastWidget(
-          message: message,
-          onDismiss: () {
-            entry.remove();
-            entry.dispose();
-          },
-        );
+        return _ToastWidget(message: message, onDismiss: dismiss);
       },
     );
 
-    overlay.insert(entry);
+    // 延迟插入，避开当前 frame 的 route teardown；Overlay 已在上面安全捕获，
+    // 因此即使调用方随后 pop，Toast 仍可挂到同一个 Overlay 上。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (dismissed || !context.mounted || !overlay.mounted) {
+        dismiss();
+        return;
+      }
+      overlay.insert(entry);
+      inserted = true;
+    });
   }
 }
 
@@ -40,6 +62,7 @@ class _ToastWidgetState extends State<_ToastWidget>
     with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   late Animation<double> _opacity;
+  Timer? _dismissTimer;
 
   @override
   void initState() {
@@ -57,10 +80,10 @@ class _ToastWidgetState extends State<_ToastWidget>
     _controller.forward();
 
     // 1秒后淡出
-    Timer(const Duration(milliseconds: 1000), () {
+    _dismissTimer = Timer(const Duration(milliseconds: 1000), () {
       if (mounted) {
         _controller.reverse().then((_) {
-          widget.onDismiss();
+          if (mounted) widget.onDismiss();
         });
       }
     });
@@ -68,6 +91,7 @@ class _ToastWidgetState extends State<_ToastWidget>
 
   @override
   void dispose() {
+    _dismissTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }
