@@ -21,6 +21,7 @@ class SkillsPluginsComposerControls extends StatefulWidget {
     required this.onDismissReviewDraft,
     required this.onDeleteReviewDraft,
     this.onRequestLogin,
+    this.onManageMcp,
     required this.isSignedIn,
     required this.onSessionChanged,
     required this.networkMode,
@@ -40,6 +41,7 @@ class SkillsPluginsComposerControls extends StatefulWidget {
   final VoidCallback onDismissReviewDraft;
   final Future<void> Function(CapabilityDraft draft) onDeleteReviewDraft;
   final Future<bool> Function()? onRequestLogin;
+  final VoidCallback? onManageMcp;
   final bool isSignedIn;
   final ValueChanged<bool> onSessionChanged;
   final String networkMode;
@@ -60,12 +62,15 @@ class _SkillsPluginsComposerControlsState
   bool _manage = false;
   List<CapabilityRecord> _records = const [];
   List<CapabilityDraft> _drafts = const [];
+  List<McpConnectionRecord> _mcpConnections = const [];
   String? _pendingDeleteId;
   bool _savingDraft = false;
   bool _deletingDraft = false;
   bool _cloudBusy = false;
   bool _showDraftInMenu = true;
   String? _reviewDraftId;
+  bool _showingMcpMenu = false;
+  String? _mcpLoadError;
 
   @override
   void didUpdateWidget(covariant SkillsPluginsComposerControls oldWidget) {
@@ -80,6 +85,8 @@ class _SkillsPluginsComposerControlsState
         _manage = false;
         _records = const [];
         _drafts = const [];
+        _mcpConnections = const [];
+        _showingMcpMenu = false;
       }
     }
     final nextId = widget.reviewDraft?.id;
@@ -148,6 +155,7 @@ class _SkillsPluginsComposerControlsState
     setState(() {
       _open = false;
       _manage = false;
+      _showingMcpMenu = false;
     });
   }
 
@@ -160,10 +168,155 @@ class _SkillsPluginsComposerControlsState
     setState(() {
       _open = true;
       _manage = false;
+      _showingMcpMenu = false;
     });
     _menuPortal.show();
     unawaited(_refresh());
   }
+
+  Future<void> _toggleMcpMenu() async {
+    if (!widget.isReadingSpace) return;
+    if (_open) {
+      _closeMenu();
+      return;
+    }
+    if (!widget.isSignedIn) {
+      final signedIn = await widget.onRequestLogin?.call() ?? false;
+      if (!signedIn || !mounted) {
+        _showStatus('登录后即可使用已保存的 MCP 连接器');
+        return;
+      }
+    }
+    setState(() {
+      _open = true;
+      _manage = false;
+      _showingMcpMenu = true;
+    });
+    _menuPortal.show();
+    await _refreshMcpConnections();
+  }
+
+  Future<void> _refreshMcpConnections() async {
+    try {
+      final items = await CapabilityCloudSync.instance.listMcpConnections();
+      if (!mounted) return;
+      setState(() {
+        _mcpConnections = items;
+        _mcpLoadError = null;
+      });
+    } catch (error) {
+      if (mounted) setState(() => _mcpLoadError = error.toString());
+    }
+  }
+
+  Widget _buildMcpMenuOverlay(
+    BuildContext context,
+    OverlayChildLayoutInfo info,
+  ) {
+    final target = MatrixUtils.transformRect(
+      info.childPaintTransform,
+      Offset.zero & info.childSize,
+    );
+    const width = 300.0;
+    final anchorX = target.center.dx
+        .clamp(16 + width / 2, info.overlaySize.width - 16 - width / 2)
+        .toDouble();
+    final top = MediaQuery.paddingOf(context).top + 12;
+    final height = (target.top - top - 12).clamp(1.0, 390.0).toDouble();
+    return Positioned(
+      left: anchorX - width / 2,
+      bottom: info.overlaySize.height - target.top + 8,
+      width: width,
+      height: height,
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: TapRegion(
+          groupId: _menuTapRegionGroup,
+          child: Container(
+            constraints: BoxConstraints(maxHeight: height),
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFFE0E3E8)),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x18000000),
+                  blurRadius: 22,
+                  offset: Offset(0, 6),
+                ),
+              ],
+            ),
+            child: SingleChildScrollView(child: _mcpMenuContents()),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _mcpMenuContents() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      const Padding(
+        padding: EdgeInsets.fromLTRB(8, 4, 8, 8),
+        child: Text(
+          '本轮使用 MCP',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+        ),
+      ),
+      if (_mcpLoadError != null)
+        ListTile(
+          dense: true,
+          title: const Text('连接器列表读取失败'),
+          subtitle: Text(
+            _mcpLoadError!,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: IconButton(
+            tooltip: '重试',
+            onPressed: _refreshMcpConnections,
+            icon: const Icon(Icons.refresh),
+          ),
+        )
+      else if (_mcpConnections.isEmpty)
+        const Padding(
+          padding: EdgeInsets.fromLTRB(8, 8, 8, 12),
+          child: Text(
+            '还没有连接器。先到扩展市场的 MCP 页添加一个远程服务。',
+            style: TextStyle(color: Color(0xFF6F7784), height: 1.4),
+          ),
+        )
+      else
+        for (final connection in _mcpConnections)
+          _featureRow(
+            'mcp_connector',
+            connection.name,
+            Uri.tryParse(connection.url)?.host ?? connection.url,
+            () {
+              widget.onCapabilitySelected({
+                'type': 'mcp',
+                'id': connection.id,
+                'name': connection.name,
+                'url': connection.url,
+                'has_bearer_token': connection.hasBearerToken,
+              });
+              _closeMenu();
+            },
+          ),
+      const Divider(height: 12),
+      TextButton.icon(
+        onPressed: () {
+          _closeMenu();
+          widget.onManageMcp?.call();
+        },
+        icon: const Icon(Icons.settings_outlined, size: 18),
+        label: const Text('管理连接器'),
+        style: TextButton.styleFrom(alignment: Alignment.centerLeft),
+      ),
+    ],
+  );
 
   void _showStatus(String message) {
     AppToast.show(context, message);
@@ -883,7 +1036,9 @@ class _SkillsPluginsComposerControlsState
               ],
               OverlayPortal.overlayChildLayoutBuilder(
                 controller: _menuPortal,
-                overlayChildBuilder: _buildMenuOverlay,
+                overlayChildBuilder: (context, info) => _showingMcpMenu
+                    ? _buildMcpMenuOverlay(context, info)
+                    : _buildMenuOverlay(context, info),
                 child: TapRegion(
                   groupId: _menuTapRegionGroup,
                   onTapOutside: (_) => _closeMenu(),
@@ -899,10 +1054,8 @@ class _SkillsPluginsComposerControlsState
               _pill(
                 label: 'MCP 连接器',
                 icon: 'mcp_connector',
-                expanded: false,
-                onTap: widget.isReadingSpace
-                    ? () => _showStatus('MCP 连接器入口已保留，尚未开放')
-                    : null,
+                expanded: _open && _showingMcpMenu,
+                onTap: widget.isReadingSpace ? _toggleMcpMenu : null,
               ),
             ],
           ),

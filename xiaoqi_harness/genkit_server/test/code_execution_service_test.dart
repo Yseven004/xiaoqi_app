@@ -118,6 +118,49 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
     await expectLater(runScript(), throwsA(isA<StateError>()));
   });
 
+  test(
+    'makes text artifacts available to the next isolated script call',
+    () async {
+      final service = DockerCodeExecutionService(
+        store,
+        pythonExecutable: pythonExecutable(),
+        workerPath: worker.path,
+      );
+      await service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: 'print("first")',
+        language: 'python',
+        authorizedDomains: const [],
+        materials: const [],
+        skillFiles: const {},
+        cancellation: CancellationController().token,
+      );
+      worker.writeAsStringSync('''
+import base64
+import json
+import sys
+request = json.loads(sys.stdin.readline())
+material = next(item for item in request["materials"] if item["name"] == "report.txt")
+assert base64.b64decode(material["base64"]) == b"saved"
+print(json.dumps({"type":"result","ok":True,"stdout":"reused","stderr":"","artifacts":[],"cleanup_pending":False}), flush=True)
+''');
+
+      final output = await service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: 'print("second")',
+        language: 'python',
+        authorizedDomains: const [],
+        materials: const [],
+        skillFiles: const {},
+        cancellation: CancellationController().token,
+      );
+
+      expect(output, contains('reused'));
+    },
+  );
+
   test('asks the runner to revoke an active task network proxy', () async {
     worker.writeAsStringSync('''
 import json

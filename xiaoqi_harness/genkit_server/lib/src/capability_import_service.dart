@@ -473,7 +473,7 @@ class CapabilityImportService {
           skill['name'].toString(),
           skill['description'].toString(),
           [skill],
-          [],
+          (skill['warnings'] as List).cast<String>(),
         ),
       );
     }
@@ -489,7 +489,10 @@ class CapabilityImportService {
     List<Map<String, dynamic>> components,
     List<String> warnings,
   ) {
-    final usable = components.where((c) => c['status'] == 'supported').length;
+    final usable = components.where((c) => c['status'] != 'unsupported').length;
+    final hasPartialComponent = components.any(
+      (component) => component['status'] == 'partial',
+    );
     return {
       'id': sha256
           .convert(utf8.encode('$kind:$root'))
@@ -501,7 +504,9 @@ class CapabilityImportService {
       'description': description,
       'status': usable == 0
           ? 'unsupported'
-          : usable < components.length || warnings.isNotEmpty
+          : usable < components.length ||
+                hasPartialComponent ||
+                warnings.isNotEmpty
           ? 'partial'
           : 'supported',
       'components': components,
@@ -516,6 +521,7 @@ class CapabilityImportService {
   ) {
     final files = subtree(allFiles, root);
     final issues = <String>[];
+    final warnings = <String>[];
     var name = root.split('/').last;
     var description = '';
     try {
@@ -533,11 +539,6 @@ class CapabilityImportService {
           description.length > 1024 ||
           text.substring(match.end).trim().isEmpty)
         issues.add('技能名称、说明或正文无效');
-      if (RegExp(
-        r'\bmcp(?:__|[_ -]|\b)|\b(?:Claude Code|Codex)[ -]only\b|\$\{CLAUDE_PROJECT_DIR\}',
-        caseSensitive: false,
-      ).hasMatch(text))
-        issues.add('技能引用 MCP 或专有客户端能力，当前无法验证独立运行');
       final allowed = header['allowed-tools']?.toString() ?? '';
       if (allowed.isNotEmpty &&
           RegExp(
@@ -552,12 +553,16 @@ class CapabilityImportService {
             !RegExp(r'\.(py|js|mjs|cjs|ts|mts|json|md|txt)$').hasMatch(path))
           issues.add('脚本类型暂不支持：$path');
       }
-      if (files.containsKey('pyproject.toml') &&
-          !files.containsKey('requirements.txt'))
-        issues.add('Python 依赖需要提供 requirements.txt');
       if (files.containsKey('setup.py') || files.containsKey('Dockerfile'))
         issues.add('需要自定义构建环境，暂不支持');
       validateDependencies(files);
+      if (files.containsKey('pyproject.toml') &&
+          !files.containsKey('requirements.txt')) {
+        warnings.add(
+          '发现 pyproject.toml，但当前安装器只会自动准备 requirements.txt 中的 Python 依赖；'
+          '技能正文和文档处理仍可使用，未声明依赖的脚本可能无法运行。',
+        );
+      }
     } catch (e) {
       issues.add(e is FormatException ? e.message : '技能文件格式无效');
     }
@@ -566,8 +571,13 @@ class CapabilityImportService {
       'root': root,
       'name': name,
       'description': description,
-      'status': issues.isEmpty ? 'supported' : 'unsupported',
+      'status': issues.isNotEmpty
+          ? 'unsupported'
+          : warnings.isEmpty
+          ? 'supported'
+          : 'partial',
       'issues': issues,
+      'warnings': warnings,
       'has_scripts': files.keys.any((p) => p.startsWith('scripts/')),
       'has_dependencies':
           files.containsKey('requirements.txt') ||
@@ -696,7 +706,7 @@ class CapabilityImportService {
       final package = subtree(all, candidate['root'].toString());
       final components = <Map<String, dynamic>>[];
       for (final raw in (candidate['components'] as List).whereType<Map>()) {
-        if (raw['status'] != 'supported') continue;
+        if (raw['status'] == 'unsupported') continue;
         final files = subtree(all, raw['root'].toString());
         if (raw['has_dependencies'] == true) {
           if (prepareDependencies == null)

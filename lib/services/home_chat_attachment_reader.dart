@@ -10,6 +10,7 @@ import '../models/home_chat_attachment.dart';
 import 'docx_document_service.dart';
 import 'document_archive_safety.dart';
 import 'epub_document_service.dart';
+import 'html_article_document_service.dart';
 import 'text_document_service.dart';
 
 class HomeChatAttachmentReader {
@@ -23,11 +24,19 @@ class HomeChatAttachmentReader {
       case 'pdf':
         return _pdf(attachment.path);
       case 'epub':
-      final doc = await const EpubDocumentService().parseFile(attachment.path);
-        return _split('${attachment.name}\n${doc.chapters.map((c) => c.plainText).join('\n')}');
+        final doc = await const EpubDocumentService().parseFile(
+          attachment.path,
+        );
+        return _split(
+          '${attachment.name}\n${doc.chapters.map((c) => c.plainText).join('\n')}',
+        );
       case 'docx':
-        final doc = await const DocxDocumentService().parseFile(attachment.path);
-        return _split('${attachment.name}\n${doc.chapters.map((c) => c.plainText).join('\n')}');
+        final doc = await const DocxDocumentService().parseFile(
+          attachment.path,
+        );
+        return _split(
+          '${attachment.name}\n${doc.chapters.map((c) => c.plainText).join('\n')}',
+        );
       case 'pptx':
         return _officeZip(attachment.path, 'ppt/slides/slide', 'pptx');
       case 'xlsx':
@@ -40,6 +49,14 @@ class HomeChatAttachmentReader {
           format: extension == 'md' ? 'markdown' : extension,
         );
         return _split(doc.chapters.map((c) => c.plainText).join('\n'));
+      case 'html':
+      case 'htm':
+        final source = await File(attachment.path).readAsString();
+        final doc = const HtmlArticleDocumentService().parse(
+          source,
+          sourceUrl: Uri.file(attachment.path).toString(),
+        );
+        return _split(doc.chapters.map((c) => c.plainText).join('\n'));
       default:
         throw FormatException('暂不支持 AI 读取 .$extension 文件');
     }
@@ -50,9 +67,10 @@ class HomeChatAttachmentReader {
     try {
       final chunks = <String>[];
       for (var i = 0; i < document.pages.length; i++) {
-        final text = (await document.pages[i].loadText())?.fullText.trim() ?? '';
+        final text =
+            (await document.pages[i].loadText())?.fullText.trim() ?? '';
         if (text.isEmpty) {
-          chunks.add('[第 ${i + 1} 页为扫描页，请结合附加页面图像识别]');
+          throw FormatException('PDF 第 ${i + 1} 页是扫描图片；当前版本只支持可复制文字的 PDF');
         } else {
           chunks.addAll(_split('[第 ${i + 1} 页]\n$text'));
         }
@@ -63,13 +81,17 @@ class HomeChatAttachmentReader {
     }
   }
 
-  Future<List<String>> readScannedPageImages(HomeChatAttachment attachment) async {
+  Future<List<String>> readScannedPageImages(
+    HomeChatAttachment attachment,
+  ) async {
     if (attachment.name.split('.').last.toLowerCase() != 'pdf') return const [];
     final document = await PdfDocument.openFile(attachment.path);
     final pages = <String>[];
     try {
       final root = await getApplicationSupportDirectory();
-      final directory = Directory('${root.path}/home_chat_attachments/pdf_pages');
+      final directory = Directory(
+        '${root.path}/home_chat_attachments/pdf_pages',
+      );
       await directory.create(recursive: true);
       for (var i = 0; i < document.pages.length; i++) {
         final raw = await document.pages[i].loadText();
@@ -92,7 +114,9 @@ class HomeChatAttachmentReader {
             order: img.ChannelOrder.bgra,
           );
           final path = '${directory.path}/${attachment.id}_page_${i + 1}.jpg';
-          await File(path).writeAsBytes(img.encodeJpg(raster, quality: 88), flush: true);
+          await File(
+            path,
+          ).writeAsBytes(img.encodeJpg(raster, quality: 88), flush: true);
           pages.add(path);
         } finally {
           rendered.dispose();
@@ -104,7 +128,11 @@ class HomeChatAttachmentReader {
     return pages;
   }
 
-  Future<List<String>> _officeZip(String path, String prefix, String type) async {
+  Future<List<String>> _officeZip(
+    String path,
+    String prefix,
+    String type,
+  ) async {
     final input = File(path);
     if (await input.length() > 50 * 1024 * 1024) {
       throw const FormatException('Office 文件超过 50 MB，无法安全读取');
@@ -117,55 +145,88 @@ class HomeChatAttachmentReader {
     );
     final archive = ZipDecoder().decodeBytes(bytes);
     if (archive.files.length > 10000 ||
-        archive.files.fold<int>(0, (sum, item) => sum + item.size) > 250 * 1024 * 1024) {
+        archive.files.fold<int>(0, (sum, item) => sum + item.size) >
+            250 * 1024 * 1024) {
       throw const FormatException('Office 文件解压后过大，无法安全读取');
     }
     final sharedStrings = <String>[];
-    final sharedFile = archive.files.where((f) => f.name == 'xl/sharedStrings.xml').firstOrNull;
+    final sharedFile = archive.files
+        .where((f) => f.name == 'xl/sharedStrings.xml')
+        .firstOrNull;
     if (type == 'xlsx' && sharedFile != null) {
-      final xml = XmlDocument.parse(String.fromCharCodes(sharedFile.content as List<int>));
+      final xml = XmlDocument.parse(
+        String.fromCharCodes(sharedFile.content as List<int>),
+      );
       for (final entry in xml.findAllElements('si')) {
-        sharedStrings.add(entry.findAllElements('t').map((t) => t.innerText).join());
+        sharedStrings.add(
+          entry.findAllElements('t').map((t) => t.innerText).join(),
+        );
       }
     }
-    final files = archive.files
-        .where((f) => f.isFile && f.name.startsWith(prefix) && f.name.endsWith('.xml'))
-        .toList()
-      ..sort((a, b) => _number(a.name).compareTo(_number(b.name)));
+    final files =
+        archive.files
+            .where(
+              (f) =>
+                  f.isFile &&
+                  f.name.startsWith(prefix) &&
+                  f.name.endsWith('.xml'),
+            )
+            .toList()
+          ..sort((a, b) => _number(a.name).compareTo(_number(b.name)));
     if (files.isEmpty) throw const FormatException('文档中没有可读取的内容');
     final output = <String>[];
     for (final file in files) {
-      final xml = XmlDocument.parse(String.fromCharCodes(file.content as List<int>));
-      final label = type == 'pptx' ? '幻灯片 ${_number(file.name)}' : '工作表 ${_number(file.name)}';
+      final xml = XmlDocument.parse(
+        String.fromCharCodes(file.content as List<int>),
+      );
+      final label = type == 'pptx'
+          ? '幻灯片 ${_number(file.name)}'
+          : '工作表 ${_number(file.name)}';
       final text = type == 'pptx'
-          ? xml.findAllElements('t').map((node) => node.innerText.trim()).where((value) => value.isNotEmpty).join('\n')
-          : xml.findAllElements('row').map((row) {
-              final values = <String>[];
-              for (final cell in row.findAllElements('c')) {
-                final ref = cell.getAttribute('r') ?? '?';
-                final rawValue = cell.findElements('v').firstOrNull?.innerText ??
-                    cell.findAllElements('t').map((node) => node.innerText).join();
-                final typeAttr = cell.getAttribute('t');
-                var value = rawValue;
-                if (typeAttr == 's') {
-                  final sharedIndex = int.tryParse(rawValue);
-                  value = sharedIndex != null &&
-                          sharedIndex >= 0 &&
-                          sharedIndex < sharedStrings.length
-                      ? sharedStrings[sharedIndex]
-                      : '';
-                }
-                if (value.isNotEmpty) values.add('$ref=$value');
-              }
-              return values.join(' | ');
-            }).where((line) => line.isNotEmpty).join('\n');
+          ? xml
+                .findAllElements('t')
+                .map((node) => node.innerText.trim())
+                .where((value) => value.isNotEmpty)
+                .join('\n')
+          : xml
+                .findAllElements('row')
+                .map((row) {
+                  final values = <String>[];
+                  for (final cell in row.findAllElements('c')) {
+                    final ref = cell.getAttribute('r') ?? '?';
+                    final rawValue =
+                        cell.findElements('v').firstOrNull?.innerText ??
+                        cell
+                            .findAllElements('t')
+                            .map((node) => node.innerText)
+                            .join();
+                    final typeAttr = cell.getAttribute('t');
+                    var value = rawValue;
+                    if (typeAttr == 's') {
+                      final sharedIndex = int.tryParse(rawValue);
+                      value =
+                          sharedIndex != null &&
+                              sharedIndex >= 0 &&
+                              sharedIndex < sharedStrings.length
+                          ? sharedStrings[sharedIndex]
+                          : '';
+                    }
+                    if (value.isNotEmpty) values.add('$ref=$value');
+                  }
+                  return values.join(' | ');
+                })
+                .where((line) => line.isNotEmpty)
+                .join('\n');
       if (text.isNotEmpty) output.addAll(_split('[$label]\n$text'));
     }
     return output;
   }
 
   int _number(String path) =>
-      int.tryParse(RegExp(r'(\d+)(?=\.xml$)').firstMatch(path)?.group(1) ?? '') ?? 0;
+      int.tryParse(
+        RegExp(r'(\d+)(?=\.xml$)').firstMatch(path)?.group(1) ?? '',
+      ) ??
+      0;
 
   List<String> _split(String text) {
     const limit = 6000;
@@ -173,7 +234,12 @@ class HomeChatAttachmentReader {
     if (normalized.isEmpty) throw const FormatException('文件中没有可读取的文字');
     final chunks = <String>[];
     for (var start = 0; start < normalized.length; start += limit) {
-      chunks.add(normalized.substring(start, (start + limit).clamp(0, normalized.length)));
+      chunks.add(
+        normalized.substring(
+          start,
+          (start + limit).clamp(0, normalized.length),
+        ),
+      );
     }
     return chunks;
   }

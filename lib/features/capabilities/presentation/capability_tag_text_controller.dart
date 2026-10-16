@@ -71,14 +71,35 @@ class CapabilityTagTextController extends TextEditingController {
                 .whereType<Map>()
                 .map((v) => Map<String, Object?>.from(v))
                 .toList()
-          : [Map<String, Object?>.from(existing)]);
-      selections.removeWhere((v) => v['id'] == metadata['id']);
-      selections.add(Map<String, Object?>.from(metadata));
-      if (selections.length > 16) return;
+          : (existing['type'] == 'skill' || existing['type'] == 'plugin'
+                ? [Map<String, Object?>.from(existing)]
+                : <Map<String, Object?>>[]));
+      final connectors = (existing['selected_mcp_connections'] is List
+          ? (existing['selected_mcp_connections'] as List)
+                .whereType<Map>()
+                .map((v) => Map<String, Object?>.from(v))
+                .toList()
+          : (existing['type'] == 'mcp'
+                ? [Map<String, Object?>.from(existing)]
+                : <Map<String, Object?>>[]));
+      if (metadata['type'] == 'mcp') {
+        connectors.removeWhere((v) => v['id'] == metadata['id']);
+        connectors.add(Map<String, Object?>.from(metadata));
+        if (connectors.length > 8) return;
+      } else {
+        selections.removeWhere((v) => v['id'] == metadata['id']);
+        selections.add(Map<String, Object?>.from(metadata));
+        if (selections.length > 16) return;
+      }
+      final labels = [
+        ...selections.map((v) => v['name']),
+        ...connectors.map((v) => v['name']),
+      ].whereType<Object>().map((v) => v.toString());
       metadata = {
         ...metadata,
-        'name': selections.map((v) => v['name']).join('、'),
-        'selected_capabilities': selections,
+        'name': labels.join('、'),
+        if (selections.isNotEmpty) 'selected_capabilities': selections,
+        if (connectors.isNotEmpty) 'selected_mcp_connections': connectors,
       };
     }
     final selectionStart = value.selection.isValid

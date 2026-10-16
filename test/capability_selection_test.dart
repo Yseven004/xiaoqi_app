@@ -80,6 +80,26 @@ void main() {
     expect(restored.messageText, '请处理材料');
   });
 
+  test('MCP connectors coexist with version-pinned skills in one message', () {
+    final controller = CapabilityTagTextController()..text = '整理我的资料';
+    addTearDown(controller.dispose);
+    final reader = selection('reader');
+    final github = {'id': 'github', 'type': 'mcp', 'name': 'GitHub'};
+
+    controller.insertCapability(reader);
+    controller.insertCapability(github);
+    final metadata = controller.messageMetadata()!;
+
+    expect(metadata['selected_capabilities'], [reader]);
+    expect(metadata['selected_mcp_connections'], [github]);
+    expect(controller.messageText, '整理我的资料');
+
+    final restored = CapabilityTagTextController();
+    addTearDown(restored.dispose);
+    restored.setMessage(controller.messageText, metadata);
+    expect(restored.messageMetadata(), metadata);
+  });
+
   test('reselection updates a version without duplicating it', () {
     final controller = CapabilityTagTextController();
     addTearDown(controller.dispose);

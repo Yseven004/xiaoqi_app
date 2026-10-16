@@ -1,8 +1,13 @@
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-pip ca-certificates \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3 python3-pip ca-certificates \
+      fontconfig fonts-noto-cjk latexmk texlive-lang-chinese texlive-xetex \
  && rm -rf /var/lib/apt/lists/* \
+ && command -v xelatex >/dev/null \
+ && kpsewhich xeCJK.sty >/dev/null \
+ && fc-match 'Noto Sans CJK SC' | grep -qi 'Noto Sans CJK SC' \
  && groupadd --gid 10001 sandbox \
  && useradd --uid 10001 --gid 10001 --create-home --home-dir /tmp/home --shell /usr/sbin/nologin sandbox \
  && mkdir -p /workspace \

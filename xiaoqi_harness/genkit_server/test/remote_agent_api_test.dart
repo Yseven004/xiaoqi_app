@@ -181,14 +181,14 @@ void main() {
       url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
       headers: () async => {
         'authorization': 'Bearer $ownerToken',
-        'x-xiaoqi-contract': '2',
+        'x-xiaoqi-contract': '3',
       },
     );
     otherTenantAgent = remoteAgent<Map<String, dynamic>>(
       url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
       headers: () async => {
         'authorization': 'Bearer $otherTenantToken',
-        'x-xiaoqi-contract': '2',
+        'x-xiaoqi-contract': '3',
       },
     );
   });
@@ -367,7 +367,7 @@ void main() {
           );
           request.headers
             ..contentType = ContentType.json
-            ..set('x-xiaoqi-contract', '2')
+            ..set('x-xiaoqi-contract', '3')
             ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
           request.write(
             jsonEncode({
@@ -421,7 +421,7 @@ void main() {
       );
       request.headers
         ..contentType = ContentType.json
-        ..set('x-xiaoqi-contract', '2')
+        ..set('x-xiaoqi-contract', '3')
         ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
       request.write(jsonEncode({'mode': 'off'}));
       final response = await request.close();
@@ -460,7 +460,7 @@ void main() {
         );
         request.headers
           ..contentType = ContentType.json
-          ..set('x-xiaoqi-contract', '2')
+          ..set('x-xiaoqi-contract', '3')
           ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
         request.write(
           jsonEncode({

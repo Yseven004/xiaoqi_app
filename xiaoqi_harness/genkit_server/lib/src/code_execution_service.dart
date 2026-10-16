@@ -141,6 +141,11 @@ class DockerCodeExecutionService {
       throw const FormatException('不支持的代码语言');
     }
     if (scriptPath != null) _claimSkillScript(tenantId, taskId);
+    final executionMaterials = _materialsForNextExecution(
+      tenantId: tenantId,
+      taskId: taskId,
+      materials: materials,
+    );
 
     final executable =
         _pythonExecutable ??
@@ -211,7 +216,7 @@ class DockerCodeExecutionService {
         'code': code,
         'language': language,
         'authorized_domains': authorizedDomains,
-        'materials': materials,
+        'materials': executionMaterials,
         'skill_files': {
           for (final entry in skillFiles.entries)
             entry.key: base64Encode(entry.value),
@@ -343,6 +348,84 @@ class DockerCodeExecutionService {
       }
     }
     throw StateError('无法锁定技能脚本执行次数');
+  }
+
+  List<Map<String, dynamic>> _materialsForNextExecution({
+    required String tenantId,
+    required String taskId,
+    required List<Map<String, dynamic>> materials,
+  }) {
+    const maxMaterialBytes = 20 * 1024 * 1024;
+    const reusableExtensions = {
+      '.adoc',
+      '.cjs',
+      '.csv',
+      '.css',
+      '.html',
+      '.htm',
+      '.js',
+      '.json',
+      '.markdown',
+      '.md',
+      '.mjs',
+      '.mts',
+      '.py',
+      '.rst',
+      '.rtf',
+      '.sh',
+      '.tex',
+      '.toml',
+      '.tsv',
+      '.ts',
+      '.txt',
+      '.xml',
+      '.yaml',
+      '.yml',
+    };
+    final result = materials
+        .map((material) => Map<String, dynamic>.from(material))
+        .toList();
+    var totalBytes = result.fold<int>(0, (total, material) {
+      final value = material['text'] ?? material['content'] ?? '';
+      return total + utf8.encode(value.toString()).length;
+    });
+    if (totalBytes >= maxMaterialBytes) return result;
+
+    final task = store.get('task/$tenantId/$taskId')?.value;
+    final artifacts = (task?['artifacts'] as List? ?? const [])
+        .whereType<Map>()
+        .toList()
+        .reversed;
+    var reused = 0;
+    for (final artifact in artifacts) {
+      if (reused >= 10 || totalBytes >= maxMaterialBytes) break;
+      final name = artifact['name']?.toString() ?? '';
+      final extension = name.lastIndexOf('.') < 0
+          ? ''
+          : name.substring(name.lastIndexOf('.')).toLowerCase();
+      if (!reusableExtensions.contains(extension)) continue;
+      final mediaType = artifact['media_type']?.toString() ?? '';
+      if (!mediaType.startsWith('text/') &&
+          mediaType != 'application/json' &&
+          mediaType != 'application/xml' &&
+          mediaType != 'application/rtf' &&
+          mediaType != 'application/x-tex') {
+        continue;
+      }
+      final objectKey = artifact['object_key']?.toString() ?? '';
+      if (!objectKey.startsWith('tenants/$tenantId/tasks/$taskId/artifacts/')) {
+        continue;
+      }
+      final bytes = store.getObject(objectKey);
+      if (bytes.length > 10 * 1024 * 1024 ||
+          totalBytes + bytes.length > maxMaterialBytes) {
+        continue;
+      }
+      result.add({'name': name, 'base64': base64Encode(bytes)});
+      totalBytes += bytes.length;
+      reused++;
+    }
+    return result;
   }
 
   String _runnerTaskId(String tenantId, String taskId) =>

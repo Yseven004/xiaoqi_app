@@ -41,6 +41,7 @@ import 'agent_runtime.dart';
 import 'chat_completion_service.dart';
 import 'code_execution_service.dart';
 import 'image_service.dart';
+import 'mcp_connection_service.dart';
 import 'store.dart';
 
 const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
@@ -435,6 +436,63 @@ class XiaoqiApi {
           request,
           (device) => _listCapabilities(request, device),
         ),
+      )
+      ..get(
+        '/v1/mcp/connections',
+        (request) => _authenticated(
+          request,
+          (device) async =>
+              _json({'items': McpConnectionService(store).list(device.tenant)}),
+        ),
+      )
+      ..post(
+        '/v1/mcp/connections',
+        (request) => _authenticated(request, (device) async {
+          try {
+            final body = await _body(request, 16 * 1024);
+            final item = await McpConnectionService(
+              store,
+            ).save(device.tenant, body);
+            return _json({'connection': item}, 201);
+          } on FormatException catch (error) {
+            return _error(error.message, 400);
+          } on StateError catch (error) {
+            return _error(error.message, 503);
+          } on RevisionConflict {
+            return _error('连接器信息已在其他设备更新，请刷新后再保存', 409);
+          } on Object {
+            return _error('保存 MCP 连接器失败', 503);
+          }
+        }),
+      )
+      ..post(
+        '/v1/mcp/connections/<id>/test',
+        (request, id) => _authenticated(request, (device) async {
+          try {
+            return _json(
+              await McpConnectionService(store).test(device.tenant, id),
+            );
+          } on FormatException catch (error) {
+            return _error(error.message, 400);
+          } on StateError catch (error) {
+            return _error(error.message, 502);
+          } on Object {
+            return _error('MCP 连接测试失败，请检查地址、登录令牌和服务状态', 502);
+          }
+        }),
+      )
+      ..delete(
+        '/v1/mcp/connections/<id>',
+        (request, id) => _authenticated(request, (device) async {
+          try {
+            McpConnectionService(store).delete(device.tenant, id);
+            return _json({'ok': true});
+          } on FormatException catch (error) {
+            return _error(error.message, 400);
+          } on Object {
+            return _error('删除 MCP 连接器失败', 503);
+          }
+        }),
       )
       ..post(
         '/v1/capabilities/sync',

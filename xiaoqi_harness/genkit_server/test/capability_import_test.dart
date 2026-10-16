@@ -149,7 +149,7 @@ void main() {
   );
 
   test(
-    'plugin installs independent skill; skips MCP and MCP-dependent skill',
+    'plugin imports instructions that mention MCP but flags its MCP manifest',
     () async {
       final importer = service({
         '.claude-plugin/plugin.json': '{"name":"mixed","mcpServers":{}}',
@@ -176,10 +176,52 @@ void main() {
           'version_id': saved.value['current_version_id'],
         },
       ]);
-      expect(selected.entries.length, 1);
-      expect(selected.files(selected.entries.values.single).keys, ['SKILL.md']);
+      expect(selected.entries.length, 2);
+      expect(
+        selected.entries.values.every(
+          (entry) => selected.files(entry).containsKey('SKILL.md'),
+        ),
+        isTrue,
+      );
     },
   );
+
+  test('imports a pyproject skill with a clear dependency warning', () async {
+    final importer = service({
+      'SKILL.md': skill(
+        'book-to-skill',
+        'MCP is mentioned for some hosts; Claude Code only has an optional path.',
+      ),
+      'pyproject.toml':
+          '[project.optional-dependencies]\npdf = ["pypdf>=4.0"]\n',
+      'scripts/extract.py': 'print("extract")',
+    });
+    final inspected = await importer.inspect(
+      'alice',
+      'https://github.com/example/book-to-skill',
+    );
+    final candidate = (inspected['candidates'] as List).single as Map;
+
+    expect(candidate['status'], 'partial');
+    expect(candidate['warnings'], isNotEmpty);
+    final saved = await importer.install(
+      'alice',
+      inspected['id'],
+      candidate['id'],
+    );
+    final selected = SelectedSkills(store, 'alice', [
+      {
+        'id': saved.value['id'],
+        'version_id': saved.value['current_version_id'],
+      },
+    ]);
+
+    expect(selected.entries.length, 1);
+    expect(
+      selected.files(selected.entries.values.single).keys,
+      containsAll(['SKILL.md', 'scripts/extract.py']),
+    );
+  });
 
   test('standard plugin and multiple standalone candidates are discovered', () {
     final standalone = CapabilityImportService.discover({

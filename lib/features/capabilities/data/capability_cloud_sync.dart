@@ -925,11 +925,20 @@ class CapabilityCloudSync {
 
   DateTime? _contractCheckedAt;
   Future<void> _verifyContract() async {
-    if (_contractCheckedAt != null && DateTime.now().difference(_contractCheckedAt!) < const Duration(seconds: 30)) return;
-    final response = await _client.get(Uri.parse(_baseUrl).replace(path: '/health', query: null)).timeout(const Duration(seconds: 15));
+    if (_contractCheckedAt != null &&
+        DateTime.now().difference(_contractCheckedAt!) <
+            const Duration(seconds: 30)) {
+      return;
+    }
+    final response = await _client
+        .get(Uri.parse(_baseUrl).replace(path: '/health', query: null))
+        .timeout(const Duration(seconds: 15));
     final health = _checked(response);
-    if (health['api_contract_version'] != apiContractVersion || health['release_id'] != releaseId) {
-      throw StateError('客户端 $releaseId（接口 $apiContractVersion）与服务端 ${health['release_id'] ?? "未知"}（接口 ${health['api_contract_version'] ?? "未知"}）不匹配，请重新构建客户端或部署匹配的服务端。');
+    if (health['api_contract_version'] != apiContractVersion ||
+        health['release_id'] != releaseId) {
+      throw StateError(
+        '客户端 $releaseId（接口 $apiContractVersion）与服务端 ${health['release_id'] ?? "未知"}（接口 ${health['api_contract_version'] ?? "未知"}）不匹配，请重新构建客户端或部署匹配的服务端。',
+      );
     }
     _contractCheckedAt = DateTime.now();
   }
@@ -996,7 +1005,16 @@ class CapabilityCloudSync {
 
   Future<void> cancelImportOperation(String id) async {
     final token = await _requireToken();
-    _checked(await _client.post(Uri.parse('$_baseUrl/capabilities/import-jobs/${Uri.encodeComponent(id)}/cancel'), headers: _headers(token)).timeout(const Duration(seconds: 20)));
+    _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/capabilities/import-jobs/${Uri.encodeComponent(id)}/cancel',
+            ),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 20)),
+    );
   }
 
   Future<List<CapabilityRecord>> installedCapabilities() async {
@@ -1013,6 +1031,68 @@ class CapabilityCloudSync {
       await CapabilityStore.instance.applyRemote(record);
     }
     return records.where((r) => !r.isDeleted).toList();
+  }
+
+  Future<List<McpConnectionRecord>> listMcpConnections() async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .get(Uri.parse('$_baseUrl/mcp/connections'), headers: _headers(token))
+          .timeout(const Duration(seconds: 20)),
+    );
+    return (value['items'] as List? ?? const [])
+        .map(McpConnectionRecord.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<McpConnectionRecord> saveMcpConnection({
+    String? id,
+    required String name,
+    required String url,
+    String? bearerToken,
+  }) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse('$_baseUrl/mcp/connections'),
+            headers: _headers(token),
+            body: jsonEncode({
+              'id': id,
+              'name': name,
+              'url': url,
+              'bearer_token': bearerToken?.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 20)),
+    );
+    return McpConnectionRecord.fromJson(value['connection']);
+  }
+
+  Future<Map<String, dynamic>> testMcpConnection(String id) async {
+    final token = await _requireToken();
+    return _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/mcp/connections/${Uri.encodeComponent(id)}/test',
+            ),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 45)),
+    );
+  }
+
+  Future<void> deleteMcpConnection(String id) async {
+    final token = await _requireToken();
+    _checked(
+      await _client
+          .delete(
+            Uri.parse('$_baseUrl/mcp/connections/${Uri.encodeComponent(id)}'),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 20)),
+    );
   }
 
   Future<void> manageInstallation(

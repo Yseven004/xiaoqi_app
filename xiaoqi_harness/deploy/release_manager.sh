@@ -223,6 +223,10 @@ deploy_release() {
     --profile build-only \
     build app sandbox-runner sandbox-image sandbox-proxy-image
 
+  docker run --rm --network none --entrypoint sh xiaoqi-code-sandbox:local \
+    -ec 'command -v xelatex >/dev/null && kpsewhich xeCJK.sty >/dev/null && fc-match "Noto Sans CJK SC" | grep -qi "Noto Sans CJK SC"' \
+    || die "sandbox image is missing the required Chinese LaTeX toolchain"
+
   DEPLOY_ACTIVATION_STARTED="yes"
   compose stop app
   backup_data "$NEXT"

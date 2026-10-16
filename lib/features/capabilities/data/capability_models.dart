@@ -2,6 +2,30 @@ enum CapabilityKind { skill, plugin }
 
 enum CapabilitySyncState { pending, synced, conflict, failed }
 
+class McpConnectionRecord {
+  const McpConnectionRecord({
+    required this.id,
+    required this.name,
+    required this.url,
+    required this.hasBearerToken,
+  });
+
+  final String id;
+  final String name;
+  final String url;
+  final bool hasBearerToken;
+
+  factory McpConnectionRecord.fromJson(Object? raw) {
+    if (raw is! Map) throw const FormatException('MCP 连接器格式无效');
+    return McpConnectionRecord(
+      id: raw['id']?.toString() ?? '',
+      name: raw['name']?.toString() ?? '',
+      url: raw['url']?.toString() ?? '',
+      hasBearerToken: raw['has_bearer_token'] == true,
+    );
+  }
+}
+
 class CapabilityVersion {
   const CapabilityVersion({
     required this.id,

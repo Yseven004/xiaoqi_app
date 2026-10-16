@@ -117,7 +117,7 @@ void main() {
       method,
       Uri.parse('http://localhost$path'),
       headers: {
-        'x-xiaoqi-contract': '2',
+        'x-xiaoqi-contract': '3',
         if (auth) 'authorization': 'Bearer $token',
         if (body != null) 'content-type': 'application/json',
       },
@@ -145,7 +145,7 @@ void main() {
       final health = await call('GET', '/health');
       expect(
         jsonDecode(await health.readAsString())['api_contract_version'],
-        '2',
+        '3',
       );
     },
   );

@@ -2117,6 +2117,79 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<bool> _confirmAgentMcpTool({
+    required String connectionName,
+    required String toolName,
+    required String description,
+    required Object? arguments,
+  }) async {
+    if (!mounted) return false;
+    final encodedArguments = const JsonEncoder.withIndent(
+      '  ',
+    ).convert(arguments is Map ? arguments : const <String, Object?>{});
+    final visibleArguments = encodedArguments.length <= 6000
+        ? encodedArguments
+        : '${encodedArguments.substring(0, 6000)}\n…（内容过长，已截断）';
+    return await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => AlertDialog(
+            backgroundColor: Colors.white,
+            title: Text('允许调用 $connectionName？'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    toolName.isEmpty ? 'MCP 工具' : toolName,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  if (description.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(description),
+                  ],
+                  const SizedBox(height: 14),
+                  const Text('将发送给这个连接器的内容：'),
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF5F5F7),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: SelectableText(
+                      visibleArguments,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '确认后只执行这一次；后续每次调用都会再次询问。',
+                    style: TextStyle(color: Color(0xFF666666), fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('拒绝'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('允许执行一次'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
   Future<bool> _confirmAgentNetworkAccess(
     String purpose,
     List<String> domains,
@@ -2346,7 +2419,9 @@ $materialIndex
     if (metadata?['type'] == 'action' && metadata?['id'] == 'create-image') {
       return {'type': 'action', 'id': 'create-image'};
     }
-    if (metadata?['type'] == 'skill' || metadata?['type'] == 'plugin') {
+    if (metadata?['type'] == 'skill' ||
+        metadata?['type'] == 'plugin' ||
+        metadata?['type'] == 'mcp') {
       return Map<String, Object?>.from(metadata!);
     }
     final targetId = metadata?['target_id']?.toString();
@@ -2422,7 +2497,18 @@ $materialIndex
       'reasoning_level': reasoningLevel,
       'network_mode': _conversation?.networkMode ?? 'off',
       'capability': ?capability,
-      'selected_capabilities': capability == null || capability['type'] == 'action' ? const [] : capability['selected_capabilities'] ?? [capability],
+      'selected_capabilities':
+          capability == null || capability['type'] == 'action'
+          ? const []
+          : capability['selected_capabilities'] ??
+                (capability['type'] == 'skill' || capability['type'] == 'plugin'
+                    ? [capability]
+                    : const []),
+      'selected_mcp_connections':
+          capability == null || capability['type'] == 'action'
+          ? const []
+          : capability['selected_mcp_connections'] ??
+                (capability['type'] == 'mcp' ? [capability] : const []),
       'materials': materials,
       'current_turn_text': question.text.trim(), // 本轮真实用户输入
       if (startSessionId == null && startSnapshotId == null)
@@ -2583,7 +2669,43 @@ $materialIndex
 
         final interrupt = response.interrupts.first;
         final input = interrupt.input;
-        if (input is! Map || input['type'] != 'network_permission') {
+        if (input is! Map) {
+          throw const AiException('服务端返回了暂不支持的工具权限请求');
+        }
+        if (input['type'] == 'mcp_tool_approval') {
+          final connectionName =
+              input['connection_name']?.toString().trim().isNotEmpty == true
+              ? input['connection_name'].toString().trim()
+              : 'MCP 连接器';
+          final toolName = input['tool_name']?.toString().trim() ?? '';
+          final description = input['description']?.toString().trim() ?? '';
+          final arguments = input['arguments'];
+          _agentStreamPresentation.value = _agentStreamPresentation.value
+              .copyWith(currentStep: '等待你确认 MCP 工具调用');
+          final allow = await _confirmAgentMcpTool(
+            connectionName: connectionName,
+            toolName: toolName,
+            description: description,
+            arguments: arguments,
+          );
+          if (!_isCurrentRequest(generation, conversationId)) return null;
+          turn = allow
+              ? chat.resumeStream(
+                  restart: [
+                    interrupt.restart({
+                      'approved': true,
+                      'approval_hash': input['approval_hash'],
+                    }),
+                  ],
+                )
+              : chat.resumeStream(
+                  respond: [
+                    interrupt.respond({'approved': false}),
+                  ],
+                );
+          continue;
+        }
+        if (input['type'] != 'network_permission') {
           throw const AiException('服务端返回了暂不支持的工具权限请求');
         }
         final domains = (input['domains'] as List? ?? const [])
@@ -2918,7 +3040,6 @@ $materialIndex
     if (!message.isUser || metadata == null) return '';
     final type = metadata['type']?.toString();
     final id = metadata['id']?.toString();
-    final name = metadata['name']?.toString() ?? '技能';
     if (type == 'action' && id == 'create-skill') {
       return SkillCreatorAdapter.creationPrompt();
     }
@@ -2942,33 +3063,50 @@ $materialIndex
 $oldContent
 ```''';
     }
-    if (type == 'plugin') {
-      final description = metadata['description']?.toString().trim() ?? '';
-      return '''[用户选中的插件：$name]
-${description.isEmpty ? '' : '用途：$description\n'}
-请在本次消息中使用这项插件能力；如果用户只发送了标签，先询问希望完成的任务。''';
+    final selected = metadata['selected_capabilities'] is List
+        ? (metadata['selected_capabilities'] as List).whereType<Map>().toList()
+        : (type == 'skill' || type == 'plugin' ? [metadata] : const <Map>[]);
+    final connectors = metadata['selected_mcp_connections'] is List
+        ? (metadata['selected_mcp_connections'] as List)
+              .whereType<Map>()
+              .toList()
+        : (type == 'mcp' ? [metadata] : const <Map>[]);
+    final instructions = <String>[];
+    if (selected.isNotEmpty) {
+      final labels = <String>[];
+      for (final item in selected) {
+        final skillId = item['id']?.toString().trim() ?? '';
+        final skillName = item['name']?.toString().trim().isNotEmpty == true
+            ? item['name'].toString().trim()
+            : '已选扩展';
+        final versionId = item['version_id']?.toString().trim() ?? '';
+        if (skillId.isEmpty || versionId.isEmpty) {
+          throw AiException('所选扩展“$skillName”的版本信息不完整，请刷新扩展列表后重试。');
+        }
+        labels.add('$skillName（$skillId，版本 $versionId）');
+      }
+      instructions.add(
+        '''[本轮已选择并要求执行这些扩展：${labels.join('、')}]
+严格使用本轮绑定的扩展版本处理用户请求。扩展正文和资源由服务端按 ID 与版本读取；不要依赖手机本地缓存，也不要自行换成其他版本。需要某项技能时，先调用 use_skill 读取该技能指令，并遵循其适用范围。若服务端报告该版本缺失、已卸载或不可用，清楚说明后停止，不要静默换版本。只有用户消息缺少完成任务所需信息时才追问；扩展不适用时简短说明原因。''',
+      );
+      if (selected.any(
+        (item) => item['name']?.toString().toLowerCase() == 'book-to-skill',
+      )) {
+        instructions.add(
+          '''[book-to-skill 在小栖中的文档流程]
+将本轮附件作为书籍来源，通过 read_task_material 分段阅读；不要要求手机或服务器上的文件路径，也不要要求运行外部桌面客户端。先说明将读取的资料名称和大致篇幅；用户要求把书籍转成技能时，按章节整理可复用的框架、方法、原则与反例，输出 `## SKILL.md` 的 Markdown 代码块，并把较长章节材料以 `## references/<文件名>.md` 的代码块分开。给出一段代表性试用结果。生成内容仅作为待检查草稿，由用户确认保存。''',
+        );
+      }
     }
-    if (type != 'skill') return '';
-    if (id == null) throw AiException('所选技能“$name”缺少有效标识，请重新选择。');
-    final record = await CapabilityStore.instance.find(id);
-    if (record == null || record.isDeleted) {
-      throw AiException('所选技能“$name”已不可用，请重新选择或检查技能列表。');
+    if (connectors.isNotEmpty) {
+      final labels = connectors
+          .map((item) => item['name']?.toString() ?? 'MCP 连接器')
+          .join('、');
+      instructions.add('''[本轮已选 MCP 连接器：$labels]
+仅在本轮任务确实需要时调用这些连接器的 MCP 工具。外部工具会在执行前显示名称和参数，并等待用户确认；不得声称操作已完成，除非工具返回成功结果。''');
     }
-    final versionId = metadata['version_id']?.toString();
-    final version = versionId == null
-        ? record.currentVersion
-        : record.versions.where((item) => item.id == versionId).firstOrNull;
-    if (version == null || version.content.trim().isEmpty) {
-      throw AiException('所选技能“$name”的指定版本无法读取，请重新选择该技能。');
-    }
-    return '''[本轮明确信号：用户已选择并要求执行技能“$name”]
-${record.description.isEmpty ? '' : '用途：${record.description}\n'}
-将这次选择视为用户的明确执行指令。严格遵循下方技能正文处理本轮用户请求，直接给出技能规定的输出。
-不要先按普通聊天回答，也不要把应用技能变成可选建议，不能在结尾询问用户是否还想按该技能改写。
-只有用户消息本身缺少完成任务所必需的信息时才追问；技能不适用于请求时，简短说明原因。
-
-以下是本轮必须执行的完整技能正文：
-${version.content}''';
+    if (instructions.isNotEmpty) return instructions.join('\n\n');
+    return '';
   }
 
   String _messageTextWithCapabilityIntent(
@@ -3313,7 +3451,21 @@ $text''';
     final metadata = parent.capabilityMetadata;
     if (metadata?['type'] != 'action') return null;
     final actionId = metadata?['id']?.toString();
-    if (actionId != 'create-skill' && actionId != 'revise-skill') return null;
+    final selected = metadata?['selected_capabilities'] is List
+        ? (metadata!['selected_capabilities'] as List).whereType<Map>().toList()
+        : <Map>[];
+    final isBookToSkill =
+        (metadata?['type'] == 'skill' || metadata?['type'] == 'plugin') &&
+        (metadata?['name']?.toString().toLowerCase() == 'book-to-skill' ||
+            selected.any(
+              (item) =>
+                  item['name']?.toString().toLowerCase() == 'book-to-skill',
+            ));
+    if (actionId != 'create-skill' &&
+        actionId != 'revise-skill' &&
+        !isBookToSkill) {
+      return null;
+    }
     final content = skillDocument ?? _extractSkillDocument(response);
     if (content == null) return null;
     if (!RegExp(r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)').hasMatch(content)) {
@@ -7037,6 +7189,12 @@ class _HomeComposerState extends State<_HomeComposer> {
         if (!widget.expanded)
           SkillsPluginsComposerControls(
             isReadingSpace: widget.showReadingTasks,
+            onManageMcp: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) =>
+                    const ExtensionMarketPage(initialKind: ExtensionKind.mcp),
+              ),
+            ),
             onRequestLogin: widget.onRequestLogin,
             isSignedIn: widget.isSignedIn,
             onSessionChanged: widget.onSessionChanged,

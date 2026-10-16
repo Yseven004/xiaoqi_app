@@ -1,5 +1,13 @@
 allprojects {
     repositories {
+        // Flutter engine artifacts are published here, not on the Aliyun
+        // Google Maven mirror. Keep this repository first so Gradle does not
+        // wait on a mirror that can never serve io.flutter artifacts.
+        maven("https://storage.googleapis.com/download.flutter.io") {
+            content {
+                includeGroup("io.flutter")
+            }
+        }
         maven("https://maven.aliyun.com/repository/google")
         google()
         mavenCentral()
