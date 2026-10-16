@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:archive/archive.dart';
 import 'package:genkit/genkit.dart';
 import 'package:uuid/uuid.dart';
 
@@ -27,6 +28,90 @@ class DockerCodeExecutionService {
   final String? _pythonExecutable;
   final String? _workerPath;
   final _uuid = const Uuid();
+
+  /// Keep the terminal error, not only the progress output before it.
+  static String failureDetails(Object error) {
+    final value = switch (error) {
+      FormatException(:final message) => message,
+      StateError(:final message) => message,
+      _ => '技能脚本执行失败，请查看任务诊断记录。',
+    }.toString().trim();
+    return value.length <= 2000
+        ? value
+        : '${value.substring(0, 300)}\n…\n${value.substring(value.length - 1600)}';
+  }
+
+  Future<Map<String, List<int>>> prepareDependencies(
+    String tenant,
+    Map<String, List<int>> files, {
+    CancellationToken? cancellation,
+  }) async {
+    final taskId = 'install-${_uuid.v4()}';
+    final key = 'task/$tenant/$taskId';
+    final worker =
+        _workerPath ??
+        Platform.environment['SANDBOX_WORKER_PATH'] ??
+        _defaultWorkerPath();
+    final installer = File(
+      '${File(worker).parent.path}/prepare_dependencies.py',
+    );
+    if (!installer.existsSync()) throw StateError('服务器缺少依赖准备程序');
+    store.put(key, {
+      'id': taskId,
+      'status': 'preparing_dependencies',
+      'events': [],
+      'artifacts': [],
+    }, null);
+    try {
+      await execute(
+        tenantId: tenant,
+        taskId: taskId,
+        code: await installer.readAsString(),
+        language: 'python',
+        authorizedDomains: [
+          'pypi.org',
+          'files.pythonhosted.org',
+          'registry.npmjs.org',
+        ],
+        materials: [],
+        skillFiles: {
+          for (final name in ['requirements.txt', 'package.json'])
+            if (files[name] != null) name: files[name]!,
+        },
+        cancellation: cancellation ?? CancellationController().token,
+      );
+      final artifacts = store.get(key)!.value['artifacts'] as List;
+      final artifact = artifacts
+          .whereType<Map>()
+          .where((a) => a['name'] == 'dependencies.zip')
+          .firstOrNull;
+      if (artifact == null) throw StateError('依赖准备没有返回锁定文件');
+      final zip = ZipDecoder().decodeBytes(
+        store.getObject(artifact['object_key'].toString()),
+      );
+      final prepared = <String, List<int>>{};
+      var total = 0;
+      for (final file in zip.files) {
+        if (!file.isFile) continue;
+        if (file.isSymbolicLink ||
+            file.name.startsWith('/') ||
+            file.name.contains('\\') ||
+            file.name.split('/').any((p) => p == '..' || p.isEmpty) ||
+            (!file.name.startsWith('.xiaoqi/') &&
+                !file.name.startsWith('node_modules/')))
+          throw StateError('依赖包路径校验失败');
+        total += file.size;
+        if (total > 40 * 1024 * 1024) throw StateError('依赖体积超出限制');
+        prepared[file.name] = file.content;
+      }
+      if (!prepared.containsKey('.xiaoqi/dependency-lock.json'))
+        throw StateError('依赖锁定记录缺失');
+      return prepared;
+    } finally {
+      store.deleteObjectsPrefix('tenants/$tenant/tasks/$taskId/');
+      store.delete(key);
+    }
+  }
 
   bool get isConfigured {
     final worker =
@@ -243,7 +328,7 @@ class DockerCodeExecutionService {
     for (var attempt = 0; attempt < 8; attempt++) {
       final current = store.get(key);
       if (current == null) throw StateError('任务不存在');
-      if ((current.value['skill_script_runs'] as num? ?? 0).toInt() >= 1) {
+      if ((current.value['skill_script_runs'] as num? ?? 0).toInt() >= 12) {
         throw StateError('本次任务的技能脚本执行次数已用完');
       }
       try {

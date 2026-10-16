@@ -12,10 +12,12 @@ class SkillToolRecoveryMiddleware extends GenerateMiddleware {
   SkillToolRecoveryMiddleware({
     required Iterable<String> skillIds,
     required this.onEvent,
+    this.beforeLoad,
   }) : skillIds = List.unmodifiable(skillIds.toSet().toList()..sort());
 
   final List<String> skillIds;
   final void Function(Map<String, Object?> event) onEvent;
+  final Map<String, Object?> Function(String id)? beforeLoad;
 
   @override
   Future<ToolResult> tool(
@@ -32,8 +34,11 @@ class SkillToolRecoveryMiddleware extends GenerateMiddleware {
 
     onEvent({'type': 'tool_started', 'tool': 'use_skill'});
     try {
+      final input = request.toolRequest.input;
+      final id = input is Map ? input['skillName']?.toString() ?? '' : '';
+      final binding = beforeLoad?.call(id) ?? const <String, Object?>{};
       final result = await next(request, context);
-      onEvent({'type': 'tool_succeeded', 'tool': 'use_skill'});
+      onEvent({'type': 'tool_succeeded', 'tool': 'use_skill', ...binding});
       return result;
     } on Object {
       if (context.cancel?.isCancelled == true) rethrow;

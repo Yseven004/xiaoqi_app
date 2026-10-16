@@ -2,29 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../widgets/app_toast.dart';
+import '../features/capabilities/data/capability_cloud_sync.dart';
+import '../features/capabilities/data/capability_models.dart';
 
 enum ExtensionKind { skill, plugin, mcp }
 
 enum ExtensionFilter { curated, installed, created }
-
-const _installedPreferencesKey = 'xiaoqi_extension_market_installed_v1';
-Future<void> _installedWriteQueue = Future<void>.value();
-
-Future<void> _persistInstalledIds(Set<String> installedIds) {
-  final snapshot = installedIds.toList(growable: false);
-  final nextWrite = _installedWriteQueue.then<void>((_) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_installedPreferencesKey, snapshot);
-  });
-  // Keep later writes usable even if a platform write fails. The UI state is
-  // still authoritative for the current session, and a later write can retry.
-  _installedWriteQueue = nextWrite.catchError((_) {});
-  return _installedWriteQueue;
-}
 
 class ExtensionFeatureBlock {
   const ExtensionFeatureBlock({
@@ -55,6 +41,7 @@ class ExtensionEntry {
     required this.examples,
     this.version = '1.0.0',
     this.repository = 'xiaoqi/paper-reader',
+    this.installation,
   });
 
   final String id;
@@ -70,6 +57,36 @@ class ExtensionEntry {
   final List<String> examples;
   final String version;
   final String repository;
+  final CapabilityRecord? installation;
+
+  factory ExtensionEntry.installed(CapabilityRecord r) => ExtensionEntry(
+    id: r.id,
+    kind: r.kind == CapabilityKind.skill
+        ? ExtensionKind.skill
+        : ExtensionKind.plugin,
+    name: r.name,
+    author:
+        r.source['source_url']?.toString().split('/').elementAtOrNull(3) ??
+        '我的技能',
+    description: r.description,
+    iconAsset: 'assets/icons/capabilities/capability_skill_book.svg',
+    iconBackground: const Color(0xFFEFF6FF),
+    authorBio: '从公开仓库导入，作者信息以仓库为准。',
+    suitableFor: '在对话中选择后按需使用；实际效果需运行验证',
+    features: const [],
+    examples: [r.description],
+    version: r.currentVersionId.substring(
+      0,
+      r.currentVersionId.length.clamp(0, 12),
+    ),
+    repository:
+        r.source['source_url']?.toString().replaceFirst(
+          'https://github.com/',
+          '',
+        ) ??
+        '',
+    installation: r,
+  );
 
   String get kindLabel => switch (kind) {
     ExtensionKind.skill => '技能',
@@ -284,41 +301,10 @@ const _pluginExtensions = [
   ),
 ];
 
-const _mcpExtensions = [
-  ExtensionEntry(
-    id: 'literature-mcp',
-    kind: ExtensionKind.mcp,
-    name: '文献检索 MCP',
-    author: '知网',
-    description: '连接文献检索与引用信息服务',
-    iconAsset: 'assets/icons/capabilities/mcp_connector.svg',
-    iconBackground: Color(0xFFEFF6FF),
-    authorBio: '知网提供面向研究工作的文献检索与引用整理能力。',
-    suitableFor: '研究主题、论文、引用',
-    features: _quickReadFeatures,
-    examples: ['检索和这个主题相关的文献。'],
-    repository: 'cnki/literature-mcp',
-  ),
-  ExtensionEntry(
-    id: 'workspace-mcp',
-    kind: ExtensionKind.mcp,
-    name: '工作区 MCP',
-    author: '小七官方',
-    description: '让智能体安全读取当前工作区资料',
-    iconAsset: 'assets/icons/capabilities/mcp_connector.svg',
-    iconBackground: Color(0xFFEFF9F1),
-    authorBio: '小七官方为阅读、学习与研究提供可靠的智能工具。',
-    suitableFor: '工作区、资料、项目文件',
-    features: _quickReadFeatures,
-    examples: ['查找工作区里和这个主题相关的资料。'],
-    repository: 'xiaoqi/workspace-mcp',
-  ),
-];
-
 List<ExtensionEntry> _entriesFor(ExtensionKind kind) => switch (kind) {
   ExtensionKind.skill => _curatedExtensions,
   ExtensionKind.plugin => _pluginExtensions,
-  ExtensionKind.mcp => _mcpExtensions,
+  ExtensionKind.mcp => const [],
 };
 
 class ExtensionMarketPage extends StatefulWidget {
@@ -332,10 +318,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
   final _carouselController = PageController();
-  final Set<String> _installedIds = {'paper-reader'};
+  final Set<String> _installedIds = {};
+  List<ExtensionEntry> _remoteEntries = [];
+  String? _loadError;
   Timer? _carouselTimer;
   Timer? _resumeCarouselTimer;
-  int _installedMutationVersion = 0;
   int _carouselIndex = 0;
   String _query = '';
   ExtensionKind _kind = ExtensionKind.skill;
@@ -381,22 +368,19 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Future<void> _restoreInstalled() async {
-    final restoreVersion = _installedMutationVersion;
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getStringList(_installedPreferencesKey);
-      if (!mounted ||
-          saved == null ||
-          restoreVersion != _installedMutationVersion) {
-        return;
-      }
+      final records = await CapabilityCloudSync.instance
+          .installedCapabilities();
+      if (!mounted) return;
       setState(() {
+        _remoteEntries = records.map(ExtensionEntry.installed).toList();
         _installedIds
           ..clear()
-          ..addAll(saved);
+          ..addAll(records.map((r) => r.id));
+        _loadError = null;
       });
-    } catch (_) {
-      // Keep the in-memory defaults when local storage is unavailable.
+    } catch (e) {
+      if (mounted) setState(() => _loadError = '加载安装记录失败：$e');
     }
   }
 
@@ -405,27 +389,19 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   void _applyInstalledChange(String id, bool installed) {
-    _installedMutationVersion++;
-    if (installed) {
-      _installedIds.add(id);
-    } else {
-      _installedIds.remove(id);
-    }
-    if (mounted) setState(() {});
-    unawaited(_persistInstalledIds(_installedIds));
+    unawaited(_restoreInstalled());
   }
 
   void _toggleInstalled(ExtensionEntry entry) {
-    final nextInstalled = !_installedIds.contains(entry.id);
-    _applyInstalledChange(entry.id, nextInstalled);
-    AppToast.show(
-      context,
-      nextInstalled ? '已安装「${entry.name}」' : '已卸载「${entry.name}」',
-    );
+    _openDetail(entry);
   }
 
   List<ExtensionEntry> _visibleEntries() {
-    final entries = _entriesFor(_kind);
+    final entries = _kind == ExtensionKind.mcp
+        ? <ExtensionEntry>[]
+        : _filter == ExtensionFilter.installed
+        ? _remoteEntries.where((e) => e.kind == _kind).toList()
+        : _entriesFor(_kind);
     if (_filter == ExtensionFilter.created) return const [];
     return entries
         .where((entry) {
@@ -470,9 +446,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   void _handleCategoryInstalledChanged() {
-    _installedMutationVersion++;
-    unawaited(_persistInstalledIds(_installedIds));
-    if (mounted) setState(() {});
+    unawaited(_restoreInstalled());
   }
 
   Future<void> _showCreateImportSheet() async {
@@ -528,17 +502,12 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Future<void> _showImportDialog() async {
-    final url = await showDialog<String>(
+    await showDialog<void>(
       context: context,
-      builder: (_) => const _GitHubImportDialog(),
+      builder: (_) => const _ImportInstallationDialog(),
     );
-    if (!mounted || url == null || url.isEmpty) return;
-    final uri = Uri.tryParse(url);
-    if (uri == null || uri.scheme != 'https' || uri.host != 'github.com') {
-      AppToast.show(context, '请输入公开 GitHub 仓库链接');
-      return;
-    }
-    AppToast.show(context, '已提交导入检查：${uri.path}');
+    await _restoreInstalled();
+    if (mounted) setState(() => _filter = ExtensionFilter.installed);
   }
 
   @override
@@ -558,14 +527,24 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               _buildKindTabs(),
               const SizedBox(height: 22),
               _buildFilters(),
+              if (_loadError != null)
+                TextButton(
+                  onPressed: _restoreInstalled,
+                  child: Text('$_loadError · 重试'),
+                ),
               const SizedBox(height: 38),
-              if (_filter == ExtensionFilter.created)
+              if (_kind == ExtensionKind.mcp)
+                const Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Text('MCP 暂不支持，包括技能和插件中的 MCP 组件。'),
+                )
+              else if (_filter == ExtensionFilter.created)
                 _buildCreatedEmptyState()
               else ...[
                 _buildCollections(),
                 const SizedBox(height: 40),
                 _buildCategorySection(
-                  '热门推荐',
+                  _filter == ExtensionFilter.installed ? '已安装' : '精选预览 · 尚未上架',
                   _visibleEntries(),
                   constraints.maxWidth - horizontal * 2,
                 ),
@@ -907,53 +886,190 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
 enum _MarketAction { create, import }
 
-class _GitHubImportDialog extends StatefulWidget {
-  const _GitHubImportDialog();
-
+class _ImportInstallationDialog extends StatefulWidget {
+  const _ImportInstallationDialog({this.update});
+  final CapabilityRecord? update;
   @override
-  State<_GitHubImportDialog> createState() => _GitHubImportDialogState();
+  State<_ImportInstallationDialog> createState() =>
+      _ImportInstallationDialogState();
 }
 
-class _GitHubImportDialogState extends State<_GitHubImportDialog> {
-  late final TextEditingController _controller;
+class _ImportInstallationDialogState extends State<_ImportInstallationDialog> {
+  final _url = TextEditingController();
+  Map<String, dynamic>? _inspection;
+  bool _busy = false;
+  String? _error;
+  String _progress = '';
+  String? _jobId;
 
+  void _onJob(String id) { if (mounted) setState(() => _jobId = id); }
+  Future<void> _cancel() async {
+    if (!_busy) { Navigator.pop(context); return; }
+    if (_jobId == null) return;
+    setState(() => _progress = '正在取消，请等待服务器停止操作…');
+    try { await CapabilityCloudSync.instance.cancelImportOperation(_jobId!); }
+    catch (e) { if (mounted) setState(() => _error = '取消请求失败：$e'); }
+  }
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController();
+    _url.text = widget.update?.source['requested_url']?.toString() ?? '';
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _url.dispose();
     super.dispose();
   }
 
+  Future<void> _inspect() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _inspection = null;
+      _progress = '检查中：固定仓库版本、识别技能和不支持的组件…';
+    });
+    try {
+      final result = await CapabilityCloudSync.instance.runImportOperation({
+        'url': _url.text.trim(),
+      }, onJob: _onJob);
+      if (mounted) {
+        setState(
+          () => _inspection = Map<String, dynamic>.from(
+            result['inspection'] as Map,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _install(Map candidate) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _progress = '安装中：准备依赖、锁定版本；成功前不会显示为已安装。';
+    });
+    try {
+      await CapabilityCloudSync.instance.runImportOperation({
+        'inspection_id': _inspection!['id'],
+        'candidate_id': candidate['id'],
+        if (widget.update != null) 'update_id': widget.update!.id,
+        if (widget.update != null)
+          'expected_revision': widget.update!.cloudRevision,
+      }, install: true, onJob: _onJob);
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('从公开 GitHub 导入'),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        keyboardType: TextInputType.url,
-        decoration: const InputDecoration(
-          hintText: 'https://github.com/owner/repository',
+  Widget build(BuildContext context) => PopScope(
+    canPop: !_busy,
+    child: AlertDialog(
+      title: Text(widget.update == null ? '从公开 GitHub 导入' : '检查并手动更新'),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: _url,
+                enabled: !_busy,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(
+                  labelText: 'GitHub 仓库或子目录链接',
+                  hintText: 'https://github.com/owner/repository',
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text('只安装兼容的技能。MCP、hooks 和专有客户端能力不会执行。检查不等于实际调用成功。'),
+              if (_busy)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Text(_progress, semanticsLabel: _progress),
+                ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    _error!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ),
+              if (_inspection != null) ...[
+                const SizedBox(height: 16),
+                SelectableText('固定版本：${_inspection!['commit']}'),
+                if ((_inspection!['candidates'] as List).isEmpty)
+                  const Text('未找到符合格式的技能或技能型插件。'),
+                for (final c
+                    in (_inspection!['candidates'] as List).whereType<Map>())
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${c['name']} · ${c['status'] == 'supported'
+                                ? '可安装'
+                                : c['status'] == 'partial'
+                                ? '部分支持'
+                                : '暂不支持'}',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          Text(c['description']?.toString() ?? ''),
+                          for (final warning in (c['warnings'] as List? ?? []))
+                            Text(warning.toString()),
+                          for (final component
+                              in (c['components'] as List).whereType<Map>())
+                            Text(
+                              '${component['name']}：${component['status'] == 'supported' ? '格式支持，任务效果未验证' : (component['issues'] as List).join('；')}',
+                            ),
+                          const SizedBox(height: 8),
+                          FilledButton(
+                            onPressed: _busy || c['status'] == 'unsupported'
+                                ? null
+                                : () => _install(c),
+                            child: Text(
+                              c['status'] == 'partial'
+                                  ? '仅安装支持的技能'
+                                  : widget.update == null
+                                  ? '安装'
+                                  : '更新',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ],
+          ),
         ),
-        onSubmitted: (value) => Navigator.pop(context, value.trim()),
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _busy && _jobId == null ? null : _cancel,
           child: const Text('取消'),
         ),
         FilledButton(
-          onPressed: () => Navigator.pop(context, _controller.text.trim()),
-          child: const Text('开始检查'),
+          onPressed: _busy ? null : _inspect,
+          child: Text(_inspection == null ? '开始检查' : '重新检查'),
         ),
       ],
-    );
-  }
+    ),
+  );
 }
 
 class _CollectionTile extends StatelessWidget {
@@ -1212,19 +1328,7 @@ class ExtensionCategoryPage extends StatefulWidget {
 
 class _ExtensionCategoryPageState extends State<ExtensionCategoryPage> {
   void _toggleInstalled(ExtensionEntry entry) {
-    final installed = !widget.installedIds.contains(entry.id);
-    setState(() {
-      if (installed) {
-        widget.installedIds.add(entry.id);
-      } else {
-        widget.installedIds.remove(entry.id);
-      }
-    });
-    widget.onChanged();
-    AppToast.show(
-      context,
-      installed ? '已安装「${entry.name}」' : '已卸载「${entry.name}」',
-    );
+    _openDetail(entry);
   }
 
   void _openDetail(ExtensionEntry entry) {
@@ -1324,7 +1428,7 @@ class ExtensionDetailPage extends StatefulWidget {
 }
 
 class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
-  late bool _installed = widget.installed;
+  late final bool _installed = widget.installed;
 
   Future<void> _openRepository() async {
     final uri = Uri.parse('https://github.com/${widget.entry.repository}');
@@ -1332,13 +1436,56 @@ class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
     if (!opened && mounted) AppToast.show(context, '暂时无法打开 GitHub 链接');
   }
 
-  void _toggleInstall() {
-    setState(() => _installed = !_installed);
-    widget.onInstallChanged(_installed);
-    AppToast.show(
-      context,
-      _installed ? '已安装「${widget.entry.name}」' : '已卸载「${widget.entry.name}」',
+  Future<void> _toggleInstall() async {
+    final record = widget.entry.installation;
+    if (record == null) {
+      AppToast.show(context, '精选预览尚未上架，请从 GitHub 导入真实扩展');
+      return;
+    }
+    final operation = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('管理已安装扩展'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, 'toggle'),
+            child: Text(record.enabled ? '停用' : '启用'),
+          ),
+          if (record.origin == 'github')
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, 'update'),
+              child: const Text('检查更新（失败保留原版本）'),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, 'delete'),
+            child: const Text('卸载'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
     );
+    if (!mounted || operation == null) return;
+    try {
+      if (operation == 'update') {
+        await showDialog<void>(
+          context: context,
+          builder: (_) => _ImportInstallationDialog(update: record),
+        );
+      } else {
+        await CapabilityCloudSync.instance.manageInstallation(
+          record,
+          enabled: !record.enabled,
+          uninstall: operation == 'delete',
+        );
+      }
+      widget.onInstallChanged(operation != 'delete');
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) AppToast.show(context, '操作失败：$e');
+    }
   }
 
   void _openAuthor() {
@@ -1478,9 +1625,16 @@ class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
                     width: 23,
                   ),
                   const SizedBox(width: 7),
-                  const Text(
-                    '已通过小七检查',
-                    style: TextStyle(color: Color(0xFF6B7890), fontSize: 16),
+                  Flexible(
+                    child: Text(
+                      widget.entry.installation == null
+                          ? '尚未上架 · 仅预览'
+                          : '已安装 · ${widget.entry.installation!.enabled ? "已启用" : "已停用"} · 任务效果需运行验证',
+                      style: const TextStyle(
+                        color: Color(0xFF6B7890),
+                        fontSize: 16,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -1610,7 +1764,7 @@ class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
 
   Widget _installButton() {
     return FilledButton(
-      onPressed: _toggleInstall,
+      onPressed: widget.entry.installation == null ? null : _toggleInstall,
       style: FilledButton.styleFrom(
         backgroundColor: _installed
             ? const Color(0xFFEAF7EF)
@@ -1621,11 +1775,40 @@ class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         textStyle: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
       ),
-      child: Text(_installed ? '已安装' : '安装'),
+      child: Text(widget.entry.installation == null ? '尚未上架' : '管理安装'),
     );
   }
 
   Widget _buildFeatureSection(double contentWidth) {
+    final record = widget.entry.installation;
+    if (record != null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '已安装组件',
+            style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 16),
+          for (final c
+              in (record.compatibility['components'] as List? ?? const [])
+                  .whereType<Map>())
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                '${c['name']}：${c['status'] == 'supported' ? "已安装，任务效果待运行验证" : (c['issues'] as List? ?? []).join("；")}',
+              ),
+            ),
+          for (final warning
+              in (record.compatibility['warnings'] as List? ?? const []))
+            Text(warning.toString()),
+          const SizedBox(height: 12),
+          const Text('MCP、hooks 和专有客户端组件不会执行。'),
+          if (record.source['commit'] != null)
+            SelectableText('仓库版本：${record.source['commit']}'),
+        ],
+      );
+    }
     final features = widget.entry.features;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

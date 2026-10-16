@@ -16,6 +16,7 @@ import 'image_service.dart';
 import 'code_execution_service.dart';
 import 'skill_tool_recovery_middleware.dart';
 import 'store.dart';
+import 'selected_skills.dart';
 
 const _maxAgentImageBytes = 5 * 1024 * 1024;
 const _clarificationCatalogId = 'com.xiaoqi.chat.clarification.v1';
@@ -300,6 +301,8 @@ final _executeSkillScriptSchema = _objectToolSchema(
     },
     'arguments': {
       'type': 'array',
+      'description':
+          'argv 参数数组，每个参数独立一项；例如 ["--", "python3", "-c", "print(42)"]，不要把 python3 -c 合并成一项，不经过 shell 分词。',
       'items': {'type': 'string'},
       'maxItems': 32,
     },
@@ -621,7 +624,7 @@ List<String> agentToolNamesForRequest({
     if (skillsAvailable) 'execute_skill_script',
     if (skillsAvailable) 'read_skill_resource',
     if (webSearchAvailable) 'web_search',
-    if (skillsAvailable && !capabilitySelected) 'use_skill',
+    if (skillsAvailable) 'use_skill',
   ];
 }
 
@@ -663,11 +666,13 @@ class XiaoqiAgentTurnResult {
     required this.text,
     required this.messages,
     this.finishReason,
+    this.extensionEvidenceMissing = false,
   });
 
   final String text;
   final List<Message> messages;
   final AgentFinishReason? finishReason;
+  final bool extensionEvidenceMissing;
 }
 
 /// Keeps Genkit's experimental Agent API behind one small server-side boundary.
@@ -728,6 +733,11 @@ class GenkitXiaoqiAgentRuntime
   }) async {
     cancellation.throwIfCancelled();
     final rawCapability = request['capability'];
+    final selectedSkills = SelectedSkills(
+      store,
+      tenantId,
+      request['selected_capabilities'],
+    );
     final imageGenerationSelected =
         rawCapability is Map &&
         rawCapability['type'] == 'action' &&
@@ -864,11 +874,9 @@ class GenkitXiaoqiAgentRuntime
     });
     final apiKey = Platform.environment[selection.keyName] ?? '';
     if (apiKey.isEmpty) throw StateError('服务器未配置 ${selection.keyName}');
-    final stagedSkills = await _stageSkills(tenantId);
-    final stagedSkillVersions = {
-      for (final entry in stagedSkills.entries)
-        entry['id']!: entry['version_id']!,
-    };
+    final stagedSkills = await _stageSkills(selectedSkills);
+    final loadedSkills = <String>{};
+    final successfulScripts = <String>{};
     final searchModel =
         Platform.environment['XIAOQI_MIMO_SEARCH_MODEL']?.trim() ??
         'mimo-v2.6-flash';
@@ -885,7 +893,7 @@ class GenkitXiaoqiAgentRuntime
     );
     final ai = Genkit(
       promptDir: null,
-      isDevEnv: false,
+      isDevEnv: Platform.environment['XIAOQI_CAPTURE_TRACES'] == '1',
       plugins: [
         openAI(
           name: selection.namespace,
@@ -941,17 +949,10 @@ class GenkitXiaoqiAgentRuntime
           request['network_mode'],
         );
         final requestedDomains = _normalizeDomains(input['domains']);
-        final selected = request['capability'];
-        final hasSelectedSkill =
-            selected is Map && selected['type'] != 'action';
+        final hasSelectedSkill = selectedSkills.entries.isNotEmpty;
         final skillId = input['skill_id']?.toString().trim() ?? '';
         final skillReference = skillId.isNotEmpty || hasSelectedSkill
-            ? _resolveSkillCapability(
-                tenantId,
-                selected,
-                input,
-                availableVersions: stagedSkillVersions,
-              )
+            ? selectedSkills.resolve(input)
             : null;
         final temporaryNetwork =
             networkMode == 'off' &&
@@ -988,7 +989,7 @@ class GenkitXiaoqiAgentRuntime
             : null;
         final skillFiles = skillReference == null
             ? <String, List<int>>{}
-            : _loadSkillFiles(tenantId, skillReference);
+            : selectedSkills.files(skillReference);
         onProcessEvent({
           'type': 'tool_started',
           'tool': 'execute_python',
@@ -1127,17 +1128,9 @@ class GenkitXiaoqiAgentRuntime
             request['network_mode'],
           );
           final skillId = input['skill_id']?.toString().trim() ?? '';
-          final selectedCapability = request['capability'];
-          final hasSelectedSkill =
-              selectedCapability is Map &&
-              selectedCapability['type'] != 'action';
+          final hasSelectedSkill = selectedSkills.entries.isNotEmpty;
           final skillReference = skillId.isNotEmpty || hasSelectedSkill
-              ? _resolveSkillCapability(
-                  tenantId,
-                  selectedCapability,
-                  input,
-                  availableVersions: stagedSkillVersions,
-                )
+              ? selectedSkills.resolve(input)
               : null;
           final temporaryNetwork = networkMode == 'off';
           final purpose = input['purpose']?.toString().trim() ?? '';
@@ -1274,7 +1267,7 @@ class GenkitXiaoqiAgentRuntime
       description:
           '对自动选择技能提供精确 skill_id；技能版本由服务端绑定。执行当前技能已同步版本中的脚本。'
           '只接受 scripts/ 下真实存在的 .py、.js、.mjs、.cjs、.ts 或 .mts 文件；'
-          '每个任务仅允许执行一次。脚本只能访问本次任务资料和当前技能文件，默认断网。',
+          '每个任务最多执行 12 次；失败后不得自动重试副作用操作。脚本只能访问本次任务资料和当前技能文件，默认断网。',
       inputSchema: _executeSkillScriptSchema,
       fn: (input, context) async {
         _logAgentRuntime('tool_called', taskId, {
@@ -1286,18 +1279,15 @@ class GenkitXiaoqiAgentRuntime
         });
         String? temporaryNetworkCapability;
         var temporaryNetworkStarted = false;
+        Map<String, String>? executingSkill;
         try {
           final scriptPath = _safeSkillScriptPath(
             input['script_path']?.toString() ?? '',
             input['language']?.toString() ?? '',
           );
-          final skillReference = _resolveSkillCapability(
-            tenantId,
-            request['capability'],
-            input,
-            availableVersions: stagedSkillVersions,
-          );
-          final skillFiles = _loadSkillFiles(tenantId, skillReference);
+          final skillReference = selectedSkills.resolve(input);
+          executingSkill = skillReference;
+          final skillFiles = selectedSkills.files(skillReference);
           final networkMode = _taskNetworkMode(
             tenantId,
             taskId,
@@ -1336,14 +1326,15 @@ class GenkitXiaoqiAgentRuntime
           }
 
           // Validate the exact skill and script before granting any task egress.
-          final permission = temporaryNetwork
+          // An imported script may mutate remote data. Network access always
+          // needs approval for this exact call, even when chat search is on.
+          final permission = requestedDomains.isEmpty
               ? null
-              : _networkPermission(
-                  tenantId,
-                  taskId,
+              : NetworkPermissionRequired(
                   requestedDomains,
-                  input['purpose']?.toString() ?? '',
+                  '运行技能 $skillName 的 $scriptPath：$purpose（可能访问或修改外部数据）',
                 );
+          List<String> approvedForThisCall = const [];
           if (permission != null) {
             final approvedDomains = request['remote_agent'] == true
                 ? _resumedAuthorizedDomains(context.resumed, permission)
@@ -1366,6 +1357,7 @@ class GenkitXiaoqiAgentRuntime
                 }),
               );
             }
+            approvedForThisCall = approvedDomains;
             _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
           }
           temporaryNetworkStarted = temporaryNetwork;
@@ -1373,6 +1365,10 @@ class GenkitXiaoqiAgentRuntime
           onProcessEvent({
             'type': 'tool_started',
             'tool': 'execute_skill_script',
+            'capability_id': skillReference['parent_id'],
+            'version_id': skillReference['version_id'],
+            'component_id': skillReference['component_id'],
+            'script_path': scriptPath,
             if (temporaryNetwork) 'temporary_network': true,
             if (temporaryNetwork) 'capability_name': skillName,
           });
@@ -1381,31 +1377,41 @@ class GenkitXiaoqiAgentRuntime
             taskId: taskId,
             code: utf8.decode(scriptBytes),
             language: input['language']?.toString() ?? '',
-            authorizedDomains: {
-              ..._authorizedDomainsForExecution(tenantId, taskId),
-              ...?_resumedAuthorizedDomains(context.resumed, permission),
-              if (temporaryNetwork) ...requestedDomains,
-            }.toList()..sort(),
+            authorizedDomains: approvedForThisCall,
             materials: _materials(request['materials']),
             skillFiles: skillFiles,
             cancellation: cancellation,
             scriptPath: scriptPath,
             arguments: arguments,
           );
+          successfulScripts.add(skillReference['id']!);
           onProcessEvent({
             'type': 'tool_succeeded',
             'tool': 'execute_skill_script',
+            'capability_id': skillReference['parent_id'],
+            'version_id': skillReference['version_id'],
+            'component_id': skillReference['component_id'],
+            'result': result,
             if (temporaryNetwork) 'temporary_network': true,
             if (temporaryNetwork) 'capability_name': skillName,
           });
           return ToolResult.response(result);
         } on Object catch (error) {
           if (cancellation.isCancelled) rethrow;
-          final message = _recoverableSkillError(error);
+          final message = DockerCodeExecutionService.failureDetails(error);
+          if (executingSkill != null)
+            successfulScripts.remove(executingSkill['id']);
           onProcessEvent({
             'type': 'tool_failed',
             'tool': 'execute_skill_script',
             'message': message,
+            if (executingSkill != null)
+              'capability_id': executingSkill['parent_id'],
+            if (executingSkill != null)
+              'version_id': executingSkill['version_id'],
+            if (executingSkill != null)
+              'component_id': executingSkill['component_id'],
+            'script_path': input['script_path'],
             if (temporaryNetworkStarted) 'temporary_network': true,
             if (temporaryNetworkCapability != null)
               'capability_name': temporaryNetworkCapability,
@@ -1425,14 +1431,9 @@ class GenkitXiaoqiAgentRuntime
       inputSchema: _readSkillResourceSchema,
       fn: (input, context) async {
         try {
-          final reference = _resolveSkillCapability(
-            tenantId,
-            request['capability'],
-            input,
-            availableVersions: stagedSkillVersions,
-          );
+          final reference = selectedSkills.resolve(input);
           final path = _safeSkillResourcePath(input['path']?.toString() ?? '');
-          final files = _loadSkillFiles(tenantId, reference);
+          final files = selectedSkills.files(reference);
           final bytes = files[path];
           if (bytes == null) throw StateError('当前技能版本没有该资源');
           if (bytes.length > 64 * 1024) {
@@ -1471,12 +1472,7 @@ class GenkitXiaoqiAgentRuntime
           .where((part) => part.isMedia)
           .length,
     });
-    final rawSelectedCapability = request['capability'];
-    final skillSelected =
-        rawSelectedCapability is Map &&
-        rawSelectedCapability['type'] != 'action' &&
-        rawSelectedCapability['id'] != null;
-    if (skillSelected) _loadSkillFiles(tenantId, rawSelectedCapability);
+    final skillSelected = selectedSkills.entries.isNotEmpty;
     final networkMode = _taskNetworkMode(
       tenantId,
       taskId,
@@ -1488,15 +1484,12 @@ class GenkitXiaoqiAgentRuntime
       // image tool out of this model turn prevents it from running first.
       imageGenerationAvailable:
           images.isConfigured && shouldGenerateImage && !answerBeforeImage,
-      codeExecutionAvailable: codeExecutor.isConfigured,
+      codeExecutionAvailable: codeExecutor.isConfigured && !skillSelected,
       webSearchAvailable: searchAvailable,
       capabilitySelected: skillSelected,
       skillsAvailable: skillSelected,
     );
 
-    final skill = skillSelected
-        ? _loadSkill(tenantId, rawSelectedCapability)
-        : '';
     final materialText = _materialsText(request['materials']);
     final skillSummary = stagedSkills.entries.isEmpty
         ? '当前账号没有已同步且版本有效的技能。'
@@ -1536,7 +1529,10 @@ class GenkitXiaoqiAgentRuntime
       '不要声称执行了没有执行的操作。'
       '当前会话联网模式：$networkMode。',
     );
-    if (skill.isNotEmpty) system.write('\n\n当前技能指令：\n$skill');
+    if (skillSelected)
+      system.write(
+        '\n本次只能使用上述选中技能。先 use_skill 读取指令。涉及脚本的任务须调用 execute_skill_script 并检查真实结果，禁止把脚本抄进 execute_python 绕过安装版本或确认。未支持的工具依赖应明确报错。',
+      );
     if (materialText.isNotEmpty) system.write('\n\n用户提供的资料：\n$materialText');
     if (imageToolAvailable) {
       system.write(
@@ -1572,6 +1568,16 @@ class GenkitXiaoqiAgentRuntime
       name: 'xiaoqi_skill_tool_recovery_$taskId',
       create: (_, _) => SkillToolRecoveryMiddleware(
         skillIds: stagedSkills.entries.map((entry) => entry['id']!),
+        beforeLoad: (id) {
+          final entry = selectedSkills.resolve({'skill_id': id});
+          loadedSkills.add(id);
+          return {
+            'capability_id': entry['parent_id'],
+            'version_id': entry['version_id'],
+            'component_id': entry['component_id'],
+            'capability_name': entry['name'],
+          };
+        },
         onEvent: onProcessEvent,
       ),
     );
@@ -1614,9 +1620,38 @@ class GenkitXiaoqiAgentRuntime
       final response = await turn.response;
       response.assertValid();
       if (pendingPermission != null) throw pendingPermission!;
-      final answer = response.text.isNotEmpty
-          ? response.text
-          : output.toString();
+      var answer = response.text.isNotEmpty ? response.text : output.toString();
+      final missingEvidence =
+          response.finishReason != AgentFinishReason.interrupted &&
+          loadedSkills.any(
+            (id) =>
+                selectedSkills
+                    .files(selectedSkills.entries[id]!)
+                    .keys
+                    .any(
+                      (p) =>
+                          p.startsWith('scripts/') &&
+                          RegExp(r'\.(py|js|mjs|cjs|ts|mts)$').hasMatch(p),
+                    ) &&
+                !successfulScripts.contains(id),
+          );
+      if (missingEvidence) {
+        const warning = '\n\n执行说明：本轮没有获得该技能脚本的成功运行结果，以上文字不代表脚本任务已完成。';
+        answer += warning;
+        onLegacyDelta?.call(warning);
+        onChunk(
+          AgentStreamChunk(
+            modelChunk: ModelResponseChunk(
+              role: Role.model,
+              content: [TextPart(text: warning)],
+            ),
+          ),
+        );
+        onProcessEvent({
+          'type': 'extension_execution_unverified',
+          'message': '缺少脚本成功执行记录',
+        });
+      }
       if (answer.isEmpty &&
           response.finishReason != AgentFinishReason.interrupted) {
         throw StateError('模型没有返回文本');
@@ -1671,8 +1706,16 @@ class GenkitXiaoqiAgentRuntime
       }
       return XiaoqiAgentTurnResult(
         text: answer,
-        messages: List<Message>.unmodifiable(chat.messages),
+        messages: [
+          ...chat.messages,
+          if (missingEvidence)
+            Message(
+              role: Role.model,
+              content: [TextPart(text: '执行说明：没有获得技能脚本的成功运行结果。')],
+            ),
+        ],
         finishReason: response.finishReason,
+        extensionEvidenceMissing: missingEvidence,
       );
     } finally {
       await stagedSkills.directory.delete(recursive: true);
@@ -1680,128 +1723,40 @@ class GenkitXiaoqiAgentRuntime
     }
   }
 
-  String _loadSkill(String tenantId, Object? rawCapability) {
-    if (rawCapability is! Map) return '';
-    final id = rawCapability['id']?.toString() ?? '';
-    final versionId = rawCapability['version_id']?.toString() ?? '';
-    final saved = store.get('cap/$tenantId/$id');
-    if (saved == null || saved.value['deleted_at'] != null) return '';
-    final versions = saved.value['versions'];
-    if (versions is! List) return '';
-    final version = versions.whereType<Map>().firstWhere(
-      (value) => value['id'] == versionId,
-      orElse: () => const {},
-    );
-    final artifact = version['artifact_key']?.toString();
-    if (artifact == null || artifact.isEmpty) return '';
-    final files = store.getImmutable(artifact);
-    final content = utf8.decode(files['SKILL.md'] ?? const []);
-    final extras = files.keys.where((path) => path != 'SKILL.md').toList()
-      ..sort();
-    return extras.isEmpty ? content : '$content\n\n技能资源文件：${extras.join('、')}';
-  }
-
-  Future<_StagedSkills> _stageSkills(String tenantId) async {
+  Future<_StagedSkills> _stageSkills(SelectedSkills selected) async {
     final directory = await Directory.systemTemp.createTemp(
       'xiaoqi-agent-skills-',
     );
-    final entries = <Map<String, String>>[];
-    var stagedBytes = 0;
     try {
-      for (final (key, document) in store.list('cap/$tenantId/', limit: 200)) {
-        final record = document.value;
-        if (record['kind'] != 'skill' || record['deleted_at'] != null) {
-          continue;
-        }
-        final id = record['id']?.toString() ?? key.split('/').last;
-        final versionId = record['current_version_id']?.toString() ?? '';
-        if (!_safeId.hasMatch(id) || !_safeId.hasMatch(versionId)) continue;
-        final versions = record['versions'];
-        if (versions is! List) continue;
-        final version = versions.whereType<Map>().firstWhere(
-          (item) => item['id'] == versionId,
-          orElse: () => const {},
-        );
-        final artifact = version['artifact_key']?.toString() ?? '';
-        if (artifact.isEmpty) continue;
-        final files = store.getImmutable(artifact);
-        final skillBytes = files['SKILL.md'];
-        if (skillBytes == null || skillBytes.isEmpty) continue;
-        if (stagedBytes + skillBytes.length > 32 * 1024 * 1024) break;
-        final skillDirectory = Directory(p.join(directory.path, id))
-          ..createSync(recursive: true);
-        final resourcePaths =
-            files.keys.where((path) => path != 'SKILL.md').toList()..sort();
-        final content = utf8.decode(skillBytes);
-        final enrichedContent = resourcePaths.isEmpty
-            ? content
-            : '$content\n\n## 已同步资源\n${resourcePaths.map((path) => '- $path').join('\n')}\n'
-                  '需要资源内容时使用 read_skill_resource；不要执行资源文件。';
-        await File(
-          p.join(skillDirectory.path, 'SKILL.md'),
-        ).writeAsString(enrichedContent, flush: true);
-        stagedBytes += skillBytes.length;
-        entries.add({
-          'id': id,
-          'version_id': versionId,
-          'name': record['name']?.toString() ?? id,
-          'description': record['description']?.toString() ?? '',
-        });
+      for (final entry in selected.entries.values) {
+        final files = selected.files(entry);
+        final content = utf8.decode(files['SKILL.md'] ?? const []);
+        final header = RegExp(
+          r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)',
+        ).firstMatch(content);
+        if (header == null) throw const FormatException('技能缺少 YAML 信息');
+        final alias = entry['id']!;
+        final resources =
+            files.keys
+                .where((p) => p != 'SKILL.md' && !p.startsWith('.xiaoqi/'))
+                .toList()
+              ..sort();
+        final rewritten =
+            '---\nname: $alias\ndescription: ${jsonEncode(entry['description'])}\n---\n'
+            '${content.substring(header.end)}\n\n技能内部 ID：$alias\n'
+            '已安装资源：${resources.join('、')}\n'
+            '使用 read_skill_resource 读取资料；使用 execute_skill_script 执行已安装脚本。';
+        final target = Directory(p.join(directory.path, alias))..createSync();
+        await File(p.join(target.path, 'SKILL.md')).writeAsString(rewritten);
       }
       return _StagedSkills(
         directory: directory,
-        entries: List.unmodifiable(entries),
+        entries: selected.entries.values.toList(),
       );
     } on Object {
       await directory.delete(recursive: true);
       rethrow;
     }
-  }
-
-  Map<String, Object?> _resolveSkillCapability(
-    String tenantId,
-    Object? selected,
-    Map<String, dynamic> input, {
-    required Map<String, String> availableVersions,
-  }) {
-    final selectedMap = selected is Map && selected['type'] != 'action'
-        ? selected
-        : null;
-    final selectedId = selectedMap?['id']?.toString();
-    final inputId = input['skill_id']?.toString();
-    if (selectedId != null && selectedId.isNotEmpty) {
-      if (inputId != null && inputId.isNotEmpty && inputId != selectedId) {
-        throw StateError('当前手动选择的技能优先，不能切换到其他技能。');
-      }
-      final selectedVersion = selectedMap?['version_id']?.toString() ?? '';
-      final requestedVersion = input['version_id']?.toString().trim() ?? '';
-      if (requestedVersion.isNotEmpty && requestedVersion != selectedVersion) {
-        throw StateError('请求的技能版本与手动选择版本不一致。');
-      }
-      return {'id': selectedId, 'version_id': selectedVersion};
-    }
-    final id = inputId?.trim() ?? '';
-    if (!_safeId.hasMatch(id)) throw StateError('执行技能操作前必须选择有效技能。');
-    final record = store.get('cap/$tenantId/$id')?.value;
-    if (record == null ||
-        record['kind'] != 'skill' ||
-        record['deleted_at'] != null) {
-      throw StateError('技能不存在、已删除或不可用。');
-    }
-    final stagedVersion = availableVersions[id];
-    if (stagedVersion == null) {
-      throw StateError('该技能未包含在本轮可用技能目录中。');
-    }
-    final currentVersion = record['current_version_id']?.toString() ?? '';
-    if (currentVersion != stagedVersion) {
-      throw StateError('技能版本在任务运行期间发生变化，请重新开始任务。');
-    }
-    final requestedVersion = input['version_id']?.toString().trim() ?? '';
-    if (requestedVersion.isNotEmpty && requestedVersion != stagedVersion) {
-      throw StateError('请求的技能版本与本轮已绑定版本不一致。');
-    }
-    if (!_safeId.hasMatch(stagedVersion)) throw StateError('技能当前版本无效。');
-    return {'id': id, 'version_id': stagedVersion};
   }
 
   static String _safeSkillResourcePath(String rawPath) {
@@ -1876,31 +1831,6 @@ class GenkitXiaoqiAgentRuntime
         if (attempt == 7) rethrow;
       }
     }
-  }
-
-  Map<String, List<int>> _loadSkillFiles(
-    String tenantId,
-    Object? rawCapability,
-  ) {
-    if (rawCapability is! Map) throw StateError('当前任务没有选择技能');
-    final id = rawCapability['id']?.toString() ?? '';
-    final versionId = rawCapability['version_id']?.toString() ?? '';
-    if (!_safeId.hasMatch(id) || !_safeId.hasMatch(versionId)) {
-      throw const FormatException('技能 ID 无效');
-    }
-    final saved = store.get('cap/$tenantId/$id');
-    if (saved == null || saved.value['deleted_at'] != null) {
-      throw StateError('技能不存在或已删除');
-    }
-    final versions = saved.value['versions'];
-    if (versions is! List) throw StateError('技能版本不存在');
-    final version = versions.whereType<Map>().firstWhere(
-      (value) => value['id'] == versionId,
-      orElse: () => const {},
-    );
-    final artifact = version['artifact_key']?.toString();
-    if (artifact == null || artifact.isEmpty) throw StateError('技能文件不存在');
-    return store.getImmutable(artifact);
   }
 
   NetworkPermissionRequired? _networkPermission(
@@ -2168,8 +2098,6 @@ class GenkitXiaoqiAgentRuntime
     }
     return null;
   }
-
-  static final _safeId = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$');
 
   static _ModelSelection _modelSelection(String model) {
     if (model.startsWith('mimo')) {

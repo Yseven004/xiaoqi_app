@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'capability_import_service.dart';
+import 'release.dart';
 
 import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental.dart'
@@ -316,6 +318,20 @@ String _redactTaskError(String value) {
 class XiaoqiApi {
   XiaoqiApi(this.store, this.runtime, {ChatCompletionService? chatCompletions})
     : chatCompletions = chatCompletions ?? ChatCompletionService() {
+    imports = CapabilityImportService(
+      store,
+      prepareDependencies: DockerCodeExecutionService(
+        store,
+      ).prepareDependencies,
+    );
+    for (final (key, doc) in store.list('import-job/', limit: 1000)) {
+      if (doc.value['status'] == 'running')
+        store.put(key, {
+          ...doc.value,
+          'status': 'failed',
+          'message': '服务器重启中断了操作，请重新检查或安装；原安装版本未变。',
+        }, doc.revision);
+    }
     _agentRouter = GenkitRouter();
     final genkit = Genkit();
     _remoteAgent = genkit.defineCustomAgent<Map<String, dynamic>>(
@@ -333,6 +349,8 @@ class XiaoqiApi {
   final CloudStore store;
   final XiaoqiAgentRuntime runtime;
   final ChatCompletionService chatCompletions;
+  late final CapabilityImportService imports;
+  final _importCancellations = <String, CancellationController>{};
   late final GenkitRouter _agentRouter;
   late final Agent<Map<String, dynamic>> _remoteAgent;
   final _controllers = <String, CancellationController>{};
@@ -342,7 +360,58 @@ class XiaoqiApi {
 
   Router get router {
     final router = Router()
-      ..get('/health', (Request request) => _json({'status': 'ok'}))
+      ..post(
+        '/v1/capabilities/import-jobs/<id>/cancel',
+        (Request r, String id) => _authenticated(r, (d) async {
+          final key = 'import-job/${d.tenant}/${_safeId(id, '操作 ID')}';
+          final job = store.get(key);
+          if (job == null) return _error('操作不存在', 404);
+          _importCancellations[key]?.cancel();
+          return _json({
+            'status': job.value['status'],
+            'cancel_requested': true,
+          });
+        }),
+      )
+      ..get(
+        '/health',
+        (Request request) => _json({
+          'status': 'ok',
+          'release_id': releaseId,
+          'api_contract_version': apiContractVersion,
+        }),
+      )
+      ..post(
+        '/v1/capabilities/imports',
+        (Request r) => _authenticated(r, (d) => _importJob(r, d, false)),
+      )
+      ..post(
+        '/v1/capabilities/install',
+        (Request r) => _authenticated(r, (d) => _importJob(r, d, true)),
+      )
+      ..get(
+        '/v1/capabilities/import-jobs/<id>',
+        (Request r, String id) => _authenticated(r, (d) async {
+          final job = store.get(
+            'import-job/${d.tenant}/${_safeId(id, '检查 ID')}',
+          );
+          return job == null ? _error('检查不存在', 404) : _json(job.value);
+        }),
+      )
+      ..get(
+        '/v1/capabilities/imports/<id>',
+        (Request r, String id) => _authenticated(r, (d) async {
+          try {
+            return _json(
+              CapabilityImportService.publicInspection(
+                imports.getInspection(d.tenant, id),
+              ),
+            );
+          } catch (_) {
+            return _error('检查不存在或已过期，请重新检查', 404);
+          }
+        }),
+      )
       ..post('/v1/auth/email/start', _startEmail)
       ..post('/v1/auth/email/verify', _verifyEmail)
       ..get(
@@ -473,6 +542,12 @@ class XiaoqiApi {
       );
 
   Map<String, dynamic> _agentRequestContext(RequestData request) {
+    if (request.headers['x-xiaoqi-contract'] != apiContractVersion) {
+      throw GenkitException(
+        contractMismatch(request.headers['x-xiaoqi-contract']),
+        status: StatusCode.failedPrecondition,
+      );
+    }
     final header = request.headers['authorization'] ?? '';
     if (!header.startsWith('Bearer ')) {
       throw GenkitException(
@@ -585,6 +660,19 @@ class XiaoqiApi {
         context['device_id'],
         request['network_mode'],
       );
+      final binding = _canonical(request['selected_capabilities'] ?? const []);
+      final taskKey = 'task/$tenantId/$taskId';
+      final boundTask = store.get(taskKey)!;
+      if (boundTask.value['selection_binding'] != null &&
+          boundTask.value['selection_binding'] != binding) {
+        throw const FormatException('不能在同一次任务中更换扩展版本，请新建一轮对话');
+      }
+      if (boundTask.value['selection_binding'] == null) {
+        store.put(taskKey, {
+          ...boundTask.value,
+          'selection_binding': binding,
+        }, boundTask.revision);
+      }
       session.updateCustom((_) => {'agent_process': <Map<String, dynamic>>[]});
 
       void addProcessEvent(Map<String, Object?> rawEvent) {
@@ -592,6 +680,7 @@ class XiaoqiApi {
           ...rawEvent,
           'created_at': DateTime.now().toUtc().toIso8601String(),
         };
+        _appendEvent(taskKey, event);
         session.updateCustom((current) {
           final custom = current == null
               ? <String, dynamic>{}
@@ -763,13 +852,15 @@ class XiaoqiApi {
         taskId,
         result.finishReason == AgentFinishReason.interrupted
             ? 'awaiting_network_permission'
-            : partialImage
+            : partialImage || result.extensionEvidenceMissing
             ? 'partially_completed'
             : 'completed',
         result: resultText,
         partialReason: partialImage
             ? ((taskValue['image_failure'] as Map?)?['category']?.toString() ??
                   'requested_image_missing')
+            : result.extensionEvidenceMissing
+            ? 'extension_execution_unverified'
             : null,
       );
       return TurnResult(finishReason: result.finishReason);
@@ -1075,9 +1166,102 @@ class XiaoqiApi {
     }
   }
 
+  Future<Response> _importJob(
+    Request request,
+    _Device device,
+    bool install,
+  ) async {
+    try {
+      final body = await _body(request, 8192);
+      if (store
+              .list('import-job/${device.tenant}/', limit: 1000)
+              .where((entry) => entry.$2.value['status'] == 'running')
+              .length >=
+          2) {
+        return _error('已有导入或安装进行中，请稍后重试', 429);
+      }
+      final id = _uuid.v4();
+      final key = 'import-job/${device.tenant}/$id';
+      final cancellation = CancellationController();
+      _importCancellations[key] = cancellation;
+      store.put(key, {
+        'id': id,
+        'status': 'running',
+        'operation': install ? 'install' : 'inspect',
+        'created_at': DateTime.now().toUtc().toIso8601String(),
+      }, null);
+      unawaited(() async {
+        try {
+          final Map<String, dynamic> result;
+          if (install) {
+            final saved = await imports.install(
+              device.tenant,
+              _safeId(body['inspection_id'], '检查 ID'),
+              _safeId(body['candidate_id'], '候选 ID'),
+              updateId: body['update_id'] == null
+                  ? null
+                  : _safeId(body['update_id'], '扩展 ID'),
+              expectedRevision: _asInt(body['expected_revision']),
+              cancellation: cancellation.token,
+            );
+            result = {
+              'record': _publicCapability(saved.value, saved.revision, false),
+            };
+          } else {
+            result = {
+              'inspection': await imports.inspect(
+                device.tenant,
+                body['url']?.toString() ?? '',
+              ),
+            };
+          }
+          if (!install) cancellation.token.throwIfCancelled();
+          final current = store.get(key)!;
+          store.put(key, {
+            ...current.value,
+            'status': 'completed',
+            ...result,
+          }, current.revision);
+        } catch (e) {
+          final current = store.get(key)!;
+          final message = e is FormatException
+              ? e.message
+              : e is StateError
+              ? e.message
+              : e is HttpException
+              ? e.message
+              : '操作失败，请重试；原安装版本保留。';
+          store.put(key, {
+            ...current.value,
+            'status': cancellation.token.isCancelled ? 'cancelled' : 'failed',
+            'message': cancellation.token.isCancelled
+                ? '操作已取消，原安装版本保留。'
+                : message,
+          }, current.revision);
+        } finally {
+          _importCancellations.remove(key);
+        }
+      }());
+      return _json({'id': id, 'status': 'running'}, 202);
+    } on FormatException catch (e) {
+      return _error(e.message, 400);
+    }
+  }
+
   Future<Response> _syncCapability(Request request, _Device device) async {
     try {
       final body = await _body(request, _maxJsonBytes);
+      final raw = body['record'];
+      if (raw is Map &&
+          (raw['origin'] == 'github' ||
+              store
+                      .get(
+                        'cap/${device.tenant}/${_safeId(raw['id'], '能力 ID')}',
+                      )
+                      ?.value['origin'] ==
+                  'github')) {
+        return _error('导入扩展只能通过安装、更新、启停或卸载接口管理', 400);
+      }
       final record = await _normalizeCapability(device.tenant, body['record']);
       final key = 'cap/${device.tenant}/${record['id']}';
       final current = store.get(key);
@@ -1116,6 +1300,11 @@ class XiaoqiApi {
     try {
       final safeId = _safeId(id, '能力 ID');
       final body = await _body(request, 1024);
+      for (final field in ['enabled', 'show_in_menu']) {
+        if (body.containsKey(field) && body[field] is! bool) {
+          return _error('$field 必须是布尔值', 400);
+        }
+      }
       final key = 'cap/${device.tenant}/$safeId';
       final current = store.get(key);
       if (current == null || current.value['deleted_at'] != null)
@@ -1130,7 +1319,8 @@ class XiaoqiApi {
         }, 409);
       final updated = {
         ...current.value,
-        'show_in_menu': body['show_in_menu'] == true,
+        'show_in_menu': body['show_in_menu'] ?? current.value['show_in_menu'],
+        'enabled': body['enabled'] ?? current.value['enabled'] ?? true,
         'updated_at':
             body['updated_at']?.toString() ?? DateTime.now().toIso8601String(),
         'cloud_revision': current.revision + 1,
@@ -1919,6 +2109,12 @@ class XiaoqiApi {
     Request request,
     Future<Response> Function(_Device) action,
   ) async {
+    if (request.headers['x-xiaoqi-contract'] != apiContractVersion) {
+      return _error(
+        contractMismatch(request.headers['x-xiaoqi-contract']),
+        426,
+      );
+    }
     final header = request.headers[HttpHeaders.authorizationHeader] ?? '';
     if (!header.startsWith('Bearer ')) return _error('登录状态已失效，请重新登录', 401);
     final token = header.substring(7).trim();
@@ -2075,7 +2271,9 @@ class XiaoqiApi {
         .map((raw) {
           final version = Map<String, dynamic>.from(raw);
           final artifactKey = version.remove('artifact_key')?.toString() ?? '';
-          if (includeContent && artifactKey.isNotEmpty) {
+          if (includeContent &&
+              artifactKey.isNotEmpty &&
+              document['origin'] != 'github') {
             final files = store.getImmutable(artifactKey);
             version['content'] = utf8.decode(files['SKILL.md'] ?? const []);
             version['files'] = {

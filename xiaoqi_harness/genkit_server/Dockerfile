@@ -16,6 +16,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
 WORKDIR /app
 COPY --from=build /out/bundle/ /app/
 COPY genkit_server/bin/docker_worker.py /app/docker_worker.py
+COPY genkit_server/bin/prepare_dependencies.py /app/prepare_dependencies.py
 ENV PORT=8080 MCP_PORT=8081 XIAOQI_DATA_DIR=/var/lib/xiaoqi SANDBOX_WORKER_PYTHON=/usr/bin/python3 SANDBOX_WORKER_PATH=/app/docker_worker.py PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH=/app/lib
 EXPOSE 8080 8081
 USER 10001:10001

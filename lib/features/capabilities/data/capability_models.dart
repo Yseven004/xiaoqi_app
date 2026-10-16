@@ -65,6 +65,10 @@ class CapabilityRecord {
     this.syncState = CapabilitySyncState.pending,
     this.deletedAt,
     this.cloudRevision = 0,
+    this.origin = 'local',
+    this.enabled = true,
+    this.source = const {},
+    this.compatibility = const {},
   });
 
   final String id;
@@ -79,6 +83,10 @@ class CapabilityRecord {
   final CapabilitySyncState syncState;
   final DateTime? deletedAt;
   final int cloudRevision;
+  final String origin;
+  final bool enabled;
+  final Map<String, dynamic> source;
+  final Map<String, dynamic> compatibility;
 
   bool get isDeleted => deletedAt != null;
   CapabilityVersion? get currentVersion {
@@ -99,6 +107,7 @@ class CapabilityRecord {
     DateTime? deletedAt,
     bool clearDeletedAt = false,
     int? cloudRevision,
+    bool? enabled,
   }) => CapabilityRecord(
     id: id,
     kind: kind,
@@ -112,6 +121,10 @@ class CapabilityRecord {
     syncState: syncState ?? this.syncState,
     deletedAt: clearDeletedAt ? null : deletedAt ?? this.deletedAt,
     cloudRevision: cloudRevision ?? this.cloudRevision,
+    origin: origin,
+    enabled: enabled ?? this.enabled,
+    source: source,
+    compatibility: compatibility,
   );
 
   Map<String, Object?> toJson() => {
@@ -128,6 +141,10 @@ class CapabilityRecord {
     'sync_state': syncState.name,
     'deleted_at': deletedAt?.toIso8601String(),
     'cloud_revision': cloudRevision,
+    'origin': origin,
+    'enabled': enabled,
+    'source': source,
+    'compatibility': compatibility,
   };
 
   factory CapabilityRecord.fromJson(Object? raw) {
@@ -160,6 +177,14 @@ class CapabilityRecord {
       ),
       deletedAt: DateTime.tryParse(raw['deleted_at']?.toString() ?? ''),
       cloudRevision: (raw['cloud_revision'] as num?)?.toInt() ?? 0,
+      origin: raw['origin']?.toString() ?? 'local',
+      enabled: raw['enabled'] != false,
+      source: raw['source'] is Map
+          ? Map<String, dynamic>.from(raw['source'] as Map)
+          : const {},
+      compatibility: raw['compatibility'] is Map
+          ? Map<String, dynamic>.from(raw['compatibility'] as Map)
+          : const {},
     );
   }
 }

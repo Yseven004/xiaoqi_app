@@ -60,6 +60,27 @@ class CapabilityTagTextController extends TextEditingController {
 
   /// Inserts at the selection and replaces any selected text or whole tags.
   void insertCapability(Map<String, Object?> metadata) {
+    // Keep the existing inline unit, but let its selection contain multiple
+    // extensions. Selecting the same extension twice does not duplicate it.
+    if (metadata['type'] != 'action' &&
+        _tag != null &&
+        _tag!.data['type'] != 'action') {
+      final existing = _tag!.data;
+      final selections = (existing['selected_capabilities'] is List
+          ? (existing['selected_capabilities'] as List)
+                .whereType<Map>()
+                .map((v) => Map<String, Object?>.from(v))
+                .toList()
+          : [Map<String, Object?>.from(existing)]);
+      selections.removeWhere((v) => v['id'] == metadata['id']);
+      selections.add(Map<String, Object?>.from(metadata));
+      if (selections.length > 16) return;
+      metadata = {
+        ...metadata,
+        'name': selections.map((v) => v['name']).join('、'),
+        'selected_capabilities': selections,
+      };
+    }
     final selectionStart = value.selection.isValid
         ? value.selection.start
         : value.text.length;

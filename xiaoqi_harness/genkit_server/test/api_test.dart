@@ -117,6 +117,7 @@ void main() {
       method,
       Uri.parse('http://localhost$path'),
       headers: {
+        'x-xiaoqi-contract': '2',
         if (auth) 'authorization': 'Bearer $token',
         if (body != null) 'content-type': 'application/json',
       },
@@ -128,6 +129,54 @@ void main() {
     final response = await call('GET', '/v1/capabilities', auth: false);
     expect(response.statusCode, 401);
   });
+
+  test(
+    'rejects missing contract and reports both versions before normal API use',
+    () async {
+      final response = await api.router.call(
+        Request(
+          'GET',
+          Uri.parse('http://localhost/v1/capabilities'),
+          headers: {'authorization': 'Bearer $token'},
+        ),
+      );
+      expect(response.statusCode, 426);
+      expect(await response.readAsString(), contains('接口版本'));
+      final health = await call('GET', '/health');
+      expect(
+        jsonDecode(await health.readAsString())['api_contract_version'],
+        '2',
+      );
+    },
+  );
+
+  test('import job and inspection lookups are tenant-scoped', () async {
+    store.put('import-job/other/private', {'status': 'completed'}, null);
+    final response = await call('GET', '/v1/capabilities/import-jobs/private');
+    expect(response.statusCode, 404);
+    expect(
+      (await call(
+        'POST',
+        '/v1/capabilities/import-jobs/private/cancel',
+      )).statusCode,
+      404,
+    );
+  });
+
+  test(
+    'capability switches reject nonboolean values before mutation',
+    () async {
+      for (final field in ['enabled', 'show_in_menu']) {
+        final response = await call(
+          'PATCH',
+          '/v1/capabilities/example/visibility',
+          body: {field: 'false', 'expected_revision': 1},
+        );
+        expect(response.statusCode, 400);
+        expect(store.get('cap/personal/example'), isNull);
+      }
+    },
+  );
 
   test('defaults new and legacy auto agent tasks to network off', () async {
     Future<void> createTask(String taskId, {String? networkMode}) async {
@@ -279,39 +328,42 @@ void main() {
     expect(artifact.containsKey('object_key'), isFalse);
   });
 
-  test('keeps text and marks an image-only miss as partially completed', () async {
-    runtime.emitImageGenerationStarted = true;
-    await call(
-      'POST',
-      '/v1/agent/tasks',
-      body: {
-        'task_id': 'task-image-partial',
-        'messages': [
-          {'role': 'user', 'content': '生成一张图片'},
-        ],
-        'model_id': 'deepseek-flash',
-        'reasoning_level': 'medium',
-        'materials': [],
-      },
-    );
+  test(
+    'keeps text and marks an image-only miss as partially completed',
+    () async {
+      runtime.emitImageGenerationStarted = true;
+      await call(
+        'POST',
+        '/v1/agent/tasks',
+        body: {
+          'task_id': 'task-image-partial',
+          'messages': [
+            {'role': 'user', 'content': '生成一张图片'},
+          ],
+          'model_id': 'deepseek-flash',
+          'reasoning_level': 'medium',
+          'materials': [],
+        },
+      );
 
-    Map<String, dynamic> task = {};
-    for (var i = 0; i < 40; i++) {
-      final response = await call(
-        'GET',
-        '/v1/agent/tasks/task-image-partial',
-      );
-      task = Map<String, dynamic>.from(
-        jsonDecode(await response.readAsString()) as Map,
-      );
-      if (task['status'] == 'partially_completed') break;
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    expect(task['status'], 'partially_completed');
-    expect(task['partial_reason'], 'requested_image_missing');
-    expect(task['result'], contains('你好'));
-    expect(task['result'], contains('图片未生成'));
-  });
+      Map<String, dynamic> task = {};
+      for (var i = 0; i < 40; i++) {
+        final response = await call(
+          'GET',
+          '/v1/agent/tasks/task-image-partial',
+        );
+        task = Map<String, dynamic>.from(
+          jsonDecode(await response.readAsString()) as Map,
+        );
+        if (task['status'] == 'partially_completed') break;
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(task['status'], 'partially_completed');
+      expect(task['partial_reason'], 'requested_image_missing');
+      expect(task['result'], contains('你好'));
+      expect(task['result'], contains('图片未生成'));
+    },
+  );
 
   test(
     'explains Ark overdue balance for an automatically called image tool',

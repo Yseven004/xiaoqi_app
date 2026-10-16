@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../../../config/release.dart';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -213,6 +214,7 @@ class CapabilityCloudSync {
     if (method != 'email' || token == null || token.isEmpty) {
       throw StateError('请先登录个人账号');
     }
+    await _verifyContract();
     return _headers(token);
   }
 
@@ -335,6 +337,7 @@ class CapabilityCloudSync {
   Future<void> _sync() async {
     final token = await _secureStorage.read(key: _tokenKey);
     if (token == null || token.isEmpty) throw StateError('请先登录个人账号');
+    await _verifyContract();
     final store = CapabilityStore.instance;
     final accountEmail = (await signedInEmail)?.trim().toLowerCase() ?? '';
     for (final deletion in await store.pendingDraftDeletions()) {
@@ -355,6 +358,7 @@ class CapabilityCloudSync {
     }
 
     for (final record in await store.list(includeDeleted: true)) {
+      if (record.origin == 'github') continue;
       if (record.syncState == CapabilitySyncState.synced ||
           record.syncState == CapabilitySyncState.conflict) {
         continue;
@@ -575,6 +579,10 @@ class CapabilityCloudSync {
       'messages': messages,
       'model_id': modelId,
       'reasoning_level': reasoningLevel,
+      'selected_capabilities':
+          capability == null || capability['type'] == 'action'
+          ? const []
+          : capability['selected_capabilities'] ?? [capability],
       if (capability != null)
         'capability': {
           if (capability['type'] != null) 'type': capability['type'],
@@ -911,7 +919,19 @@ class CapabilityCloudSync {
   Future<String> _requireToken() async {
     final token = await _secureStorage.read(key: _tokenKey);
     if (token == null || token.isEmpty) throw StateError('请先登录个人账号');
+    await _verifyContract();
     return token;
+  }
+
+  DateTime? _contractCheckedAt;
+  Future<void> _verifyContract() async {
+    if (_contractCheckedAt != null && DateTime.now().difference(_contractCheckedAt!) < const Duration(seconds: 30)) return;
+    final response = await _client.get(Uri.parse(_baseUrl).replace(path: '/health', query: null)).timeout(const Duration(seconds: 15));
+    final health = _checked(response);
+    if (health['api_contract_version'] != apiContractVersion || health['release_id'] != releaseId) {
+      throw StateError('客户端 $releaseId（接口 $apiContractVersion）与服务端 ${health['release_id'] ?? "未知"}（接口 ${health['api_contract_version'] ?? "未知"}）不匹配，请重新构建客户端或部署匹配的服务端。');
+    }
+    _contractCheckedAt = DateTime.now();
   }
 
   static String newTaskId() {
@@ -926,7 +946,107 @@ class CapabilityCloudSync {
   Map<String, String> _headers(String token) => {
     'Content-Type': 'application/json',
     'Authorization': 'Bearer $token',
+    'X-Xiaoqi-Contract': apiContractVersion,
+    'X-Xiaoqi-Release': releaseId,
   };
+
+  Future<Map<String, dynamic>> runImportOperation(
+    Map<String, Object?> body, {
+    bool install = false,
+    void Function(String id)? onJob,
+  }) async {
+    final token = await _requireToken();
+    final started = _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/capabilities/${install ? 'install' : 'imports'}',
+            ),
+            headers: _headers(token),
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 25)),
+    );
+    final id = started['id'].toString();
+    onJob?.call(id);
+    for (var attempt = 0; attempt < 240; attempt++) {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      final result = _checked(
+        await _client
+            .get(
+              Uri.parse('$_baseUrl/capabilities/import-jobs/$id'),
+              headers: _headers(token),
+            )
+            .timeout(const Duration(seconds: 25)),
+      );
+      if (result['status'] == 'failed' || result['status'] == 'cancelled') {
+        throw StateError(result['message']?.toString() ?? '操作失败');
+      }
+      if (result['status'] == 'completed') {
+        if (result['record'] is Map) {
+          await CapabilityStore.instance.applyRemote(
+            CapabilityRecord.fromJson(result['record']),
+          );
+        }
+        return result;
+      }
+    }
+    throw StateError('等待超时，操作可能仍在服务器进行。请刷新已安装列表后再重试。');
+  }
+
+  Future<void> cancelImportOperation(String id) async {
+    final token = await _requireToken();
+    _checked(await _client.post(Uri.parse('$_baseUrl/capabilities/import-jobs/${Uri.encodeComponent(id)}/cancel'), headers: _headers(token)).timeout(const Duration(seconds: 20)));
+  }
+
+  Future<List<CapabilityRecord>> installedCapabilities() async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .get(Uri.parse('$_baseUrl/capabilities'), headers: _headers(token))
+          .timeout(const Duration(seconds: 25)),
+    );
+    final records = (value['items'] as List? ?? const [])
+        .map(CapabilityRecord.fromJson)
+        .toList();
+    for (final record in records) {
+      await CapabilityStore.instance.applyRemote(record);
+    }
+    return records.where((r) => !r.isDeleted).toList();
+  }
+
+  Future<void> manageInstallation(
+    CapabilityRecord record, {
+    bool? enabled,
+    bool? showInMenu,
+    bool uninstall = false,
+  }) async {
+    final token = await _requireToken();
+    final uri = Uri.parse(
+      '$_baseUrl/capabilities/${Uri.encodeComponent(record.id)}${uninstall ? '?expected_revision=${record.cloudRevision}' : '/visibility'}',
+    );
+    final response = uninstall
+        ? await _client.delete(uri, headers: _headers(token))
+        : await _client.patch(
+            uri,
+            headers: _headers(token),
+            body: jsonEncode({
+              'expected_revision': record.cloudRevision,
+              'enabled': ?enabled,
+              'show_in_menu': ?showInMenu,
+            }),
+          );
+    _checked(response);
+    if (uninstall) {
+      await CapabilityStore.instance.applyRemote(
+        record.copyWith(
+          deletedAt: DateTime.now(),
+          cloudRevision: record.cloudRevision + 1,
+        ),
+      );
+    }
+    await installedCapabilities();
+  }
 
   Map<String, dynamic> _checked(http.Response response) {
     final decoded = _decode(response);

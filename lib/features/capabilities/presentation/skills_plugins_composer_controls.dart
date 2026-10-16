@@ -101,7 +101,7 @@ class _SkillsPluginsComposerControlsState
     final drafts = await _store.drafts();
     if (!mounted || !widget.isReadingSpace) return;
     setState(() {
-      _records = records;
+      _records = records.where((r) => r.enabled).toList();
       _drafts = drafts;
     });
   }
@@ -180,6 +180,18 @@ class _SkillsPluginsComposerControlsState
       setState(() => _pendingDeleteId = record.id);
       return;
     }
+    if (record.origin == 'github') {
+      try {
+        await CapabilityCloudSync.instance.manageInstallation(
+          record,
+          uninstall: true,
+        );
+        await _refresh();
+      } catch (e) {
+        if (mounted) _showStatus('卸载失败：$e');
+      }
+      return;
+    }
     await _store.markDeleted(record.id);
     try {
       if (await CapabilityCloudSync.instance.hasEmailSession) {
@@ -192,6 +204,18 @@ class _SkillsPluginsComposerControlsState
   }
 
   Future<void> _toggleVisibility(CapabilityRecord record) async {
+    if (record.origin == 'github') {
+      try {
+        await CapabilityCloudSync.instance.manageInstallation(
+          record,
+          showInMenu: !record.showInMenu,
+        );
+        await _refresh();
+      } catch (e) {
+        if (mounted) _showStatus('更新失败：$e');
+      }
+      return;
+    }
     await _store.setMenuVisibility(record.id, !record.showInMenu);
     try {
       if (await CapabilityCloudSync.instance.hasEmailSession) {

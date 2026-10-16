@@ -14,6 +14,15 @@ $ChunkSize = 18KB
 $DeployDir = $PSScriptRoot
 $HarnessDir = Split-Path -Parent $DeployDir
 $ManagerPath = Join-Path $DeployDir 'release_manager.sh'
+$serverReleaseSource = Get-Content -Raw -LiteralPath (Join-Path $HarnessDir 'genkit_server/lib/src/release.dart')
+$clientReleaseSource = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $HarnessDir) 'lib/config/release.dart')
+$productRelease = [regex]::Match($serverReleaseSource, "const releaseId = '([^']+)'").Groups[1].Value
+$contractVersion = [regex]::Match($serverReleaseSource, "const apiContractVersion = '([^']+)'").Groups[1].Value
+if (-not $productRelease -or -not $contractVersion -or
+    $clientReleaseSource -notmatch [regex]::Escape("const releaseId = '$productRelease'") -or
+    $clientReleaseSource -notmatch [regex]::Escape("const apiContractVersion = '$contractVersion'")) {
+    throw 'Client and server release/contract identifiers must match before deployment.'
+}
 
 function Invoke-AliyunJson {
     param([Parameter(Mandatory)][string[]]$Arguments)
@@ -199,7 +208,12 @@ try {
     Write-Host $status
     $response = Invoke-WebRequest -Uri $PublicHealthUrl -UseBasicParsing -NoProxy -TimeoutSec 20
     if ([int]$response.StatusCode -ne 200) { throw "Public health check returned $($response.StatusCode)." }
-    Write-Host "DEPLOYMENT_VERIFIED public_health=$($response.StatusCode) release=$releaseId"
+    $health = $response.Content | ConvertFrom-Json
+    if ($health.release_id -ne $productRelease -or $health.api_contract_version -ne $contractVersion) {
+        Invoke-RemoteCommand -Script "set -eu; '$RemoteRoot/release_manager.sh' rollback" -TimeoutSeconds 600 | Write-Host
+        throw 'Release/contract verification failed; automatic rollback requested.'
+    }
+    Write-Host "DEPLOYMENT_VERIFIED public_health=$($response.StatusCode) release=$releaseId product=$productRelease contract=$contractVersion"
 }
 finally {
     try {

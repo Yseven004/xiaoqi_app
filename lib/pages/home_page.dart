@@ -204,12 +204,15 @@ String _agentTaskFailureMessage(
 String _agentToolLabel(String name) => switch (name) {
   'execute_python' => 'Python',
   'execute_skill_script' => '技能脚本',
+  'use_skill' => '读取技能',
+  'read_skill_resource' => '读取技能资料',
   'generate_image' => '图片生成',
   'read_task_material' => '读取附件',
   _ => name,
 };
 
 String _agentProcessEventLabel(Map<String, Object?> event) {
+  if (event['type'] == 'extension_execution_unverified') return '技能脚本尚无成功执行记录';
   final tool = event['temporary_network'] == true
       ? '为${event['capability_name'] ?? '技能'}临时联网'
       : _agentToolLabel(event['tool']?.toString() ?? '工具');
@@ -219,7 +222,8 @@ String _agentProcessEventLabel(Map<String, Object?> event) {
     'image_generation_started' => '开始生成',
     _ => '进行中',
   };
-  return '$tool · $status';
+  final name = event['capability_name']?.toString();
+  return '${name == null ? tool : "$name · $tool"} · $status';
 }
 
 String? _safeAgentTaskDetails(Object error) {
@@ -2342,7 +2346,7 @@ $materialIndex
     if (metadata?['type'] == 'action' && metadata?['id'] == 'create-image') {
       return {'type': 'action', 'id': 'create-image'};
     }
-    if (metadata?['type'] == 'skill') {
+    if (metadata?['type'] == 'skill' || metadata?['type'] == 'plugin') {
       return Map<String, Object?>.from(metadata!);
     }
     final targetId = metadata?['target_id']?.toString();
@@ -2418,6 +2422,7 @@ $materialIndex
       'reasoning_level': reasoningLevel,
       'network_mode': _conversation?.networkMode ?? 'off',
       'capability': ?capability,
+      'selected_capabilities': capability == null || capability['type'] == 'action' ? const [] : capability['selected_capabilities'] ?? [capability],
       'materials': materials,
       'current_turn_text': question.text.trim(), // 本轮真实用户输入
       if (startSessionId == null && startSnapshotId == null)

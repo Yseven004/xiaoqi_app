@@ -7,6 +7,19 @@ import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
 void main() {
+  test(
+    'bounded script errors retain the terminal cause after long progress logs',
+    () {
+      final error = StateError(
+        '${'progress\n' * 1000}FileNotFoundError: python3 -c\nerror: exit 1',
+      );
+      final message = DockerCodeExecutionService.failureDetails(error);
+      expect(message.length, lessThanOrEqualTo(2000));
+      expect(message, contains('FileNotFoundError: python3 -c'));
+      expect(message, endsWith('error: exit 1'));
+    },
+  );
+
   late Directory directory;
   late CloudStore store;
   late File worker;
@@ -76,7 +89,7 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
     },
   );
 
-  test('limits a skill script to one execution per task', () async {
+  test('limits skill scripts to twelve executions per task', () async {
     final service = DockerCodeExecutionService(
       store,
       pythonExecutable: pythonExecutable(),
@@ -97,6 +110,11 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
     );
 
     await runScript();
+    final current = store.get('task/personal/task-code')!;
+    store.put('task/personal/task-code', {
+      ...current.value,
+      'skill_script_runs': 12,
+    }, current.revision);
     await expectLater(runScript(), throwsA(isA<StateError>()));
   });
 
