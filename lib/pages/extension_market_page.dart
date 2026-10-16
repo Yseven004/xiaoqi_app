@@ -382,8 +382,14 @@ const _trialExtensions = [
 ];
 
 List<ExtensionEntry> _entriesFor(ExtensionKind kind) => switch (kind) {
-  ExtensionKind.skill => _curatedExtensions,
-  ExtensionKind.plugin => _pluginExtensions,
+  ExtensionKind.skill => [
+    ..._curatedExtensions,
+    ..._trialExtensions.where((entry) => entry.kind == ExtensionKind.skill),
+  ],
+  ExtensionKind.plugin => [
+    ..._pluginExtensions,
+    ..._trialExtensions.where((entry) => entry.kind == ExtensionKind.plugin),
+  ],
   ExtensionKind.mcp => const [],
 };
 
@@ -473,8 +479,15 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   void _toggleInstalled(ExtensionEntry entry) {
+    if (entry.isTrialCandidate) {
+      unawaited(_showImportDialog(initialUrl: entry.importUrl));
+      return;
+    }
     _openDetail(entry);
   }
+
+  bool _isInstalled(ExtensionEntry entry) =>
+      _installedIds.contains(entry.id) || _installationFor(entry) != null;
 
   List<ExtensionEntry> _visibleEntries() {
     final entries = _kind == ExtensionKind.mcp
@@ -506,7 +519,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           entry: installed == null
               ? entry
               : ExtensionEntry.installed(installed),
-          installed: installed != null,
+          installed: installed != null || _installedIds.contains(entry.id),
           onInstallChanged: (installed) {
             _applyInstalledChange(entry.id, installed);
           },
@@ -535,18 +548,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     }
     return null;
   }
-
-  List<ExtensionEntry> _visibleTrialEntries() => _trialExtensions
-      .where((entry) => entry.kind == _kind)
-      .where((entry) {
-        final matchesQuery =
-            _query.isEmpty ||
-            '${entry.name} ${entry.author} ${entry.description}'
-                .toLowerCase()
-                .contains(_query);
-        return matchesQuery;
-      })
-      .toList(growable: false);
 
   void _openCategory(String title, List<ExtensionEntry> entries) {
     Navigator.of(context).push(
@@ -657,17 +658,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               else if (_filter == ExtensionFilter.created)
                 _buildCreatedEmptyState()
               else ...[
-                if (_filter == ExtensionFilter.curated) ...[
-                  _buildTrialSection(
-                    _visibleTrialEntries(),
-                    constraints.maxWidth - horizontal * 2,
-                  ),
-                  const SizedBox(height: 36),
-                ],
                 _buildCollections(),
                 const SizedBox(height: 40),
                 _buildCategorySection(
-                  _filter == ExtensionFilter.installed ? '已安装' : '精选预览 · 尚未上架',
+                  _filter == ExtensionFilter.installed ? '已安装' : '精选推荐',
                   _visibleEntries(),
                   constraints.maxWidth - horizontal * 2,
                 ),
@@ -676,50 +670,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildTrialSection(List<ExtensionEntry> entries, double contentWidth) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          '推荐试用',
-          style: TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          '公开 GitHub 样本，先检查再安装；安装后可在对话中选中验证。',
-          style: TextStyle(color: Color(0xFF66738D), fontSize: 16),
-        ),
-        const SizedBox(height: 16),
-        if (entries.isEmpty)
-          _buildNoResults()
-        else
-          GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: entries.length,
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: contentWidth < 680 ? 1 : 2,
-              mainAxisExtent: 122,
-              crossAxisSpacing: 16,
-              mainAxisSpacing: 14,
-            ),
-            itemBuilder: (context, index) {
-              final entry = entries[index];
-              return _ExtensionCard(
-                entry: entry,
-                installed:
-                    _installationFor(entry) != null ||
-                    _installedIds.contains(entry.id),
-                onOpen: () => _openDetail(entry),
-                onToggleInstall: () =>
-                    unawaited(_showImportDialog(initialUrl: entry.importUrl)),
-              );
-            },
-          ),
-      ],
     );
   }
 
@@ -985,7 +935,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             ),
             itemBuilder: (context, index) => _ExtensionCard(
               entry: entries[index],
-              installed: _installedIds.contains(entries[index].id),
+              installed: _isInstalled(entries[index]),
               onOpen: () => _openDetail(entries[index]),
               onToggleInstall: () => _toggleInstalled(entries[index]),
             ),

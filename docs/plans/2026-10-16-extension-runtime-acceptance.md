@@ -55,9 +55,9 @@ MCP（含插件内 MCP）、OAuth、hooks、commands、agents、客户端专有�
 | [Claude frontend-design 插件](https://github.com/anthropics/claude-plugins-official/tree/8f814f49002ff824e8a9ba43cf96112dc7f5948d/plugins/frontend-design) | `8f814f49002ff824e8a9ba43cf96112dc7f5948d` | 技能内 LICENSE.txt 为 Apache-2.0；验证插件技能加载，不代表 Claude 专有功能可用 |
 | [Anthropic webapp-testing](https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/webapp-testing) | `dbd4588f9e1033efb41dad4bef2f7947c8993d44` | Apache-2.0；仅验证已安装 `with_server.py` 的本地服务生命周期，不声称浏览器自动化可用 |
 
-## App 推荐试用样本
+## App 精选推荐样本
 
-2026-10-16 根据用户的教育 / 学习场景，在扩展市场加入以下真实公开来源的“推荐试用”入口。入口只预填 GitHub 地址，不代表已安装；用户点击后仍由服务端检查、固定 commit，并在兼容检查通过后安装。
+2026-10-16 根据用户的教育 / 学习场景，在扩展市场“精选”目录加入以下真实公开来源。它们不是预装包；用户点击精选卡片后仍由服务端检查、固定 commit，并在兼容检查通过后安装。
 
 | 样本 | 用途 | 许可证 / 兼容边界 |
 | --- | --- | --- |
