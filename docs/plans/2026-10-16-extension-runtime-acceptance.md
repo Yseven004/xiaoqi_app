@@ -55,6 +55,19 @@ MCP（含插件内 MCP）、OAuth、hooks、commands、agents、客户端专有�
 | [Claude frontend-design 插件](https://github.com/anthropics/claude-plugins-official/tree/8f814f49002ff824e8a9ba43cf96112dc7f5948d/plugins/frontend-design) | `8f814f49002ff824e8a9ba43cf96112dc7f5948d` | 技能内 LICENSE.txt 为 Apache-2.0；验证插件技能加载，不代表 Claude 专有功能可用 |
 | [Anthropic webapp-testing](https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/webapp-testing) | `dbd4588f9e1033efb41dad4bef2f7947c8993d44` | Apache-2.0；仅验证已安装 `with_server.py` 的本地服务生命周期，不声称浏览器自动化可用 |
 
+## App 推荐试用样本
+
+2026-10-16 根据用户的教育 / 学习场景，在扩展市场加入以下真实公开来源的“推荐试用”入口。入口只预填 GitHub 地址，不代表已安装；用户点击后仍由服务端检查、固定 commit，并在兼容检查通过后安装。
+
+| 样本 | 用途 | 许可证 / 兼容边界 |
+| --- | --- | --- |
+| [K-Dense paper-lookup](https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/paper-lookup) | 检索论文、DOI、摘要和开放获取来源；适合验证网络脚本及可核对来源 | MIT；需要网络和 Python 标准库脚本，不需要账号密钥；实际 API 限流仍以运行时结果为准 |
+| [K-Dense literature-review](https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/literature-review) | 按综述流程整理检索、筛选和证据边界 | MIT；需要 Python `requests` 和网络；PDF 导出、可选 AI 步骤等额外能力不承诺可用 |
+| [K-Dense Scientific Agent Skills](https://github.com/K-Dense-AI/scientific-agent-skills) | 技能型插件集合，包含论文检索、文献综述、科学写作等学习 / 科研技能 | MIT；插件整体可能出现部分支持，MCP 或未满足的外部依赖不会执行；建议先安装单个技能再试插件集合 |
+| [K-Dense scientific-writing](https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/scientific-writing) | 将学习笔记整理成有论点、证据和待核实项的学术表达 | MIT；主要是文本技能，结果仍需用户核对来源 |
+
+没有把 Anthropic PDF 技能放进精选试用入口：其 `SKILL.md` 标注为自定义限制条款，适合用户自行导入测试，但本项目不把它作为可再分发的精选样本。
+
 最初曾用 PDF 技能的标准库脚本验证执行链路；核对 LICENSE.txt 后发现其为自定义限制条款，后续可重复验收改用上表 Apache-2.0 样本，不收录/分发该 PDF 包。
 
 依赖样本：PyPI `packaging==24.2`、npm `is-number==7.0.0`，准备后断网导入使用；另验证 TypeScript 数值结果。混合 MCP 插件、多技能、同名、越权、取消、失败更新、重启与危险包使用可控自动化 fixtures，不连接真实 MCP。

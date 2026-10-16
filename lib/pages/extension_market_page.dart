@@ -41,6 +41,7 @@ class ExtensionEntry {
     required this.examples,
     this.version = '1.0.0',
     this.repository = 'xiaoqi/paper-reader',
+    this.importUrl,
     this.installation,
   });
 
@@ -57,7 +58,10 @@ class ExtensionEntry {
   final List<String> examples;
   final String version;
   final String repository;
+  final String? importUrl;
   final CapabilityRecord? installation;
+
+  bool get isTrialCandidate => importUrl != null;
 
   factory ExtensionEntry.installed(CapabilityRecord r) => ExtensionEntry(
     id: r.id,
@@ -301,6 +305,82 @@ const _pluginExtensions = [
   ),
 ];
 
+// These are real public repositories selected for manual end-to-end testing.
+// They are intentionally not presented as installed marketplace entries: the
+// user still has to inspect and install the fixed commit through the server.
+const _trialExtensions = [
+  ExtensionEntry(
+    id: 'trial-paper-lookup',
+    kind: ExtensionKind.skill,
+    name: '论文检索',
+    author: 'K-Dense',
+    description: '从多个学术数据库查论文、DOI、摘要和开放获取全文，并保留来源。',
+    iconAsset: 'assets/icons/capabilities/web_search.svg',
+    iconBackground: Color(0xFFEFF6FF),
+    authorBio: 'K-Dense Scientific Agent Skills 中的研究检索技能。',
+    suitableFor: '论文、课程作业、研究主题',
+    features: _quickReadFeatures,
+    examples: ['请检索近五年关于主动学习的论文，列出标题、年份、DOI 和可公开获取的全文链接。'],
+    version: '2.4',
+    repository:
+        'K-Dense-AI/scientific-agent-skills/tree/main/skills/paper-lookup',
+    importUrl:
+        'https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/paper-lookup',
+  ),
+  ExtensionEntry(
+    id: 'trial-literature-review',
+    kind: ExtensionKind.skill,
+    name: '文献综述',
+    author: 'K-Dense',
+    description: '按系统综述、范围综述或叙述综述流程整理研究问题、检索和证据边界。',
+    iconAsset: 'assets/icons/capabilities/help_outline.svg',
+    iconBackground: Color(0xFFFFF8E8),
+    authorBio: 'K-Dense Scientific Agent Skills 中的文献综述技能。',
+    suitableFor: '课程论文、研究综述、选题调研',
+    features: _quickReadFeatures,
+    examples: ['请围绕“生成式 AI 对学习效果的影响”设计一个可复核的文献综述检索和筛选方案。'],
+    version: '1.11',
+    repository:
+        'K-Dense-AI/scientific-agent-skills/tree/main/skills/literature-review',
+    importUrl:
+        'https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/literature-review',
+  ),
+  ExtensionEntry(
+    id: 'trial-scientific-agent-skills',
+    kind: ExtensionKind.plugin,
+    name: 'Scientific Agent Skills',
+    author: 'K-Dense',
+    description: '一套面向科研和学习的技能插件，包含论文检索、文献综述、科学写作和数据分析。',
+    iconAsset: 'assets/icons/capabilities/capability_plugin_document.svg',
+    iconBackground: Color(0xFFEFF9F1),
+    authorBio: 'K-Dense 的开源科学研究 Agent Skills 插件集合。',
+    suitableFor: '论文阅读、课程学习、科研分析',
+    features: _quickReadFeatures,
+    examples: ['请先使用可用的研究技能，帮我把“如何提升大学生的主动学习能力”拆成检索、比较和总结步骤。'],
+    version: '2.72.0',
+    repository: 'K-Dense-AI/scientific-agent-skills',
+    importUrl: 'https://github.com/K-Dense-AI/scientific-agent-skills',
+  ),
+  ExtensionEntry(
+    id: 'trial-scientific-writing',
+    kind: ExtensionKind.skill,
+    name: '科学写作',
+    author: 'K-Dense',
+    description: '把学习或研究材料整理成有证据边界、结构清晰的学术表达。',
+    iconAsset: 'assets/icons/capabilities/description.svg',
+    iconBackground: Color(0xFFEFF9F1),
+    authorBio: 'K-Dense Scientific Agent Skills 中的科学写作技能。',
+    suitableFor: '读书笔记、课程论文、研究摘要',
+    features: _quickReadFeatures,
+    examples: ['请根据下面的学习笔记，整理出研究问题、主要论点、证据和仍需核实的部分。'],
+    version: 'GitHub main',
+    repository:
+        'K-Dense-AI/scientific-agent-skills/tree/main/skills/scientific-writing',
+    importUrl:
+        'https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/scientific-writing',
+  ),
+];
+
 List<ExtensionEntry> _entriesFor(ExtensionKind kind) => switch (kind) {
   ExtensionKind.skill => _curatedExtensions,
   ExtensionKind.plugin => _pluginExtensions,
@@ -419,11 +499,14 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   void _openDetail(ExtensionEntry entry) {
+    final installed = _installationFor(entry);
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => ExtensionDetailPage(
-          entry: entry,
-          installed: _installedIds.contains(entry.id),
+          entry: installed == null
+              ? entry
+              : ExtensionEntry.installed(installed),
+          installed: installed != null,
           onInstallChanged: (installed) {
             _applyInstalledChange(entry.id, installed);
           },
@@ -431,6 +514,39 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       ),
     );
   }
+
+  CapabilityRecord? _installationFor(ExtensionEntry entry) {
+    if (entry.installation != null) return entry.installation;
+    if (_installedIds.contains(entry.id)) return null;
+    final requestedUrl = entry.importUrl;
+    if (requestedUrl == null) return null;
+    for (final record in _remoteEntries) {
+      final installation = record.installation;
+      if (installation == null) continue;
+      final sourceUrl =
+          installation.source['requested_url']?.toString() ??
+          installation.source['source_url']?.toString() ??
+          '';
+      if (sourceUrl == requestedUrl ||
+          sourceUrl.startsWith(requestedUrl) ||
+          requestedUrl.startsWith(sourceUrl)) {
+        return installation;
+      }
+    }
+    return null;
+  }
+
+  List<ExtensionEntry> _visibleTrialEntries() => _trialExtensions
+      .where((entry) => entry.kind == _kind)
+      .where((entry) {
+        final matchesQuery =
+            _query.isEmpty ||
+            '${entry.name} ${entry.author} ${entry.description}'
+                .toLowerCase()
+                .contains(_query);
+        return matchesQuery;
+      })
+      .toList(growable: false);
 
   void _openCategory(String title, List<ExtensionEntry> entries) {
     Navigator.of(context).push(
@@ -501,10 +617,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     await _showImportDialog();
   }
 
-  Future<void> _showImportDialog() async {
+  Future<void> _showImportDialog({String? initialUrl}) async {
     await showDialog<void>(
       context: context,
-      builder: (_) => const _ImportInstallationDialog(),
+      builder: (_) => _ImportInstallationDialog(initialUrl: initialUrl),
     );
     await _restoreInstalled();
     if (mounted) setState(() => _filter = ExtensionFilter.installed);
@@ -541,6 +657,13 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               else if (_filter == ExtensionFilter.created)
                 _buildCreatedEmptyState()
               else ...[
+                if (_filter == ExtensionFilter.curated) ...[
+                  _buildTrialSection(
+                    _visibleTrialEntries(),
+                    constraints.maxWidth - horizontal * 2,
+                  ),
+                  const SizedBox(height: 36),
+                ],
                 _buildCollections(),
                 const SizedBox(height: 40),
                 _buildCategorySection(
@@ -553,6 +676,50 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildTrialSection(List<ExtensionEntry> entries, double contentWidth) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '推荐试用',
+          style: TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          '公开 GitHub 样本，先检查再安装；安装后可在对话中选中验证。',
+          style: TextStyle(color: Color(0xFF66738D), fontSize: 16),
+        ),
+        const SizedBox(height: 16),
+        if (entries.isEmpty)
+          _buildNoResults()
+        else
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: entries.length,
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: contentWidth < 680 ? 1 : 2,
+              mainAxisExtent: 122,
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 14,
+            ),
+            itemBuilder: (context, index) {
+              final entry = entries[index];
+              return _ExtensionCard(
+                entry: entry,
+                installed:
+                    _installationFor(entry) != null ||
+                    _installedIds.contains(entry.id),
+                onOpen: () => _openDetail(entry),
+                onToggleInstall: () =>
+                    unawaited(_showImportDialog(initialUrl: entry.importUrl)),
+              );
+            },
+          ),
+      ],
     );
   }
 
@@ -887,8 +1054,9 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 enum _MarketAction { create, import }
 
 class _ImportInstallationDialog extends StatefulWidget {
-  const _ImportInstallationDialog({this.update});
+  const _ImportInstallationDialog({this.update, this.initialUrl});
   final CapabilityRecord? update;
+  final String? initialUrl;
   @override
   State<_ImportInstallationDialog> createState() =>
       _ImportInstallationDialogState();
@@ -902,18 +1070,31 @@ class _ImportInstallationDialogState extends State<_ImportInstallationDialog> {
   String _progress = '';
   String? _jobId;
 
-  void _onJob(String id) { if (mounted) setState(() => _jobId = id); }
+  void _onJob(String id) {
+    if (mounted) setState(() => _jobId = id);
+  }
+
   Future<void> _cancel() async {
-    if (!_busy) { Navigator.pop(context); return; }
+    if (!_busy) {
+      Navigator.pop(context);
+      return;
+    }
     if (_jobId == null) return;
     setState(() => _progress = '正在取消，请等待服务器停止操作…');
-    try { await CapabilityCloudSync.instance.cancelImportOperation(_jobId!); }
-    catch (e) { if (mounted) setState(() => _error = '取消请求失败：$e'); }
+    try {
+      await CapabilityCloudSync.instance.cancelImportOperation(_jobId!);
+    } catch (e) {
+      if (mounted) setState(() => _error = '取消请求失败：$e');
+    }
   }
+
   @override
   void initState() {
     super.initState();
-    _url.text = widget.update?.source['requested_url']?.toString() ?? '';
+    _url.text =
+        widget.initialUrl ??
+        widget.update?.source['requested_url']?.toString() ??
+        '';
   }
 
   @override
@@ -954,14 +1135,18 @@ class _ImportInstallationDialogState extends State<_ImportInstallationDialog> {
       _progress = '安装中：准备依赖、锁定版本；成功前不会显示为已安装。';
     });
     try {
-      await CapabilityCloudSync.instance.runImportOperation({
-        'inspection_id': _inspection!['id'],
-        'candidate_id': candidate['id'],
-        if (widget.update != null) 'update_id': widget.update!.id,
-        if (widget.update != null)
-          'expected_revision': widget.update!.cloudRevision,
-      }, install: true, onJob: _onJob);
-      if (mounted) Navigator.pop(context);
+      await CapabilityCloudSync.instance.runImportOperation(
+        {
+          'inspection_id': _inspection!['id'],
+          'candidate_id': candidate['id'],
+          if (widget.update != null) 'update_id': widget.update!.id,
+          if (widget.update != null)
+            'expected_revision': widget.update!.cloudRevision,
+        },
+        install: true,
+        onJob: _onJob,
+      );
+      if (mounted) Navigator.pop(context, true);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {
@@ -1258,7 +1443,11 @@ class _ExtensionCard extends StatelessWidget {
                 child: Align(
                   alignment: Alignment.centerRight,
                   child: _CardActionButton(
-                    label: installed ? '卸载${entry.name}' : '安装${entry.name}',
+                    label: installed
+                        ? '卸载${entry.name}'
+                        : entry.isTrialCandidate
+                        ? '检查${entry.name}'
+                        : '安装${entry.name}',
                     onTap: onToggleInstall,
                     asset: installed
                         ? 'assets/icons/extensions/market_check.svg'
@@ -1439,7 +1628,19 @@ class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
   Future<void> _toggleInstall() async {
     final record = widget.entry.installation;
     if (record == null) {
-      AppToast.show(context, '精选预览尚未上架，请从 GitHub 导入真实扩展');
+      final importUrl = widget.entry.importUrl;
+      if (importUrl == null) {
+        AppToast.show(context, '精选预览尚未上架，请从 GitHub 导入真实扩展');
+        return;
+      }
+      final installed = await showDialog<bool>(
+        context: context,
+        builder: (_) => _ImportInstallationDialog(initialUrl: importUrl),
+      );
+      if (installed == true && mounted) {
+        widget.onInstallChanged(true);
+        Navigator.pop(context);
+      }
       return;
     }
     final operation = await showDialog<String>(
@@ -1763,8 +1964,12 @@ class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
   }
 
   Widget _installButton() {
+    final canImport =
+        widget.entry.installation == null && widget.entry.importUrl != null;
     return FilledButton(
-      onPressed: widget.entry.installation == null ? null : _toggleInstall,
+      onPressed: widget.entry.installation == null && !canImport
+          ? null
+          : _toggleInstall,
       style: FilledButton.styleFrom(
         backgroundColor: _installed
             ? const Color(0xFFEAF7EF)
@@ -1775,7 +1980,13 @@ class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         textStyle: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
       ),
-      child: Text(widget.entry.installation == null ? '尚未上架' : '管理安装'),
+      child: Text(
+        widget.entry.installation == null
+            ? canImport
+                  ? '检查并安装'
+                  : '尚未上架'
+            : '管理安装',
+      ),
     );
   }
 

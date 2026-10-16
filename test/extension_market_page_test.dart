@@ -17,10 +17,13 @@ void main() {
 
     expect(find.text('扩展市场'), findsOneWidget);
     expect(find.text('论文精读'), findsWidgets);
+    expect(find.text('推荐试用'), findsOneWidget);
+    expect(find.text('论文检索'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     await tester.tap(find.text('插件'));
     await tester.pump();
     expect(find.text('论文精读工作台'), findsWidgets);
+    expect(find.text('Scientific Agent Skills'), findsOneWidget);
 
     await tester.tap(find.text('我创建的'));
     await tester.pump();
