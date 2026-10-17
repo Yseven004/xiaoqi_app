@@ -3,6 +3,7 @@ param(
     [string]$Region = 'cn-hongkong',
     [string]$InstanceId = 'i-j6cdji1nji415swaliji',
     [string]$Profile = 'xiaoqi-remote-deploy',
+    [string]$Endpoint = 'ecs.cn-hongkong.aliyuncs.com',
     [string]$PublicHealthUrl = 'https://47-76-60-77.sslip.io/health'
 )
 
@@ -27,8 +28,9 @@ if (-not $productRelease -or -not $contractVersion -or
 function Invoke-AliyunJson {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
+    $cliArguments = @($Arguments + @('--endpoint', $Endpoint))
     for ($attempt = 1; $attempt -le 4; $attempt++) {
-        $output = & aliyun @Arguments 2>&1 | Out-String
+        $output = & aliyun @cliArguments 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0) {
             $parsed = $output | ConvertFrom-Json
             if (-not ($parsed.PSObject.Properties.Name -contains 'message' -and $parsed.PSObject.Properties.Name -contains 'schemaVersion')) {
@@ -206,14 +208,14 @@ try {
     Write-Host '[5/5] Verifying the running service and restore point'
     $status = Invoke-RemoteCommand -Script "set -eu; '$RemoteRoot/release_manager.sh' status" -TimeoutSeconds 180
     Write-Host $status
-    $response = Invoke-WebRequest -Uri $PublicHealthUrl -UseBasicParsing -NoProxy -TimeoutSec 20
-    if ([int]$response.StatusCode -ne 200) { throw "Public health check returned $($response.StatusCode)." }
-    $health = $response.Content | ConvertFrom-Json
+    $healthBody = & curl.exe --noproxy '*' --fail --silent --show-error --max-time 20 --url $PublicHealthUrl 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Public health check failed:`n$healthBody" }
+    $health = $healthBody | ConvertFrom-Json
     if ($health.release_id -ne $productRelease -or $health.api_contract_version -ne $contractVersion) {
         Invoke-RemoteCommand -Script "set -eu; '$RemoteRoot/release_manager.sh' rollback" -TimeoutSeconds 600 | Write-Host
         throw 'Release/contract verification failed; automatic rollback requested.'
     }
-    Write-Host "DEPLOYMENT_VERIFIED public_health=$($response.StatusCode) release=$releaseId product=$productRelease contract=$contractVersion"
+    Write-Host "DEPLOYMENT_VERIFIED public_health=200 release=$releaseId product=$productRelease contract=$contractVersion"
 }
 finally {
     try {

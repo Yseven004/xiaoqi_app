@@ -230,10 +230,7 @@ class GlmBookMetadataProvider implements BookMetadataProvider {
            ),
        _model =
            model ??
-           const String.fromEnvironment(
-             'BOOK_GLM_MODEL',
-             defaultValue: '',
-           ),
+           const String.fromEnvironment('BOOK_GLM_MODEL', defaultValue: ''),
        _fallbackModel =
            fallbackModel ??
            const String.fromEnvironment(
@@ -729,8 +726,9 @@ class TanshuProxyBookMetadataProvider implements BookMetadataProvider {
     if (kIsWeb) return '';
     try {
       return (await const MethodChannel(
-        'xiaoqi_app/runtime_config',
-      ).invokeMethod<String>(method))?.trim() ?? '';
+            'xiaoqi_app/runtime_config',
+          ).invokeMethod<String>(method))?.trim() ??
+          '';
     } on MissingPluginException {
       return '';
     } on PlatformException {
@@ -969,12 +967,6 @@ BookMetadataPlugin resolveBookMetadataPlugin() {
     defaultValue: 'tanshu_proxy',
   );
   if (useMock) return _MockBookMetadataPlugin();
-  if (provider == 'deepseek_cloud') {
-    return DeepSeekCloudBookMetadataPlugin();
-  }
-  if (provider == 'deepseek_direct') {
-    return StableDeepSeekBookMetadataPlugin();
-  }
   if (provider == 'tanshu_direct') {
     return CompositeBookMetadataPlugin(glm: TanshuBookMetadataProvider());
   }
@@ -1046,10 +1038,7 @@ class DeepSeekDirectBookMetadataPlugin implements BookMetadataPlugin {
            ),
        _model =
            model ??
-           const String.fromEnvironment(
-             'DEEPSEEK_MODEL',
-             defaultValue: '',
-           ),
+           const String.fromEnvironment('DEEPSEEK_MODEL', defaultValue: ''),
        _httpClient = httpClient ?? http.Client(),
        _timeout = timeout ?? const Duration(seconds: 35);
 
@@ -1331,89 +1320,6 @@ Map<String, dynamic> _deepSeekOutputObject(Object? response) {
 bool _deepSeekBool(Object? value) {
   if (value == true) return true;
   return value?.toString().trim().toLowerCase() == 'true';
-}
-
-/// Uses the existing Singapore book-recognition function, whose server-side
-/// ISBN resolver is backed by DeepSeek. The provider key never enters Flutter.
-class DeepSeekCloudBookMetadataPlugin implements BookMetadataPlugin {
-  DeepSeekCloudBookMetadataPlugin({BookRecognitionRepository? repository})
-    : _repository =
-          repository ??
-          CloudBookRecognitionRepository(
-            isbnEndpoint: ApiConfig.bookIsbnEndpoint,
-            appSecret: ApiConfig.appSecret,
-          );
-
-  final BookRecognitionRepository _repository;
-
-  @override
-  Future<BookMetadataLookupResult> lookupByIsbn(String value) async {
-    final isbn = Isbn.normalize(value);
-    if (isbn == null) {
-      return BookMetadataLookupResult(
-        book: const BookRecord(title: '待确认书籍'),
-        exactIsbnMatch: false,
-        missingFields: const ['ISBN'],
-        retryableError: '这串数字不是有效的图书条形码',
-      );
-    }
-    try {
-      final candidates = await _repository.lookupIsbn(isbn);
-      final exact = candidates.where(
-        (candidate) =>
-            candidate.book.isbn13 == isbn || candidate.book.isbn10 == isbn,
-      );
-      final candidate = exact.firstOrNull ?? candidates.firstOrNull;
-      if (candidate == null) {
-        return BookMetadataLookupResult(
-          book: BookRecord(
-            title: '待确认书籍',
-            isbn13: isbn,
-            source: 'isbn_unresolved',
-            sourceId: 'isbn-$isbn',
-          ),
-          exactIsbnMatch: false,
-          missingFields: const ['书名', '作者', '出版社'],
-          retryableError: 'DeepSeek 书目服务没有返回精确资料',
-        );
-      }
-      return BookMetadataLookupResult(
-        book: candidate.book,
-        exactIsbnMatch: exact.isNotEmpty,
-        missingFields: [
-          if (candidate.book.title.trim().isEmpty) '书名',
-          if (candidate.book.authors.isEmpty) '作者',
-          if (candidate.book.publisher.trim().isEmpty) '出版社',
-        ],
-        retryableError: exact.isEmpty ? '返回资料需要人工核对' : null,
-        diagnostics: const {'provider': 'deepseek_cloud'},
-      );
-    } on BookRecognitionException catch (error) {
-      return BookMetadataLookupResult(
-        book: BookRecord(
-          title: '待确认书籍',
-          isbn13: isbn,
-          source: 'isbn_unresolved',
-          sourceId: 'isbn-$isbn',
-        ),
-        exactIsbnMatch: false,
-        missingFields: const ['书名', '作者', '出版社'],
-        retryableError: error.message,
-      );
-    } catch (_) {
-      return BookMetadataLookupResult(
-        book: BookRecord(
-          title: '待确认书籍',
-          isbn13: isbn,
-          source: 'isbn_unresolved',
-          sourceId: 'isbn-$isbn',
-        ),
-        exactIsbnMatch: false,
-        missingFields: const ['书名', '作者', '出版社'],
-        retryableError: 'DeepSeek 书目服务暂时不可用',
-      );
-    }
-  }
 }
 
 /// Temporary diagnostic mode for comparing direct catalogue reachability on a

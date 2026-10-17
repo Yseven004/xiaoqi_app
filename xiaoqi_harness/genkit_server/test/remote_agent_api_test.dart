@@ -21,6 +21,7 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/api.dart';
+import 'package:xiaoqi_genkit_server/src/release.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
 class _StreamingRuntime
@@ -181,14 +182,14 @@ void main() {
       url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
       headers: () async => {
         'authorization': 'Bearer $ownerToken',
-        'x-xiaoqi-contract': '3',
+        'x-xiaoqi-contract': apiContractVersion,
       },
     );
     otherTenantAgent = remoteAgent<Map<String, dynamic>>(
       url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
       headers: () async => {
         'authorization': 'Bearer $otherTenantToken',
-        'x-xiaoqi-contract': '3',
+        'x-xiaoqi-contract': apiContractVersion,
       },
     );
   });
@@ -367,7 +368,7 @@ void main() {
           );
           request.headers
             ..contentType = ContentType.json
-            ..set('x-xiaoqi-contract', '3')
+            ..set('x-xiaoqi-contract', apiContractVersion)
             ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
           request.write(
             jsonEncode({
@@ -421,7 +422,7 @@ void main() {
       );
       request.headers
         ..contentType = ContentType.json
-        ..set('x-xiaoqi-contract', '3')
+        ..set('x-xiaoqi-contract', apiContractVersion)
         ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
       request.write(jsonEncode({'mode': 'off'}));
       final response = await request.close();
@@ -460,7 +461,7 @@ void main() {
         );
         request.headers
           ..contentType = ContentType.json
-          ..set('x-xiaoqi-contract', '3')
+          ..set('x-xiaoqi-contract', apiContractVersion)
           ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
         request.write(
           jsonEncode({

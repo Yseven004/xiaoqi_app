@@ -12,7 +12,7 @@ import 'package:genkit_openai/genkit_openai.dart';
 import 'package:path/path.dart' as p;
 import 'package:schemantic/schemantic.dart';
 
-import 'mimo_web_search_service.dart';
+import 'deepseek_web_service.dart';
 import 'image_service.dart';
 import 'code_execution_service.dart';
 import 'skill_tool_recovery_middleware.dart';
@@ -340,7 +340,7 @@ final _webSearchSchema = _objectToolSchema(
     'query': {
       'type': 'string',
       'minLength': 1,
-      'maxLength': 2000,
+      'maxLength': 128,
       'description': '只发送完成检索所需的最短查询词。',
     },
     'skill_id': {'type': 'string', 'minLength': 1, 'maxLength': 128},
@@ -948,19 +948,15 @@ class GenkitXiaoqiAgentRuntime
     final loadedSkills = <String>{};
     final successfulScripts = <String>{};
     final taskMaterials = _materials(request['materials']);
-    final searchModel =
-        Platform.environment['XIAOQI_MIMO_SEARCH_MODEL']?.trim() ??
-        'mimo-v2.6-flash';
-    final searchApiKey = Platform.environment['MIMO_API_KEY']?.trim() ?? '';
-    final searchAvailable =
-        searchApiKey.isNotEmpty &&
-        MimoWebSearchService.supportedModels.contains(searchModel);
-    final webSearch = MimoWebSearchService(
+    final searchApiKey = Platform.environment['DEEPSEEK_API_KEY']?.trim() ?? '';
+    final searchAvailable = searchApiKey.isNotEmpty;
+    final webSearch = DeepSeekWebSearchService(
       apiKey: searchApiKey,
-      model: searchModel,
-      baseUrl: Platform.environment['MIMO_BASE_URL']?.trim().isNotEmpty == true
-          ? Platform.environment['MIMO_BASE_URL']!.trim()
-          : 'https://api.xiaomimimo.com/v1',
+      baseUrl:
+          Platform.environment['DEEPSEEK_SEARCH_BASE_URL']?.trim().isNotEmpty ==
+              true
+          ? Platform.environment['DEEPSEEK_SEARCH_BASE_URL']!.trim()
+          : 'https://api.deepseek.com/v1',
     );
     final ai = Genkit(
       promptDir: null,
@@ -1748,8 +1744,8 @@ class GenkitXiaoqiAgentRuntime
         ? '可用（Docker 隔离执行）'
         : '不可用（服务端没有 Docker 沙箱执行桥接文件）';
     final searchStatus = searchAvailable
-        ? '已配置 MiMo Web Search（实际插件状态以接口响应为准）'
-        : '不可用（服务端 MiMo 搜索账号未配置或搜索模型不受支持）';
+        ? '已配置 DeepSeek Search/Fetch（实际接口状态以响应为准）'
+        : '不可用（服务端未配置 DEEPSEEK_API_KEY）';
     final system = StringBuffer(
       '你是小七，一个由当前所选语言模型驱动的 AI 助手。请使用中文回答，遵循用户最新要求。'
       '用户询问你的身份、资料、能力或限制时，必须依据下面这份服务端实时目录如实回答；'

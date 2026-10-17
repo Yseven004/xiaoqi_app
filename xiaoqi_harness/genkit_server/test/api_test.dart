@@ -8,6 +8,7 @@ import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/api.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
+import 'package:xiaoqi_genkit_server/src/release.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
 class _FakeRuntime implements XiaoqiAgentRuntime {
@@ -117,7 +118,7 @@ void main() {
       method,
       Uri.parse('http://localhost$path'),
       headers: {
-        'x-xiaoqi-contract': '3',
+        'x-xiaoqi-contract': apiContractVersion,
         if (auth) 'authorization': 'Bearer $token',
         if (body != null) 'content-type': 'application/json',
       },
@@ -145,7 +146,7 @@ void main() {
       final health = await call('GET', '/health');
       expect(
         jsonDecode(await health.readAsString())['api_contract_version'],
-        '3',
+        apiContractVersion,
       );
     },
   );

@@ -730,6 +730,7 @@ class _MetadataPill extends StatelessWidget {
 
 String _providerLabel(String provider) => switch (provider) {
   'glm_web_search' => '联网书目',
+  'deepseek_search_fetch' => 'DeepSeek Search/Fetch',
   'tanshu_isbn' => '探数 ISBN',
   'tanshu_proxy' => '探数代理',
   'jisu_isbn' => '极速数据',

@@ -40,11 +40,17 @@ import 'package:uuid/uuid.dart';
 import 'agent_runtime.dart';
 import 'chat_completion_service.dart';
 import 'code_execution_service.dart';
+import 'deepseek_web_service.dart';
 import 'image_service.dart';
 import 'mcp_connection_service.dart';
 import 'store.dart';
 
 const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
+final _deepSeekApiKey = Platform.environment['DEEPSEEK_API_KEY'] ?? '';
+final _deepSeekBaseUrl =
+    Platform.environment['DEEPSEEK_SEARCH_BASE_URL']?.trim().isNotEmpty == true
+    ? Platform.environment['DEEPSEEK_SEARCH_BASE_URL']!.trim()
+    : 'https://api.deepseek.com/v1';
 
 String _networkMode(Object? value) => switch (value?.toString()) {
   'on' => 'on',
@@ -317,8 +323,18 @@ String _redactTaskError(String value) {
 }
 
 class XiaoqiApi {
-  XiaoqiApi(this.store, this.runtime, {ChatCompletionService? chatCompletions})
-    : chatCompletions = chatCompletions ?? ChatCompletionService() {
+  XiaoqiApi(
+    this.store,
+    this.runtime, {
+    ChatCompletionService? chatCompletions,
+    DeepSeekWebFetchService? webFetch,
+  }) : chatCompletions = chatCompletions ?? ChatCompletionService(),
+       webFetch =
+           webFetch ??
+           DeepSeekWebFetchService(
+             apiKey: _deepSeekApiKey,
+             baseUrl: _deepSeekBaseUrl,
+           ) {
     imports = CapabilityImportService(
       store,
       prepareDependencies: DockerCodeExecutionService(
@@ -350,6 +366,7 @@ class XiaoqiApi {
   final CloudStore store;
   final XiaoqiAgentRuntime runtime;
   final ChatCompletionService chatCompletions;
+  final DeepSeekWebFetchService webFetch;
   late final CapabilityImportService imports;
   final _importCancellations = <String, CancellationController>{};
   late final GenkitRouter _agentRouter;
@@ -539,6 +556,10 @@ class XiaoqiApi {
         '/v1/chat/completions',
         (request) =>
             _authenticated(request, (_) => chatCompletions.handle(request)),
+      )
+      ..post(
+        '/v1/web/fetch',
+        (request) => _authenticated(request, (_) => _fetchWebPage(request)),
       )
       ..get(
         '/v1/agent/tasks/<id>',
@@ -1426,6 +1447,23 @@ class XiaoqiApi {
       return _json({'ok': true, 'cloud_revision': saved.revision});
     } on Object {
       return _error('同步删除标记失败', 503);
+    }
+  }
+
+  Future<Response> _fetchWebPage(Request request) async {
+    try {
+      final body = await _body(request, 16 * 1024);
+      return _json(await webFetch.fetch(body['url']?.toString() ?? ''));
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on DeepSeekWebException catch (error) {
+      final status = error.statusCode;
+      final normalizedStatus = status == null || status < 400 || status > 599
+          ? 502
+          : status;
+      return _error(error.message, normalizedStatus);
+    } on Object {
+      return _error('DeepSeek 网页抓取失败，请稍后重试', 502);
     }
   }
 

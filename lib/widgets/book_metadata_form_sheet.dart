@@ -294,6 +294,7 @@ class _SourceTag extends StatelessWidget {
 
 String _sourceLabel(String provider) => switch (provider) {
   'glm_web_search' => '联网书目核对',
+  'deepseek_search_fetch' => 'DeepSeek 联网书目',
   'tanshu_isbn' => '探数 ISBN',
   'tanshu_proxy' => '探数代理',
   'jisu_isbn' => '极速数据',

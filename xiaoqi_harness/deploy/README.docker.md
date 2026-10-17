@@ -15,7 +15,7 @@ chmod 600 single-server.env
 
 至少填写单人邮箱登录、SMTP、`CAPABILITY_AUTH_CODE_PEPPER` 和至少一个文字模型密钥。默认模型由 `XIAOQI_DEFAULT_TEXT_MODEL` 选择，温度由 `XIAOQI_TEXT_TEMPERATURE` 控制；密钥只保存在服务器。
 
-联网搜索使用 MiMo 官方 Web Search 插件，需在 MiMo 开放平台「控制台 → 插件管理」开通，并在服务器配置 `MIMO_API_KEY`；`XIAOQI_MIMO_SEARCH_MODEL` 默认使用 `mimo-v2.6-flash`，也可按账号已开通的模型调整。搜索保留用户当前聊天模型，搜索服务只接收最短查询词，回复只引用接口返回的 URL 来源。未开通、未配置或接口没有返回可验证来源时，会明确报告搜索失败，不会切换服务商或伪造搜索来源。
+联网搜索和用户粘贴网页后的正文抓取使用 DeepSeek 原生 Search/Fetch API，服务器配置 `DEEPSEEK_API_KEY`；默认地址为 `https://api.deepseek.com/v1`，可用 `DEEPSEEK_SEARCH_BASE_URL` 覆盖。Search 只发送最短查询词并只引用接口返回的真实 URL 来源；未配置、接口失败或没有可验证来源时，会明确报告失败，不会切换服务商或伪造来源。官方原始 API 当前按成功请求计费（Search 与 Fetch 均为 5 元/千次），不要把“DeepSeek Harness / Claude Code / Codex 的服务端工具暂免”当作本应用原始 API 调用的免费额度。
 
 要启用聊天中的图片生成，还要在服务器的 `single-server.env` 配置火山引擎 Ark `ARK_API_KEY`。默认图片模型为 Seedream 5.0 Lite（模型 ID：`doubao-seedream-5-0-260128`），API 地址可用 `ARK_IMAGE_API_URL` 覆盖。不要把密钥放进客户端或提交到仓库；未配置时，生图请求会返回“服务器未配置 ARK_API_KEY”。首次部署时，在服务器上生成沙箱执行器内部令牌：
 
@@ -65,7 +65,7 @@ Agent 会话使用 `on`、`off` 两种联网模式；新会话和缺省值为 `o
 | [Genkit Dart Agents](https://genkit.dev/docs/dart/agents/overview/) | 2026-10-09 | Dart Agent API；Beta API 固定版本并由 `XiaoqiAgentRuntime` 隔离 |
 | [Genkit Dart middleware](https://genkit.dev/docs/dart/middleware/) and [source](https://github.com/genkit-ai/genkit-dart) | 2026-10-11 | `genkit_middleware 1.0.0`（Apache-2.0）；复用官方 Skills middleware 与 `use_skill` 按需加载，不复制技能运行框架 |
 | [Genkit A2UI](https://genkit.dev/docs/agents/a2ui/) and [Flutter GenUI](https://github.com/flutter/genui) | 2026-10-11 | `genkit_a2ui 0.4.0`（Apache-2.0）、`genui 0.10.4`（BSD-3-Clause）、`a2ui_core 0.1.1`（Apache-2.0）；复用官方 middleware、受限目录、`SurfaceController` 和 action 消息 |
-| [MiMo Web Search](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/text-generation/tool-calling/web-search) | 2026-10-11 | 按官方 `force_search` 契约接入并要求真实 URL citations；自动化契约测试覆盖字段与来源校验 |
+| [DeepSeek 网页搜索与抓取](https://api-docs.deepseek.com/zh-cn/guides/search/) | 2026-10-17 | 按官方 Search/Fetch 原始 JSON 契约接入；自动化契约测试覆盖请求字段、正文和真实 URL 来源校验 |
 | [Genkit Dart on pub.dev](https://pub.dev/packages/genkit/versions) | 2026-10-09 | Genkit 1.0.0 与 Dart SDK 版本约束 |
 | [Genkit MCP Dart](https://pub.dev/documentation/genkit_mcp/latest/) | 2026-10-09 | 服务端 MCP tools、resources 与 prompts |
 | [Docker Compose volumes](https://docs.docker.com/reference/compose-file/volumes/) | 2026-10-09 | 命名卷持久化行为 |
