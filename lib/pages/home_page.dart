@@ -8613,12 +8613,7 @@ class _ScrollToBottomButtonState extends State<_ScrollToBottomButton>
     duration: const Duration(milliseconds: 1500),
   );
   bool _pressed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _syncRingAnimation();
-  }
+  bool _reduceMotion = false;
 
   @override
   void didUpdateWidget(covariant _ScrollToBottomButton oldWidget) {
@@ -8629,9 +8624,7 @@ class _ScrollToBottomButtonState extends State<_ScrollToBottomButton>
   }
 
   void _syncRingAnimation() {
-    final reduceMotion =
-        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    if (widget.isGenerating && !reduceMotion) {
+    if (widget.isGenerating && !_reduceMotion) {
       if (!_ringController.isAnimating) _ringController.repeat();
     } else {
       _ringController.stop();
@@ -8642,6 +8635,7 @@ class _ScrollToBottomButtonState extends State<_ScrollToBottomButton>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
     _syncRingAnimation();
   }
 
@@ -8665,48 +8659,49 @@ class _ScrollToBottomButtonState extends State<_ScrollToBottomButton>
         child: AnimatedOpacity(
           duration: const Duration(milliseconds: 100),
           opacity: _pressed ? .72 : 1,
-          child: AnimatedBuilder(
-            animation: _ringController,
-            builder: (context, child) => CustomPaint(
-              size: const Size.square(46),
-              painter: _ScrollToBottomRingPainter(
-                progress: _ringController.value,
-                animated:
-                    widget.isGenerating &&
-                    !(MediaQuery.maybeOf(context)?.disableAnimations ?? false),
+          child: SizedBox.square(
+            dimension: 46,
+            child: AnimatedBuilder(
+              animation: _ringController,
+              builder: (context, child) => CustomPaint(
+                size: const Size.square(46),
+                painter: _ScrollToBottomRingPainter(
+                  progress: _ringController.value,
+                  animated: widget.isGenerating && !_reduceMotion,
+                ),
+                child: child,
               ),
-              child: child,
-            ),
-            child: Container(
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: Color(0x18000000),
-                    blurRadius: 12,
-                    offset: Offset(0, 3),
-                  ),
-                ],
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(1),
-                child: ClipOval(
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                    child: DecoratedBox(
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [Color(0xD9FFFFFF), Color(0x86F2F6FF)],
+              child: Container(
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Color(0x18000000),
+                      blurRadius: 12,
+                      offset: Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(1),
+                  child: ClipOval(
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                      child: DecoratedBox(
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [Color(0xD9FFFFFF), Color(0x86F2F6FF)],
+                          ),
                         ),
-                      ),
-                      child: Center(
-                        child: SvgPicture.asset(
-                          'assets/icons/chat_note_editor/scroll_to_bottom.svg',
-                          width: 22,
-                          height: 22,
+                        child: Center(
+                          child: SvgPicture.asset(
+                            'assets/icons/chat_note_editor/scroll_to_bottom.svg',
+                            width: 22,
+                            height: 22,
+                          ),
                         ),
                       ),
                     ),
