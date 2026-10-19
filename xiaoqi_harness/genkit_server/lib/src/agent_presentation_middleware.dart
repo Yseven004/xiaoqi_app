@@ -6,13 +6,14 @@ import 'package:uuid/uuid.dart';
 
 import 'public_agent_process.dart';
 import 'public_reasoning_buffer.dart';
+import 'model_tool_protocol.dart';
 
 /// Redacts implementation details before model text reaches the user.
 ///
 /// This is deliberately deterministic: a prompt rule alone is not a privacy
 /// boundary because retrieved pages and tool output are untrusted input.
 String sanitizeAssistantText(String text) {
-  var sanitized = text;
+  var sanitized = stripModelToolProtocol(text);
   final patterns = <RegExp>[
     RegExp(r'(?:system\s+prompt|系统提示词|系统指令|内部提示词)', caseSensitive: false),
     RegExp(
@@ -41,11 +42,13 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
     required this.preparing,
     required this.onEvent,
     this.protectedValues = const [],
+    this.allowToolCalls = true,
   });
 
   final bool preparing;
   final void Function(Map<String, Object?> event) onEvent;
   final Iterable<String> protectedValues;
+  final bool allowToolCalls;
 
   @override
   Future<ModelResponse> model(
@@ -72,6 +75,7 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
         'text': text,
       }),
     );
+    ModelToolProtocolBuffer textBuffer = ModelToolProtocolBuffer();
     final wrapped = context.copyWith(
       sendChunk: (chunk) {
         final forwarded = <Part>[];
@@ -81,14 +85,14 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
             reasoning.add(part.reasoning ?? '');
             continue;
           }
+          if (part.isToolRequest && !allowToolCalls) continue;
           if (part.isToolRequest || (!preparing && part.isText)) {
             reasoning.boundary();
           }
-          if (preparing && part.isText) {
-            continue;
-          }
           if (part.isText) {
-            final text = sanitizeAssistantText(part.text ?? '');
+            final visible = textBuffer.add(part.text ?? '');
+            if (preparing) continue;
+            final text = sanitizeAssistantText(visible);
             if (text.isEmpty) continue;
             forwarded.add(TextPart(text: text));
           } else {
@@ -116,7 +120,71 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
       },
     );
     try {
-      final response = await next(request, wrapped);
+      var modelRequest = request;
+      late ModelResponse response;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        textBuffer = ModelToolProtocolBuffer();
+        response = await next(modelRequest, wrapped);
+        final tail = textBuffer.finish();
+        final rawText =
+            response.message?.content
+                .where((part) => part.isText)
+                .map((part) => part.text ?? '')
+                .join() ??
+            '';
+        final unexpectedCall =
+            !allowToolCalls &&
+            response.message?.content.any((part) => part.isToolRequest) == true;
+        if (textBuffer.sawProtocol ||
+            containsModelToolProtocol(rawText) ||
+            unexpectedCall) {
+          if (attempt == 0 &&
+              !answerStarted &&
+              context.cancel?.isCancelled != true) {
+            // No tool has executed at the model boundary. Retry the format,
+            // never a billable tool request or an already published answer.
+            final canCallTools =
+                request.tools?.isNotEmpty == true &&
+                request.toJson()['toolChoice'] != 'none';
+            modelRequest = ModelRequest.fromJson({
+              ...request.toJson(),
+              'messages': [
+                ...request.messages.map((message) => message.toJson()),
+                Message(
+                  role: Role.system,
+                  content: [
+                    TextPart(
+                      text:
+                          '上一响应未遵守 API 输出格式。禁止把内部工具协议写入正文。'
+                          '${canCallTools ? "需要工具时仅使用本请求声明的原生 tool_calls；否则直接回答。" : "本阶段禁止工具调用和追问卡片，只输出自然语言 Markdown 最终回答，不再规划任务。"}',
+                    ),
+                  ],
+                ).toJson(),
+              ],
+            });
+            continue;
+          }
+          throw const FormatException('模型返回了无效的响应格式，请重试。');
+        }
+        if (!preparing &&
+            tail.isNotEmpty &&
+            context.cancel?.isCancelled != true) {
+          if (!answerStarted) {
+            answerStarted = true;
+            onEvent({
+              'type': 'answer_started',
+              'model_first_token_ms': modelStopwatch.elapsedMilliseconds,
+            });
+          }
+          context.sendChunk(
+            ModelResponseChunk(
+              role: response.message?.role,
+              content: [TextPart(text: sanitizeAssistantText(tail))],
+            ),
+          );
+        }
+        break;
+      }
       reasoning.finish(
         finalText:
             response.message?.content

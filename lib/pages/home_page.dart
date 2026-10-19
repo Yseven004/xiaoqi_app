@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' show min, pi, sin;
+import 'dart:math' show cos, min, pi, sin;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/foundation.dart'
@@ -251,6 +251,7 @@ String _agentToolLabel(String name) => switch (name) {
   'read_skill_resource' => '读取技能资料',
   'generate_image' => '图片生成',
   'read_task_material' => '读取附件',
+  'mcp_connection' => 'MCP 连接器',
   _ when name.startsWith('mcp_') => 'MCP 工具',
   _ => name,
 };
@@ -495,6 +496,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _followLatestMessage = true;
   bool _showScrollToBottom = false;
   bool _scrollToBottomAnimating = false;
+  bool _latestScrollAnimating = false;
+  bool _latestScrollFollowUp = false;
+  int _latestScrollEpoch = 0;
   bool _replyBodyOverflowsMessageCanvas = false;
   bool _composerExpanded = false;
   bool _composerSizeTransitioning = false;
@@ -1516,6 +1520,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _onMessagesScrolled() {
     if (!_messagesScrollController.hasClients) return;
+    if (_latestScrollAnimating || _scrollToBottomAnimating) return;
     final position = _messagesScrollController.position;
     final atBottom = position.maxScrollExtent - position.pixels <= 72;
     _followLatestMessage = atBottom;
@@ -1533,6 +1538,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (notification.depth != 0) return false;
     if (notification is ScrollStartNotification &&
         notification.dragDetails != null) {
+      _latestScrollEpoch++;
+      _latestScrollAnimating = false;
+      _latestScrollFollowUp = false;
       _userScrollingMessages = true;
       _followLatestMessage = false;
     } else if (notification is ScrollEndNotification &&
@@ -1543,12 +1551,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return false;
   }
 
+  void _onMessagesMetricsChanged(ScrollMetrics metrics) {
+    if (metrics.axis == Axis.vertical &&
+        _isGenerating &&
+        _followLatestMessage &&
+        !_userScrollingMessages &&
+        !_scrollToBottomAnimating &&
+        metrics.extentAfter > 1) {
+      _scrollToLatest(requireFollow: true);
+    }
+  }
+
   void _scrollToLatest({bool immediate = false, bool requireFollow = false}) {
     _latestScrollImmediate = _latestScrollImmediate || immediate;
     _latestScrollRequiresFollow = _latestScrollRequiresFollow || requireFollow;
     if (_latestScrollScheduled) return;
     _latestScrollScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       final jump = _latestScrollImmediate;
       final followOnly = _latestScrollRequiresFollow;
       _latestScrollScheduled = false;
@@ -1558,16 +1578,40 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (followOnly && (!_followLatestMessage || _userScrollingMessages)) {
         return;
       }
+      if (followOnly && _latestScrollAnimating && !jump) {
+        _latestScrollFollowUp = true;
+        return;
+      }
       final position = _messagesScrollController.position;
       final target = position.maxScrollExtent;
       if ((target - position.pixels).abs() < 1) return;
-      if (jump) {
+      final epoch = ++_latestScrollEpoch;
+      if (jump || MediaQuery.of(context).disableAnimations) {
+        _latestScrollAnimating = false;
+        _latestScrollFollowUp = false;
         _messagesScrollController.jumpTo(target);
       } else {
-        _messagesScrollController.animateTo(
-          target,
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOut,
+        _latestScrollAnimating = true;
+        unawaited(
+          _messagesScrollController
+              .animateTo(
+                target,
+                duration: const Duration(milliseconds: 420),
+                curve: Curves.easeOutCubic,
+              )
+              .whenComplete(() {
+                if (!mounted || epoch != _latestScrollEpoch) return;
+                _latestScrollAnimating = false;
+                final followUp = _latestScrollFollowUp;
+                _latestScrollFollowUp = false;
+                if (_followLatestMessage &&
+                    !_userScrollingMessages &&
+                    (followUp || _isGenerating)) {
+                  _scrollToLatest(requireFollow: true);
+                } else {
+                  _onMessagesScrolled();
+                }
+              }),
         );
       }
     });
@@ -1575,6 +1619,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _jumpToLatestMessage() {
     if (!_messagesScrollController.hasClients) return;
+    _latestScrollEpoch++;
+    _latestScrollAnimating = false;
+    _latestScrollFollowUp = false;
+    _followLatestMessage = true;
     _userScrollingMessages = false;
     final target = _messagesScrollController.position.maxScrollExtent;
     _scrollToBottomAnimating = true;
@@ -1596,7 +1644,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           .whenComplete(() {
             _scrollToBottomAnimating = false;
             if (mounted) {
-              _onMessagesScrolled();
+              if (_isGenerating &&
+                  _followLatestMessage &&
+                  !_userScrollingMessages) {
+                _scrollToLatest(requireFollow: true);
+              } else {
+                _onMessagesScrolled();
+              }
               _onReplyBodyOverflowChanged(_replyBodyOverflowsMessageCanvas);
             }
           }),
@@ -3944,7 +3998,7 @@ $text''';
     _streamingReplyPublishTimer?.cancel();
     _streamingReplyPublishTimer = null;
     if (!_isCurrentRequest(generation, conversationId)) return;
-    final reply = _streamingReplyBuffer.toString();
+    final reply = visibleChatAssistantText(_streamingReplyBuffer.toString());
     if (reply == _streamingReply.value) return;
     _streamingReply.value = reply;
   }
@@ -4993,7 +5047,9 @@ $text''';
 
   Future<void> _copyReply(AiConversationMessage message) async {
     try {
-      await Clipboard.setData(ClipboardData(text: message.text));
+      await Clipboard.setData(
+        ClipboardData(text: visibleChatAssistantText(message.text)),
+      );
       if (mounted) AppToast.show(context, '已复制回复');
     } catch (_) {
       _showReplyError('复制失败');
@@ -5154,7 +5210,9 @@ $text''';
 
   Future<void> _shareReply(AiConversationMessage message) async {
     try {
-      await SharePlus.instance.share(ShareParams(text: message.text));
+      await SharePlus.instance.share(
+        ShareParams(text: visibleChatAssistantText(message.text)),
+      );
     } catch (_) {
       _showReplyError('分享失败');
     }
@@ -6535,6 +6593,8 @@ $text''';
                                                 _imageGenerationInProgress,
                                             onScrollNotification:
                                                 _onMessagesScrollNotification,
+                                            onScrollMetricsChanged:
+                                                _onMessagesMetricsChanged,
                                             onReplyBodyOverflowChanged:
                                                 _onReplyBodyOverflowChanged,
                                             onCopy: _copyReply,
@@ -8825,6 +8885,7 @@ class _ConversationMessages extends StatefulWidget {
     required this.imageGenerationInProgress,
     required this.onScrollNotification,
     required this.onReplyBodyOverflowChanged,
+    required this.onScrollMetricsChanged,
     required this.onCopy,
     required this.onCopySelectedText,
     required this.onEditMessage,
@@ -8861,6 +8922,7 @@ class _ConversationMessages extends StatefulWidget {
   final ValueListenable<bool> imageGenerationInProgress;
   final bool Function(ScrollNotification) onScrollNotification;
   final ValueChanged<bool> onReplyBodyOverflowChanged;
+  final ValueChanged<ScrollMetrics> onScrollMetricsChanged;
   final Future<void> Function(AiConversationMessage) onCopy;
   final Future<void> Function(String) onCopySelectedText;
   final ValueChanged<AiConversationMessage> onEditMessage;
@@ -8974,13 +9036,14 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       if (!message.hasAssistantContent) {
         continue;
       }
-      final segments = message.text.trim().isEmpty
+      final visibleText = visibleChatAssistantText(message.text);
+      final segments = visibleText.trim().isEmpty
           ? const <String>[]
-          : _splitAssistantMarkdown(message.text) ?? [message.text];
+          : _splitAssistantMarkdown(visibleText) ?? [visibleText];
       _messageRows.add(
         _ConversationMessageRow(
           message: message,
-          text: message.text,
+          text: visibleText,
           segments: segments,
         ),
       );
@@ -9528,7 +9591,10 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   Widget build(BuildContext context) {
     return NotificationListener<ScrollMetricsNotification>(
       onNotification: (notification) {
-        if (notification.depth == 0) _scheduleReplyBodyMeasurement();
+        if (notification.depth == 0) {
+          _scheduleReplyBodyMeasurement();
+          widget.onScrollMetricsChanged(notification.metrics);
+        }
         return false;
       },
       child: NotificationListener<SizeChangedLayoutNotification>(
@@ -9960,7 +10026,12 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     BuildContext context,
     String text, {
     List<AiChatWebSource> sources = const [],
-  }) => _assistantMarkdown(context, text, isStreaming: false, sources: sources);
+  }) => _assistantMarkdown(
+    context,
+    visibleChatAssistantText(text),
+    isStreaming: false,
+    sources: sources,
+  );
 
   Widget _measureLatestReplyBody(Widget child) =>
       Container(key: _latestReplyBodyKey, child: child);
@@ -9991,7 +10062,11 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
               : null,
           onCopy: () => unawaited(widget.onCopy(message)),
           onFeedback: (kind) => unawaited(widget.onFeedback(kind)),
-          onNote: () => widget.onNote(message, message.text, false),
+          onNote: () => widget.onNote(
+            message,
+            visibleChatAssistantText(message.text),
+            false,
+          ),
           onShare: () => unawaited(widget.onShare(message)),
           onDelete: () => unawaited(widget.onDelete(message)),
           onRegenerate:
@@ -10006,6 +10081,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   }
 
   Widget _assistantStreamingText(BuildContext context, String text) {
+    text = visibleChatAssistantText(text);
     if (_streamingMarkdownEndsInCodeBlock(text)) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -10327,8 +10403,8 @@ class _ImageGenerationProgressState extends State<_ImageGenerationProgress>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 7),
-    )..repeat(reverse: true);
+      duration: const Duration(seconds: 10),
+    )..repeat();
   }
 
   @override
@@ -10359,44 +10435,98 @@ class _ImageGenerationProgressState extends State<_ImageGenerationProgress>
                   ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(13),
-                    child: AnimatedBuilder(
-                      animation: _controller,
-                      builder: (context, child) {
-                        final progress = _controller.value;
-                        return Opacity(
-                          opacity: 0.72 + progress * 0.18,
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment(-1.5 + progress, -1),
-                                end: Alignment(0.5 + progress, 1),
-                                colors: const [
-                                  Color(0x00DDEBFF),
-                                  Color(0x1ADDEBFF),
-                                  Color(0x19EEE5FF),
-                                  Color(0x18DDF3EF),
-                                  Color(0x00DDF3EF),
-                                ],
-                                stops: const [0, 0.3, 0.52, 0.72, 1],
+                    child: TickerMode(
+                      enabled: !MediaQuery.of(context).disableAnimations,
+                      child: AnimatedBuilder(
+                        animation: _controller,
+                        builder: (context, grid) {
+                          final phase = _controller.value * 2 * pi;
+                          final flowOpacity = 0.58 + sin(phase * 2) * 0.16;
+                          return Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              const DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                    colors: [
+                                      Color(0xFFDDEBFF),
+                                      Color(0xFFEEE5FF),
+                                      Color(0xFFDDF3EF),
+                                    ],
+                                    stops: [0, 0.52, 1],
+                                  ),
+                                ),
                               ),
-                            ),
-                            child: child,
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: RadialGradient(
+                                    center: Alignment(
+                                      -0.32 + sin(phase) * 0.55,
+                                      -0.18 + cos(phase) * 0.4,
+                                    ),
+                                    radius: 1.05 + sin(phase * 2) * 0.1,
+                                    colors: [
+                                      Color(
+                                        0xFFAECFFF,
+                                      ).withValues(alpha: flowOpacity),
+                                      const Color(0x00AECFFF),
+                                    ],
+                                    stops: const [0, 1],
+                                  ),
+                                ),
+                              ),
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: RadialGradient(
+                                    center: Alignment(
+                                      0.38 + sin(phase + 2 * pi / 3) * 0.5,
+                                      0.12 + cos(phase + 2 * pi / 3) * 0.42,
+                                    ),
+                                    radius: 1.12 + sin(phase * 2 + 2) * 0.1,
+                                    colors: [
+                                      const Color(
+                                        0xFFCDB9F7,
+                                      ).withValues(alpha: flowOpacity),
+                                      const Color(0x00CDB9F7),
+                                    ],
+                                    stops: const [0, 1],
+                                  ),
+                                ),
+                              ),
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: RadialGradient(
+                                    center: Alignment(
+                                      0.02 + sin(phase + 4 * pi / 3) * 0.52,
+                                      0.5 + cos(phase + 4 * pi / 3) * 0.4,
+                                    ),
+                                    radius: 1.08 + sin(phase * 2 + 4) * 0.1,
+                                    colors: [
+                                      const Color(
+                                        0xFFAFE8E4,
+                                      ).withValues(alpha: flowOpacity),
+                                      const Color(0x00AFE8E4),
+                                    ],
+                                    stops: const [0, 1],
+                                  ),
+                                ),
+                              ),
+                              Positioned.fill(child: grid!),
+                            ],
+                          );
+                        },
+                        child: RepaintBoundary(
+                          child: SvgPicture.asset(
+                            'assets/images/image_generation_microgrid.svg',
+                            fit: BoxFit.fill,
                           ),
-                        );
-                      },
-                      child: const SizedBox.expand(),
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              '正在生成图片...',
-              style: TextStyle(
-                color: Color(0xFF777981),
-                fontSize: 13,
-                height: 1.35,
               ),
             ),
           ],

@@ -217,7 +217,8 @@ deploy_release() {
   [[ -f "$stage/genkit_server/pubspec.yaml" ]] || die "invalid release archive"
   ln -sfn "$CONFIG" "$stage/deploy/single-server.env"
 
-  docker compose \
+  # Keep image builds sequential on the 2 GB deployment host.
+  docker compose --parallel 1 \
     -f "$stage/deploy/compose.yaml" \
     --env-file "$CONFIG" \
     --profile build-only \

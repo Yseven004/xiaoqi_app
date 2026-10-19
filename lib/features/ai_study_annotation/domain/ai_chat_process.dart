@@ -1,3 +1,26 @@
+final _savedToolProtocol = RegExp(
+  r'<[｜|]DSML[｜|]\s*(?:calls|tool_calls)\b[\s\S]*?</[｜|]DSML[｜|]\s*(?:calls|tool_calls)\s*>',
+);
+const _toolProtocolPrefixes = ['<｜DSML｜', '</｜DSML｜', '<|DSML|', '</|DSML|'];
+
+/// Hide old malformed model output without changing stored conversation data.
+String visibleChatAssistantText(String text) {
+  var visible = text.replaceAll(_savedToolProtocol, '');
+  for (final marker in _toolProtocolPrefixes) {
+    final start = visible.indexOf(marker);
+    if (start >= 0) visible = visible.substring(0, start);
+  }
+  final start = visible.lastIndexOf('<');
+  if (start >= 0) {
+    final suffix = visible.substring(start);
+    if ((suffix.contains('｜') || suffix.contains('|')) &&
+        _toolProtocolPrefixes.any((marker) => marker.startsWith(suffix))) {
+      visible = visible.substring(0, start);
+    }
+  }
+  return visible;
+}
+
 String savedChatProcessStatus(String? status, {required bool isIncomplete}) =>
     switch (status) {
       'completed' => 'completed',

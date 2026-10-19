@@ -328,6 +328,67 @@ void main() {
     }
   });
 
+  test(
+    'selected image action bypasses unrelated discoverable skills',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'image-action-skills-',
+      );
+      final store = CloudStore(root: directory.path);
+      final images = _RecordingImageService(store);
+      store.putImmutable('probe/writing', {
+        'SKILL.md': utf8.encode(
+          '---\nname: writing\ndescription: 润色文章。\n---\n润色用户提供的文章。',
+        ),
+      });
+      store.put('cap/personal/writing', {
+        'id': 'writing',
+        'kind': 'skill',
+        'name': '写作',
+        'description': '润色文章',
+        'enabled': true,
+        'origin': 'github',
+        'current_version_id': 'v1',
+        'versions': [
+          {
+            'id': 'v1',
+            'artifact_key': 'probe/writing',
+            'components': [
+              {
+                'id': 'writing',
+                'root': '',
+                'name': 'writing',
+                'description': '润色文章',
+              },
+            ],
+          },
+        ],
+      }, null);
+      try {
+        final answer = await GenkitXiaoqiAgentRuntime(store, images).run(
+          tenantId: 'personal',
+          taskId: 'selected-cat',
+          request: {
+            'model_id': 'deepseek-flash',
+            'capability': {'type': 'action', 'id': 'create-image'},
+            'current_turn_text': '小猫',
+            'messages': [
+              {'role': 'user', 'content': '小猫'},
+            ],
+          },
+          onDelta: (_) {},
+          cancellation: CancellationController().token,
+        );
+        expect(answer, '图片已生成。');
+        expect(images.prompt, contains('小猫'));
+        expect(images.count, 1);
+      } finally {
+        store.close();
+        directory.deleteSync(recursive: true);
+      }
+    },
+  );
+
   test('passes an attached image to a direct edit request', () async {
     const sourceImage = 'data:image/png;base64,aW1hZ2U=';
     final directory = Directory.systemTemp.createTempSync(

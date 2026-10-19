@@ -2,6 +2,30 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:xiaoqi_app/features/ai_study_annotation/domain/ai_chat_process.dart';
 
 void main() {
+  test(
+    'saved DSML is hidden while surrounding prose and source data survive',
+    () {
+      const raw =
+          '前文\n<｜DSML｜calls><｜DSML｜invoke name="set_task_deliverables">'
+          '内部参数</｜DSML｜invoke></｜DSML｜calls>\n后文';
+      expect(visibleChatAssistantText(raw), '前文\n\n后文');
+      expect(raw, contains('set_task_deliverables'));
+    },
+  );
+
+  test(
+    'incomplete streamed control prefixes and parameter tails are hidden',
+    () {
+      for (final raw in ['正文<｜D', '正文<｜DSML｜calls>内部参数', '正文<|DSML|invoke']) {
+        expect(visibleChatAssistantText(raw), '正文');
+      }
+      expect(
+        visibleChatAssistantText('A < B\n<tag>正文</tag>\n'),
+        'A < B\n<tag>正文</tag>\n',
+      );
+    },
+  );
+
   test('native reasoning revisions preserve paragraphs and cannot regress', () {
     final first = <String, Object?>{
       'step_id': 'native:1',

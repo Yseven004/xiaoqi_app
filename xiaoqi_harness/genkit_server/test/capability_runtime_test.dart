@@ -28,9 +28,11 @@ void main() {
           final serialized = jsonEncode(body['messages']);
           final textOnly = scenario.startsWith('text-only');
           final tools = (body['tools'] as List? ?? const []).whereType<Map>();
-          final preparing = tools.any(
-            (tool) => tool['function']?['name'] == 'set_task_deliverables',
-          );
+          final preparing =
+              body['tool_choice'] != 'none' &&
+              tools.any(
+                (tool) => tool['function']?['name'] == 'set_task_deliverables',
+              );
           final alias = RegExp(
             r'skill-[a-f0-9]{24}',
           ).firstMatch(serialized)?.group(0);
@@ -259,6 +261,15 @@ void main() {
               );
             if (scenario == 'image-format-repair')
               expect(jsonEncode(requests), contains('图片编码格式尚无可执行保障'));
+          }
+          if (scenario != 'missing' && scenario != 'mcp-error') {
+            final finalRequest = requests.last;
+            expect(finalRequest['tool_choice'], 'none');
+            expect(finalRequest['tools'], isNotEmpty);
+            expect(
+              jsonEncode(finalRequest['tools']),
+              isNot(contains('send_a2ui')),
+            );
           }
         } finally {
           await server.close(force: true);

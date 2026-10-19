@@ -4,6 +4,184 @@ import 'package:xiaoqi_genkit_server/src/agent_presentation_middleware.dart';
 
 void main() {
   test(
+    'answer phase rejects native calls before any tool can execute',
+    () async {
+      final chunks = <ModelResponseChunk>[];
+      var calls = 0;
+      final middleware = AgentPresentationMiddleware(
+        preparing: false,
+        allowToolCalls: false,
+        onEvent: (_) {},
+      );
+      await middleware.model(
+        ModelRequest(messages: [], toolChoice: ToolChoice.none),
+        ActionFnArg<ModelResponseChunk, ModelRequest, void>(
+          sendChunk: chunks.add,
+        ),
+        (_, context) async {
+          calls++;
+          final part = calls == 1
+              ? ToolRequestPart(
+                  toolRequest: ToolRequest(name: 'generate_image', input: {}),
+                )
+              : TextPart(text: '已有图片已生成。');
+          context.sendChunk(ModelResponseChunk(content: [part]));
+          return ModelResponse(
+            finishReason: FinishReason.stop,
+            message: Message(role: Role.model, content: [part]),
+          );
+        },
+      );
+      expect(calls, 2);
+      expect(
+        chunks.expand((c) => c.content).any((p) => p.isToolRequest),
+        isFalse,
+      );
+      expect(
+        chunks.expand((c) => c.content).map((p) => p.text ?? '').join(),
+        '已有图片已生成。',
+      );
+    },
+  );
+
+  test(
+    'split DSML is private and a format retry returns only the answer',
+    () async {
+      final chunks = <ModelResponseChunk>[];
+      var calls = 0;
+      final middleware = AgentPresentationMiddleware(
+        preparing: false,
+        allowToolCalls: false,
+        onEvent: (_) {},
+      );
+      final response = await middleware.model(
+        ModelRequest(messages: [], toolChoice: ToolChoice.none),
+        ActionFnArg<ModelResponseChunk, ModelRequest, void>(
+          sendChunk: chunks.add,
+        ),
+        (request, context) async {
+          calls++;
+          if (calls == 1) {
+            for (final text in ['<｜DS', 'ML｜calls>', 'backend arguments']) {
+              context.sendChunk(
+                ModelResponseChunk(content: [TextPart(text: text)]),
+              );
+            }
+            return ModelResponse(
+              finishReason: FinishReason.stop,
+              message: Message(
+                role: Role.model,
+                content: [TextPart(text: '<｜DSML｜calls>backend arguments')],
+              ),
+            );
+          }
+          expect(request.toJson()['toolChoice'], 'none');
+          expect(
+            request.messages.last.content.first.text,
+            contains('本阶段禁止工具调用'),
+          );
+          context.sendChunk(
+            ModelResponseChunk(content: [TextPart(text: '正文。')]),
+          );
+          return ModelResponse(
+            finishReason: FinishReason.stop,
+            message: Message(
+              role: Role.model,
+              content: [TextPart(text: '正文。')],
+            ),
+          );
+        },
+      );
+      expect(calls, 2);
+      expect(response.message!.content.single.text, '正文。');
+      expect(
+        chunks.expand((chunk) => chunk.content).map((p) => p.text ?? '').join(),
+        '正文。',
+      );
+    },
+  );
+
+  test(
+    'persistent protocol errors fail closed after one model retry',
+    () async {
+      final chunks = <ModelResponseChunk>[];
+      var calls = 0;
+      final middleware = AgentPresentationMiddleware(
+        preparing: false,
+        onEvent: (_) {},
+      );
+      await expectLater(
+        middleware.model(
+          ModelRequest(messages: []),
+          ActionFnArg<ModelResponseChunk, ModelRequest, void>(
+            sendChunk: chunks.add,
+          ),
+          (_, context) async {
+            calls++;
+            context.sendChunk(
+              ModelResponseChunk(
+                content: [TextPart(text: '<｜DSML｜invoke name="private">')],
+              ),
+            );
+            return ModelResponse(
+              finishReason: FinishReason.stop,
+              message: Message(
+                role: Role.model,
+                content: [TextPart(text: '<｜DSML｜invoke name="private">')],
+              ),
+            );
+          },
+        ),
+        throwsFormatException,
+      );
+      expect(calls, 2);
+      expect(chunks, isEmpty);
+    },
+  );
+
+  test(
+    'a published answer is not duplicated when later protocol is rejected',
+    () async {
+      final chunks = <ModelResponseChunk>[];
+      var calls = 0;
+      final middleware = AgentPresentationMiddleware(
+        preparing: false,
+        onEvent: (_) {},
+      );
+      await expectLater(
+        middleware.model(
+          ModelRequest(messages: []),
+          ActionFnArg<ModelResponseChunk, ModelRequest, void>(
+            sendChunk: chunks.add,
+          ),
+          (_, context) async {
+            calls++;
+            context.sendChunk(
+              ModelResponseChunk(content: [TextPart(text: '正常前文。')]),
+            );
+            context.sendChunk(
+              ModelResponseChunk(content: [TextPart(text: '<｜DSML｜calls>')]),
+            );
+            return ModelResponse(
+              finishReason: FinishReason.stop,
+              message: Message(
+                role: Role.model,
+                content: [TextPart(text: '正常前文。<｜DSML｜calls>')],
+              ),
+            );
+          },
+        ),
+        throwsFormatException,
+      );
+      expect(calls, 1);
+      expect(
+        chunks.expand((c) => c.content).map((p) => p.text ?? '').join(),
+        '正常前文。',
+      );
+    },
+  );
+
+  test(
     'preparation projects provider reasoning but suppresses raw parts and drafts',
     () async {
       final chunks = <ModelResponseChunk>[];

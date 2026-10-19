@@ -32,7 +32,7 @@ String publicToolLabel(String tool) => switch (tool) {
   'read_mcp_resource' => '读取 MCP 文件',
   'generate_image' => '图片生成',
   'mcp_tool' => 'MCP 工具',
-  'mcp_connection' => 'MCP 连接',
+  'mcp_connection' => 'MCP 连接器',
   _ => '工具调用',
 };
 
