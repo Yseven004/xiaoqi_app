@@ -132,6 +132,18 @@ void main() {
   });
 
   test(
+    'MCP catalog is authenticated and returns only configured entries',
+    () async {
+      final unauthenticated = await call('GET', '/v1/mcp/catalog', auth: false);
+      expect(unauthenticated.statusCode, 401);
+
+      final response = await call('GET', '/v1/mcp/catalog');
+      expect(response.statusCode, 200);
+      expect(jsonDecode(await response.readAsString())['items'], isA<List>());
+    },
+  );
+
+  test(
     'rejects missing contract and reports both versions before normal API use',
     () async {
       final response = await api.router.call(

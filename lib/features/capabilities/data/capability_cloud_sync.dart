@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 import '../../../config/release.dart';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:genkit/experimental_client.dart' as genkit_client;
 import 'package:http/http.dart' as http;
 
@@ -179,15 +181,31 @@ import 'capability_store.dart';
   );
 }
 
+class AttachmentCloudException extends FormatException {
+  const AttachmentCloudException(
+    super.message, {
+    this.code = 'attachment_failed',
+    this.retryable = false,
+    this.statusCode,
+  });
+
+  final String code;
+  final bool retryable;
+  final int? statusCode;
+}
+
 class CapabilityCloudSync {
-  CapabilityCloudSync._();
+  CapabilityCloudSync._() : _client = http.Client();
+
+  @visibleForTesting
+  CapabilityCloudSync.forTesting(this._client);
 
   static final instance = CapabilityCloudSync._();
   static const _tokenKey = 'xiaoqi.capabilities.device_token.v1';
   static const _authMethodKey = 'xiaoqi.auth.method.v1';
   static const _emailKey = 'xiaoqi.auth.email.v1';
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
-  final http.Client _client = http.Client();
+  final http.Client _client;
   genkit_client.AgentApi<Map<String, dynamic>>? _remoteAgent;
   Future<void>? _syncing;
   bool _syncAgain = false;
@@ -216,6 +234,183 @@ class CapabilityCloudSync {
     }
     await _verifyContract();
     return _headers(token);
+  }
+
+  /// Uploads a content-addressed resource once. Progress is actual bytes read
+  /// into the HTTP request; parsing progress comes from server snapshots.
+  Future<Map<String, dynamic>> createAttachment({
+    required String path,
+    required String name,
+    required String mimeType,
+    String? contentHash,
+    void Function(int sent, int total)? onProgress,
+    Future<void>? abortTrigger,
+  }) async {
+    final headers = await authenticatedHeaders();
+    final file = File(path);
+    final size = await file.length();
+    if (size <= 0 || size > 50 * 1024 * 1024) {
+      throw const AttachmentCloudException('附件为空或超过 50 MB 限制', code: 'invalid_size');
+    }
+    final request = http.AbortableStreamedRequest(
+      'POST', Uri.parse('$_baseUrl/attachments'), abortTrigger: abortTrigger,
+    )
+      ..headers.addAll(headers)
+      ..headers['Content-Type'] = mimeType
+      ..headers['X-Xiaoqi-Filename'] = Uri.encodeComponent(name)
+      ..contentLength = size;
+    if (contentHash != null) request.headers['X-Xiaoqi-Sha256'] = contentHash;
+    var sent = 0;
+    onProgress?.call(sent, size);
+    final response = _client.send(request).then(http.Response.fromStream);
+    final pump = file.openRead().map((bytes) {
+      sent += bytes.length;
+      onProgress?.call(sent, size);
+      return bytes;
+    }).pipe(request.sink);
+    final results = await Future.wait<Object?>([response, pump])
+        .timeout(const Duration(minutes: 10));
+    return _checkedAttachment(results.first as http.Response);
+  }
+
+  Future<Map<String, dynamic>> getAttachment(
+    String id, {Future<void>? abortTrigger,
+  }) => _attachmentRequest('GET', id, abortTrigger: abortTrigger);
+
+  Future<Map<String, dynamic>> submitAttachmentSegments(
+    String id, List<Map<String, Object?>> segments, {
+    Future<void>? abortTrigger,
+  }) => _attachmentRequest(
+    'PUT', '$id/segments', body: {'segments': segments, 'full': true},
+    abortTrigger: abortTrigger,
+  );
+
+  Future<Map<String, dynamic>> readAttachment(
+    String id, {
+    String mode = 'overview',
+    String? query,
+    List<int>? pages,
+    Future<void>? abortTrigger,
+  }) => _attachmentRequest(
+    'POST', '$id/read',
+    body: {'mode': mode, 'query': ?query, 'pages': ?pages},
+    abortTrigger: abortTrigger,
+  );
+
+  /// Cancellation stops active work; completed pages remain in the server's
+  /// 24-hour resource cache. Never call this on success or a polling failure.
+  Future<void> cancelAttachment(String id) async {
+    await _attachmentRequest('DELETE', id);
+  }
+
+  Future<Map<String, dynamic>> waitForAttachment(
+    String id, {
+    Map<String, dynamic>? initial,
+    Future<void>? abortTrigger,
+    bool Function()? isCancelled,
+    void Function(Map<String, dynamic>)? onSnapshot,
+    Duration pollInterval = const Duration(seconds: 1),
+    Duration retryInterval = const Duration(seconds: 1),
+  }) async {
+    var snapshot = initial;
+    var consecutiveFailures = 0;
+    final deadline = DateTime.now().add(const Duration(hours: 2));
+    while (DateTime.now().isBefore(deadline)) {
+      if (isCancelled?.call() == true) {
+        throw const AttachmentCloudException('已停止读取附件', code: 'cancelled', retryable: true);
+      }
+      if (snapshot != null) {
+        onSnapshot?.call(snapshot);
+        if (snapshot['status'] == 'failed') {
+          throw AttachmentCloudException(
+            snapshot['message']?.toString() ?? snapshot['error_message']?.toString() ?? '附件解析失败',
+            code: snapshot['error_code']?.toString() ?? 'parse_failed',
+            retryable: snapshot['retryable'] == true,
+          );
+        }
+        if (snapshot['ready'] == true || snapshot['status'] == 'ready') return snapshot;
+        if (snapshot['status'] == 'cancelled') {
+          throw const AttachmentCloudException('已停止读取附件，可重试继续', code: 'cancelled', retryable: true);
+        }
+        await _attachmentDelay(pollInterval, abortTrigger);
+      }
+      try {
+        snapshot = await getAttachment(id, abortTrigger: abortTrigger);
+        consecutiveFailures = 0;
+      } on Object catch (error) {
+        if (!_transientAttachmentError(error) || ++consecutiveFailures > 5) rethrow;
+        // A single 30-second poll timeout must not delete successfully read pages.
+        await _attachmentDelay(retryInterval * min(consecutiveFailures, 4), abortTrigger);
+      }
+    }
+    throw const AttachmentCloudException('附件仍在处理中，已保存进度，请重试继续', code: 'poll_timeout', retryable: true);
+  }
+
+  Future<void> _attachmentDelay(Duration duration, Future<void>? abort) async {
+    if (abort == null) return Future<void>.delayed(duration);
+    await Future.any<void>([
+      Future<void>.delayed(duration),
+      abort.then<void>((_) => throw const AttachmentCloudException('已停止读取附件', code: 'cancelled', retryable: true)),
+    ]);
+  }
+
+  bool _transientAttachmentError(Object error) =>
+      error is TimeoutException || error is SocketException ||
+      (error is http.ClientException && error is! http.RequestAbortedException) ||
+      (error is AttachmentCloudException && error.retryable && error.code != 'cancelled');
+
+  Future<Map<String, dynamic>> _attachmentRequest(
+    String method, String suffix, {
+    Map<String, Object?>? body,
+    Future<void>? abortTrigger,
+  }) async {
+    final headers = await authenticatedHeaders();
+    // IDs are server-generated; encode only the ID, retain the endpoint suffix.
+    final parts = suffix.split('/');
+    parts[0] = Uri.encodeComponent(parts[0]);
+    final request = http.AbortableRequest(
+      method, Uri.parse('$_baseUrl/attachments/${parts.join('/')}'),
+      abortTrigger: abortTrigger,
+    )..headers.addAll(headers);
+    if (body != null) request.body = jsonEncode(body);
+    return _checkedAttachment(await _client.send(request)
+        .then(http.Response.fromStream).timeout(const Duration(seconds: 30)));
+  }
+
+  Map<String, dynamic> _checkedAttachment(http.Response response) {
+    if (response.statusCode >= 200 && response.statusCode < 300) return _decode(response);
+    Map<String, dynamic> decoded;
+    try { decoded = _decode(response); } on Object { decoded = {}; }
+    final error = decoded['error'];
+    final code = error is Map ? error['code']?.toString() : decoded['error_code']?.toString();
+    throw AttachmentCloudException(
+      _errorMessage(decoded, '附件请求失败', statusCode: response.statusCode),
+      code: code ?? 'http_${response.statusCode}',
+      statusCode: response.statusCode,
+      retryable: response.statusCode == 408 || response.statusCode == 429 || response.statusCode >= 500,
+    );
+  }
+
+  /// Kept as a local convenience for full-PDF consumers, using only the current
+  /// attachment resource contract. Chat preparation requests overview instead.
+  Future<List<String>> recognizePdf(String path, {bool Function()? isCancelled}) async {
+    final started = await createAttachment(path: path, name: path.split(RegExp(r'[/\\]')).last, mimeType: 'application/pdf');
+    final id = started['id']?.toString() ?? '';
+    if (id.isEmpty) throw const FormatException('服务端没有创建附件任务');
+    if (isCancelled?.call() == true) {
+      await cancelAttachment(id);
+      throw const FormatException('已停止识别附件');
+    }
+    final job = await readAttachment(id, mode: 'full');
+    final result = await waitForAttachment(id, initial: job, isCancelled: isCancelled);
+    final count = (result['page_count'] as num?)?.toInt() ?? 0;
+    final pages = List<String>.filled(count, '');
+    for (final segment in result['segments'] is List ? result['segments'] as List : const []) {
+      if (segment is! Map) continue;
+      final page = (segment['page'] as num?)?.toInt() ?? ((segment['index'] as num?)?.toInt() ?? 0) + 1;
+      if (page > 0 && page <= count) pages[page - 1] += segment['text']?.toString() ?? '';
+    }
+    return pages;
   }
 
   Future<String?> get signedInEmail => _secureStorage.read(key: _emailKey);
@@ -1045,6 +1240,63 @@ class CapabilityCloudSync {
         .toList(growable: false);
   }
 
+  Future<List<McpCatalogEntry>> listMcpCatalog() async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .get(Uri.parse('$_baseUrl/mcp/catalog'), headers: _headers(token))
+          .timeout(const Duration(seconds: 20)),
+    );
+    return (value['items'] as List? ?? const [])
+        .map(McpCatalogEntry.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<McpConnectionRecord> installMcp(String catalogId) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse('$_baseUrl/mcp/installations'),
+            headers: _headers(token),
+            body: jsonEncode({'catalog_id': catalogId}),
+          )
+          .timeout(const Duration(seconds: 45)),
+    );
+    return McpConnectionRecord.fromJson(value['connection']);
+  }
+
+  Future<Uri?> startMcpLogin(String connectionId) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/mcp/installations/${Uri.encodeComponent(connectionId)}/login',
+            ),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 20)),
+    );
+    final raw = value['auth_url']?.toString();
+    return raw == null || raw.isEmpty ? null : Uri.tryParse(raw);
+  }
+
+  Future<McpConnectionRecord> reconnectMcp(String connectionId) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/mcp/installations/${Uri.encodeComponent(connectionId)}/reconnect',
+            ),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 45)),
+    );
+    return McpConnectionRecord.fromJson(value['connection']);
+  }
+
   Future<McpConnectionRecord> saveMcpConnection({
     String? id,
     required String name,
@@ -1131,13 +1383,20 @@ class CapabilityCloudSync {
   Map<String, dynamic> _checked(http.Response response) {
     final decoded = _decode(response);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError(_errorMessage(decoded, '云端请求失败'));
+      throw StateError(
+        _errorMessage(decoded, '云端请求失败', statusCode: response.statusCode),
+      );
     }
     return decoded;
   }
 
   Map<String, dynamic> _decode(http.Response response) {
-    final value = jsonDecode(utf8.decode(response.bodyBytes));
+    Object? value;
+    try {
+      value = jsonDecode(utf8.decode(response.bodyBytes));
+    } on FormatException {
+      throw StateError('云端返回格式无效（HTTP ${response.statusCode}），请检查服务地址或稍后重试');
+    }
     if (value is! Map) throw StateError('云端返回格式无效');
     return value.cast<String, dynamic>();
   }

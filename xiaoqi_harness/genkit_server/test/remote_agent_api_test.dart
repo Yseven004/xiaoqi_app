@@ -38,6 +38,8 @@ class _StreamingRuntime
   Completer<void>? pauseBeforeReturn;
   Completer<void>? turnStarted;
   final disabledNetworkTasks = <String>[];
+  final preparationEvents = <Map<String, Object?>>[];
+  bool failAfterPreparation = false;
 
   @override
   Future<void> disableTaskNetwork({
@@ -111,27 +113,29 @@ class _StreamingRuntime
       );
     }
 
+    for (final event in preparationEvents) {
+      onProcessEvent(event);
+    }
+    if (failAfterPreparation) throw StateError('private-runtime-failure');
     onProcessEvent({'type': 'tool_started', 'tool': 'execute_python'});
     onChunk(
       AgentStreamChunk(
         modelChunk: ModelResponseChunk(
           role: Role.model,
-          content: [
-            ReasoningPart(reasoning: 'Check the calculation'),
-            TextPart(text: '你'),
-          ],
-        ),
-      ),
-    );
-    onChunk(
-      AgentStreamChunk(
-        modelChunk: ModelResponseChunk(
-          role: Role.model,
-          content: [TextPart(text: '好')],
+          content: [ReasoningPart(reasoning: '先核对计算结果。')],
         ),
       ),
     );
     onProcessEvent({'type': 'tool_succeeded', 'tool': 'execute_python'});
+    onProcessEvent({'type': 'answer_started'});
+    onChunk(
+      AgentStreamChunk(
+        modelChunk: ModelResponseChunk(
+          role: Role.model,
+          content: [TextPart(text: '你好')],
+        ),
+      ),
+    );
     turnStarted?.complete();
     await pauseBeforeReturn?.future;
     return XiaoqiAgentTurnResult(
@@ -141,7 +145,7 @@ class _StreamingRuntime
         Message(
           role: Role.model,
           content: [
-            ReasoningPart(reasoning: 'Check the calculation'),
+            ReasoningPart(reasoning: '先核对计算结果。'),
             TextPart(text: '你好'),
           ],
         ),
@@ -211,7 +215,54 @@ void main() {
   );
 
   test(
-    'streams text, model reasoning, process updates, and isolated snapshots',
+    'updates one live status through MCP, skills, search and the final answer',
+    () async {
+      runtime.preparationEvents.addAll([
+        {'type': 'mcp_connection_started', 'connection_name': '资料库'},
+        {'type': 'mcp_tool_approval_required', 'connection_name': '资料库'},
+        {
+          'type': 'tool_started',
+          'tool': 'MCP · 资料库 · lookup',
+          'capability_name': '资料库',
+        },
+        {
+          'type': 'tool_started',
+          'tool': 'use_skill',
+          'capability_name': '资料整理',
+        },
+        {'type': 'network_permission_required', 'tool': 'execute_skill_script'},
+        {'type': 'tool_started', 'tool': 'web_search'},
+        {'type': 'tool_succeeded', 'tool': 'web_search'},
+        {'type': 'thinking_started'},
+      ]);
+      final turn = ownerAgent.chat().sendStream(
+        message: userMessage('查找并整理资料', 'status-sequence'),
+      );
+      final titles = <String>[];
+      await for (final chunk in turn.stream) {
+        final state = chunk.custom;
+        if (state != null) titles.add(state['current_step'] as String);
+      }
+      await turn.response;
+      expect(
+        titles,
+        containsAllInOrder([
+          '正在连接 MCP',
+          '等待操作确认',
+          '正在调用 MCP',
+          '正在调用技能',
+          '等待操作确认',
+          '正在搜索',
+          '正在思考',
+          '正在执行代码',
+          '正在生成回复',
+        ]),
+      );
+    },
+  );
+
+  test(
+    'streams public process updates without raw reasoning and isolates snapshots',
     () async {
       final chat = ownerAgent.chat();
       final turn = chat.sendStream(
@@ -221,11 +272,15 @@ void main() {
       final reasoning = StringBuffer();
       var sawToolStart = false;
       var sawToolSuccess = false;
+      var sawAnswerStart = false;
+      final phases = <String>[];
       await for (final chunk in turn.stream) {
         body.write(chunk.text);
         reasoning.write(chunk.reasoning);
         final custom = chunk.custom;
         if (custom != null) {
+          phases.add(custom['process_phase'] as String);
+          if (custom['answer_started'] == true) sawAnswerStart = true;
           final events = (custom['agent_process'] as List? ?? const [])
               .whereType<Map>()
               .toList();
@@ -240,12 +295,15 @@ void main() {
       final response = await turn.response;
 
       expect(body.toString(), '你好');
-      expect(reasoning.toString(), 'Check the calculation');
+      expect(reasoning.toString(), isEmpty);
       expect(response.text, '你好');
       expect(response.sessionId, isNotEmpty);
       expect(response.snapshotId, isNotEmpty);
       expect(sawToolStart, isTrue);
       expect(sawToolSuccess, isTrue);
+      expect(sawAnswerStart, isTrue);
+      expect(phases, contains('executing'));
+      expect(phases.last, 'answer');
       expect(
         await otherTenantAgent.getSnapshot(snapshotId: response.snapshotId),
         isNull,
@@ -253,6 +311,12 @@ void main() {
 
       final restored = await ownerAgent.loadChat(
         snapshotId: response.snapshotId,
+      );
+      expect(
+        restored.messages
+            .expand((message) => message.content)
+            .where((part) => part.toJson().containsKey('reasoning')),
+        isEmpty,
       );
       final nextTurn = restored.sendStream(
         message: userMessage('继续', 'stream-task-2'),
@@ -262,6 +326,82 @@ void main() {
       expect(nextResponse.text, '你好');
       expect(nextResponse.sessionId, response.sessionId);
       expect(nextResponse.snapshotId, isNot(response.snapshotId));
+    },
+  );
+
+  test(
+    'keeps the full public timeline and removes private event payloads',
+    () async {
+      for (var index = 0; index < 55; index++) {
+        runtime.preparationEvents.addAll([
+          {
+            'type': 'tool_started',
+            'tool': 'web_search',
+            'script_path': '/workspace/private',
+          },
+          {
+            'type': 'tool_succeeded',
+            'tool': 'web_search',
+            'source_count': 2,
+            'result': 'private-result',
+            'request': {'API_KEY': 'private-credential'},
+          },
+        ]);
+      }
+      runtime.preparationEvents.addAll([
+        {'type': 'reasoning_update', 'text': '已找到原始采访，接下来核对成本案例。'},
+        {'type': 'reasoning_update', 'text': '搜索到 999 个网页。'},
+      ]);
+      final turn = ownerAgent.chat().sendStream(
+        message: userMessage('查找资料', 'full-public-process'),
+      );
+      final observed = StringBuffer();
+      await for (final chunk in turn.stream) {
+        observed.write(jsonEncode(chunk.custom));
+      }
+      final response = await turn.response;
+      final rows = (response.state!['agent_process'] as List)
+          .whereType<Map>()
+          .toList();
+      expect(rows, hasLength(57));
+      expect(rows.map((row) => row['step_id']).toSet(), hasLength(57));
+      expect(
+        rows.where((row) => row['kind'] == 'reasoning').single['text'],
+        '已找到原始采访，接下来核对成本案例。',
+      );
+      expect(rows.every((row) => row['status'] == 'completed'), isTrue);
+      expect(response.state!['process_status'], 'completed');
+      expect(observed.toString(), isNot(contains('private-')));
+      expect(observed.toString(), isNot(contains('999')));
+      final stored = store.get('task/personal/full-public-process')!.value;
+      expect(jsonEncode(stored['events']), isNot(contains('/workspace')));
+      expect(jsonEncode(stored['events']), isNot(contains('private-')));
+    },
+  );
+
+  test(
+    'failed turns settle pending tools before the stream reports failure',
+    () async {
+      runtime.failAfterPreparation = true;
+      runtime.preparationEvents.add({
+        'type': 'tool_started',
+        'tool': 'web_search',
+      });
+      final turn = ownerAgent.chat().sendStream(
+        message: userMessage('查找资料', 'failed-public-process'),
+      );
+      Map<String, dynamic>? finalState;
+      await expectLater(() async {
+        await for (final chunk in turn.stream) {
+          if (chunk.custom != null) finalState = chunk.custom;
+        }
+        await turn.response;
+      }(), throwsA(anything));
+      expect(finalState!['process_status'], 'failed');
+      final row = (finalState!['agent_process'] as List).single as Map;
+      expect(row['status'], 'incomplete');
+      expect(row['text'], isNot(startsWith('正在')));
+      expect(jsonEncode(finalState), isNot(contains('private-')));
     },
   );
 

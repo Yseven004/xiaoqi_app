@@ -1,23 +1,30 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 import '../models/home_chat_attachment.dart';
+import '../services/home_chat_attachment_preparer.dart';
 
 class HomeChatAttachmentTray extends StatelessWidget {
   const HomeChatAttachmentTray({
     required this.attachments,
     required this.onRemove,
     this.onEditDrawing,
+    this.preparationStates,
+    this.onRetry,
     super.key,
   });
 
   final List<HomeChatAttachment> attachments;
   final ValueChanged<HomeChatAttachment> onRemove;
   final ValueChanged<HomeChatAttachment>? onEditDrawing;
+  final ValueListenable<Map<String, AttachmentPreparationState>>?
+  preparationStates;
+  final ValueChanged<HomeChatAttachment>? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -25,7 +32,7 @@ class HomeChatAttachmentTray extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(2, 2, 2, 0),
       child: SizedBox(
-        height: 78,
+        height: preparationStates == null ? 78 : 122,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
           itemCount: attachments.length,
@@ -36,7 +43,7 @@ class HomeChatAttachmentTray extends StatelessWidget {
                 item.source == 'drawing' &&
                 item.drawingDraftPath != null &&
                 onEditDrawing != null;
-            final preview = GestureDetector(
+            final thumbnail = GestureDetector(
               onTap: canEditDrawing
                   ? () => onEditDrawing!(item)
                   : item.isImage
@@ -54,7 +61,12 @@ class HomeChatAttachmentTray extends StatelessWidget {
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: item.isImage
-                    ? Image.file(File(item.path), fit: BoxFit.cover)
+                    ? Image.file(
+                        File(item.path),
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) =>
+                            const ColoredBox(color: Color(0xFFF1F1F1)),
+                      )
                     : Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -70,7 +82,9 @@ class HomeChatAttachmentTray extends StatelessWidget {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            '${item.name.split('.').last.toUpperCase()} · ${_size(item.byteLength)}',
+                            item.byteLength > 0
+                                ? '${item.name.split('.').last.toUpperCase()} · ${_size(item.byteLength)}'
+                                : item.name.split('.').last.toUpperCase(),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -80,6 +94,24 @@ class HomeChatAttachmentTray extends StatelessWidget {
                           ),
                         ],
                       ),
+              ),
+            );
+            final preview = SizedBox(
+              width: preparationStates == null
+                  ? (item.isImage ? 64 : 150)
+                  : (item.isImage ? 92 : 180),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  thumbnail,
+                  if (preparationStates != null)
+                    HomeChatAttachmentPreparationStatus(
+                      attachment: item,
+                      states: preparationStates!,
+                      onRetry: onRetry,
+                    ),
+                ],
               ),
             );
             final editBadge = Positioned(
@@ -180,12 +212,36 @@ class HomeChatAttachmentTray extends StatelessWidget {
 }
 
 class HomeChatMessageAttachments extends StatelessWidget {
-  const HomeChatMessageAttachments({required this.attachments, super.key});
+  const HomeChatMessageAttachments({
+    required this.attachments,
+    this.preparationStates,
+    this.onRetry,
+    super.key,
+  });
 
   final List<HomeChatAttachment> attachments;
+  final ValueListenable<Map<String, AttachmentPreparationState>>?
+  preparationStates;
+  final ValueChanged<HomeChatAttachment>? onRetry;
 
   @override
-  Widget build(BuildContext context) => Wrap(
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.end,
+    children: [
+      _attachments(context),
+      if (preparationStates != null)
+        for (final attachment in attachments)
+          HomeChatAttachmentPreparationStatus(
+            attachment: attachment,
+            states: preparationStates!,
+            onRetry: onRetry,
+            hideWhenReady: true,
+          ),
+    ],
+  );
+
+  Widget _attachments(BuildContext context) => Wrap(
     alignment: WrapAlignment.end,
     spacing: 8,
     runSpacing: 8,
@@ -284,6 +340,91 @@ class HomeChatMessageAttachments extends StatelessWidget {
   String _size(int bytes) => bytes < 1024 * 1024
       ? '${(bytes / 1024).ceil()} KB'
       : '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+class HomeChatAttachmentPreparationStatus extends StatelessWidget {
+  const HomeChatAttachmentPreparationStatus({
+    required this.attachment,
+    required this.states,
+    this.onRetry,
+    this.hideWhenReady = false,
+    super.key,
+  });
+
+  final HomeChatAttachment attachment;
+  final ValueListenable<Map<String, AttachmentPreparationState>> states;
+  final ValueChanged<HomeChatAttachment>? onRetry;
+  final bool hideWhenReady;
+
+  @override
+  Widget build(BuildContext context) =>
+      ValueListenableBuilder<Map<String, AttachmentPreparationState>>(
+        valueListenable: states,
+        builder: (context, values, _) {
+          final state = values[attachment.id];
+          if (hideWhenReady && (state == null || state.ready)) {
+            return const SizedBox.shrink();
+          }
+          final error = state?.error;
+          final label =
+              state?.label ??
+              (attachment.remoteAttachmentId == null ? '正在准备' : '已就绪');
+          return Semantics(
+            liveRegion: true,
+            label: '${attachment.name}，${error ?? label}',
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 320),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Tooltip(
+                      message: error ?? label,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            error == null ? label : '准备失败',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: error == null
+                                  ? const Color(0xFF777777)
+                                  : Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                          if (state?.ready != true &&
+                              (state?.progress != null ||
+                                  state?.phase == 'copying'))
+                            Padding(
+                              padding: const EdgeInsets.only(top: 3),
+                              child: LinearProgressIndicator(
+                                value: state?.progress?.clamp(0.0, 1.0),
+                                minHeight: 2,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (state?.retryable == true && onRetry != null)
+                    SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: TextButton(
+                        onPressed: () => onRetry!(attachment),
+                        style: TextButton.styleFrom(padding: EdgeInsets.zero),
+                        child: const Text('重试', style: TextStyle(fontSize: 11)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
 }
 
 class HomeChatAttachmentActionPanel extends StatelessWidget {

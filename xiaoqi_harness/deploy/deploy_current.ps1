@@ -61,14 +61,14 @@ function Wait-RemoteCommand {
             '--InstanceId', $InstanceId
         )
         $item = @($result.Invocation.InvocationResults.InvocationResult)[0]
-        if ($null -ne $item -and $item.InvocationStatus -in @('Success', 'Failed', 'Stopped')) {
+        if ($null -ne $item -and $item.InvocationStatus -in @('Success', 'Failed', 'Stopped', 'Aborted')) {
             $text = if ($item.Output) {
                 [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$item.Output))
             } else {
                 ''
             }
             if ($item.InvocationStatus -ne 'Success' -or [int]$item.ExitCode -ne 0) {
-                throw "Remote command failed (exit $($item.ExitCode)):`n$text`n$($item.ErrorInfo)"
+                throw "Remote command $($item.InvocationStatus) (exit $($item.ExitCode)):`n$text`n$($item.ErrorInfo)"
             }
             return $text.Trim()
         }

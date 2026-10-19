@@ -17,6 +17,13 @@ class HomeChatAttachment {
     this.pageImagePaths = const [],
     this.drawingDraftPath,
     this.drawingDraftScope,
+    this.remoteAttachmentId,
+    this.contentHash,
+    this.preparationCoverage = '',
+    this.preparationPhase = '',
+    this.preparationPageCount,
+    this.preparationCompletedPages,
+    this.preparationExpiresAt,
   });
 
   final String id;
@@ -31,6 +38,13 @@ class HomeChatAttachment {
   final List<String> pageImagePaths;
   final String? drawingDraftPath;
   final String? drawingDraftScope;
+  final String? remoteAttachmentId;
+  final String? contentHash;
+  final String preparationCoverage;
+  final String preparationPhase;
+  final int? preparationPageCount;
+  final int? preparationCompletedPages;
+  final DateTime? preparationExpiresAt;
 
   bool get isImage => mimeType.startsWith('image/');
   bool get exists => File(path).existsSync();
@@ -48,6 +62,13 @@ class HomeChatAttachment {
     'page_image_paths': pageImagePaths,
     'drawing_draft_path': drawingDraftPath,
     'drawing_draft_scope': drawingDraftScope,
+    'remote_attachment_id': remoteAttachmentId,
+    'content_hash': contentHash,
+    'preparation_coverage': preparationCoverage,
+    'preparation_phase': preparationPhase,
+    'preparation_page_count': preparationPageCount,
+    'preparation_completed_pages': preparationCompletedPages,
+    'preparation_expires_at': preparationExpiresAt?.toUtc().toIso8601String(),
   };
 
   factory HomeChatAttachment.fromJson(Object? raw) {
@@ -69,21 +90,43 @@ class HomeChatAttachment {
           : const [],
       drawingDraftPath: raw['drawing_draft_path']?.toString(),
       drawingDraftScope: raw['drawing_draft_scope']?.toString(),
+      remoteAttachmentId: raw['remote_attachment_id']?.toString(),
+      contentHash: raw['content_hash']?.toString(),
+      preparationCoverage: raw['preparation_coverage']?.toString() ?? '',
+      preparationPhase: raw['preparation_phase']?.toString() ?? '',
+      preparationPageCount: int.tryParse(
+        raw['preparation_page_count']?.toString() ?? '',
+      ),
+      preparationCompletedPages: int.tryParse(
+        raw['preparation_completed_pages']?.toString() ?? '',
+      ),
+      preparationExpiresAt: DateTime.tryParse(
+        raw['preparation_expires_at']?.toString() ?? '',
+      ),
     );
   }
 
   HomeChatAttachment copyWith({
+    String? path,
+    int? byteLength,
     String? extractedText,
     String? sourceLabel,
     List<String>? pageImagePaths,
     Object? drawingDraftPath = _unchanged,
     Object? drawingDraftScope = _unchanged,
+    Object? remoteAttachmentId = _unchanged,
+    String? contentHash,
+    String? preparationCoverage,
+    String? preparationPhase,
+    int? preparationPageCount,
+    int? preparationCompletedPages,
+    DateTime? preparationExpiresAt,
   }) => HomeChatAttachment(
     id: id,
     name: name,
-    path: path,
+    path: path ?? this.path,
     mimeType: mimeType,
-    byteLength: byteLength,
+    byteLength: byteLength ?? this.byteLength,
     source: source,
     sourceAssetId: sourceAssetId,
     extractedText: extractedText ?? this.extractedText,
@@ -95,5 +138,15 @@ class HomeChatAttachment {
     drawingDraftScope: identical(drawingDraftScope, _unchanged)
         ? this.drawingDraftScope
         : drawingDraftScope as String?,
+    remoteAttachmentId: identical(remoteAttachmentId, _unchanged)
+        ? this.remoteAttachmentId
+        : remoteAttachmentId as String?,
+    contentHash: contentHash ?? this.contentHash,
+    preparationCoverage: preparationCoverage ?? this.preparationCoverage,
+    preparationPhase: preparationPhase ?? this.preparationPhase,
+    preparationPageCount: preparationPageCount ?? this.preparationPageCount,
+    preparationCompletedPages:
+        preparationCompletedPages ?? this.preparationCompletedPages,
+    preparationExpiresAt: preparationExpiresAt ?? this.preparationExpiresAt,
   );
 }

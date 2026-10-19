@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -396,10 +397,12 @@ List<ExtensionEntry> _entriesFor(ExtensionKind kind) => switch (kind) {
 class ExtensionMarketPage extends StatefulWidget {
   const ExtensionMarketPage({
     this.initialKind = ExtensionKind.skill,
+    this.onMcpSelected,
     super.key,
   });
 
   final ExtensionKind initialKind;
+  final ValueChanged<Map<String, Object?>>? onMcpSelected;
 
   @override
   State<ExtensionMarketPage> createState() => _ExtensionMarketPageState();
@@ -411,9 +414,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   final _carouselController = PageController();
   final Set<String> _installedIds = {};
   List<ExtensionEntry> _remoteEntries = [];
+  List<McpCatalogEntry> _mcpCatalog = const [];
   List<McpConnectionRecord> _mcpConnections = const [];
-  final Set<String> _testingMcpIds = {};
-  final Map<String, int> _mcpToolCounts = {};
+  final Set<String> _installingMcpIds = {};
+  StreamSubscription<Uri>? _appLinkSubscription;
   bool _loadingMcpConnections = false;
   String? _mcpLoadError;
   String? _loadError;
@@ -432,6 +436,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     _searchController.addListener(_handleSearchChanged);
     unawaited(_restoreInstalled());
     unawaited(_restoreMcpConnections());
+    _appLinkSubscription = AppLinks().uriLinkStream.listen(
+      _handleMcpAppLink,
+      onError: (_) {},
+    );
   }
 
   @override
@@ -457,6 +465,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   void dispose() {
     _carouselTimer?.cancel();
     _resumeCarouselTimer?.cancel();
+    _appLinkSubscription?.cancel();
     _searchController
       ..removeListener(_handleSearchChanged)
       ..dispose();
@@ -485,9 +494,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   Future<void> _restoreMcpConnections() async {
     setStateIfMounted(() => _loadingMcpConnections = true);
     try {
+      final catalog = await CapabilityCloudSync.instance.listMcpCatalog();
       final items = await CapabilityCloudSync.instance.listMcpConnections();
       if (!mounted) return;
       setState(() {
+        _mcpCatalog = catalog;
         _mcpConnections = items;
         _mcpLoadError = null;
       });
@@ -498,24 +509,66 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     }
   }
 
+  void _handleMcpAppLink(Uri uri) {
+    if ((uri.scheme == 'xiaoqi' && uri.host == 'mcp' && uri.path == '/oauth') ||
+        (uri.path.contains('mcp') && uri.path.contains('oauth'))) {
+      unawaited(_restoreMcpConnections());
+    }
+  }
+
   void setStateIfMounted(VoidCallback update) {
     if (mounted) setState(update);
   }
 
-  Future<void> _testMcpConnection(McpConnectionRecord connection) async {
-    setState(() => _testingMcpIds.add(connection.id));
+  Future<void> _installMcp(McpCatalogEntry entry) async {
+    if (_installingMcpIds.contains(entry.id)) return;
+    setState(() => _installingMcpIds.add(entry.id));
     try {
-      final result = await CapabilityCloudSync.instance.testMcpConnection(
+      final connection = await CapabilityCloudSync.instance.installMcp(
+        entry.id,
+      );
+      if (!mounted) return;
+      await _restoreMcpConnections();
+      if (!mounted) return;
+      if (connection.needsLogin) {
+        AppToast.show(context, '已安装，请点击“登录”完成授权');
+      } else if (connection.isReady) {
+        AppToast.show(context, '已就绪，点击“开始使用”进入聊天');
+      } else {
+        AppToast.show(context, '已安装，正在连接服务');
+      }
+    } catch (error) {
+      if (mounted) AppToast.show(context, '安装失败：$error');
+    } finally {
+      if (mounted) setState(() => _installingMcpIds.remove(entry.id));
+    }
+  }
+
+  Future<void> _loginMcp(McpConnectionRecord connection) async {
+    try {
+      final uri = await CapabilityCloudSync.instance.startMcpLogin(
         connection.id,
       );
-      final count = (result['tool_count'] as num?)?.toInt() ?? 0;
-      if (!mounted) return;
-      setState(() => _mcpToolCounts[connection.id] = count);
-      AppToast.show(context, '连接成功，发现 $count 个可用工具');
+      if (uri == null ||
+          !await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        throw StateError('无法打开登录页面');
+      }
+      if (mounted) AppToast.show(context, '请在打开的页面完成登录，完成后回到小栖');
+    } catch (error) {
+      if (mounted) AppToast.show(context, '登录暂不可用：$error');
+    }
+  }
+
+  Future<void> _reconnectMcp(McpConnectionRecord connection) async {
+    setState(() => _installingMcpIds.add(connection.id));
+    try {
+      await CapabilityCloudSync.instance.reconnectMcp(connection.id);
+      await _restoreMcpConnections();
+      if (mounted) AppToast.show(context, '连接状态已更新');
     } catch (error) {
       if (mounted) AppToast.show(context, '连接失败：$error');
     } finally {
-      if (mounted) setState(() => _testingMcpIds.remove(connection.id));
+      if (mounted) setState(() => _installingMcpIds.remove(connection.id));
     }
   }
 
@@ -545,6 +598,36 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     } catch (error) {
       if (mounted) AppToast.show(context, '删除失败：$error');
     }
+  }
+
+  void _startUsingMcp(McpConnectionRecord connection) {
+    if (!connection.isReady) {
+      AppToast.show(context, '连接尚未就绪，请先完成登录或重新连接');
+      return;
+    }
+    final selected = <String, Object?>{
+      'type': 'mcp',
+      'id': connection.id,
+      'name': connection.name,
+      'url': connection.url,
+      'has_bearer_token': connection.hasBearerToken,
+      if (connection.catalogId != null) 'catalog_id': connection.catalogId,
+      if (connection.version != null) 'version': connection.version,
+    };
+    final callback = widget.onMcpSelected;
+    if (callback == null) {
+      AppToast.show(context, '已就绪，请从聊天入口选择此工具');
+      return;
+    }
+    callback(selected);
+    Navigator.of(context).pop();
+  }
+
+  McpConnectionRecord? _mcpConnectionForCatalog(String catalogId) {
+    for (final connection in _mcpConnections) {
+      if (connection.catalogId == catalogId) return connection;
+    }
+    return null;
   }
 
   void _handleSearchChanged() {
@@ -645,7 +728,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
   Future<void> _showCreateImportSheet() async {
     if (_kind == ExtensionKind.mcp) {
-      await _showMcpConnectionDialog();
+      AppToast.show(context, 'MCP 工具只能从已验证目录安装');
       return;
     }
     ModalRoute<dynamic>? sheetRoute;
@@ -708,168 +791,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     if (mounted) setState(() => _filter = ExtensionFilter.installed);
   }
 
-  Future<void> _showMcpConnectionDialog({
-    McpConnectionRecord? connection,
-  }) async {
-    final pageContext = context;
-    final name = TextEditingController(text: connection?.name ?? '');
-    final url = TextEditingController(text: connection?.url ?? '');
-    final bearerToken = TextEditingController();
-    String? savedId = connection?.id;
-    var saving = false;
-    String? errorText;
-    int? discoveredTools;
-    try {
-      await showDialog<void>(
-        context: pageContext,
-        builder: (dialogContext) => StatefulBuilder(
-          builder: (context, setDialogState) {
-            Future<void> submit({required bool test}) async {
-              if (saving) return;
-              setDialogState(() {
-                saving = true;
-                errorText = null;
-                discoveredTools = null;
-              });
-              try {
-                final saved = await CapabilityCloudSync.instance
-                    .saveMcpConnection(
-                      id: savedId,
-                      name: name.text,
-                      url: url.text,
-                      bearerToken: bearerToken.text,
-                    );
-                savedId = saved.id;
-                if (test) {
-                  final result = await CapabilityCloudSync.instance
-                      .testMcpConnection(saved.id);
-                  discoveredTools =
-                      (result['tool_count'] as num?)?.toInt() ?? 0;
-                }
-                if (!dialogContext.mounted) return;
-                Navigator.of(dialogContext).pop();
-                await _restoreMcpConnections();
-                if (pageContext.mounted) {
-                  AppToast.show(
-                    pageContext,
-                    test
-                        ? '已保存并连接，发现 ${discoveredTools ?? 0} 个可用工具'
-                        : 'MCP 连接器已保存',
-                  );
-                }
-              } catch (error) {
-                if (dialogContext.mounted) {
-                  setDialogState(() => errorText = error.toString());
-                }
-              } finally {
-                if (dialogContext.mounted) {
-                  setDialogState(() => saving = false);
-                }
-              }
-            }
-
-            return AlertDialog(
-              backgroundColor: const Color(0xFFFFFCF8),
-              title: Text(connection == null ? '添加 MCP 连接器' : '编辑 MCP 连接器'),
-              content: SizedBox(
-                width: 520,
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text(
-                        '连接一个可从服务器访问的 HTTPS MCP 服务。保存的令牌会加密保管；每次调用工具前都会请你确认。',
-                        style: TextStyle(height: 1.45),
-                      ),
-                      const SizedBox(height: 18),
-                      TextField(
-                        controller: name,
-                        decoration: const InputDecoration(
-                          labelText: '连接器名称',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: url,
-                        keyboardType: TextInputType.url,
-                        autocorrect: false,
-                        decoration: const InputDecoration(
-                          labelText: 'MCP 服务地址',
-                          hintText: 'https://example.com/mcp',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton.icon(
-                          onPressed: saving
-                              ? null
-                              : () {
-                                  name.text = 'GitHub';
-                                  url.text =
-                                      'https://api.githubcopilot.com/mcp/';
-                                },
-                          icon: const Icon(Icons.code, size: 18),
-                          label: const Text('填入 GitHub MCP 地址'),
-                        ),
-                      ),
-                      TextField(
-                        controller: bearerToken,
-                        obscureText: true,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        decoration: InputDecoration(
-                          labelText: connection?.hasBearerToken == true
-                              ? 'Bearer 令牌（留空表示不更换）'
-                              : 'Bearer 令牌（可选）',
-                          helperText: 'GitHub 当前可使用个人访问令牌；此入口暂不提供浏览器 OAuth 登录。',
-                          border: const OutlineInputBorder(),
-                        ),
-                      ),
-                      if (errorText != null) ...[
-                        const SizedBox(height: 12),
-                        Text(
-                          errorText!,
-                          style: const TextStyle(color: Color(0xFFB3261E)),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: saving ? null : () => Navigator.pop(dialogContext),
-                  child: const Text('取消'),
-                ),
-                TextButton(
-                  onPressed: saving ? null : () => submit(test: false),
-                  child: const Text('只保存'),
-                ),
-                FilledButton(
-                  onPressed: saving ? null : () => submit(test: true),
-                  child: saving
-                      ? const SizedBox(
-                          width: 17,
-                          height: 17,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('保存并测试'),
-                ),
-              ],
-            );
-          },
-        ),
-      );
-    } finally {
-      name.dispose();
-      url.dispose();
-      bearerToken.dispose();
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final horizontal = MediaQuery.sizeOf(context).width < 640 ? 20.0 : 40.0;
@@ -886,7 +807,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               const SizedBox(height: 28),
               _buildKindTabs(),
               const SizedBox(height: 22),
-              if (_kind != ExtensionKind.mcp) _buildFilters(),
+              _buildFilters(),
               if (_loadError != null)
                 TextButton(
                   onPressed: _restoreInstalled,
@@ -914,83 +835,92 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Widget _buildMcpConnections(double contentWidth) {
-    final matches = _mcpConnections
-        .where((connection) {
-          return _query.isEmpty ||
-              '${connection.name} ${connection.url}'.toLowerCase().contains(
-                _query,
-              );
-        })
+    final installed = _filter == ExtensionFilter.installed;
+    final catalogMatches = _mcpCatalog
+        .where(
+          (entry) =>
+              entry.status == McpInstallationState.ready || _query.isNotEmpty,
+        )
+        .where(
+          (entry) =>
+              _query.isEmpty ||
+              '${entry.name} ${entry.description} ${entry.package ?? ''} ${entry.reason ?? ''}'
+                  .toLowerCase()
+                  .contains(_query),
+        )
         .toList(growable: false);
+    final connectionMatches = _mcpConnections
+        .where(
+          (connection) =>
+              _query.isEmpty ||
+              '${connection.name} ${connection.status.name} ${connection.error ?? ''}'
+                  .toLowerCase()
+                  .contains(_query),
+        )
+        .toList(growable: false);
+    final itemCount = installed
+        ? connectionMatches.length
+        : catalogMatches.length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          '已连接',
-          style: TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
+        Text(
+          installed ? '已安装的 MCP' : '推荐的 MCP',
+          style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
         ),
         const SizedBox(height: 8),
-        const Text(
-          '只连接服务器可访问的远程 MCP 服务。选中后才会在当前聊天中使用；每次调用工具前都会显示操作并等待确认。',
-          style: TextStyle(color: Color(0xFF68707C), height: 1.45),
+        Text(
+          installed
+              ? '登录状态和连接状态都在这里管理。需要授权时，小栖会打开服务商的登录页面。'
+              : '选择工具后，小栖会自动完成安装和连接；你不需要填写地址或令牌。',
+          style: const TextStyle(color: Color(0xFF68707C), height: 1.45),
         ),
         const SizedBox(height: 20),
         if (_loadingMcpConnections)
-          const Padding(padding: EdgeInsets.all(22), child: Text('正在读取连接器列表…'))
+          const _McpStaticPlaceholder()
         else if (_mcpLoadError != null)
           TextButton.icon(
             onPressed: _restoreMcpConnections,
             icon: const Icon(Icons.refresh),
             label: Text('$_mcpLoadError · 重试'),
           )
-        else if (matches.isEmpty)
-          Container(
-            width: contentWidth,
-            padding: const EdgeInsets.all(22),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF8F9FB),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFFE6E9EE)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Row(
-                  children: [
-                    Icon(Icons.link_outlined, size: 24),
-                    SizedBox(width: 10),
-                    Text(
-                      '还没有连接器',
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                const Text('添加远程服务地址，可选填 Bearer 令牌。'),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: _showCreateImportSheet,
-                  icon: const Icon(Icons.add),
-                  label: const Text('添加 MCP 连接器'),
-                ),
-              ],
-            ),
-          )
+        else if (itemCount == 0)
+          _McpEmptyState(installed: installed)
         else
-          for (final connection in matches) ...[
-            _McpConnectionTile(
-              connection: connection,
-              toolCount: _mcpToolCounts[connection.id],
-              testing: _testingMcpIds.contains(connection.id),
-              onTest: () => _testMcpConnection(connection),
-              onEdit: () => _showMcpConnectionDialog(connection: connection),
-              onDelete: () => _deleteMcpConnection(connection),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: itemCount,
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: contentWidth < 680 ? 1 : 2,
+              mainAxisExtent: installed ? 164 : 142,
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 14,
             ),
-            const SizedBox(height: 12),
-          ],
+            itemBuilder: (context, index) => installed
+                ? _McpInstalledTile(
+                    connection: connectionMatches[index],
+                    busy: _installingMcpIds.contains(
+                      connectionMatches[index].id,
+                    ),
+                    onLogin: () => _loginMcp(connectionMatches[index]),
+                    onReconnect: () => _reconnectMcp(connectionMatches[index]),
+                    onDelete: () =>
+                        _deleteMcpConnection(connectionMatches[index]),
+                    onStartUsing: () =>
+                        _startUsingMcp(connectionMatches[index]),
+                  )
+                : _McpCatalogTile(
+                    entry: catalogMatches[index],
+                    connection: _mcpConnectionForCatalog(
+                      catalogMatches[index].id,
+                    ),
+                    busy: _installingMcpIds.contains(catalogMatches[index].id),
+                    onInstall: () => _installMcp(catalogMatches[index]),
+                    onLogin: (connection) => _loginMcp(connection),
+                    onStartUsing: (connection) => _startUsingMcp(connection),
+                  ),
+          ),
       ],
     );
   }
@@ -1016,23 +946,24 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             ),
           ),
         ),
-        OutlinedButton.icon(
-          onPressed: _showCreateImportSheet,
-          icon: _assetIcon('assets/icons/extensions/market_plus.svg', 25),
-          label: Text(_kind == ExtensionKind.mcp ? '添加连接器' : '创建/导入'),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: const Color(0xFF10131A),
-            side: const BorderSide(color: Color(0xFFD9DEE7), width: 1.5),
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(20),
-            ),
-            textStyle: const TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.w600,
+        if (_kind != ExtensionKind.mcp)
+          OutlinedButton.icon(
+            onPressed: _showCreateImportSheet,
+            icon: _assetIcon('assets/icons/extensions/market_plus.svg', 25),
+            label: const Text('创建/导入'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFF10131A),
+              side: const BorderSide(color: Color(0xFFD9DEE7), width: 1.5),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              textStyle: const TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
-        ),
       ],
     );
   }
@@ -1114,11 +1045,16 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       scrollDirection: Axis.horizontal,
       child: Row(
         children: [
-          _filterChip('精选', ExtensionFilter.curated),
+          _filterChip(
+            _kind == ExtensionKind.mcp ? '推荐' : '精选',
+            ExtensionFilter.curated,
+          ),
           const SizedBox(width: 14),
           _filterChip('已安装', ExtensionFilter.installed),
-          const SizedBox(width: 14),
-          _filterChip('我创建的', ExtensionFilter.created),
+          if (_kind != ExtensionKind.mcp) ...[
+            const SizedBox(width: 14),
+            _filterChip('我创建的', ExtensionFilter.created),
+          ],
         ],
       ),
     );
@@ -1529,119 +1465,178 @@ class _ImportInstallationDialogState extends State<_ImportInstallationDialog> {
   );
 }
 
-class _McpConnectionTile extends StatelessWidget {
-  const _McpConnectionTile({
+class _McpStaticPlaceholder extends StatelessWidget {
+  const _McpStaticPlaceholder();
+
+  @override
+  Widget build(BuildContext context) => GridView.builder(
+    shrinkWrap: true,
+    physics: const NeverScrollableScrollPhysics(),
+    itemCount: 4,
+    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+      crossAxisCount: 2,
+      mainAxisExtent: 142,
+      crossAxisSpacing: 16,
+      mainAxisSpacing: 14,
+    ),
+    itemBuilder: (_, _) => DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F5F8),
+        borderRadius: BorderRadius.circular(16),
+      ),
+    ),
+  );
+}
+
+class _McpEmptyState extends StatelessWidget {
+  const _McpEmptyState({required this.installed});
+
+  final bool installed;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(24),
+    decoration: BoxDecoration(
+      color: const Color(0xFFF7F8FA),
+      borderRadius: BorderRadius.circular(16),
+    ),
+    child: Text(
+      installed ? '还没有安装 MCP 工具。切换到“推荐”开始安装。' : '暂时没有可直接接入的 MCP 工具。',
+      style: const TextStyle(color: Color(0xFF68707C), height: 1.45),
+    ),
+  );
+}
+
+class _McpCatalogTile extends StatelessWidget {
+  const _McpCatalogTile({
+    required this.entry,
     required this.connection,
-    required this.toolCount,
-    required this.testing,
-    required this.onTest,
-    required this.onEdit,
-    required this.onDelete,
+    required this.busy,
+    required this.onInstall,
+    required this.onLogin,
+    required this.onStartUsing,
   });
 
-  final McpConnectionRecord connection;
-  final int? toolCount;
-  final bool testing;
-  final VoidCallback onTest;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
+  final McpCatalogEntry entry;
+  final McpConnectionRecord? connection;
+  final bool busy;
+  final VoidCallback onInstall;
+  final ValueChanged<McpConnectionRecord> onLogin;
+  final ValueChanged<McpConnectionRecord> onStartUsing;
 
   @override
   Widget build(BuildContext context) {
-    final uri = Uri.tryParse(connection.url);
-    final endpoint = '${uri?.host ?? connection.url}${uri?.path ?? ''}';
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFE2E6EC)),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x08000000),
-            blurRadius: 12,
-            offset: Offset(0, 3),
+    final installed = connection != null;
+    final ready = connection?.isReady == true;
+    final needsLogin = connection?.needsLogin == true;
+    final unsupported = entry.status == McpInstallationState.unsupported;
+    return _McpCard(
+      iconAsset: entry.iconAsset,
+      title: entry.name,
+      subtitle: entry.reason == null
+          ? entry.description
+          : '${entry.description}\n${entry.reason}',
+      badge: unsupported
+          ? '暂未支持'
+          : installed
+          ? _mcpStatusLabel(connection!.status)
+          : '已验证',
+      footer: Row(
+        children: [
+          Expanded(
+            child: Text(
+              '版本 ${entry.version}',
+              style: const TextStyle(color: Color(0xFF68707C), fontSize: 13),
+            ),
           ),
+          if (busy)
+            const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else if (needsLogin)
+            FilledButton(
+              onPressed: () => onLogin(connection!),
+              child: const Text('登录'),
+            )
+          else if (ready)
+            FilledButton(
+              onPressed: () => onStartUsing(connection!),
+              child: const Text('开始使用'),
+            )
+          else if (unsupported)
+            const FilledButton(onPressed: null, child: Text('暂未支持'))
+          else
+            FilledButton(
+              onPressed: installed ? null : onInstall,
+              child: Text(
+                installed ? _mcpStatusLabel(connection!.status) : '安装',
+              ),
+            ),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+    );
+  }
+}
+
+class _McpInstalledTile extends StatelessWidget {
+  const _McpInstalledTile({
+    required this.connection,
+    required this.busy,
+    required this.onLogin,
+    required this.onReconnect,
+    required this.onDelete,
+    required this.onStartUsing,
+  });
+
+  final McpConnectionRecord connection;
+  final bool busy;
+  final VoidCallback onLogin;
+  final VoidCallback onReconnect;
+  final VoidCallback onDelete;
+  final VoidCallback onStartUsing;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = connection.status;
+    return _McpCard(
+      iconAsset: 'assets/icons/capabilities/mcp_connector.svg',
+      title: connection.name,
+      subtitle: connection.error ?? '已安装的工具会出现在聊天入口中。',
+      badge: _mcpStatusLabel(status),
+      footer: Row(
         children: [
-          Row(
-            children: [
-              _assetIcon('assets/icons/capabilities/mcp_connector.svg', 42),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      connection.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      endpoint,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFF68707C),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (connection.hasBearerToken)
-                const Tooltip(
-                  message: '已保存 Bearer 令牌',
-                  child: Icon(
-                    Icons.lock_outline,
-                    size: 19,
-                    color: Color(0xFF667085),
-                  ),
-                ),
-              PopupMenuButton<String>(
-                tooltip: '更多操作',
-                onSelected: (value) => value == 'edit' ? onEdit() : onDelete(),
-                itemBuilder: (_) => const [
-                  PopupMenuItem(value: 'edit', child: Text('编辑')),
-                  PopupMenuItem(value: 'delete', child: Text('删除')),
-                ],
-              ),
-            ],
+          Expanded(
+            child: Text(
+              connection.toolCount == null
+                  ? '工具数量待发现'
+                  : '可用工具：${connection.toolCount}',
+              style: const TextStyle(color: Color(0xFF68707C), fontSize: 13),
+            ),
           ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              OutlinedButton.icon(
-                onPressed: testing ? null : onTest,
-                icon: testing
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.sync, size: 18),
-                label: const Text('测试连接'),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  toolCount == null ? '尚未测试' : '可用工具：$toolCount',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFF68707C),
-                    fontSize: 13,
-                  ),
-                ),
-              ),
+          if (busy)
+            const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else if (connection.needsLogin)
+            FilledButton(onPressed: onLogin, child: const Text('登录'))
+          else if (connection.isReady)
+            FilledButton(onPressed: onStartUsing, child: const Text('开始使用'))
+          else
+            FilledButton(onPressed: onReconnect, child: const Text('重试连接')),
+          const SizedBox(width: 4),
+          PopupMenuButton<String>(
+            tooltip: '管理',
+            onSelected: (value) {
+              if (value == 'reconnect') onReconnect();
+              if (value == 'delete') onDelete();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'reconnect', child: Text('重新连接')),
+              PopupMenuItem(value: 'delete', child: Text('卸载')),
             ],
           ),
         ],
@@ -1649,6 +1644,96 @@ class _McpConnectionTile extends StatelessWidget {
     );
   }
 }
+
+class _McpCard extends StatelessWidget {
+  const _McpCard({
+    required this.iconAsset,
+    required this.title,
+    required this.subtitle,
+    required this.badge,
+    required this.footer,
+  });
+
+  final String iconAsset;
+  final String title;
+  final String subtitle;
+  final String badge;
+  final Widget footer;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: const Color(0xFFE2E6EC)),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x08000000),
+          blurRadius: 12,
+          offset: Offset(0, 3),
+        ),
+      ],
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            _assetIcon(iconAsset, 42),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEAF7EF),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text(
+                badge,
+                style: const TextStyle(
+                  color: Color(0xFF217443),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Expanded(
+          child: Text(
+            subtitle,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Color(0xFF68707C), height: 1.35),
+          ),
+        ),
+        const SizedBox(height: 10),
+        footer,
+      ],
+    ),
+  );
+}
+
+String _mcpStatusLabel(McpInstallationState status) => switch (status) {
+  McpInstallationState.installing => '安装中',
+  McpInstallationState.needsLogin => '待登录',
+  McpInstallationState.connecting => '连接中',
+  McpInstallationState.ready => '已就绪',
+  McpInstallationState.failed => '失败',
+  McpInstallationState.unsupported => '暂未支持',
+};
 
 class _CollectionTile extends StatelessWidget {
   const _CollectionTile({required this.card, required this.selectedIndex});

@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../domain/ai_web_source.dart';
+import '../domain/ai_chat_web_source.dart';
+import '../domain/ai_chat_process.dart';
 import '../../../models/home_chat_attachment.dart';
 
 int _generatedMessageSequence = 0;
@@ -31,6 +33,11 @@ class AiConversationMessage {
     this.agentSessionId,
     this.agentSnapshotId,
     this.agentProcessSummary,
+    this.agentProcessDetails = const [],
+    this.agentProcessDurationMs,
+    this.agentProcessStatus,
+    this.agentProcessExpanded = false,
+    this.agentWebSources = const [],
   }) : id = id ?? _newMessageId();
 
   final String id;
@@ -49,6 +56,18 @@ class AiConversationMessage {
   final String? agentSessionId;
   final String? agentSnapshotId;
   final String? agentProcessSummary;
+  final List<Map<String, Object?>> agentProcessDetails;
+  final int? agentProcessDurationMs;
+  final String? agentProcessStatus;
+  final bool agentProcessExpanded;
+  final List<AiChatWebSource> agentWebSources;
+
+  bool get hasAgentProcess =>
+      agentProcessDetails.isNotEmpty ||
+      agentProcessSummary?.trim().isNotEmpty == true ||
+      agentProcessStatus != null;
+
+  bool get hasAssistantContent => text.trim().isNotEmpty || hasAgentProcess;
 
   AiConversationMessage copyWith({
     String? id,
@@ -73,6 +92,11 @@ class AiConversationMessage {
     bool clearAgentSnapshotId = false,
     String? agentProcessSummary,
     bool clearAgentProcessSummary = false,
+    List<Map<String, Object?>>? agentProcessDetails,
+    int? agentProcessDurationMs,
+    String? agentProcessStatus,
+    bool? agentProcessExpanded,
+    List<AiChatWebSource>? agentWebSources,
   }) => AiConversationMessage(
     id: id ?? this.id,
     parentMessageId: clearParentMessageId
@@ -100,6 +124,12 @@ class AiConversationMessage {
     agentProcessSummary: clearAgentProcessSummary
         ? null
         : agentProcessSummary ?? this.agentProcessSummary,
+    agentProcessDetails: agentProcessDetails ?? this.agentProcessDetails,
+    agentProcessDurationMs:
+        agentProcessDurationMs ?? this.agentProcessDurationMs,
+    agentProcessStatus: agentProcessStatus ?? this.agentProcessStatus,
+    agentProcessExpanded: agentProcessExpanded ?? this.agentProcessExpanded,
+    agentWebSources: agentWebSources ?? this.agentWebSources,
   );
 
   Map<String, Object?> toJson() => {
@@ -126,6 +156,19 @@ class AiConversationMessage {
     if (agentSnapshotId != null) 'agent_snapshot_id': agentSnapshotId,
     if (agentProcessSummary != null)
       'agent_process_summary': agentProcessSummary,
+    if (agentProcessDetails.isNotEmpty)
+      'agent_process_details': settleChatProcessDetails(
+        agentProcessDetails,
+        status: agentProcessStatus ?? (isIncomplete ? 'stopped' : 'completed'),
+      ),
+    if (agentProcessDurationMs != null)
+      'agent_process_duration_ms': agentProcessDurationMs,
+    if (agentProcessStatus != null) 'agent_process_status': agentProcessStatus,
+    if (agentProcessExpanded) 'agent_process_expanded': true,
+    if (agentWebSources.isNotEmpty)
+      'agent_web_sources': agentWebSources
+          .map((source) => source.toJson())
+          .toList(),
   };
 
   factory AiConversationMessage.fromJson(Object? raw) {
@@ -165,6 +208,27 @@ class AiConversationMessage {
       agentSessionId: raw['agent_session_id']?.toString(),
       agentSnapshotId: raw['agent_snapshot_id']?.toString(),
       agentProcessSummary: raw['agent_process_summary']?.toString(),
+      agentProcessDetails: settleChatProcessDetails(
+        raw['agent_process_details'] is List
+            ? (raw['agent_process_details'] as List)
+                  .whereType<Map>()
+                  .map((item) => Map<String, Object?>.from(item))
+                  .toList(growable: false)
+            : const [],
+        status:
+            raw['agent_process_status']?.toString() ??
+            (raw['is_incomplete'] == true ? 'stopped' : 'completed'),
+      ),
+      agentProcessDurationMs: raw['agent_process_duration_ms'] is num
+          ? (raw['agent_process_duration_ms'] as num).toInt()
+          : null,
+      agentProcessStatus: raw['agent_process_status']?.toString(),
+      agentProcessExpanded: raw['agent_process_expanded'] == true,
+      agentWebSources: raw['agent_web_sources'] is List
+          ? (raw['agent_web_sources'] as List)
+                .map(AiChatWebSource.fromJson)
+                .toList(growable: false)
+          : const [],
     );
   }
 }
@@ -272,20 +336,19 @@ class AiConversationRecord {
               (selected.parentMessageId ?? _rootMessageKey) == parentKey
           ? selected
           : candidates.first;
-      if (!next.isUser && !next.isDeletedMarker && next.text.trim().isEmpty) {
+      if (!next.isUser && !next.isDeletedMarker && !next.hasAssistantContent) {
         final validAnswers = candidates
             .where(
               (node) =>
                   !node.isUser &&
                   !node.isDeletedMarker &&
-                  node.text.trim().isNotEmpty,
+                  node.hasAssistantContent,
             )
             .toList(growable: false);
         if (validAnswers.isNotEmpty) next = validAnswers.last;
       }
       if (!visited.add(next.id)) break;
-      if (!next.isDeletedMarker &&
-          (next.isUser || next.text.trim().isNotEmpty)) {
+      if (!next.isDeletedMarker && (next.isUser || next.hasAssistantContent)) {
         path.add(next);
       }
       parentKey = next.id;
@@ -296,7 +359,9 @@ class AiConversationRecord {
   AiConversationMessage? nodeById(String messageId) => _nodesById[messageId];
 
   List<AiConversationMessage> answerVersionsFor(AiConversationMessage answer) {
-    if (answer.isUser || answer.isDeletedMarker || answer.text.trim().isEmpty) {
+    if (answer.isUser ||
+        answer.isDeletedMarker ||
+        !answer.hasAssistantContent) {
       return const [];
     }
     final question = nodeById(answer.parentMessageId ?? '');
@@ -306,9 +371,7 @@ class AiConversationRecord {
     return children
         .where(
           (node) =>
-              !node.isUser &&
-              !node.isDeletedMarker &&
-              node.text.trim().isNotEmpty,
+              !node.isUser && !node.isDeletedMarker && node.hasAssistantContent,
         )
         .toList(growable: false);
   }
@@ -542,6 +605,7 @@ class AiConversationRecord {
               .where(
                 (message) =>
                     message.isDeletedMarker ||
+                    message.hasAgentProcess ||
                     message.text.trim().isNotEmpty ||
                     message.capabilityMetadata != null ||
                     message.agentTaskId != null ||

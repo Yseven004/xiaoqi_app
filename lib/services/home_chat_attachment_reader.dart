@@ -1,9 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:archive/archive.dart';
-import 'package:image/image.dart' as img;
-import 'package:pdfrx/pdfrx.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:xml/xml.dart';
 
 import '../models/home_chat_attachment.dart';
@@ -13,16 +12,48 @@ import 'epub_document_service.dart';
 import 'html_article_document_service.dart';
 import 'text_document_service.dart';
 
+Future<List<String>> _readAttachmentLocally(HomeChatAttachment attachment) =>
+    HomeChatAttachmentReader()._readLocal(attachment);
+
 class HomeChatAttachmentReader {
-  Future<List<String>> read(HomeChatAttachment attachment) async {
+  Future<List<String>> read(
+    HomeChatAttachment attachment, {
+    bool Function()? isCancelled,
+  }) async {
+    if (isCancelled?.call() == true) {
+      throw const FormatException('已停止读取附件');
+    }
+    // File/ZIP/XML work runs away from the UI isolate. The closure captures
+    // only the immutable attachment; it never calls platform plugins.
+    final result = await Isolate.run(() => _readAttachmentLocally(attachment));
+    if (isCancelled?.call() == true) {
+      throw const FormatException('已停止读取附件');
+    }
+    return result;
+  }
+
+  Future<List<String>> _readLocal(HomeChatAttachment attachment) async {
     if (!await File(attachment.path).exists()) {
       throw FormatException('找不到文件：${attachment.name}');
     }
     final extension = attachment.name.split('.').last.toLowerCase();
     if (attachment.isImage) return const [];
+    if (await File(attachment.path).length() > 50 * 1024 * 1024) {
+      throw const FormatException('附件超过 50 MB，无法安全读取');
+    }
+    if (const ['epub', 'docx', 'pptx', 'xlsx'].contains(extension)) {
+      DocumentArchiveSafety.preflightZip(
+        await File(attachment.path).readAsBytes(),
+        maxEntries: 10000,
+        maxExpandedBytes: 250 * 1024 * 1024,
+      );
+    }
     switch (extension) {
       case 'pdf':
-        return _pdf(attachment.path);
+        if (attachment.extractedText.trim().isNotEmpty) {
+          return _split(attachment.extractedText);
+        }
+        throw const FormatException('PDF 请通过附件准备流程读取');
       case 'epub':
         final doc = await const EpubDocumentService().parseFile(
           attachment.path,
@@ -62,71 +93,11 @@ class HomeChatAttachmentReader {
     }
   }
 
-  Future<List<String>> _pdf(String path) async {
-    final document = await PdfDocument.openFile(path);
-    try {
-      final chunks = <String>[];
-      for (var i = 0; i < document.pages.length; i++) {
-        final text =
-            (await document.pages[i].loadText())?.fullText.trim() ?? '';
-        if (text.isEmpty) {
-          throw FormatException('PDF 第 ${i + 1} 页是扫描图片；当前版本只支持可复制文字的 PDF');
-        } else {
-          chunks.addAll(_split('[第 ${i + 1} 页]\n$text'));
-        }
-      }
-      return chunks;
-    } finally {
-      document.dispose();
-    }
-  }
-
+  /// Historical callers may still ask for page images. PDF extraction and OCR
+  /// now have a single server owner, so no duplicate client rendering occurs.
   Future<List<String>> readScannedPageImages(
     HomeChatAttachment attachment,
-  ) async {
-    if (attachment.name.split('.').last.toLowerCase() != 'pdf') return const [];
-    final document = await PdfDocument.openFile(attachment.path);
-    final pages = <String>[];
-    try {
-      final root = await getApplicationSupportDirectory();
-      final directory = Directory(
-        '${root.path}/home_chat_attachments/pdf_pages',
-      );
-      await directory.create(recursive: true);
-      for (var i = 0; i < document.pages.length; i++) {
-        final raw = await document.pages[i].loadText();
-        if (raw?.fullText.trim().isNotEmpty == true) continue;
-        final size = document.pages[i].width > document.pages[i].height
-            ? (800.0, 600.0)
-            : (600.0, 800.0);
-        final rendered = await document.pages[i].render(
-          fullWidth: size.$1,
-          fullHeight: size.$2,
-          backgroundColor: 0xffffffff,
-        );
-        if (rendered == null) throw FormatException('PDF 第 ${i + 1} 页无法转为图片');
-        try {
-          final raster = img.Image.fromBytes(
-            width: rendered.width,
-            height: rendered.height,
-            bytes: rendered.pixels.buffer,
-            numChannels: 4,
-            order: img.ChannelOrder.bgra,
-          );
-          final path = '${directory.path}/${attachment.id}_page_${i + 1}.jpg';
-          await File(
-            path,
-          ).writeAsBytes(img.encodeJpg(raster, quality: 88), flush: true);
-          pages.add(path);
-        } finally {
-          rendered.dispose();
-        }
-      }
-    } finally {
-      document.dispose();
-    }
-    return pages;
-  }
+  ) async => const [];
 
   Future<List<String>> _officeZip(
     String path,
@@ -155,7 +126,7 @@ class HomeChatAttachmentReader {
         .firstOrNull;
     if (type == 'xlsx' && sharedFile != null) {
       final xml = XmlDocument.parse(
-        String.fromCharCodes(sharedFile.content as List<int>),
+        utf8.decode(sharedFile.content as List<int>),
       );
       for (final entry in xml.findAllElements('si')) {
         sharedStrings.add(
@@ -176,9 +147,7 @@ class HomeChatAttachmentReader {
     if (files.isEmpty) throw const FormatException('文档中没有可读取的内容');
     final output = <String>[];
     for (final file in files) {
-      final xml = XmlDocument.parse(
-        String.fromCharCodes(file.content as List<int>),
-      );
+      final xml = XmlDocument.parse(utf8.decode(file.content as List<int>));
       final label = type == 'pptx'
           ? '幻灯片 ${_number(file.name)}'
           : '工作表 ${_number(file.name)}';

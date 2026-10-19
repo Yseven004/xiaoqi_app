@@ -9,17 +9,32 @@ class DeepSeekWebSearchSource {
     required this.url,
     required this.summary,
     this.content = '',
+    this.snippet = '',
+    this.siteName = '',
+    this.siteIcon = '',
+    this.date,
+    this.authority,
   });
 
   final String title;
   final String url;
   final String summary;
   final String content;
+  final String snippet;
+  final String siteName;
+  final String siteIcon;
+  final DateTime? date;
+  final int? authority;
 
   Map<String, Object?> toJson() => {
     'title': title,
     'url': url,
     'summary': summary,
+    'snippet': snippet,
+    'site_name': siteName,
+    'site_icon': siteIcon,
+    if (date != null) 'date': date!.toUtc().toIso8601String(),
+    if (authority != null) 'authority': authority,
   };
 }
 
@@ -100,6 +115,13 @@ class DeepSeekWebSearchService {
       }
       final title = _bounded(raw['title'], 300);
       final summary = _bounded(raw['summary'] ?? raw['snippet'], 1200);
+      final snippet = _bounded(raw['snippet'], 600);
+      final siteName = _bounded(raw['site_name'], 120);
+      final siteIcon = _safeHttpUrl(raw['site_icon']);
+      final date = DateTime.tryParse(raw['date']?.toString() ?? '')?.toUtc();
+      final authority = raw['authority'] is num
+          ? (raw['authority'] as num).toInt()
+          : null;
       final content = needContent ? _bounded(raw['content'], 6000) : '';
       sources.add(
         DeepSeekWebSearchSource(
@@ -107,6 +129,11 @@ class DeepSeekWebSearchService {
           url: uri.toString(),
           summary: summary,
           content: content,
+          snippet: snippet,
+          siteName: siteName,
+          siteIcon: siteIcon,
+          date: date,
+          authority: authority,
         ),
       );
     }
@@ -121,6 +148,16 @@ class DeepSeekWebSearchService {
       summary: _bounded(summary, 6000),
       sources: List.unmodifiable(sources),
     );
+  }
+
+  String _safeHttpUrl(Object? raw) {
+    final uri = Uri.tryParse(raw?.toString() ?? '');
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme.toLowerCase()) ||
+        uri.host.isEmpty) {
+      return '';
+    }
+    return uri.toString();
   }
 
   Future<Map<String, dynamic>> _post(

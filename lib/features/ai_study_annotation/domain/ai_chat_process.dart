@@ -1,0 +1,62 @@
+String savedChatProcessStatus(String? status, {required bool isIncomplete}) =>
+    switch (status) {
+      'completed' => 'completed',
+      'stopped' => 'stopped',
+      'failed' => 'failed',
+      _ => isIncomplete ? 'stopped' : 'completed',
+    };
+
+/// Merge snapshots by step identity; terminal states update the original row.
+List<Map<String, Object?>> mergeChatProcessDetails(
+  Iterable<Map<String, Object?>> details,
+) {
+  final rows = <Map<String, Object?>>[];
+  final positions = <String, int>{};
+  for (final detail in details) {
+    final text = detail['text']?.toString().trim() ?? '';
+    if (text.isEmpty || detail['type'] == 'thinking_update') continue;
+    final row = <String, Object?>{
+      for (final key in const [
+        'step_id',
+        'sequence',
+        'kind',
+        'type',
+        'status',
+        'tool',
+        'source_count',
+      ])
+        if (detail[key] != null) key: detail[key],
+      'text': text,
+    };
+    final id = row['step_id']?.toString();
+    final index = id == null ? null : positions[id];
+    if (index == null) {
+      if (id != null) positions[id] = rows.length;
+      rows.add(row);
+    } else {
+      rows[index] = row;
+    }
+  }
+  return rows;
+}
+
+/// A saved or disconnected message cannot have a live tool. Missing terminal
+/// evidence is incomplete, even when the answer itself succeeded.
+List<Map<String, Object?>> settleChatProcessDetails(
+  Iterable<Map<String, Object?>> details, {
+  required String status,
+}) => mergeChatProcessDetails(details)
+    .map((row) {
+      final state = row['status'];
+      final text = row['text']!.toString();
+      final legacyActive = state == null && text.startsWith('正在');
+      if (state != 'running' && state != 'waiting' && !legacyActive) return row;
+      final stopped = status == 'stopped';
+      final label = text.replaceFirst(RegExp(r'^正在'), '');
+      return <String, Object?>{
+        ...row,
+        'status': stopped ? 'stopped' : 'incomplete',
+        'text': '$label（${stopped ? '已停止' : '未记录完成结果'}）',
+      };
+    })
+    .toList(growable: false);

@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "command": "deliver",
+  "status": "pending",
+  "receiptId": "ba7beef6-414d-42da-b22a-46f34836934d",
+  "input": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-running-actual-20261015-205320\\candidate.json",
+  "output": "C:\\Users\\20833\\Desktop\\xiaoqi_app\\.archify\\architecture-xiaoqi-running-actual-20261015-205320\\xiaoqi-running-actual.html"
+}

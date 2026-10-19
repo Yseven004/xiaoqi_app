@@ -10,7 +10,7 @@ RUN dart analyze && dart test && dart build cli --target bin/server.dart --outpu
 FROM debian:bookworm-slim
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
- && apt-get update && apt-get install -y --no-install-recommends ca-certificates libsqlite3-0 curl python3 && rm -rf /var/lib/apt/lists/* \
+ && apt-get update && apt-get install -y --no-install-recommends ca-certificates libsqlite3-0 curl python3 poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 10001 xiaoqi && useradd --uid 10001 --gid 10001 --create-home --home-dir /run/xiaoqi --shell /usr/sbin/nologin xiaoqi \
  && mkdir -p /var/lib/xiaoqi && chown 10001:10001 /var/lib/xiaoqi
 WORKDIR /app

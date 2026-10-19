@@ -2,18 +2,94 @@ enum CapabilityKind { skill, plugin }
 
 enum CapabilitySyncState { pending, synced, conflict, failed }
 
+enum McpInstallationState {
+  installing,
+  needsLogin,
+  connecting,
+  ready,
+  failed,
+  unsupported,
+}
+
+class McpCatalogEntry {
+  const McpCatalogEntry({
+    required this.id,
+    required this.name,
+    required this.description,
+    required this.version,
+    required this.runtime,
+    required this.authMode,
+    required this.status,
+    this.repository,
+    this.iconAsset = 'assets/icons/capabilities/mcp_connector.svg',
+    this.package,
+    this.packageVersion,
+    this.reason,
+  });
+
+  final String id;
+  final String name;
+  final String description;
+  final String version;
+  final String runtime;
+  final String authMode;
+  final McpInstallationState status;
+  final String? repository;
+  final String iconAsset;
+  final String? package;
+  final String? packageVersion;
+  final String? reason;
+
+  bool get requiresLogin => authMode == 'oauth';
+
+  factory McpCatalogEntry.fromJson(Object? raw) {
+    if (raw is! Map) throw const FormatException('MCP 工具清单格式无效');
+    return McpCatalogEntry(
+      id: raw['id']?.toString() ?? '',
+      name: raw['name']?.toString() ?? '',
+      description: raw['description']?.toString() ?? '',
+      version: raw['version']?.toString() ?? '',
+      runtime: raw['runtime']?.toString() ?? 'remote_https',
+      authMode: raw['auth_mode']?.toString() ?? 'none',
+      status: _mcpState(raw['status']),
+      repository: raw['repository']?.toString(),
+      iconAsset:
+          raw['icon_asset']?.toString() ??
+          'assets/icons/capabilities/mcp_connector.svg',
+      package: raw['package']?.toString(),
+      packageVersion: raw['package_version']?.toString(),
+      reason: raw['reason']?.toString(),
+    );
+  }
+}
+
 class McpConnectionRecord {
   const McpConnectionRecord({
     required this.id,
     required this.name,
     required this.url,
     required this.hasBearerToken,
+    this.catalogId,
+    this.version,
+    this.status = McpInstallationState.ready,
+    this.authMode = 'none',
+    this.toolCount,
+    this.error,
   });
 
   final String id;
   final String name;
   final String url;
   final bool hasBearerToken;
+  final String? catalogId;
+  final String? version;
+  final McpInstallationState status;
+  final String authMode;
+  final int? toolCount;
+  final String? error;
+
+  bool get isReady => status == McpInstallationState.ready;
+  bool get needsLogin => status == McpInstallationState.needsLogin;
 
   factory McpConnectionRecord.fromJson(Object? raw) {
     if (raw is! Map) throw const FormatException('MCP 连接器格式无效');
@@ -22,9 +98,24 @@ class McpConnectionRecord {
       name: raw['name']?.toString() ?? '',
       url: raw['url']?.toString() ?? '',
       hasBearerToken: raw['has_bearer_token'] == true,
+      catalogId: raw['catalog_id']?.toString(),
+      version: raw['version']?.toString(),
+      status: _mcpState(raw['status']),
+      authMode: raw['auth_mode']?.toString() ?? 'none',
+      toolCount: (raw['tool_count'] as num?)?.toInt(),
+      error: raw['error']?.toString(),
     );
   }
 }
+
+McpInstallationState _mcpState(Object? value) => switch (value?.toString()) {
+  'installing' => McpInstallationState.installing,
+  'needs_login' => McpInstallationState.needsLogin,
+  'connecting' => McpInstallationState.connecting,
+  'failed' => McpInstallationState.failed,
+  'unsupported' => McpInstallationState.unsupported,
+  _ => McpInstallationState.ready,
+};
 
 class CapabilityVersion {
   const CapabilityVersion({

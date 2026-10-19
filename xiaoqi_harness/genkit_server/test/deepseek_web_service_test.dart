@@ -20,6 +20,11 @@ void main() {
                 'title': '官方来源',
                 'url': 'https://example.com/current',
                 'summary': '用于核验的公开页面',
+                'snippet': '页面摘要',
+                'site_name': 'Example',
+                'site_icon': 'https://example.com/favicon.ico',
+                'date': '2026-10-18T00:00:00Z',
+                'authority': 4,
               },
               {
                 'title': '忽略不安全来源',
@@ -47,6 +52,9 @@ void main() {
     });
     expect(result.sources, hasLength(1));
     expect(result.sources.single.url, 'https://example.com/current');
+    expect(result.sources.single.siteName, 'Example');
+    expect(result.sources.single.siteIcon, 'https://example.com/favicon.ico');
+    expect(result.sources.single.authority, 4);
     expect(result.summary, contains('用于核验的公开页面'));
     client.close();
   });

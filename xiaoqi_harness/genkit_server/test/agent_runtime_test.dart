@@ -130,6 +130,97 @@ void main() {
     );
   });
 
+  test(
+    'explains a single selected capability and gives a next action',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'xiaoqi-agent-capability-only-test-',
+      );
+      final store = CloudStore(root: directory.path);
+      final runtime = GenkitXiaoqiAgentRuntime(
+        store,
+        _RecordingImageService(store),
+      );
+
+      try {
+        final answer = await runtime.run(
+          tenantId: 'personal',
+          taskId: 'capability-only-test',
+          request: {
+            'model_id': 'deepseek-flash',
+            'intent_mode': 'capability_only',
+            'current_turn_text': '',
+            'capability': {'type': 'skill', 'id': 'study-notes-studio'},
+            'selected_capabilities': [
+              {
+                'type': 'skill',
+                'id': 'study-notes-studio',
+                'name': 'study-notes-studio',
+                'description': '把学习资料整理成结构化笔记和复习提纲',
+              },
+            ],
+            'messages': [
+              {'role': 'user', 'content': '我选择了这个技能'},
+            ],
+          },
+          onDelta: (_) {},
+          cancellation: CancellationController().token,
+        );
+
+        expect(answer, contains('结构化笔记和复习提纲'));
+        expect(answer, contains('直接告诉我目标'));
+      } finally {
+        store.close();
+        directory.deleteSync(recursive: true);
+      }
+    },
+  );
+
+  test('does not invent an attachment overview from its filename', () async {
+    final directory = Directory.systemTemp.createTempSync(
+      'xiaoqi-agent-attachment-only-test-',
+    );
+    final store = CloudStore(root: directory.path);
+    final runtime = GenkitXiaoqiAgentRuntime(
+      store,
+      _RecordingImageService(store),
+    );
+
+    try {
+      final answer = runtime.run(
+        tenantId: 'personal',
+        taskId: 'attachment-only-test',
+        request: {
+          'model_id': 'deepseek-flash',
+          'intent_mode': 'attachment_only',
+          'current_turn_text': '',
+          'materials': [
+            {'id': 'local', 'name': '课件.pdf', 'mime_type': 'application/pdf'},
+          ],
+          'messages': [
+            {'role': 'user', 'content': '我上传了这个附件'},
+          ],
+        },
+        onDelta: (_) {},
+        cancellation: CancellationController().token,
+      );
+
+      await expectLater(
+        answer,
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            contains('附件尚未准备完成'),
+          ),
+        ),
+      );
+    } finally {
+      store.close();
+      directory.deleteSync(recursive: true);
+    }
+  });
+
   test('selected create-image action directly requests one image', () async {
     final directory = Directory.systemTemp.createTempSync(
       'xiaoqi-agent-image-test-',

@@ -88,4 +88,34 @@ void main() {
       );
     }
   });
+
+  test(
+    'normalizes verified catalog entries without exposing OAuth secrets',
+    () {
+      final entry = McpCatalogEntry.fromJson({
+        'id': 'github',
+        'name': 'GitHub',
+        'description': 'Repository tools',
+        'url': 'https://example.com/mcp',
+        'version': '1.2.3',
+        'auth_mode': 'oauth',
+        'status': 'verified',
+        'client_secret': 'do-not-return',
+        'scopes': ['repo'],
+      });
+
+      expect(entry, isNotNull);
+      expect(entry!.requiresLogin, isTrue);
+      expect(entry.toPublic(), {
+        'id': 'github',
+        'name': 'GitHub',
+        'description': 'Repository tools',
+        'version': '1.2.3',
+        'runtime': 'remote_https',
+        'auth_mode': 'oauth',
+        'status': 'verified',
+      });
+      expect(entry.toPublic().containsKey('client_secret'), isFalse);
+    },
+  );
 }

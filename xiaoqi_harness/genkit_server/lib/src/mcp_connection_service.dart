@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
 import 'package:genkit_mcp/genkit_mcp.dart';
+import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
 import 'store.dart';
@@ -14,12 +16,14 @@ class McpConnectionCredentials {
     required this.name,
     required this.url,
     required this.bearerToken,
+    this.catalogId,
   });
 
   final String id;
   final String name;
   final Uri url;
   final String? bearerToken;
+  final String? catalogId;
 
   McpServerConfig serverConfig() => McpServerConfig(
     url: url,
@@ -28,6 +32,109 @@ class McpConnectionCredentials {
         : {'Authorization': 'Bearer $bearerToken'},
     timeout: const Duration(seconds: 15),
   );
+}
+
+class McpCatalogEntry {
+  const McpCatalogEntry({
+    required this.id,
+    required this.name,
+    required this.description,
+    required this.url,
+    required this.version,
+    required this.runtime,
+    required this.authMode,
+    required this.status,
+    this.repository,
+    this.authorizeUrl,
+    this.tokenUrl,
+    this.clientId,
+    this.clientSecret,
+    this.scopes = const [],
+    this.package,
+    this.packageVersion,
+    this.reason,
+  });
+
+  final String id;
+  final String name;
+  final String description;
+  final Uri? url;
+  final String version;
+  final String runtime;
+  final String authMode;
+  final String status;
+  final String? repository;
+  final Uri? authorizeUrl;
+  final Uri? tokenUrl;
+  final String? clientId;
+  final String? clientSecret;
+  final List<String> scopes;
+  final String? package;
+  final String? packageVersion;
+  final String? reason;
+
+  bool get requiresLogin => authMode == 'oauth';
+
+  static McpCatalogEntry? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final id = raw['id']?.toString().trim() ?? '';
+    final name = raw['name']?.toString().trim() ?? '';
+    final description = raw['description']?.toString().trim() ?? '';
+    final runtime = raw['runtime']?.toString() ?? 'remote_https';
+    final rawUrl = raw['url']?.toString().trim() ?? '';
+    final package = raw['package']?.toString().trim();
+    if (id.isEmpty || name.isEmpty || description.isEmpty) {
+      return null;
+    }
+    try {
+      final remoteUrl = runtime == 'remote_https'
+          ? McpConnectionService.parseRemoteUrl(rawUrl)
+          : null;
+      if (runtime == 'remote_https' && remoteUrl == null) return null;
+      if ((runtime == 'sandbox_npm' || runtime == 'sandbox_pypi') &&
+          (package == null || package.isEmpty)) {
+        return null;
+      }
+      return McpCatalogEntry(
+        id: id,
+        name: name,
+        description: description,
+        url: remoteUrl,
+        version: raw['version']?.toString() ?? '1.0.0',
+        runtime: runtime,
+        authMode: raw['auth_mode']?.toString() ?? 'none',
+        status: raw['status']?.toString() ?? 'verified',
+        repository: raw['repository']?.toString(),
+        authorizeUrl: Uri.tryParse(raw['authorize_url']?.toString() ?? ''),
+        tokenUrl: Uri.tryParse(raw['token_url']?.toString() ?? ''),
+        clientId: raw['client_id']?.toString(),
+        clientSecret: raw['client_secret']?.toString(),
+        scopes: (raw['scopes'] as List? ?? const [])
+            .map((value) => value.toString())
+            .where((value) => value.isNotEmpty)
+            .toList(growable: false),
+        package: package,
+        packageVersion: raw['package_version']?.toString(),
+        reason: raw['reason']?.toString(),
+      );
+    } on FormatException {
+      return null;
+    }
+  }
+
+  Map<String, Object?> toPublic() => {
+    'id': id,
+    'name': name,
+    'description': description,
+    'version': version,
+    'runtime': runtime,
+    if (package != null) 'package': package,
+    if (packageVersion != null) 'package_version': packageVersion,
+    'auth_mode': authMode,
+    'status': status,
+    if (repository != null) 'repository': repository,
+    if (reason != null) 'reason': reason,
+  };
 }
 
 /// Tenant-scoped remote MCP connection storage and transport setup.
@@ -42,10 +149,149 @@ class McpConnectionService {
   static const _uuid = Uuid();
   static final _cipher = AesGcm.with256bits();
 
+  List<McpCatalogEntry> catalog() {
+    final raw = Platform.environment['XIAOQI_MCP_CATALOG_JSON'] ?? '[]';
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .map(McpCatalogEntry.fromJson)
+          .whereType<McpCatalogEntry>()
+          .toList(growable: false);
+    } on Object {
+      return const [];
+    }
+  }
+
   List<Map<String, Object?>> list(String tenantId) => store
       .list('mcp/$tenantId/', limit: 100)
       .map((entry) => _public(entry.$2.value))
       .toList(growable: false);
+
+  Future<Map<String, Object?>> install(
+    String tenantId,
+    String catalogId,
+  ) async {
+    final entry = catalog().where((item) => item.id == catalogId).firstOrNull;
+    if (entry == null) throw const FormatException('该 MCP 工具暂未支持');
+    if (entry.status != 'verified') {
+      throw const FormatException('该 MCP 工具尚未通过可用性验证');
+    }
+    if (entry.runtime != 'remote_https') {
+      throw const FormatException('该 MCP 工具需要沙箱运行，当前版本暂未开放');
+    }
+    final remoteUrl = entry.url;
+    if (remoteUrl == null) {
+      throw const FormatException('该 MCP 工具缺少远程服务地址');
+    }
+    final existing = store
+        .list('mcp/$tenantId/', limit: 100)
+        .map((item) => item.$2.value)
+        .where((item) => item['catalog_id'] == entry.id)
+        .firstOrNull;
+    if (existing != null) return _public(existing);
+    final id = _uuid.v4();
+    final now = DateTime.now().toUtc().toIso8601String();
+    final value = <String, dynamic>{
+      'id': id,
+      'catalog_id': entry.id,
+      'name': entry.name,
+      'url': remoteUrl.toString(),
+      'version': entry.version,
+      'runtime': entry.runtime,
+      'auth_mode': entry.authMode,
+      'status': entry.requiresLogin ? 'needs_login' : 'connecting',
+      'created_at': now,
+      'updated_at': now,
+    };
+    store.put(_key(tenantId, id), value, null);
+    if (!entry.requiresLogin) {
+      try {
+        final result = await _discoverTools(
+          McpConnectionCredentials(
+            id: id,
+            name: entry.name,
+            url: remoteUrl,
+            bearerToken: null,
+            catalogId: entry.id,
+          ),
+        );
+        value['status'] = 'ready';
+        value['tool_count'] = result.length;
+      } on Object catch (error) {
+        value['status'] = 'failed';
+        value['error'] = _safeError(error);
+      }
+      store.put(
+        _key(tenantId, id),
+        value,
+        store.get(_key(tenantId, id))?.revision,
+      );
+    }
+    return _public(value);
+  }
+
+  Future<Map<String, Object?>> startLogin(String tenantId, String id) async {
+    final connection = await _read(tenantId, _safeId(id));
+    final entry = catalog()
+        .where((item) => item.id == connection.catalogId)
+        .firstOrNull;
+    if (entry == null ||
+        !entry.requiresLogin ||
+        entry.authorizeUrl == null ||
+        entry.clientId == null) {
+      throw StateError('该工具暂未提供网页登录');
+    }
+    final authorizeUrl = entry.authorizeUrl!;
+    final clientId = entry.clientId!;
+    final state = _uuid.v4();
+    final verifier = base64Url
+        .encode(List<int>.generate(32, (_) => Random.secure().nextInt(256)))
+        .replaceAll('=', '');
+    final challenge = base64Url
+        .encode(crypto.sha256.convert(utf8.encode(verifier)).bytes)
+        .replaceAll('=', '');
+    store.put('mcp-oauth/$tenantId/$state', {
+      'connection_id': connection.id,
+      'catalog_id': entry.id,
+      'verifier': verifier,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    }, null);
+    final redirectUri = _oauthRedirectUri();
+    final query = <String, String>{
+      ...authorizeUrl.queryParameters,
+      'response_type': 'code',
+      'client_id': clientId,
+      'redirect_uri': redirectUri.toString(),
+      'state': state,
+      'code_challenge': challenge,
+      'code_challenge_method': 'S256',
+      if (entry.scopes.isNotEmpty) 'scope': entry.scopes.join(' '),
+    };
+    return {
+      'auth_url': authorizeUrl.replace(queryParameters: query).toString(),
+    };
+  }
+
+  Future<Map<String, Object?>> reconnect(String tenantId, String id) async {
+    final connection = await _read(tenantId, _safeId(id));
+    try {
+      final tools = await _discoverTools(connection);
+      return await _setStatus(
+        tenantId,
+        connection.id,
+        'ready',
+        toolCount: tools.length,
+      );
+    } on Object catch (error) {
+      return await _setStatus(
+        tenantId,
+        connection.id,
+        'failed',
+        error: _safeError(error),
+      );
+    }
+  }
 
   Future<Map<String, Object?>> save(
     String tenantId,
@@ -82,11 +328,129 @@ class McpConnectionService {
     final key = _key(tenantId, _safeId(id));
     final previous = store.get(key);
     if (previous == null) return false;
+    for (final pending in store.list('mcp-oauth/$tenantId/', limit: 1000)) {
+      if (pending.$2.value['connection_id']?.toString() == id) {
+        store.delete(pending.$1, expectedRevision: pending.$2.revision);
+      }
+    }
     return store.delete(key, expectedRevision: previous.revision);
   }
 
   Future<Map<String, Object?>> test(String tenantId, String id) async {
     final connection = await _read(tenantId, _safeId(id));
+    final tools = await _discoverTools(connection);
+    await _setStatus(tenantId, connection.id, 'ready', toolCount: tools.length);
+    return {
+      'connection_id': connection.id,
+      'name': connection.name,
+      'tool_count': tools.length,
+      'tools': tools
+          .map(
+            (tool) => {
+              'name': tool['name']?.toString() ?? '',
+              'description': tool['description']?.toString() ?? '',
+            },
+          )
+          .toList(growable: false),
+    };
+  }
+
+  Future<String> oauthCallback(Map<String, String> query) async {
+    final state = query['state']?.trim() ?? '';
+    final code = query['code']?.trim() ?? '';
+    final oauthError = query['error']?.trim();
+    if (state.isEmpty) return _oauthPage('登录失败', '缺少授权状态，请重新开始登录。');
+    final pending = store
+        .list('mcp-oauth/', limit: 1000)
+        .where((item) => item.$1.endsWith('/$state'))
+        .firstOrNull;
+    if (pending == null) return _oauthPage('登录已过期', '请回到小栖重新点击“登录”。');
+    final parts = pending.$1.split('/');
+    final tenantId = parts.length >= 3 ? parts[1] : '';
+    final pendingValue = pending.$2.value;
+    store.delete(pending.$1, expectedRevision: pending.$2.revision);
+    final connectionId = pendingValue['connection_id']?.toString() ?? '';
+    if (tenantId.isEmpty || connectionId.isEmpty || code.isEmpty) {
+      return _oauthPage(
+        '登录未完成',
+        oauthError == null || oauthError.isEmpty
+            ? '授权被取消，请回到小栖重试。'
+            : '授权未完成，请回到小栖重试。',
+      );
+    }
+    final entry = catalog()
+        .where((item) => item.id == pendingValue['catalog_id'])
+        .firstOrNull;
+    if (entry?.tokenUrl == null || entry?.clientId == null) {
+      return _oauthPage('登录暂不可用', '该工具的登录配置不完整，请稍后重试。');
+    }
+    late final http.Response tokenResponse;
+    try {
+      tokenResponse = await http
+          .post(
+            entry!.tokenUrl!,
+            headers: const {'Accept': 'application/json'},
+            body: {
+              'grant_type': 'authorization_code',
+              'code': code,
+              'client_id': entry.clientId!,
+              if (entry.clientSecret != null)
+                'client_secret': entry.clientSecret!,
+              'redirect_uri': _oauthRedirectUri().toString(),
+              'code_verifier': pendingValue['verifier']?.toString() ?? '',
+            },
+          )
+          .timeout(const Duration(seconds: 20));
+    } on Object {
+      return _oauthPage('登录失败', '服务商暂时无法响应，请回到小栖重试。');
+    }
+    if (tokenResponse.statusCode < 200 || tokenResponse.statusCode >= 300) {
+      return _oauthPage('登录失败', '服务商没有接受这次授权，请重新登录。');
+    }
+    Object? tokenBody;
+    try {
+      tokenBody = jsonDecode(tokenResponse.body);
+    } on FormatException {
+      return _oauthPage('登录失败', '服务商返回的数据无法识别，请回到小栖重试。');
+    }
+    final accessToken = tokenBody is Map
+        ? tokenBody['access_token']?.toString()
+        : null;
+    if (accessToken == null || accessToken.isEmpty) {
+      return _oauthPage('登录失败', '服务商没有返回有效授权，请重新登录。');
+    }
+    final key = _key(tenantId, connectionId);
+    final document = store.get(key);
+    if (document == null) return _oauthPage('连接器不存在', '请回到小栖重新安装。');
+    final value = Map<String, dynamic>.from(document.value)
+      ..['encrypted_bearer_token'] = await _encrypt(accessToken)
+      ..['status'] = 'connecting'
+      ..['error'] = null
+      ..['updated_at'] = DateTime.now().toUtc().toIso8601String();
+    store.put(key, value, document.revision);
+    try {
+      final tools = await _discoverTools(await _read(tenantId, connectionId));
+      await _setStatus(
+        tenantId,
+        connectionId,
+        'ready',
+        toolCount: tools.length,
+      );
+      return _oauthPage('登录成功', '已回到小栖，你可以关闭此页面。');
+    } on Object catch (error) {
+      await _setStatus(
+        tenantId,
+        connectionId,
+        'failed',
+        error: _safeError(error),
+      );
+      return _oauthPage('连接失败', '登录成功，但工具暂时无法连接。请回到小栖重试。');
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _discoverTools(
+    McpConnectionCredentials connection,
+  ) async {
     final client = await connect(connection);
     try {
       await client.ready().timeout(const Duration(seconds: 20));
@@ -103,26 +467,62 @@ class McpConnectionService {
         );
         cursor = page['nextCursor']?.toString();
         if (tools.length > 100) {
-          throw StateError('MCP 连接器返回超过 100 个工具，当前暂不支持');
+          throw StateError('MCP 工具数量超过 100 个，当前暂不支持');
         }
       } while (cursor != null && cursor.isNotEmpty);
-      return {
-        'connection_id': connection.id,
-        'name': connection.name,
-        'tool_count': tools.length,
-        'tools': tools
-            .map(
-              (tool) => {
-                'name': tool['name']?.toString() ?? '',
-                'description': tool['description']?.toString() ?? '',
-              },
-            )
-            .toList(growable: false),
-      };
+      return tools;
     } finally {
       await client.close();
     }
   }
+
+  Future<Map<String, Object?>> _setStatus(
+    String tenantId,
+    String id,
+    String status, {
+    int? toolCount,
+    String? error,
+  }) async {
+    final key = _key(tenantId, id);
+    final previous = store.get(key);
+    if (previous == null) throw StateError('MCP 连接器不存在，请刷新后重新选择');
+    final value = Map<String, dynamic>.from(previous.value)
+      ..['status'] = status
+      ..['updated_at'] = DateTime.now().toUtc().toIso8601String();
+    if (toolCount != null) value['tool_count'] = toolCount;
+    if (error != null) {
+      value['error'] = error;
+    } else {
+      value.remove('error');
+    }
+    store.put(key, value, previous.revision);
+    return _public(value);
+  }
+
+  static String _safeError(Object error) => error
+      .toString()
+      .replaceAll(RegExp(r'Bearer\s+\S+', caseSensitive: false), 'Bearer [已隐藏]')
+      .replaceAll(
+        RegExp(r'\b(?:sk|ghp|github_pat)_[A-Za-z0-9_]+\b'),
+        '[凭据已隐藏]',
+      );
+
+  static Uri _oauthRedirectUri() {
+    final host = Platform.environment['XIAOQI_PUBLIC_HOST']?.trim() ?? '';
+    if (host.isEmpty) throw StateError('服务端没有配置 OAuth 回调地址');
+    final base = Uri.parse(host);
+    return base.replace(
+      path: '/v1/mcp/oauth/callback',
+      queryParameters: const {},
+      fragment: null,
+    );
+  }
+
+  static String _oauthPage(String title, String message) =>
+      '<!doctype html><meta charset="utf-8"><title>$title</title>'
+      '<style>body{font-family:system-ui;padding:32px;color:#20242b}main{max-width:520px;margin:auto}a{display:inline-block;margin-top:16px}</style>'
+      '<main><h1>$title</h1><p>$message</p>'
+      '<a href="xiaoqi://mcp/oauth?status=complete">返回小栖</a></main>';
 
   Future<GenkitMcpClient> connect(McpConnectionCredentials connection) async {
     await _checkPublicEndpoint(connection.url);
@@ -168,6 +568,7 @@ class McpConnectionService {
       name: document.value['name']?.toString() ?? 'MCP 连接器',
       url: parseRemoteUrl(document.value['url']?.toString() ?? ''),
       bearerToken: token,
+      catalogId: document.value['catalog_id']?.toString(),
     );
   }
 
@@ -292,12 +693,28 @@ class McpConnectionService {
 
   static String _key(String tenantId, String id) => 'mcp/$tenantId/$id';
 
-  static Map<String, Object?> _public(Map<String, dynamic> value) => {
-    'id': value['id'],
-    'name': value['name'],
-    'url': value['url'],
-    'has_bearer_token': value['encrypted_bearer_token'] != null,
-    'created_at': value['created_at'],
-    'updated_at': value['updated_at'],
-  };
+  static Map<String, Object?> _public(Map<String, dynamic> value) {
+    var status = value['status'] ?? 'ready';
+    var error = value['error'];
+    try {
+      parseRemoteUrl(value['url']?.toString() ?? '');
+    } on FormatException {
+      status = 'unsupported';
+      error = '连接地址已失效，请从推荐目录重新安装';
+    }
+    return {
+      'id': value['id'],
+      'name': value['name'],
+      'url': value['url'],
+      'has_bearer_token': value['encrypted_bearer_token'] != null,
+      if (value['catalog_id'] != null) 'catalog_id': value['catalog_id'],
+      if (value['version'] != null) 'version': value['version'],
+      'status': status,
+      'auth_mode': value['auth_mode'] ?? 'none',
+      if (value['tool_count'] != null) 'tool_count': value['tool_count'],
+      if (error != null) 'error': error,
+      'created_at': value['created_at'],
+      'updated_at': value['updated_at'],
+    };
+  }
 }

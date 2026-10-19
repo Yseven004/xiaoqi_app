@@ -38,6 +38,9 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:uuid/uuid.dart';
 
 import 'agent_runtime.dart';
+import 'public_agent_process.dart';
+import 'public_agent_transport.dart';
+import 'attachment_service.dart';
 import 'chat_completion_service.dart';
 import 'code_execution_service.dart';
 import 'deepseek_web_service.dart';
@@ -328,7 +331,9 @@ class XiaoqiApi {
     this.runtime, {
     ChatCompletionService? chatCompletions,
     DeepSeekWebFetchService? webFetch,
+    AttachmentService? attachments,
   }) : chatCompletions = chatCompletions ?? ChatCompletionService(),
+       _attachments = attachments,
        webFetch =
            webFetch ??
            DeepSeekWebFetchService(
@@ -367,6 +372,9 @@ class XiaoqiApi {
   final XiaoqiAgentRuntime runtime;
   final ChatCompletionService chatCompletions;
   final DeepSeekWebFetchService webFetch;
+  AttachmentService? _attachments;
+  AttachmentService get attachments =>
+      _attachments ??= AttachmentService(store);
   late final CapabilityImportService imports;
   final _importCancellations = <String, CancellationController>{};
   late final GenkitRouter _agentRouter;
@@ -398,6 +406,41 @@ class XiaoqiApi {
           'release_id': releaseId,
           'api_contract_version': apiContractVersion,
         }),
+      )
+      ..post(
+        '/v1/attachments',
+        (Request request) => _authenticated(
+          request,
+          (device) => attachments.upload(request, device.tenant),
+        ),
+      )
+      ..get(
+        '/v1/attachments/<id>',
+        (Request request, String id) => _authenticated(
+          request,
+          (device) => attachments.status(device.tenant, id),
+        ),
+      )
+      ..put(
+        '/v1/attachments/<id>/segments',
+        (Request request, String id) => _authenticated(
+          request,
+          (device) => attachments.submitSegments(request, device.tenant, id),
+        ),
+      )
+      ..post(
+        '/v1/attachments/<id>/read',
+        (Request request, String id) => _authenticated(
+          request,
+          (device) => attachments.read(request, device.tenant, id),
+        ),
+      )
+      ..delete(
+        '/v1/attachments/<id>',
+        (Request request, String id) => _authenticated(
+          request,
+          (device) => attachments.cancel(device.tenant, id),
+        ),
       )
       ..post(
         '/v1/capabilities/imports',
@@ -454,6 +497,76 @@ class XiaoqiApi {
           (device) => _listCapabilities(request, device),
         ),
       )
+      ..get(
+        '/v1/mcp/catalog',
+        (request) => _authenticated(
+          request,
+          (device) async => _json({
+            'items': McpConnectionService(store)
+                .catalog()
+                .map((entry) => entry.toPublic())
+                .toList(growable: false),
+          }),
+        ),
+      )
+      ..post(
+        '/v1/mcp/installations',
+        (request) => _authenticated(request, (device) async {
+          try {
+            final body = await _body(request, 8 * 1024);
+            final catalogId = body['catalog_id']?.toString().trim() ?? '';
+            if (catalogId.isEmpty) {
+              return _error('请选择要安装的 MCP 工具', 400);
+            }
+            return _json({
+              'connection': await McpConnectionService(
+                store,
+              ).install(device.tenant, catalogId),
+            }, 201);
+          } on FormatException catch (error) {
+            return _error(error.message, 400);
+          } on Object catch (error) {
+            return _error(error.toString(), 503);
+          }
+        }),
+      )
+      ..post(
+        '/v1/mcp/installations/<id>/login',
+        (request, id) => _authenticated(request, (device) async {
+          try {
+            return _json(
+              await McpConnectionService(store).startLogin(device.tenant, id),
+            );
+          } on FormatException catch (error) {
+            return _error(error.message, 400);
+          } on StateError catch (error) {
+            return _error(error.message, 503);
+          }
+        }),
+      )
+      ..post(
+        '/v1/mcp/installations/<id>/reconnect',
+        (request, id) => _authenticated(request, (device) async {
+          try {
+            return _json({
+              'connection': await McpConnectionService(
+                store,
+              ).reconnect(device.tenant, id),
+            });
+          } on Object catch (error) {
+            return _error(error.toString(), 503);
+          }
+        }),
+      )
+      ..get('/v1/mcp/oauth/callback', (request) async {
+        final html = await McpConnectionService(
+          store,
+        ).oauthCallback(request.url.queryParameters);
+        return Response.ok(
+          html,
+          headers: const {'content-type': 'text/html; charset=utf-8'},
+        );
+      })
       ..get(
         '/v1/mcp/connections',
         (request) => _authenticated(
@@ -617,8 +730,19 @@ class XiaoqiApi {
   Handler get handler => const Pipeline()
       .addMiddleware(logRequests())
       .addHandler(
-        Cascade().add(router.call).add(_agentRouter.asShelfHandler()).handler,
+        Cascade()
+            .add(router.call)
+            .add(
+              (request) async => publicAgentResponse(
+                await _agentRouter.asShelfHandler()(request),
+              ),
+            )
+            .handler,
       );
+
+  Future<void> close() async {
+    await _attachments?.close();
+  }
 
   Map<String, dynamic> _agentRequestContext(RequestData request) {
     if (request.headers['x-xiaoqi-contract'] != apiContractVersion) {
@@ -752,30 +876,66 @@ class XiaoqiApi {
           'selection_binding': binding,
         }, boundTask.revision);
       }
-      session.updateCustom((_) => {'agent_process': <Map<String, dynamic>>[]});
+      session.updateCustom(
+        (_) => {
+          'agent_process': <Map<String, dynamic>>[],
+          'process_phase': 'thinking',
+          'current_step': '正在思考',
+          'answer_started': false,
+          'process_status': 'thinking',
+          'web_sources': <Map<String, Object?>>[],
+        },
+      );
 
+      final publicProcess = PublicAgentProcess(_uuid.v4());
       void addProcessEvent(Map<String, Object?> rawEvent) {
-        final event = <String, dynamic>{
-          ...rawEvent,
-          'created_at': DateTime.now().toUtc().toIso8601String(),
+        final firstTokenMs = rawEvent['model_first_token_ms'];
+        if (rawEvent['type'] == 'answer_started' && firstTokenMs is num) {
+          _logTaskEvent('model_first_token', taskId, {
+            'duration_ms': firstTokenMs.toInt(),
+          });
+        }
+        final event = publicProcess.add(rawEvent);
+        if (event != null) _appendEvent(taskKey, event);
+        if (rawEvent['type'] == 'answer_started')
+          publicProcess.finish('completed');
+        final labelEvent = <String, dynamic>{
+          'type': rawEvent['type'],
+          'tool': publicToolName(rawEvent['tool']?.toString() ?? ''),
         };
-        _appendEvent(taskKey, event);
         session.updateCustom((current) {
           final custom = current == null
               ? <String, dynamic>{}
               : Map<String, dynamic>.from(current);
-          final events = (custom['agent_process'] as List? ?? const [])
-              .whereType<Map>()
-              .map((item) => Map<String, dynamic>.from(item))
-              .toList();
-          events.add(event);
-          if (events.length > 48) events.removeRange(0, events.length - 48);
           return {
             ...custom,
-            'agent_process': events,
-            'current_step': _agentProcessLabel(event),
+            'agent_process': publicProcess.rows,
+            'process_phase': _agentProcessPhase(labelEvent),
+            'current_step': _agentProcessLabel(labelEvent),
+            'answer_started':
+                custom['answer_started'] == true ||
+                rawEvent['type'] == 'answer_started',
+            if (firstTokenMs is num)
+              'model_first_token_ms': firstTokenMs.toInt(),
           };
         });
+      }
+
+      void finishProcess(String status) {
+        publicProcess.finish(status);
+        session.updateCustom(
+          (current) => {
+            ...?current,
+            'agent_process': publicProcess.rows,
+            'process_status': status,
+            'current_step': switch (status) {
+              'completed' => '已完成',
+              'stopped' => '已停止',
+              'waiting' => '等待操作确认',
+              _ => '生成未完成',
+            },
+          },
+        );
       }
 
       final modelMessages = messages.map(_withoutTurnMetadata).toList();
@@ -807,6 +967,7 @@ class XiaoqiApi {
               );
         } else {
           final output = StringBuffer();
+          var answerStarted = false;
           final text = await activeRuntime.run(
             tenantId: tenantId,
             taskId: taskId,
@@ -818,6 +979,11 @@ class XiaoqiApi {
             },
             cancellation: options.cancel ?? CancellationController().token,
             onDelta: (delta) {
+              if (delta.isEmpty) return;
+              if (!answerStarted) {
+                answerStarted = true;
+                addProcessEvent({'type': 'answer_started'});
+              }
               output.write(delta);
               options.sendChunk(
                 AgentStreamChunk(
@@ -846,6 +1012,9 @@ class XiaoqiApi {
           );
         }
       } on Object {
+        finishProcess(
+          options.cancel?.isCancelled == true ? 'stopped' : 'failed',
+        );
         _setRemoteAgentTaskStatus(
           tenantId,
           taskId,
@@ -854,6 +1023,11 @@ class XiaoqiApi {
         rethrow;
       }
 
+      finishProcess(switch (result.finishReason) {
+        AgentFinishReason.aborted => 'stopped',
+        AgentFinishReason.interrupted => 'waiting',
+        _ => 'completed',
+      });
       final resultMessages = result.messages.toList();
       final webSources =
           (store.get('task/$tenantId/$taskId')?.value['web_sources'] as List? ??
@@ -867,29 +1041,16 @@ class XiaoqiApi {
               .toList(growable: false);
       if (webSources.isNotEmpty &&
           result.finishReason != AgentFinishReason.interrupted) {
-        final lastModelIndex = resultMessages.lastIndexWhere(
-          (message) => message.role == Role.model,
-        );
-        if (lastModelIndex >= 0) {
-          final lastModel = resultMessages[lastModelIndex];
-          final citations = webSources
-              .map((source) {
-                final title = (source['title']?.toString() ?? '网页来源')
-                    .replaceAll(RegExp(r'[\[\]()]'), ' ')
-                    .replaceAll('\n', ' ');
-                final url = source['url']!.toString();
-                return '- [$title](<$url>)';
-              })
-              .join('\n');
-          resultMessages[lastModelIndex] = Message(
-            role: lastModel.role,
-            content: [
-              ...lastModel.content,
-              TextPart(text: '\n\n参考来源：\n$citations'),
-            ],
-            metadata: lastModel.metadata,
-          );
-        }
+        // Stream sources through the agent's custom state. An empty model
+        // chunk is transport-dependent and may be discarded before it reaches
+        // the Flutter client; customPatch is the protocol's reliable state
+        // channel and is already consumed by AgentApi as `chunk.custom`.
+        session.updateCustom((current) {
+          final custom = current == null
+              ? <String, dynamic>{}
+              : Map<String, dynamic>.from(current);
+          return {...custom, 'web_sources': webSources};
+        });
       }
       final latestResultUserIndex = resultMessages.lastIndexWhere(
         (message) => message.role == Role.user,
@@ -929,7 +1090,9 @@ class XiaoqiApi {
       _setRemoteAgentTaskStatus(
         tenantId,
         taskId,
-        result.finishReason == AgentFinishReason.interrupted
+        result.finishReason == AgentFinishReason.aborted
+            ? 'cancelled'
+            : result.finishReason == AgentFinishReason.interrupted
             ? 'awaiting_network_permission'
             : partialImage || result.extensionEvidenceMissing
             ? 'partially_completed'
@@ -1049,17 +1212,56 @@ class XiaoqiApi {
     );
   }
 
-  static String _agentProcessLabel(Map<String, dynamic> event) =>
-      switch (event['type']?.toString()) {
-        'tool_started' when event['temporary_network'] == true =>
-          '正在为${event['capability_name'] ?? '技能'}临时联网',
-        'tool_started' => '正在使用 ${event['tool'] ?? '工具'}',
-        'tool_succeeded' => '${event['tool'] ?? '工具'}已完成',
-        'tool_failed' => '${event['tool'] ?? '工具'}遇到问题',
-        'image_generation_started' => '正在生成图片',
-        'steering_applied' => '正在应用补充指令',
-        _ => '正在处理',
-      };
+  static String _agentProcessPhase(Map<String, dynamic> event) {
+    final type = event['type'];
+    if (type == 'answer_started' ||
+        type == 'text_completed' ||
+        type == 'extension_execution_unverified')
+      return 'answer';
+    if (type == 'mcp_connection_started') return 'connecting_mcp';
+    if (type == 'mcp_tool_approval_required' ||
+        type == 'network_permission_required')
+      return 'waiting_permission';
+    if (type == 'image_generation_started' || type == 'visual_brief_compiled')
+      return 'generating_image';
+    if (type != 'tool_requested' && type != 'tool_started') return 'thinking';
+    final tool = event['tool']?.toString() ?? '';
+    if (tool.startsWith('mcp_') || tool.startsWith('MCP')) return 'using_mcp';
+    return switch (tool) {
+      'web_search' => 'searching',
+      'web_fetch' => 'reading_web',
+      'use_skill' ||
+      'read_skill_resource' ||
+      'execute_skill_script' => 'using_skill',
+      'read_task_material' => 'reading_material',
+      'execute_python' => 'executing',
+      'generate_image' => 'generating_image',
+      _ => 'using_tool',
+    };
+  }
+
+  static String _agentProcessLabel(Map<String, dynamic> event) {
+    final connection = event['connection_name'] ?? event['capability_name'];
+    if (event['type'] == 'reasoning_translation_failed') return '正在整理思考';
+    if (event['type'] == 'reasoning_update') return '正在思考';
+    if (event['type'] == 'tool_failed') return '正在处理工具结果';
+    if (event['type'] == 'steering_applied') return '正在应用补充指令';
+    return switch (_agentProcessPhase(event)) {
+      'answer' => '正在生成回复',
+      'connecting_mcp' =>
+        connection == null ? '正在连接 MCP' : '正在连接 MCP · $connection',
+      'using_mcp' => connection == null ? '正在调用 MCP' : '正在调用 MCP · $connection',
+      'waiting_permission' => '等待操作确认',
+      'searching' => '正在搜索',
+      'reading_web' => '正在阅读网页',
+      'using_skill' => connection == null ? '正在调用技能' : '正在调用技能 · $connection',
+      'reading_material' => '正在读取附件',
+      'executing' => '正在执行代码',
+      'generating_image' => '正在生成图片',
+      'using_tool' => '正在调用工具',
+      _ => '正在思考',
+    };
+  }
 
   Future<Response> _startEmail(Request request) async {
     try {

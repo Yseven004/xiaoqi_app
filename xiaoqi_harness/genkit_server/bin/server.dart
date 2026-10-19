@@ -4,6 +4,7 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 
 import '../lib/src/agent_runtime.dart';
 import '../lib/src/api.dart';
+import '../lib/src/attachment_service.dart';
 import '../lib/src/image_service.dart';
 import '../lib/src/mcp_server.dart';
 import '../lib/src/store.dart';
@@ -12,7 +13,12 @@ Future<void> main() async {
   final store = CloudStore();
   store.removeOrphanedTempFiles();
   final imageService = ImageService(store);
-  final api = XiaoqiApi(store, GenkitXiaoqiAgentRuntime(store, imageService));
+  final attachments = AttachmentService(store);
+  final api = XiaoqiApi(
+    store,
+    GenkitXiaoqiAgentRuntime(store, imageService, attachments: attachments),
+    attachments: attachments,
+  );
   final mcp = XiaoqiMcpService(store, imageService);
   final mcpPort =
       int.tryParse(Platform.environment['MCP_PORT'] ?? '8081') ?? 8081;
@@ -28,6 +34,7 @@ Future<void> main() async {
       poweredByHeader: null,
     );
   } on Object {
+    await api.close();
     await mcp.close();
     store.checkpointWal();
     store.close();
@@ -41,6 +48,7 @@ Future<void> main() async {
     if (shuttingDown) return;
     shuttingDown = true;
     await server.close(force: false);
+    await api.close();
     await mcp.close();
     store.checkpointWal();
     store.close();

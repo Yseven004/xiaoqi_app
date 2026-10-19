@@ -1,0 +1,369 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "小七：现在实际在跑的东西",
+    "subtitle": "依据部署配置与源码核对，不是效果图",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-xiaoqi-running-actual-20261015-205320/xiaoqi-running-actual.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "你",
+      "sublabel": "提问 · 看结果",
+      "icon": "person",
+      "pos": [60, 200],
+      "size": [130, 80]
+    },
+    {
+      "id": "app",
+      "type": "frontend",
+      "label": "小七 App",
+      "sublabel": "阅读 · 笔记 · 对话 · 能力菜单",
+      "tag": "Flutter",
+      "icon": "frontend",
+      "pos": [60, 330],
+      "size": [170, 90]
+    },
+    {
+      "id": "model_api",
+      "type": "external",
+      "label": "模型服务商",
+      "sublabel": "对话 · 分析 · 推理",
+      "tag": "密钥只在服务器",
+      "icon": "external",
+      "pos": [1350, 200],
+      "size": [160, 90]
+    },
+    {
+      "id": "caddy",
+      "type": "security",
+      "label": "Caddy",
+      "sublabel": "HTTPS · 转发 · 鉴权",
+      "tag": "容器 · 对外唯一入口",
+      "icon": "security",
+      "pos": [440, 180],
+      "size": [120, 70]
+    },
+    {
+      "id": "email_login",
+      "type": "external",
+      "label": "邮箱验证码",
+      "sublabel": "登录用",
+      "icon": "external",
+      "pos": [1310, 180],
+      "size": [160, 70]
+    },
+    {
+      "id": "dart_service",
+      "type": "backend",
+      "label": "小七服务",
+      "sublabel": "接口 · 任务 · 存储",
+      "tag": "容器 · Dart",
+      "icon": "backend",
+      "pos": [440, 310],
+      "size": [200, 90]
+    },
+    {
+      "id": "agent_runtime",
+      "type": "backend",
+      "label": "Agent 调度",
+      "sublabel": "理解意图 · 规划任务",
+      "tag": "容器 · Dart",
+      "icon": "backend",
+      "pos": [900, 310],
+      "size": [200, 90]
+    },
+    {
+      "id": "capability_router",
+      "type": "backend",
+      "label": "能力路由层",
+      "sublabel": "按场景开放工具，不是全部开放",
+      "icon": "backend",
+      "pos": [900, 440],
+      "size": [200, 100]
+    },
+    {
+      "id": "data_store",
+      "type": "database",
+      "label": "持久数据",
+      "sublabel": "文档 · 任务 · 附件文件",
+      "tag": "数据卷 · 发布不重建",
+      "icon": "database",
+      "pos": [440, 460],
+      "size": [200, 90]
+    },
+    {
+      "id": "mimo_search",
+      "type": "external",
+      "label": "联网搜索",
+      "sublabel": "只收最短查询词",
+      "tag": "需单独开通",
+      "icon": "external",
+      "pos": [1310, 430],
+      "size": [170, 90]
+    },
+    {
+      "id": "ark_image",
+      "type": "external",
+      "label": "图片生成",
+      "sublabel": "火山引擎 Ark",
+      "tag": "需配置密钥",
+      "icon": "external",
+      "pos": [1310, 580],
+      "size": [160, 80]
+    },
+    {
+      "id": "mission_tmp",
+      "type": "database",
+      "label": "任务临时目录",
+      "sublabel": "跑完就清",
+      "icon": "database",
+      "pos": [920, 590],
+      "size": [160, 70]
+    },
+    {
+      "id": "sandbox_exec",
+      "type": "cloud",
+      "label": "沙箱执行器",
+      "sublabel": "独占 Docker 控制权",
+      "tag": "容器 · 不对外",
+      "icon": "cloud",
+      "pos": [1060, 590],
+      "size": [180, 70]
+    },
+    {
+      "id": "code_sandbox",
+      "type": "cloud",
+      "label": "用户代码沙箱",
+      "sublabel": "非 root · 只读根 · 限内存CPU",
+      "tag": "每任务一个 · 用完删",
+      "icon": "cloud",
+      "pos": [1000, 730],
+      "size": [220, 80]
+    },
+    {
+      "id": "squid_proxy",
+      "type": "cloud",
+      "label": "联网代理",
+      "sublabel": "只放行本次授权的域名",
+      "tag": "临时 · 用完删",
+      "icon": "cloud",
+      "pos": [1280, 730],
+      "size": [190, 80]
+    },
+    {
+      "id": "release_mgr",
+      "type": "security",
+      "label": "发布与回滚",
+      "sublabel": "只留一份应急恢复点",
+      "tag": "部署脚本",
+      "icon": "security",
+      "pos": [620, 730],
+      "size": [180, 80]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "阿里云 ECS · 单机 Docker",
+      "wraps": ["caddy", "dart_service", "agent_runtime", "capability_router", "data_store", "mission_tmp", "sandbox_exec", "code_sandbox", "squid_proxy", "release_mgr"],
+      "pad": 35
+    }
+  ],
+  "connections": [
+    {
+      "id": "user-app",
+      "from": "user",
+      "to": "app",
+      "label": "打开小七",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "app-caddy",
+      "from": "app",
+      "to": "caddy",
+      "label": "HTTPS 请求",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "caddy-dart",
+      "from": "caddy",
+      "to": "dart_service",
+      "label": "转发接口",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "caddy-email",
+      "from": "caddy",
+      "to": "email_login",
+      "label": "发验证码",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "dart-agent",
+      "from": "dart_service",
+      "to": "agent_runtime",
+      "label": "创建任务",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "dart-data",
+      "from": "dart_service",
+      "to": "data_store",
+      "label": "读写",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "dart-sandbox",
+      "from": "dart_service",
+      "to": "sandbox_exec",
+      "label": "发起代码执行",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "agent-router",
+      "from": "agent_runtime",
+      "to": "capability_router",
+      "label": "选择本次要用的能力",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "agent-model",
+      "from": "agent_runtime",
+      "to": "model_api",
+      "label": "模型推理",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "router-sandbox",
+      "from": "capability_router",
+      "to": "sandbox_exec",
+      "label": "要跑代码时",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "router-search",
+      "from": "capability_router",
+      "to": "mimo_search",
+      "label": "需要时联网",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "router-mission",
+      "from": "capability_router",
+      "to": "mission_tmp",
+      "label": "产物落盘",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "mission-image",
+      "from": "mission_tmp",
+      "to": "ark_image",
+      "label": "生成图片",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "mission-data",
+      "from": "mission_tmp",
+      "to": "data_store",
+      "label": "成品文件回传保存",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "sandbox-container",
+      "from": "sandbox_exec",
+      "to": "code_sandbox",
+      "label": "Docker 拉起",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "container-proxy",
+      "from": "code_sandbox",
+      "to": "squid_proxy",
+      "label": "授权域名才联网",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "release-deploy",
+      "from": "release_mgr",
+      "to": "dart_service",
+      "label": "换上新版本 / 失败自动退回",
+      "fromSide": "left",
+      "toSide": "left",
+      "route": "orthogonal-v",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "一条任务实际怎么跑",
+      "items": [
+        "你在 App 里提问，请求打到 Caddy，它先确认你已登录，再转给小七服务。",
+        "小七服务建一条任务记录，交给 Agent 调度。Agent 决定这次要用哪些能力，不会把所有工具都打开。",
+        "需要跑代码时，由沙箱执行器单独拉起一个用完就删的容器；容器跑完把成品文件交回来。",
+        "全程锁屏、切应用都不影响：计算在云端，你回来查同一条任务就能看到进度、回答和文件。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "为什么这样设计（三条安全底线）",
+      "items": [
+        "沙箱执行器是唯一能碰 Docker 的容器，所以它绝不对外暴露，也不和用户代码共用网络。",
+        "用户代码容器：非 root、根文件系统只读、去掉全部 Linux capabilities、限制进程数/内存/CPU/日志。",
+        "默认断网。要联网必须说明精确域名和用途，才临时开一条只放行该域名的代理，任务结束或取消立刻删掉。",
+        "已知边界：这些容器共用同一台机器的内核，隔离强度低于独立虚拟机。这是设计取舍，不是疏漏。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "最该盯住的四件事",
+      "items": [
+        "接口契约版本：客户端和服务端必须一致，不一致就停下并说清两边版本，别让它悄悄跑错。",
+        "发布与回滚：只有一份应急恢复点。它能救代码和镜像出错，救不了整台机器或云盘损坏——那需要异地快照。",
+        "数据卷不能删：现用数据卷装文档和对象，发布不重建它。任何时候都别用 docker compose down -v。",
+        "已知缺陷（图纸上看不出来）：正则曾把用户原话里的主题删掉，导致「讲第一性原理」画成无关图片；任务还会在没交付图片时显示完成。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "图纸之外的一件事：旧路已经不在部署里",
+      "items": [
+        "以前还有一套 Python + 另一个 Agent 框架的云端链路（函数计算 + Tablestore + OSS + 外部沙箱）。",
+        "现在的发布脚本只打包 Dart 服务和部署目录，那套 Python 代码已经不进发布包；仓库里只剩编译后的残留文件，源码为 0 个。",
+        "所以旧链路是「源码历史」，不是「正在运行的服务」。真要确认线上有没有残留容器，需要连服务器查一次，本图不能替你证明。",
+        "但 Flutter 里可能还留着新旧两条入口分支。这是历史包袱，不是运行中的第二套后端。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "这张图和你手上那张效果图的区别",
+      "items": [
+        "效果图讲「小七由哪些部件组成」，适合讲给人听，画得很整齐。",
+        "这张图讲「这些部件现在怎么连、边界在哪、出事去哪查」。",
+        "效果图没画：沙箱隔离、联网代理、发布回滚、鉴权入口，以及上面那几个已知缺陷。",
+        "两者不冲突：一个用来讲产品，一个用来排查问题。"
+      ]
+    }
+  ]
+}
