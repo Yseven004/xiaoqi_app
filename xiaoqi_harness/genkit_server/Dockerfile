@@ -5,7 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 \
 COPY genkit_server/pubspec.yaml genkit_server/pubspec.lock ./
 RUN dart pub get --no-precompile
 COPY genkit_server/ ./
-RUN dart analyze && dart test && dart build cli --target bin/server.dart --output /out
+RUN dart analyze && dart test --concurrency=1 && dart build cli --target bin/server.dart --output /out \
+ && dart build cli --target bin/verify_capability_chain.dart --output /probe
 
 FROM debian:bookworm-slim
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
@@ -15,6 +16,8 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
  && mkdir -p /var/lib/xiaoqi && chown 10001:10001 /var/lib/xiaoqi
 WORKDIR /app
 COPY --from=build /out/bundle/ /app/
+COPY --from=build /probe/bundle/bin/verify_capability_chain /app/bin/verify_capability_chain
+COPY --from=build /probe/bundle/lib/ /app/lib/
 COPY genkit_server/bin/docker_worker.py /app/docker_worker.py
 COPY genkit_server/bin/prepare_dependencies.py /app/prepare_dependencies.py
 ENV PORT=8080 MCP_PORT=8081 XIAOQI_DATA_DIR=/var/lib/xiaoqi SANDBOX_WORKER_PYTHON=/usr/bin/python3 SANDBOX_WORKER_PATH=/app/docker_worker.py PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH=/app/lib

@@ -769,10 +769,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _cancelAttachmentPreparation(attachment);
     }
     _abandonMessageEdit();
-    _composerController.restore(
-      _conversationDrafts[conversation.id] ??
-          CapabilityTextSnapshot(value: TextEditingValue.empty),
-    );
+    final draft = _conversationDrafts[conversation.id];
+    if (draft != null) {
+      _composerController.restore(draft);
+    } else {
+      _composerController.setMessage('', conversation.activeCapabilityMetadata);
+    }
     _attachmentPanelOpen = false;
     _attachments = const [];
     unawaited(_loadAttachments(conversation.id));
@@ -1926,6 +1928,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         createdAt: now,
         attachments: preparedAttachments,
         capabilityMetadata: capabilityMetadata,
+        capabilityScopeOperation:
+            const {
+              'skill',
+              'plugin',
+              'mcp',
+            }.contains(capabilityMetadata?['type'])
+            ? 'replace'
+            : source.capabilityMetadata != null
+            ? 'clear'
+            : source.capabilityScopeOperation,
       );
       final updateRootTitle =
           source.parentMessageId == null && latest.titleRevision < 2;
@@ -2114,6 +2126,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final selectedCapability = _composerController.messageMetadata();
     _normalizeCapabilityTextOffset(selectedCapability, rawText, text);
     final capabilityForMessage = selectedCapability ?? _activeSkillWorkflow;
+    final capabilityScopeOperation =
+        const {'skill', 'plugin', 'mcp'}.contains(selectedCapability?['type'])
+        ? 'replace'
+        : _conversation?.activeCapabilityMetadata != null &&
+              selectedCapability == null
+        ? 'clear'
+        : 'inherit';
     if (text.isEmpty && _attachments.isEmpty && capabilityForMessage == null) {
       return;
     }
@@ -2142,6 +2161,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       capabilityMetadata: capabilityForMessage == null
           ? null
           : Map<String, Object?>.from(capabilityForMessage),
+      capabilityScopeOperation: capabilityScopeOperation,
     );
     if (selectedCapability?['type'] == 'action' &&
         (selectedCapability?['id'] == 'create-skill' ||
@@ -2195,7 +2215,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _bookConversationFallbacks[bookId] = withUserMessage;
     }
     _attachments = const [];
-    _composerController.clear();
+    _composerController.setMessage(
+      '',
+      const {'skill', 'plugin', 'mcp'}.contains(selectedCapability?['type'])
+          ? selectedCapability
+          : null,
+    );
     unawaited(_persistAttachments());
     _scrollToLatest();
     try {
@@ -2781,6 +2806,8 @@ $materialIndex
         : null;
     final turnMetadata = <String, dynamic>{
       'task_id': taskId,
+      'workflow_id': conversationId,
+      'capability_scope_operation': question.capabilityScopeOperation,
       'model_id': modelId,
       'reasoning_level': reasoningLevel,
       'network_mode': _conversation?.networkMode ?? 'off',
@@ -5454,6 +5481,10 @@ $text''';
         ..clear()
         ..addAll(updated.messages);
     });
+    _composerController.setMessage(
+      _composerController.messageText,
+      updated.activeCapabilityMetadata,
+    );
     unawaited(
       _historyService
           .saveVersionSelection(updated, fallbackRecord: current)
@@ -5475,6 +5506,10 @@ $text''';
                   ..clear()
                   ..addAll(restored.messages);
               });
+              _composerController.setMessage(
+                _composerController.messageText,
+                restored.activeCapabilityMetadata,
+              );
               _showReplyError('切换回复版本失败，已恢复上次保存的版本：$error');
             },
           ),
@@ -5511,6 +5546,10 @@ $text''';
         ..clear()
         ..addAll(updated.messages);
     });
+    _composerController.setMessage(
+      _composerController.messageText,
+      updated.activeCapabilityMetadata,
+    );
     unawaited(
       _historyService
           .saveVersionSelection(updated, fallbackRecord: current)
@@ -5532,6 +5571,10 @@ $text''';
                   ..clear()
                   ..addAll(restored.messages);
               });
+              _composerController.setMessage(
+                _composerController.messageText,
+                restored.activeCapabilityMetadata,
+              );
               _showReplyError('切换提问版本失败，已恢复上次保存的版本：$error');
             },
           ),

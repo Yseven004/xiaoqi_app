@@ -61,7 +61,7 @@ function Wait-RemoteCommand {
             '--InstanceId', $InstanceId
         )
         $item = @($result.Invocation.InvocationResults.InvocationResult)[0]
-        if ($null -ne $item -and $item.InvocationStatus -in @('Success', 'Failed', 'Stopped', 'Aborted')) {
+        if ($null -ne $item -and $item.InvocationStatus -in @('Success', 'Failed', 'Stopped', 'Aborted', 'Timeout')) {
             $text = if ($item.Output) {
                 [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$item.Output))
             } else {
@@ -208,7 +208,7 @@ try {
     Write-Host '[5/5] Verifying the running service and restore point'
     $status = Invoke-RemoteCommand -Script "set -eu; '$RemoteRoot/release_manager.sh' status" -TimeoutSeconds 180
     Write-Host $status
-    $healthBody = & curl.exe --noproxy '*' --fail --silent --show-error --max-time 20 --url $PublicHealthUrl 2>&1 | Out-String
+    $healthBody = & curl.exe --fail --silent --show-error --max-time 20 --url $PublicHealthUrl 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "Public health check failed:`n$healthBody" }
     $health = $healthBody | ConvertFrom-Json
     if ($health.release_id -ne $productRelease -or $health.api_contract_version -ne $contractVersion) {
@@ -224,6 +224,12 @@ finally {
         Write-Warning "Could not clean remote upload files: $($_.Exception.Message)"
     }
     if (Test-Path -LiteralPath $tempDir) {
+        $resolvedTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        $resolvedTempDir = [IO.Path]::GetFullPath($tempDir)
+        if (-not $resolvedTempDir.StartsWith($resolvedTempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            (Split-Path -Leaf $resolvedTempDir) -notlike 'xiaoqi-deploy-*') {
+            throw 'Refusing to remove a deployment temporary directory outside the verified temp root.'
+        }
         Remove-Item -LiteralPath $tempDir -Recurse -Force
     }
 }

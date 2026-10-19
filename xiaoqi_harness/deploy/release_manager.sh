@@ -227,6 +227,11 @@ deploy_release() {
     -ec 'command -v xelatex >/dev/null && kpsewhich xeCJK.sty >/dev/null && fc-match "Noto Sans CJK SC" | grep -qi "Noto Sans CJK SC"' \
     || die "sandbox image is missing the required Chinese LaTeX toolchain"
 
+  # Exercise the new runtime with synthetic data before touching the healthy
+  # service or its persistent volume. A failure uses the existing rollback trap.
+  timeout 900 docker run --rm --env-file "$CONFIG" \
+    --entrypoint /app/bin/verify_capability_chain xiaoqi-genkit-server:local
+
   DEPLOY_ACTIVATION_STARTED="yes"
   compose stop app
   backup_data "$NEXT"

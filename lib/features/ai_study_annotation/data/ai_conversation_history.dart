@@ -27,6 +27,7 @@ class AiConversationMessage {
     this.isDeletedMarker = false,
     this.isIncomplete = false,
     this.capabilityMetadata,
+    this.capabilityScopeOperation = 'inherit',
     this.outputArtifacts = const [],
     this.agentTaskId,
     this.agentTaskPending = false,
@@ -50,6 +51,7 @@ class AiConversationMessage {
   final bool isDeletedMarker;
   final bool isIncomplete;
   final Map<String, Object?>? capabilityMetadata;
+  final String capabilityScopeOperation;
   final List<Map<String, Object?>> outputArtifacts;
   final String? agentTaskId;
   final bool agentTaskPending;
@@ -82,6 +84,7 @@ class AiConversationMessage {
     bool? isIncomplete,
     Map<String, Object?>? capabilityMetadata,
     bool clearCapabilityMetadata = false,
+    String? capabilityScopeOperation,
     List<Map<String, Object?>>? outputArtifacts,
     String? agentTaskId,
     bool clearAgentTaskId = false,
@@ -112,6 +115,8 @@ class AiConversationMessage {
     capabilityMetadata: clearCapabilityMetadata
         ? null
         : capabilityMetadata ?? this.capabilityMetadata,
+    capabilityScopeOperation:
+        capabilityScopeOperation ?? this.capabilityScopeOperation,
     outputArtifacts: outputArtifacts ?? this.outputArtifacts,
     agentTaskId: clearAgentTaskId ? null : agentTaskId ?? this.agentTaskId,
     agentTaskPending: agentTaskPending ?? this.agentTaskPending,
@@ -149,6 +154,7 @@ class AiConversationMessage {
     'is_deleted_marker': isDeletedMarker,
     'is_incomplete': isIncomplete,
     if (capabilityMetadata != null) 'capability_metadata': capabilityMetadata,
+    'capability_scope_operation': capabilityScopeOperation,
     if (outputArtifacts.isNotEmpty) 'output_artifacts': outputArtifacts,
     if (agentTaskId != null) 'agent_task_id': agentTaskId,
     if (agentTaskPending) 'agent_task_pending': true,
@@ -197,6 +203,8 @@ class AiConversationMessage {
       capabilityMetadata: raw['capability_metadata'] is Map
           ? Map<String, Object?>.from(raw['capability_metadata'] as Map)
           : null,
+      capabilityScopeOperation:
+          raw['capability_scope_operation']?.toString() ?? 'inherit',
       outputArtifacts: raw['output_artifacts'] is List
           ? (raw['output_artifacts'] as List)
                 .whereType<Map>()
@@ -357,6 +365,19 @@ class AiConversationRecord {
   }
 
   AiConversationMessage? nodeById(String messageId) => _nodesById[messageId];
+
+  /// The selected branch owns its capabilities; unrelated branches never leak in.
+  Map<String, Object?>? get activeCapabilityMetadata {
+    Map<String, Object?>? active;
+    for (final message in messages.where((message) => message.isUser)) {
+      if (message.capabilityScopeOperation == 'clear') active = null;
+      final metadata = message.capabilityMetadata;
+      if (const {'skill', 'plugin', 'mcp'}.contains(metadata?['type'])) {
+        active = metadata;
+      }
+    }
+    return active;
+  }
 
   List<AiConversationMessage> answerVersionsFor(AiConversationMessage answer) {
     if (answer.isUser ||

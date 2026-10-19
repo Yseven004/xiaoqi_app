@@ -10,6 +10,24 @@ import 'package:uuid/uuid.dart';
 
 import 'store.dart';
 
+Future<List<Map<String, dynamic>>> listAllMcpTools(
+  Future<Map<String, dynamic>> Function(String? cursor) readPage,
+) async {
+  final tools = <Map<String, dynamic>>[];
+  final seen = <String>{};
+  String? cursor;
+  for (var pageNumber = 0; pageNumber < 100; pageNumber++) {
+    final page = await readPage(cursor).timeout(const Duration(seconds: 20));
+    tools.addAll((page['tools'] as List? ?? const []).whereType<Map>()
+        .map((tool) => Map<String, dynamic>.from(tool)));
+    if (tools.length > 100) throw StateError('MCP 工具数量超过 100 个，当前暂不支持');
+    cursor = page['nextCursor']?.toString();
+    if (cursor == null || cursor.isEmpty) return tools;
+    if (!seen.add(cursor)) throw StateError('MCP 工具目录返回重复分页标记');
+  }
+  throw StateError('MCP 工具目录分页超过限制');
+}
+
 class McpConnectionCredentials {
   const McpConnectionCredentials({
     required this.id,
@@ -454,23 +472,7 @@ class McpConnectionService {
     final client = await connect(connection);
     try {
       await client.ready().timeout(const Duration(seconds: 20));
-      final tools = <Map<String, dynamic>>[];
-      String? cursor;
-      do {
-        final page = await client
-            .listTools(cursor: cursor)
-            .timeout(const Duration(seconds: 20));
-        tools.addAll(
-          (page['tools'] as List? ?? const []).whereType<Map>().map(
-            (tool) => Map<String, dynamic>.from(tool),
-          ),
-        );
-        cursor = page['nextCursor']?.toString();
-        if (tools.length > 100) {
-          throw StateError('MCP 工具数量超过 100 个，当前暂不支持');
-        }
-      } while (cursor != null && cursor.isNotEmpty);
-      return tools;
+      return await listAllMcpTools((cursor) => client.listTools(cursor: cursor));
     } finally {
       await client.close();
     }
@@ -547,13 +549,38 @@ class McpConnectionService {
     Object? rawIds,
   ) async {
     if (rawIds == null) return const [];
-    if (rawIds is! List || rawIds.length > 8) {
+    if (rawIds is! List) {
       throw const FormatException('一次最多选择 8 个 MCP 连接器');
     }
-    final ids = rawIds.map(_safeId).toSet();
+    final ids = rawIds
+        .map((raw) => _safeId(raw is Map ? raw['id'] : raw))
+        .toSet();
+    if (ids.length > 8) throw const FormatException('一次最多选择 8 个 MCP 连接器');
     final result = <McpConnectionCredentials>[];
     for (final id in ids) {
       result.add(await _read(tenantId, id));
+    }
+    return result;
+  }
+
+  Future<List<McpConnectionCredentials>> discoverable(
+    String tenantId, {
+    Iterable<String> excludedIds = const [],
+  }) async {
+    final result = <McpConnectionCredentials>[];
+    for (final (_, document) in store.list('mcp/$tenantId/', limit: 500)) {
+      final value = document.value;
+      final id = value['id']?.toString() ?? '';
+      if (value['enabled'] == false ||
+          excludedIds.contains(id) ||
+          (value['status'] != null && value['status'] != 'ready'))
+        continue;
+      try {
+        result.add(await _read(tenantId, _safeId(id)));
+      } on Object {
+        continue;
+      }
+      if (result.length == 8) break;
     }
     return result;
   }

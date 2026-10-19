@@ -215,6 +215,66 @@ void main() {
   );
 
   test(
+    'ordinary followups preserve capabilities while removal and branches isolate scope',
+    () async {
+      Message scoped(
+        String text,
+        String task,
+        String operation, {
+        bool select = false,
+      }) => Message(
+        role: Role.user,
+        content: [TextPart(text: text)],
+        metadata: {
+          'xiaoqi_agent_turn': {
+            'task_id': task,
+            'workflow_id': 'book',
+            'capability_scope_operation': operation,
+            'selected_capabilities': select
+                ? [
+                    {'id': 'notes', 'version_id': 'fixed-v1', 'type': 'plugin'},
+                  ]
+                : [],
+            'selected_mcp_connections': select ? ['library'] : [],
+          },
+        },
+      );
+      final chat = ownerAgent.chat();
+      final first = chat.sendStream(
+        message: scoped('选能力', 'scope-first', 'replace', select: true),
+      );
+      await first.stream.drain<void>();
+      final firstResult = await first.response;
+      final followup = chat.sendStream(
+        message: scoped('请用它整理', 'scope-next', 'inherit'),
+      );
+      await followup.stream.drain<void>();
+      await followup.response;
+      expect(runtime.lastRequest!['selected_capabilities'], [
+        {'id': 'notes', 'version_id': 'fixed-v1', 'type': 'plugin'},
+      ]);
+      expect(runtime.lastRequest!['selected_mcp_connections'], ['library']);
+      final clear = chat.sendStream(
+        message: scoped('移除', 'scope-clear', 'clear'),
+      );
+      await clear.stream.drain<void>();
+      await clear.response;
+      expect(runtime.lastRequest!['selected_capabilities'], isEmpty);
+      expect(
+        runtime.lastRequest!['excluded_capability_ids'],
+        contains('notes'),
+      );
+      final branch = ownerAgent.chat(snapshotId: firstResult.snapshotId);
+      final branched = branch.sendStream(
+        message: scoped('分支继续', 'scope-branch', 'inherit'),
+      );
+      await branched.stream.drain<void>();
+      await branched.response;
+      expect(runtime.lastRequest!['selected_mcp_connections'], ['library']);
+    },
+  );
+
+  test(
     'updates one live status through MCP, skills, search and the final answer',
     () async {
       runtime.preparationEvents.addAll([

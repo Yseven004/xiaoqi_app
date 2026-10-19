@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'capability_import_service.dart';
+import 'capability_scope.dart';
 import 'release.dart';
 
 import 'package:crypto/crypto.dart';
@@ -827,8 +828,19 @@ class XiaoqiApi {
         ]);
         messages = [...seeded.take(seeded.length - 1), currentUser];
       }
-      final cleanConfig = Map<String, dynamic>.from(config)
-        ..remove('legacy_history');
+      final cleanConfig = resolveCapabilityScope(
+        config,
+        messages
+            .take(
+              messages.lastIndexWhere((message) => message.role == Role.user),
+            )
+            .toList()
+            .reversed
+            .where((message) => message.role == Role.user)
+            .map((message) => message.metadata?[_remoteAgentTurnMetadataKey])
+            .whereType<Map>()
+            .map((value) => Map<String, dynamic>.from(value)),
+      )..remove('legacy_history');
       currentUserIndex = messages.lastIndexWhere(
         (message) => message.role == Role.user,
       );
@@ -1029,6 +1041,32 @@ class XiaoqiApi {
         _ => 'completed',
       });
       final resultMessages = result.messages.toList();
+      if (result.activeMcpConnections != null)
+        cleanConfig['selected_mcp_connections'] = result.activeMcpConnections;
+      if (result.activeCapabilities != null &&
+          result.activeCapabilities!.isNotEmpty) {
+        final active = <String, Map<String, dynamic>>{};
+        for (final entry in [
+          ...(cleanConfig['selected_capabilities'] as List? ?? const [])
+              .whereType<Map>(),
+          ...result.activeCapabilities!,
+        ]) {
+          active['${entry['id']}/${entry['component_id'] ?? ''}'] =
+              Map<String, dynamic>.from(entry);
+        }
+        cleanConfig['selected_capabilities'] = active.values.toList();
+      }
+      // Implicit activation belongs to this runtime, so an approved resume must
+      // compare against the newly bound versions rather than the initial list.
+      _mutateTask(
+        taskKey,
+        (value) => {
+          ...value,
+          'selection_binding': _canonical(
+            cleanConfig['selected_capabilities'] ?? const [],
+          ),
+        },
+      );
       final webSources =
           (store.get('task/$tenantId/$taskId')?.value['web_sources'] as List? ??
                   const [])

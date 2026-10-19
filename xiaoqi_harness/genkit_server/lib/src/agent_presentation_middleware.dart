@@ -166,6 +166,7 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
         if (output is Map) {
           final resultStatus = output['status']?.toString() ?? '';
           if (output['isError'] == true ||
+              output['ok'] == false ||
               output['error'] != null ||
               const {
                 'error',

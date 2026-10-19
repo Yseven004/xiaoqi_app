@@ -36,6 +36,13 @@ subprojects {
 
     plugins.withId("com.android.library") {
         extensions.configure<com.android.build.api.dsl.LibraryExtension> {
+            if (project.name == "jni") {
+                externalNativeBuild {
+                    cmake {
+                        buildStagingDirectory(rootProject.file("../.local/capability-chain-verification/native-cmake/jni"))
+                    }
+                }
+            }
             compileOptions {
                 sourceCompatibility = JavaVersion.VERSION_17
                 targetCompatibility = JavaVersion.VERSION_17

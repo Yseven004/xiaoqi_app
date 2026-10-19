@@ -1384,7 +1384,9 @@ class _ImportInstallationDialogState extends State<_ImportInstallationDialog> {
                 ),
               ),
               const SizedBox(height: 16),
-              const Text('只安装兼容的技能。MCP、hooks 和专有客户端能力不会执行。检查不等于实际调用成功。'),
+              const Text(
+                '安装兼容技能；远程 MCP 组件需配置账号连接。当前尚不支持 hooks 和专有客户端组件。检查不等于实际执行成功。',
+              ),
               if (_busy)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 16),
@@ -2492,7 +2494,7 @@ class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
               in (record.compatibility['warnings'] as List? ?? const []))
             Text(warning.toString()),
           const SizedBox(height: 12),
-          const Text('MCP、hooks 和专有客户端组件不会执行。'),
+          const Text('远程 MCP 组件需绑定账号连接；当前尚不支持 hooks 和专有客户端组件。实际执行状态以任务结果为准。'),
           if (record.source['commit'] != null)
             SelectableText('仓库版本：${record.source['commit']}'),
         ],

@@ -10,6 +10,7 @@ import 'package:yaml/yaml.dart';
 import 'package:genkit/genkit.dart' show CancellationToken;
 
 import 'store.dart';
+import 'plugin_dependencies.dart';
 
 typedef DependencyPreparer =
     Future<Map<String, List<int>>> Function(
@@ -434,10 +435,34 @@ class CapabilityImportService {
       if (manifest['extensions'] != null)
         unsupported.add('客户端专有 extensions 不执行');
       final scoped = subtree(files, root);
+      try {
+        for (final entry in PluginDependencies.declarations(scoped).entries) {
+          final config = entry.value;
+          final remote =
+              config is Map &&
+              config['url'] is String &&
+              config['command'] == null &&
+              Uri.tryParse(config['url'])?.scheme == 'https';
+          components.add({
+            'id':
+                'mcp-${sha256.convert(utf8.encode(entry.key)).toString().substring(0, 16)}',
+            'type': 'mcp',
+            'root': root,
+            'name': entry.key,
+            'description': '插件声明的 MCP 连接器',
+            'mcp_server_name': entry.key,
+            'status': remote ? 'partial' : 'unsupported',
+            'issues': [remote ? '需要绑定当前账号的远程连接' : '需要尚未支持的本地宿主或连接类型'],
+            'has_dependencies': false,
+          });
+        }
+      } on FormatException {
+        unsupported.add('插件 MCP 声明格式或路径无效');
+      }
       if ((!standard && manifest['mcpServers'] != null) ||
           scoped.containsKey('mcp.json') ||
           scoped.containsKey('.mcp.json'))
-        unsupported.add('MCP 组件暂不支持');
+        unsupported.add('MCP 组件需绑定当前账号的兼容远程连接；本地进程需宿主支持');
       for (final type in ['hooks', 'commands', 'agents', 'apps']) {
         if (manifest[type] != null ||
             scoped.keys.any((p) => p.startsWith('$type/')) ||

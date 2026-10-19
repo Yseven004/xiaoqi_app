@@ -54,6 +54,7 @@ app.*.map.json
 *.jks
 *.keystore
 /.codex-artifacts/
+/.local/capability-chain-verification/
 **/.gradle/
 **/.kotlin/
 **/build/
