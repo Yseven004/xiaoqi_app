@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:genkit/genkit.dart';
+import 'package:uuid/uuid.dart';
 
 import 'public_agent_process.dart';
+import 'public_reasoning_buffer.dart';
 
 /// Redacts implementation details before model text reaches the user.
 ///
@@ -33,13 +35,17 @@ String sanitizeAssistantText(String text) {
   return sanitized;
 }
 
-/// Separates explicitly public explanations from the final answer. Internal
-/// reasoning is discarded regardless of language or provider.
+/// Publishes checked provider reasoning independently of private model history.
 class AgentPresentationMiddleware extends GenerateMiddleware {
-  AgentPresentationMiddleware({required this.preparing, required this.onEvent});
+  AgentPresentationMiddleware({
+    required this.preparing,
+    required this.onEvent,
+    this.protectedValues = const [],
+  });
 
   final bool preparing;
   final void Function(Map<String, Object?> event) onEvent;
+  final Iterable<String> protectedValues;
 
   @override
   Future<ModelResponse> model(
@@ -54,17 +60,31 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
     onEvent({'type': 'thinking_started'});
     final modelStopwatch = Stopwatch()..start();
     var answerStarted = false;
-    final summaries = PublicSummaryBuffer(
-      (summary) => onEvent({'type': 'reasoning_update', 'text': summary}),
+    final reasoningId = const Uuid().v4();
+    final reasoning = PublicReasoningBuffer(
+      protectedValues: protectedValues,
+      onUpdate: (text, revision, status) => onEvent({
+        'type': 'reasoning_update',
+        'source': 'model_reasoning',
+        'reasoning_id': reasoningId,
+        'revision': revision,
+        'status': status,
+        'text': text,
+      }),
     );
     final wrapped = context.copyWith(
       sendChunk: (chunk) {
         final forwarded = <Part>[];
         for (final part in chunk.content) {
           if (context.cancel?.isCancelled == true) return;
-          if (part.isReasoning) continue;
+          if (part.isReasoning) {
+            reasoning.add(part.reasoning ?? '');
+            continue;
+          }
+          if (part.isToolRequest || (!preparing && part.isText)) {
+            reasoning.boundary();
+          }
           if (preparing && part.isText) {
-            summaries.add(part.text ?? '');
             continue;
           }
           if (part.isText) {
@@ -95,12 +115,28 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
         );
       },
     );
-    final response = await next(request, wrapped);
-    // Some providers only return preparation text in the final response.
-    if (preparing && context.cancel?.isCancelled != true) {
-      summaries.add(response.message?.text ?? '');
+    try {
+      final response = await next(request, wrapped);
+      reasoning.finish(
+        finalText:
+            response.message?.content
+                .where((p) => p.isReasoning)
+                .map((p) => p.reasoning ?? '')
+                .join() ??
+            '',
+        status: context.cancel?.isCancelled == true
+            ? 'stopped'
+            : response.finishReason == FinishReason.stop
+            ? 'completed'
+            : 'incomplete',
+      );
+      return response;
+    } on Object {
+      reasoning.finish(
+        status: context.cancel?.isCancelled == true ? 'stopped' : 'incomplete',
+      );
+      rethrow;
     }
-    return response;
   }
 
   @override

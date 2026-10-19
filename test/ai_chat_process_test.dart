@@ -2,6 +2,29 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:xiaoqi_app/features/ai_study_annotation/domain/ai_chat_process.dart';
 
 void main() {
+  test('native reasoning revisions preserve paragraphs and cannot regress', () {
+    final first = <String, Object?>{
+      'step_id': 'native:1',
+      'kind': 'reasoning',
+      'source': 'model_reasoning',
+      'revision': 1,
+      'status': 'running',
+      'text': '先核对采访。',
+    };
+    final latest = {
+      ...first,
+      'revision': 2,
+      'text': '先核对采访。\n\nThen compare the dates.',
+    };
+    final rows = mergeChatProcessDetails([first, latest, first, latest]);
+    expect(rows, hasLength(1));
+    expect(rows.single['text'], latest['text']);
+    expect(rows.single['source'], 'model_reasoning');
+    final stopped = settleChatProcessDetails(rows, status: 'stopped');
+    expect(stopped.single['text'], latest['text']);
+    expect(stopped.single['status'], 'stopped');
+    expect(settleChatProcessDetails(stopped, status: 'stopped'), stopped);
+  });
   test(
     'saved old active or missing states follow the message terminal state',
     () {

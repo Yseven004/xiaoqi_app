@@ -349,8 +349,22 @@ void main() {
         ]);
       }
       runtime.preparationEvents.addAll([
-        {'type': 'reasoning_update', 'text': '已找到原始采访，接下来核对成本案例。'},
-        {'type': 'reasoning_update', 'text': '搜索到 999 个网页。'},
+        {
+          'type': 'reasoning_update',
+          'source': 'model_reasoning',
+          'reasoning_id': 'call-1',
+          'revision': 1,
+          'status': 'completed',
+          'text': '已找到原始采访，接下来核对成本案例。',
+        },
+        {
+          'type': 'reasoning_update',
+          'source': 'model_reasoning',
+          'reasoning_id': 'call-2',
+          'revision': 1,
+          'status': 'completed',
+          'text': 'API_KEY 是 999。',
+        },
       ]);
       final turn = ownerAgent.chat().sendStream(
         message: userMessage('查找资料', 'full-public-process'),

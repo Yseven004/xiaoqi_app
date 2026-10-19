@@ -24,6 +24,8 @@ List<Map<String, Object?>> mergeChatProcessDetails(
         'status',
         'tool',
         'source_count',
+        'source',
+        'revision',
       ])
         if (detail[key] != null) key: detail[key],
       'text': text,
@@ -34,6 +36,11 @@ List<Map<String, Object?>> mergeChatProcessDetails(
       if (id != null) positions[id] = rows.length;
       rows.add(row);
     } else {
+      if (row['revision'] is int &&
+          rows[index]['revision'] is int &&
+          (row['revision'] as int) <= (rows[index]['revision'] as int)) {
+        continue;
+      }
       rows[index] = row;
     }
   }
@@ -52,6 +59,12 @@ List<Map<String, Object?>> settleChatProcessDetails(
       final legacyActive = state == null && text.startsWith('正在');
       if (state != 'running' && state != 'waiting' && !legacyActive) return row;
       final stopped = status == 'stopped';
+      if (row['kind'] == 'reasoning' && row['source'] == 'model_reasoning') {
+        return <String, Object?>{
+          ...row,
+          'status': stopped ? 'stopped' : 'incomplete',
+        };
+      }
       final label = text.replaceFirst(RegExp(r'^正在'), '');
       return <String, Object?>{
         ...row,

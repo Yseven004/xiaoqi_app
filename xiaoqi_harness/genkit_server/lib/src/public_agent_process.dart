@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'public_reasoning_buffer.dart';
 
 /// Correlates runtime evidence with the invocation enclosing it, including
 /// concurrent calls of the same tool. Never serialized to the client.
@@ -31,73 +32,6 @@ String publicToolLabel(String tool) => switch (tool) {
   _ => '工具调用',
 };
 
-/// Reject the whole public paragraph, rather than replacing a keyword and
-/// accidentally retaining its value. Called only after a complete block.
-String? publicProcessSummary(String raw) {
-  final text = raw.replaceAll(RegExp(r'\s+'), ' ').trim();
-  if (text.isEmpty ||
-      text.length > 480 ||
-      !RegExp(r'[\u3400-\u9fff]').hasMatch(text))
-    return null;
-  final privateContent = RegExp(
-    r'system\s*prompt|系统提示|系统指令|内部提示|内部指令|开发者指令|'
-    r'api[ _-]?key|access[ _-]?key|secret|token|bearer|password|密码|凭据|密钥|'
-    r'环境变量|服务[端器]+配置|后端|内部[配参日路]|请求参数|原始日志|堆栈|文件路径|目录|\.env\b|\.pem\b|'
-    r'[A-Z][A-Z0-9]+_[A-Z0-9_]+|[a-z]:[\\/]|/(?:opt|workspace|home|tmp|etc|var|usr)/|'
-    r'https?://|localhost|127\.0\.0\.1|\b10\.\d+\.\d+\.\d+|\b192\.168\.|'
-    r'sk-[a-z0-9_-]+|eyJ[a-z0-9_-]+\.|'
-    r'忽略.{0,12}(?:指令|规则)|(?:泄露|输出|展示).{0,12}(?:提示词|密钥|配置)|'
-    r'ignore.{0,20}instructions|<|>|```|\{|\}',
-    caseSensitive: false,
-  );
-  if (privateContent.hasMatch(text)) return null;
-  final sentences = RegExp(r'[^。！？!?]+[。！？!?]').allMatches(text).toList();
-  if (sentences.isEmpty) return null;
-  return sentences.take(3).map((match) => match.group(0)!.trim()).join();
-}
-
-/// Accepts explicitly authored public explanations, never ReasoningPart text.
-class PublicSummaryBuffer {
-  PublicSummaryBuffer(this.onSummary);
-  final void Function(String) onSummary;
-  var _buffer = '';
-  var _sentenceCount = 0;
-  final _published = <String>{};
-
-  void add(String delta) {
-    _buffer += delta;
-    const start = '<public_summary>';
-    const end = '</public_summary>';
-    while (true) {
-      final begin = _buffer.indexOf(start);
-      if (begin < 0) {
-        // Keep only enough to recognize an opening tag split across chunks.
-        if (_buffer.length > start.length) {
-          _buffer = _buffer.substring(_buffer.length - start.length);
-        }
-        return;
-      }
-      if (begin > 0) _buffer = _buffer.substring(begin);
-      final close = _buffer.indexOf(end, start.length);
-      if (close < 0) {
-        if (_buffer.length > 4096) _buffer = '';
-        return;
-      }
-      final summary = publicProcessSummary(
-        _buffer.substring(start.length, close),
-      );
-      _buffer = _buffer.substring(close + end.length);
-      if (summary != null && _sentenceCount < 3 && _published.add(summary)) {
-        final sentences = RegExp(
-          r'[^。！？!?]+[。！？!?]',
-        ).allMatches(summary).take(3 - _sentenceCount).toList();
-        _sentenceCount += sentences.length;
-        onSummary(sentences.map((match) => match.group(0)).join());
-      }
-    }
-  }
-}
-
 /// The only projection of runtime events allowed into the chat's custom state.
 class PublicAgentProcess {
   PublicAgentProcess(this.turnId);
@@ -105,6 +39,7 @@ class PublicAgentProcess {
   final _rows = <Map<String, dynamic>>[];
   final _invocations = <Object, int>{};
   final _unscoped = <String, int>{};
+  final _reasoning = <String, int>{};
   var _sequence = 0;
 
   List<Map<String, dynamic>> get rows =>
@@ -113,23 +48,41 @@ class PublicAgentProcess {
   Map<String, dynamic>? add(Map<String, Object?> event) {
     final type = event['type']?.toString() ?? '';
     if (type == 'reasoning_update') {
-      final text = publicProcessSummary(event['text']?.toString() ?? '');
-      if (text == null) return null;
-      final counts = RegExp(r'(\d+)\s*个?\s*(?:网页|页面|来源)').allMatches(text);
-      if (counts.any(
-        (match) => !_rows.any(
-          (row) =>
-              row['status'] == 'completed' &&
-              row['source_count'] == int.tryParse(match.group(1)!),
-        ),
-      ))
+      final text = event['text']?.toString() ?? '';
+      final id = event['reasoning_id']?.toString() ?? '';
+      final revision = event['revision'];
+      final status = event['status'];
+      if (event['source'] != 'model_reasoning' ||
+          id.isEmpty ||
+          revision is! int ||
+          revision < 1 ||
+          text.trim().isEmpty ||
+          !isPublicReasoning(text) ||
+          !const {
+            'running',
+            'completed',
+            'stopped',
+            'incomplete',
+          }.contains(status)) {
         return null;
-      return _insert({
+      }
+      final index = _reasoning[id];
+      final fields = <String, dynamic>{
         'kind': 'reasoning',
         'type': type,
-        'status': 'completed',
+        'source': 'model_reasoning',
+        'revision': revision,
+        'status': status,
         'text': text,
-      });
+      };
+      if (index == null) {
+        _reasoning[id] = _rows.length;
+        return _insert(fields);
+      }
+      if (revision <= (_rows[index]['revision'] as int)) return null;
+      final row = <String, dynamic>{..._rows[index], ...fields};
+      _rows[index] = row;
+      return row;
     }
     var tool = publicToolName(event['tool']?.toString() ?? '');
     if (type.startsWith('mcp_connection')) tool = 'mcp_connection';
@@ -225,6 +178,14 @@ class PublicAgentProcess {
       final row = _rows[index];
       if (!_active(row)) continue;
       final stopped = status == 'stopped';
+      if (row['kind'] == 'reasoning') {
+        _rows[index] = {
+          ...row,
+          'status': stopped ? 'stopped' : 'incomplete',
+          'revision': (row['revision'] as int) + 1,
+        };
+        continue;
+      }
       _rows[index] = {
         ...row,
         'status': stopped ? 'stopped' : 'incomplete',
