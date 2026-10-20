@@ -100,7 +100,7 @@ Future<void> main(List<String> args) async {
       tenantId: 'personal',
       taskId: 'attachment-$scenario',
       request: {
-        'model_id': 'mimo-test',
+        'model_id': 'mimo-v2.6-flash',
         'intent_mode': 'attachment_only',
         'current_turn_text': scenario == 'full' ? '请逐页分析全文' : '',
         'materials': [

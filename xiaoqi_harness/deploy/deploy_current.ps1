@@ -52,14 +52,23 @@ function Wait-RemoteCommand {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        $result = Invoke-AliyunJson -Arguments @(
-            'ecs', 'DescribeInvocationResults',
-            '--profile', $Profile,
-            '--region', $Region,
-            '--RegionId', $Region,
-            '--InvokeId', $InvokeId,
-            '--InstanceId', $InstanceId
-        )
+        try {
+            $result = Invoke-AliyunJson -Arguments @(
+                'ecs', 'DescribeInvocationResults',
+                '--profile', $Profile,
+                '--region', $Region,
+                '--RegionId', $Region,
+                '--InvokeId', $InvokeId,
+                '--InstanceId', $InstanceId
+            )
+        } catch {
+            if ((Get-Date) -ge $deadline) { throw }
+            $remainingSeconds = [Math]::Max(1, [int]($deadline - (Get-Date)).TotalSeconds)
+            $retryDelay = [Math]::Min(15, [Math]::Min(5, $remainingSeconds))
+            Write-Warning "ECS status polling failed temporarily; remote command $InvokeId is still being tracked. Retrying in ${retryDelay}s."
+            Start-Sleep -Seconds $retryDelay
+            continue
+        }
         $item = @($result.Invocation.InvocationResults.InvocationResult)[0]
         if ($null -ne $item -and $item.InvocationStatus -in @('Success', 'Failed', 'Stopped', 'Aborted', 'Timeout')) {
             $text = if ($item.Output) {
@@ -168,6 +177,7 @@ try {
     Write-Host "[1/5] Packaging current source as $releaseId"
     & tar.exe -czf $archivePath `
         '--exclude=genkit_server/.dart_tool' `
+        '--exclude=genkit_server/.genkit' `
         '--exclude=genkit_server/build' `
         '--exclude=genkit_server/coverage' `
         '--exclude=deploy/single-server.env' `

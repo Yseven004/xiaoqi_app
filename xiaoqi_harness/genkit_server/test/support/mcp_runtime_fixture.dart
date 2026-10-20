@@ -120,7 +120,7 @@ Future<void> main(List<String> args) async {
     mcpConnections: FixtureMcpConnections(store, rpc.port),
   );
   final request = <String, dynamic>{
-    'model_id': 'mimo-test',
+    'model_id': 'mimo-v2.6-flash',
     'current_turn_text': '请用 MCP 生成图片卡片',
     'selected_mcp_connections': [
       {'id': 'library'},

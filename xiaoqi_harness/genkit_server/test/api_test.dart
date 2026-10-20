@@ -345,6 +345,14 @@ void main() {
     'keeps text and marks an image-only miss as partially completed',
     () async {
       runtime.emitImageGenerationStarted = true;
+      runtime.beforeReturn = (tenantId, taskId) {
+        final key = 'task/$tenantId/$taskId';
+        final task = store.get(key)!;
+        store.put(key, {
+          ...task.value,
+          'turn_scope': {'mode': 'create', 'image_limit': 1},
+        }, task.revision);
+      };
       await call(
         'POST',
         '/v1/agent/tasks',

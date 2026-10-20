@@ -75,3 +75,5 @@ xiaoqi_harness/dsh_manager/ui/dist/
 # Local deployment artifacts and upload checkpoints
 .ossutil_checkpoint/
 xiaoqi_harness/deploy/**/*.zip
+xiaoqi_harness/genkit_server/.genkit/
+/.local/intent-scope-*

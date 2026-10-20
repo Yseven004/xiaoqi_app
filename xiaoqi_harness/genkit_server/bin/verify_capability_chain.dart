@@ -82,9 +82,16 @@ Future<void> main() async {
       'implicit-skill',
       'explicit-plugin',
       'unrelated',
+      'ordinary-answer',
       'text-only-skill',
     ]) {
+      final selectedChecks = Platform.environment['XIAOQI_VERIFY_SCENARIOS'];
+      if (selectedChecks != null &&
+          !selectedChecks.split(',').contains(scenario))
+        continue;
       final textOnly = scenario == 'text-only-skill';
+      final ordinaryAnswer = scenario == 'ordinary-answer';
+      final noWorkflow = scenario == 'unrelated' || ordinaryAnswer;
       if (textOnly) {
         for (final id in ['card-skill', 'card-plugin']) {
           final current = store.get('cap/$tenant/$id')!;
@@ -105,6 +112,8 @@ Future<void> main() async {
         }
       }
       final prompt = textOnly
+          ? '请用纯文字编辑技能将这段资料整理成一段简洁的纯文字，不需要图片或文件：$text'
+          : ordinaryAnswer
           ? '请将这段资料整理成一段简洁的纯文字，不需要图片或文件：$text'
           : scenario == 'unrelated'
           ? '你好，请用一句话打个招呼。'
@@ -128,8 +137,16 @@ Future<void> main() async {
                 'current_turn_text': prompt,
                 'network_mode': 'off',
                 'reasoning_level': 'medium',
-                'image_budget': scenario == 'unrelated' ? 0 : 1,
-                'selected_capabilities': scenario == 'explicit-plugin'
+                'image_budget': noWorkflow ? 0 : 1,
+                'selected_capabilities': textOnly
+                    ? [
+                        {
+                          'id': 'text-skill',
+                          'version_id': 'v1',
+                          'component_id': 'card',
+                        },
+                      ]
+                    : scenario == 'explicit-plugin'
                     ? [
                         {
                           'id': 'card-plugin',
@@ -157,7 +174,7 @@ Future<void> main() async {
             .where((event) => event['type'] == 'tool_succeeded')
             .map((event) => event['tool'])
             .toList();
-        final expected = scenario == 'unrelated' || textOnly ? 0 : 1;
+        final expected = noWorkflow || textOnly ? 0 : 1;
         final integrity = artifacts.every((artifact) {
           final bytes = store.getObject(artifact['object_key']);
           return bytes.length == artifact['size'] &&
@@ -168,7 +185,7 @@ Future<void> main() async {
             result.text.isNotEmpty &&
             artifacts.length == expected &&
             integrity &&
-            (scenario == 'unrelated'
+            (noWorkflow
                 ? result.activeCapabilities?.isEmpty == true
                 : result.activeCapabilities?.isNotEmpty == true &&
                       successful.contains('read_skill_resource') &&

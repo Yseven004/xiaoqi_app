@@ -194,7 +194,10 @@ void main() {
           final body =
               jsonDecode(await utf8.decoder.bind(request).join())
                   as Map<String, dynamic>;
-          requests.add(body);
+          final classifier = jsonEncode(
+            body['messages'],
+          ).contains('XIAOQI_TURN_INTENT_V1');
+          if (!classifier) requests.add(body);
           if (body['stream'] == true) {
             request.response.headers.contentType = ContentType(
               'text',
@@ -231,7 +234,17 @@ void main() {
                     'index': 0,
                     'message': {
                       'role': 'assistant',
-                      'content': '光合作用的结构及证据（已读页码）。',
+                      'content': classifier
+                          ? jsonEncode({
+                              'mode': 'answer',
+                              'image_count': 0,
+                              'answer_required': true,
+                              'skill_ids': [],
+                              'connection_ids': [],
+                              'target_artifact_id': null,
+                              'clarification': null,
+                            })
+                          : '光合作用的结构及证据（已读页码）。',
                     },
                     'finish_reason': 'stop',
                   },

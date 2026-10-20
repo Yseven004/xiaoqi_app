@@ -24,8 +24,57 @@ void main() {
           final body =
               jsonDecode(await utf8.decoder.bind(request).join())
                   as Map<String, dynamic>;
-          requests.add(body);
           final serialized = jsonEncode(body['messages']);
+          if (serialized.contains('XIAOQI_TURN_INTENT_V1')) {
+            final messages = (body['messages'] as List)
+                .whereType<Map>()
+                .toList();
+            final content = messages.last['content'];
+            final prompt =
+                jsonDecode(
+                      content is String
+                          ? content
+                          : (content as List)
+                                .whereType<Map>()
+                                .map((p) => p['text'] ?? '')
+                                .join(),
+                    )
+                    as Map;
+            final catalog = (prompt['skills'] as List).whereType<Map>();
+            final connectors = (prompt['connections'] as List).whereType<Map>();
+            final proposal = {
+              'mode': 'workflow',
+              'answer_required': true,
+              'image_count': scenario.startsWith('text-only')
+                  ? 0
+                  : scenario.startsWith('mcp-')
+                  ? 1
+                  : 2,
+              'skill_ids': catalog.map((entry) => entry['id']).toList(),
+              'connection_ids': connectors.map((entry) => entry['id']).toList(),
+              'target_artifact_id': null,
+              'clarification': null,
+            };
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(
+              jsonEncode({
+                'id': 'intent-fixture',
+                'choices': [
+                  {
+                    'index': 0,
+                    'message': {
+                      'role': 'assistant',
+                      'content': jsonEncode(proposal),
+                    },
+                    'finish_reason': 'stop',
+                  },
+                ],
+              }),
+            );
+            await request.response.close();
+            return;
+          }
+          requests.add(body);
           final textOnly = scenario.startsWith('text-only');
           final tools = (body['tools'] as List? ?? const []).whereType<Map>();
           final preparing =
@@ -231,14 +280,13 @@ void main() {
               jsonEncode(requests.first['messages']),
               contains('TEXT_ONLY'),
             );
-            // Image generation is available; zero calls are caused by this
-            // task's delivery requirements, not a disabled image provider.
+            // The provider is configured, but this turn does not permit images.
             expect(
               jsonEncode(requests.first['tools']),
-              contains('generate_image'),
+              isNot(contains('generate_image')),
             );
             if (scenario == 'text-only-unplanned-image') {
-              expect(jsonEncode(requests), contains('budget_exhausted'));
+              expect(jsonEncode(requests), contains('scope_denied'));
             }
           } else {
             expect(result['missing'], isFalse);

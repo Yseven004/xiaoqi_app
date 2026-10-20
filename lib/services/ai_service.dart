@@ -46,7 +46,6 @@ class AiService {
         'reasoning_level': selection.reasoningLevel.name,
         'messages': messages,
         'stream': false,
-        'max_output_tokens': 128,
       });
   }
 

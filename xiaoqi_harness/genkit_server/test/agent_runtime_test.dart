@@ -6,6 +6,27 @@ import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
+import 'package:xiaoqi_genkit_server/src/tool_execution.dart';
+import 'package:xiaoqi_genkit_server/src/turn_contract.dart';
+
+// These unit cases exercise the executor after semantic routing. Real model
+// classification is covered by the live intent gate and HTTP model fixtures.
+String _classifiedImageTask(
+  CloudStore store,
+  String id,
+  String text, {
+  String mode = 'create',
+}) {
+  ToolExecution(
+    store,
+    'personal',
+    id,
+    TurnContract(mode: mode, imageLimit: 1),
+    requestIdentity: ToolExecution.digest([id, text]),
+    requestText: text,
+  ).bind();
+  return id;
+}
 
 class _RecordingImageService extends ImageService {
   _RecordingImageService(super.store);
@@ -33,17 +54,6 @@ class _RecordingImageService extends ImageService {
 }
 
 void main() {
-  test('routes explicit image requests but not capability questions', () {
-    expect(agentShouldGenerateImage('帮我做一张动漫风景图片'), isTrue);
-    expect(agentShouldGenerateImage('生图啊？'), isTrue);
-    expect(agentShouldGenerateImage('请问可以生成图片吗？'), isFalse);
-    expect(agentShouldGenerateImage('怎么生成图片？'), isFalse);
-    expect(agentShouldGenerateImage('帮我解释一下如何生成图片'), isFalse);
-    expect(agentShouldGenerateImage('给我解释一下马斯克第一性原理，再加上一张图片给我更直观地理解'), isTrue);
-    expect(agentShouldGenerateImage('帮我解释光合作用并配图'), isTrue);
-    expect(agentShouldGenerateImage('解释光合作用，然后画一张图'), isTrue);
-  });
-
   test(
     'keeps explanations for requests that ask for an accompanying image',
     () {
@@ -96,7 +106,7 @@ void main() {
     expect(agentToolNamesForRequest(latestUserText: '请问可以生成图片吗？'), isEmpty);
   });
 
-  test('exposes configured tools regardless of the current user wording', () {
+  test('configured execution tools require the current turn contract', () {
     final ordinary = agentToolNamesForRequest(
       latestUserText: '你好，讲解一下第一性原理',
       imageGenerationAvailable: true,
@@ -104,22 +114,7 @@ void main() {
       webSearchAvailable: true,
       skillsAvailable: true,
     );
-    final codeQuestion = agentToolNamesForRequest(
-      latestUserText: 'Python 是什么？',
-      imageGenerationAvailable: true,
-      codeExecutionAvailable: true,
-      webSearchAvailable: true,
-      skillsAvailable: true,
-    );
-    expect(ordinary, [
-      'execute_python',
-      'generate_image',
-      'execute_skill_script',
-      'read_skill_resource',
-      'web_search',
-      'use_skill',
-    ]);
-    expect(codeQuestion, ordinary);
+    expect(ordinary, ['web_search']);
     expect(
       agentToolNamesForRequest(
         latestUserText: '普通问答',
@@ -234,7 +229,7 @@ void main() {
     try {
       final answer = await runtime.run(
         tenantId: 'personal',
-        taskId: 'image-action-test',
+        taskId: _classifiedImageTask(store, 'image-action-test', '生成一张动漫风景图'),
         request: {
           'model_id': 'deepseek-flash',
           'capability': {'type': 'action', 'id': 'create-image'},
@@ -294,39 +289,46 @@ void main() {
     },
   );
 
-  test('normal image requests call the image service directly', () async {
-    final directory = Directory.systemTemp.createTempSync(
-      'xiaoqi-agent-image-request-test-',
-    );
-    final store = CloudStore(root: directory.path);
-    final images = _RecordingImageService(store);
-    final runtime = GenkitXiaoqiAgentRuntime(store, images);
-    final deltas = <String>[];
-
-    try {
-      final answer = await runtime.run(
-        tenantId: 'personal',
-        taskId: 'image-request-test',
-        request: {
-          'model_id': 'deepseek-flash',
-          'messages': [
-            {'role': 'user', 'content': '帮我做一张动漫风景图片'},
-          ],
-        },
-        onDelta: deltas.add,
-        cancellation: CancellationController().token,
+  test(
+    'semantically classified image requests reach the image executor',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'xiaoqi-agent-image-request-test-',
       );
+      final store = CloudStore(root: directory.path);
+      final images = _RecordingImageService(store);
+      final runtime = GenkitXiaoqiAgentRuntime(store, images);
+      final deltas = <String>[];
 
-      expect(images.prompt, contains('动漫风景'));
-      expect(images.count, 1);
-      expect(images.imageUrl, isNull);
-      expect(answer, '图片已生成。');
-      expect(deltas, ['图片已生成。']);
-    } finally {
-      store.close();
-      directory.deleteSync(recursive: true);
-    }
-  });
+      try {
+        final answer = await runtime.run(
+          tenantId: 'personal',
+          taskId: _classifiedImageTask(
+            store,
+            'image-request-test',
+            '帮我做一张动漫风景图片',
+          ),
+          request: {
+            'model_id': 'deepseek-flash',
+            'messages': [
+              {'role': 'user', 'content': '帮我做一张动漫风景图片'},
+            ],
+          },
+          onDelta: deltas.add,
+          cancellation: CancellationController().token,
+        );
+
+        expect(images.prompt, contains('动漫风景'));
+        expect(images.count, 1);
+        expect(images.imageUrl, isNull);
+        expect(answer, '图片已生成。');
+        expect(deltas, ['图片已生成。']);
+      } finally {
+        store.close();
+        directory.deleteSync(recursive: true);
+      }
+    },
+  );
 
   test(
     'selected image action bypasses unrelated discoverable skills',
@@ -367,7 +369,7 @@ void main() {
       try {
         final answer = await GenkitXiaoqiAgentRuntime(store, images).run(
           tenantId: 'personal',
-          taskId: 'selected-cat',
+          taskId: _classifiedImageTask(store, 'selected-cat', '小猫'),
           request: {
             'model_id': 'deepseek-flash',
             'capability': {'type': 'action', 'id': 'create-image'},
@@ -401,7 +403,12 @@ void main() {
     try {
       await runtime.run(
         tenantId: 'personal',
-        taskId: 'image-edit-test',
+        taskId: _classifiedImageTask(
+          store,
+          'image-edit-test',
+          '修改这张图片，让它变成动漫风格',
+          mode: 'revise',
+        ),
         request: {
           'model_id': 'deepseek-flash',
           'messages': [

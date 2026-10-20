@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -19,7 +20,7 @@ class DatabaseService {
 
   static Database? _database;
   static const String _dbName = 'xiaoqi.db';
-  static const int _dbVersion = 32;
+  static const int _dbVersion = 33;
   static const int homeNotebookLimit = 7;
   static const int pinnedNotebookLimit = 10;
   static const Duration deletedNotebookRetention = Duration(days: 30);
@@ -147,6 +148,7 @@ class DatabaseService {
     ''');
     await _createChatNoteSourceTable(db);
     await _createNoteAttachmentTable(db);
+    await _createNoteRelationTables(db);
 
     await _createBookRecognitionTables(db);
     await _createBookSourceTables(db);
@@ -664,6 +666,26 @@ class DatabaseService {
       await _createNoteAttachmentTable(db);
       debugPrint('[XiaoQi] DB: v31→v32 笔记附件迁移完成');
     }
+
+    if (oldVersion < 33 && newVersion >= 33) {
+      for (final sql in const [
+        "ALTER TABLE books ADD COLUMN deleted_at TEXT",
+        "ALTER TABLE books ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0",
+      ]) {
+        try {
+          await db.execute(sql);
+        } catch (_) {}
+      }
+      await _createNoteRelationTables(db);
+      await db.execute('''
+        INSERT OR IGNORE INTO note_book_references
+          (note_id, book_id, book_name, book_page, is_primary, created_at)
+        SELECT id, book_id, book_name, book_page, 1, COALESCE(created_at, '')
+        FROM notes
+        WHERE book_id IS NOT NULL
+      ''');
+      debugPrint('[XiaoQi] DB: v32→v33 笔记引用与回收批次迁移完成');
+    }
   }
 
   static Future<void> _createNoteAttachmentTable(DatabaseExecutor db) async {
@@ -700,6 +722,71 @@ class DatabaseService {
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_note_chat_sources_note
       ON note_chat_sources(note_id, captured_at)
+    ''');
+  }
+
+  static Future<void> _createNoteRelationTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS note_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        note_id INTEGER NOT NULL,
+        related_note_id INTEGER NOT NULL,
+        relation_type TEXT NOT NULL DEFAULT 'body_link',
+        created_at TEXT NOT NULL,
+        UNIQUE(note_id, related_note_id, relation_type)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_note_relations_target
+      ON note_relations(related_note_id, created_at)
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS note_book_references (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        note_id INTEGER NOT NULL,
+        book_id INTEGER NOT NULL,
+        book_name TEXT NOT NULL DEFAULT '',
+        book_page TEXT NOT NULL DEFAULT '',
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(note_id, book_id)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_note_book_references_book
+      ON note_book_references(book_id, note_id)
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS note_source_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        note_id INTEGER NOT NULL,
+        book_id INTEGER,
+        book_name TEXT NOT NULL DEFAULT '',
+        book_page TEXT NOT NULL DEFAULT '',
+        capture_page_id INTEGER,
+        created_at TEXT NOT NULL,
+        is_primary INTEGER NOT NULL DEFAULT 1
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_note_source_snapshots_note
+      ON note_source_snapshots(note_id, is_primary, created_at)
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS note_recycle_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        deleted_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS note_recycle_items (
+        batch_id INTEGER NOT NULL,
+        note_id INTEGER NOT NULL,
+        book_id INTEGER,
+        reason TEXT NOT NULL DEFAULT 'manual',
+        PRIMARY KEY(batch_id, note_id)
+      )
     ''');
   }
 
@@ -846,6 +933,8 @@ class DatabaseService {
         is_in_reading_space INTEGER NOT NULL DEFAULT 1,
         pinned_at TEXT,
         last_studied_at TEXT,
+        deleted_at TEXT,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
@@ -1061,6 +1150,92 @@ class DatabaseService {
     );
   }
 
+  List<int> _noteIdsFromDelta(String encodedDelta) {
+    if (encodedDelta.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(encodedDelta);
+      if (decoded is! List) return const [];
+      final ids = <int>{};
+      for (final operation in decoded) {
+        if (operation is! Map) continue;
+        final attributes = operation['attributes'];
+        if (attributes is! Map) continue;
+        final link = attributes['link']?.toString() ?? '';
+        final match = RegExp(r'^note://(\d+)$').firstMatch(link.trim());
+        final id = int.tryParse(match?.group(1) ?? '');
+        if (id != null && id > 0) ids.add(id);
+      }
+      return ids.toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> _syncNoteRelations(
+    DatabaseExecutor txn,
+    int noteId,
+    Map<String, dynamic> map,
+  ) async {
+    await txn.delete(
+      'note_relations',
+      where: 'note_id = ?',
+      whereArgs: [noteId],
+    );
+    final now = DateTime.now().toIso8601String();
+    final linkedIds = _noteIdsFromDelta(
+      map['content_delta'] as String? ?? '',
+    ).where((id) => id != noteId).toSet();
+    for (final relatedId in linkedIds) {
+      await txn.insert('note_relations', {
+        'note_id': noteId,
+        'related_note_id': relatedId,
+        'relation_type': 'body_link',
+        'created_at': now,
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    }
+
+    final bookId = map['book_id'] as int?;
+    if (bookId == null) return;
+    await txn.update(
+      'note_book_references',
+      {'is_primary': 0},
+      where: 'note_id = ?',
+      whereArgs: [noteId],
+    );
+    await txn.insert('note_book_references', {
+      'note_id': noteId,
+      'book_id': bookId,
+      'book_name': map['book_name'] as String? ?? '',
+      'book_page': map['book_page'] as String? ?? '',
+      'is_primary': 1,
+      'created_at': now,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await txn.update(
+      'note_book_references',
+      {
+        'book_name': map['book_name'] as String? ?? '',
+        'book_page': map['book_page'] as String? ?? '',
+        'is_primary': 1,
+      },
+      where: 'note_id = ? AND book_id = ?',
+      whereArgs: [noteId, bookId],
+    );
+    await txn.delete(
+      'note_source_snapshots',
+      where: 'note_id = ? AND is_primary = 1',
+      whereArgs: [noteId],
+    );
+    await txn.insert('note_source_snapshots', {
+      'note_id': noteId,
+      'book_id': bookId,
+      'book_name': map['book_name'] as String? ?? '',
+      'book_page': map['book_page'] as String? ?? '',
+      'capture_page_id': map['capture_page_id'],
+      'created_at': now,
+      'is_primary': 1,
+    });
+  }
+
   Future<int> insertNote(Note note) async {
     try {
       final db = await database;
@@ -1071,6 +1246,7 @@ class DatabaseService {
           map,
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
+        await _syncNoteRelations(txn, insertedId, map);
         await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
         return insertedId;
       });
@@ -1107,6 +1283,7 @@ class DatabaseService {
         noteId = note.id!;
       }
       await txn.insert('note_chat_sources', source.toMap(noteId));
+      await _syncNoteRelations(txn, noteId, map);
       await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
       return noteId;
     });
@@ -1147,6 +1324,7 @@ class DatabaseService {
           attachment.copyWith(id: attachmentId, noteId: noteId),
         );
       }
+      await _syncNoteRelations(txn, noteId, map);
       await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
       return (noteId, savedAttachments);
     });
@@ -1199,6 +1377,7 @@ class DatabaseService {
           attachment.toMap(forNoteId: noteId),
         );
       }
+      await _syncNoteRelations(txn, noteId, map);
       await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
       return noteId;
     });
@@ -1238,6 +1417,7 @@ class DatabaseService {
           map,
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
+        await _syncNoteRelations(txn, insertedId, map);
         await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
         return insertedId;
       });
@@ -1275,15 +1455,38 @@ class DatabaseService {
   // 查询所有未删除笔记
   // ========================
 
-  Future<List<Note>> queryAllNotes() async {
+  Future<List<Note>> queryAllNotes({
+    String search = '',
+    int? notebookId,
+    int? bookId,
+  }) async {
     try {
       final db = await database;
+      final where = <String>['is_deleted = 0'];
+      final args = <Object?>[];
+      if (notebookId != null) {
+        where.add('notebook_id = ?');
+        args.add(notebookId);
+      }
+      if (bookId != null) {
+        where.add('''(
+          book_id = ? OR id IN (
+            SELECT note_id FROM note_book_references WHERE book_id = ?
+          )
+        )''');
+        args.addAll([bookId, bookId]);
+      }
+      final normalizedSearch = search.trim();
+      if (normalizedSearch.isNotEmpty) {
+        where.add('(title LIKE ? OR content LIKE ? OR book_name LIKE ?)');
+        final like = '%$normalizedSearch%';
+        args.addAll([like, like, like]);
+      }
       final List<Map<String, dynamic>> maps = await db.query(
         'notes',
-        where: 'is_deleted = ?',
-        whereArgs: [0],
-        orderBy:
-            'COALESCE(capture_sequence, 2147483647) ASC, COALESCE(captured_at, created_at) ASC, COALESCE(group_index, page_group_index, 2147483647) ASC, id ASC',
+        where: where.join(' AND '),
+        whereArgs: args,
+        orderBy: 'is_pinned DESC, pinned_at DESC, updated_at DESC, id DESC',
       );
       debugPrint('[XiaoQi] DB: 查询全部笔记 ${maps.length} 条');
       return maps.map((map) => Note.fromMap(map)).toList();
@@ -1291,6 +1494,152 @@ class DatabaseService {
       debugPrint('[XiaoQi] DB: 查询全部笔记失败: $e');
       rethrow;
     }
+  }
+
+  Future<List<Note>> queryDeletedNotes() async {
+    final db = await database;
+    final maps = await db.query(
+      'notes',
+      where: 'is_deleted = 1',
+      orderBy: 'updated_at DESC, id DESC',
+    );
+    return maps.map(Note.fromMap).toList(growable: false);
+  }
+
+  Future<List<Note>> queryLinkedNotes(int noteId) async {
+    final db = await database;
+    final maps = await db.rawQuery(
+      '''
+      SELECT notes.*
+      FROM notes
+      INNER JOIN note_relations
+        ON note_relations.related_note_id = notes.id
+      WHERE note_relations.note_id = ?
+      ORDER BY notes.is_deleted ASC, notes.updated_at DESC, notes.id DESC
+    ''',
+      [noteId],
+    );
+    return maps.map(Note.fromMap).toList(growable: false);
+  }
+
+  Future<List<Note>> queryBacklinks(int noteId) async {
+    final db = await database;
+    final maps = await db.rawQuery(
+      '''
+      SELECT notes.*
+      FROM notes
+      INNER JOIN note_relations
+        ON note_relations.note_id = notes.id
+      WHERE note_relations.related_note_id = ?
+      ORDER BY notes.is_deleted ASC, notes.updated_at DESC, notes.id DESC
+    ''',
+      [noteId],
+    );
+    return maps.map(Note.fromMap).toList(growable: false);
+  }
+
+  Future<void> addNoteRelation({
+    required int noteId,
+    required int relatedNoteId,
+  }) async {
+    if (noteId == relatedNoteId) return;
+    final db = await database;
+    await db.insert('note_relations', {
+      'note_id': noteId,
+      'related_note_id': relatedNoteId,
+      'relation_type': 'body_link',
+      'created_at': DateTime.now().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
+  Future<void> removeNoteRelation({
+    required int noteId,
+    required int relatedNoteId,
+  }) async {
+    final db = await database;
+    await db.delete(
+      'note_relations',
+      where: 'note_id = ? AND related_note_id = ?',
+      whereArgs: [noteId, relatedNoteId],
+    );
+  }
+
+  Future<List<Map<String, Object?>>> queryNoteBookReferences(int noteId) async {
+    final db = await database;
+    return db.query(
+      'note_book_references',
+      where: 'note_id = ?',
+      whereArgs: [noteId],
+      orderBy: 'is_primary DESC, created_at ASC, id ASC',
+    );
+  }
+
+  Future<void> addNoteBookReference({
+    required int noteId,
+    required int bookId,
+    required String bookName,
+    String bookPage = '',
+  }) async {
+    final db = await database;
+    await db.insert('note_book_references', {
+      'note_id': noteId,
+      'book_id': bookId,
+      'book_name': bookName,
+      'book_page': bookPage,
+      'is_primary': 0,
+      'created_at': DateTime.now().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> setNotePinned(int noteId, bool pinned) async {
+    final db = await database;
+    await db.update(
+      'notes',
+      {
+        'is_pinned': pinned ? 1 : 0,
+        'pinned_at': pinned ? DateTime.now().toIso8601String() : null,
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      where: 'id = ? AND is_deleted = 0',
+      whereArgs: [noteId],
+    );
+  }
+
+  Future<void> restoreNotes(Iterable<int> noteIds) async {
+    final ids = noteIds.toSet().toList(growable: false);
+    if (ids.isEmpty) return;
+    final db = await database;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await db.update(
+      'notes',
+      {'is_deleted': 0, 'updated_at': DateTime.now().toIso8601String()},
+      where: 'id IN ($placeholders)',
+      whereArgs: ids,
+    );
+  }
+
+  Future<void> permanentlyDeleteNotes(Iterable<int> noteIds) async {
+    final ids = noteIds.toSet().toList(growable: false);
+    if (ids.isEmpty) return;
+    final db = await database;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await db.transaction((txn) async {
+      for (final table in const [
+        'note_relations',
+        'note_book_references',
+        'note_source_snapshots',
+        'note_attachments',
+        'note_chat_sources',
+        'ai_usage',
+      ]) {
+        await txn.delete(
+          table,
+          where: 'note_id IN ($placeholders)',
+          whereArgs: ids,
+        );
+      }
+      await txn.delete('notes', where: 'id IN ($placeholders)', whereArgs: ids);
+    });
   }
 
   /// 首页使用的最近笔记，按最后更新时间倒序返回。
@@ -2341,6 +2690,7 @@ class DatabaseService {
           where: 'id = ?',
           whereArgs: [note.id],
         );
+        await _syncNoteRelations(txn, note.id!, map);
         await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
         if (before.isNotEmpty) {
           await _touchNotebook(
@@ -2370,17 +2720,31 @@ class DatabaseService {
       final count = await db.transaction((txn) async {
         final rows = await txn.query(
           'notes',
-          columns: ['notebook_id'],
+          columns: ['notebook_id', 'book_id'],
           where: 'id = ?',
           whereArgs: [id],
           limit: 1,
         );
+        final batchId = await txn.insert('note_recycle_batches', {
+          'deleted_at': now,
+          'expires_at': DateTime.parse(
+            now,
+          ).add(deletedNotebookRetention).toIso8601String(),
+        });
         final changed = await txn.update(
           'notes',
           {'is_deleted': 1, 'updated_at': now},
           where: 'id = ?',
           whereArgs: [id],
         );
+        if (changed == 1) {
+          await txn.insert('note_recycle_items', {
+            'batch_id': batchId,
+            'note_id': id,
+            'book_id': rows.isEmpty ? null : rows.first['book_id'],
+            'reason': 'manual',
+          });
+        }
         if (rows.isNotEmpty) {
           await _touchNotebook(txn, rows.first['notebook_id'] as int?, now);
         }

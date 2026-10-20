@@ -23,6 +23,7 @@ import 'book_isbn_scanner_page.dart';
 import 'book_learning_space_page.dart';
 import 'book_study_page.dart';
 import 'discover_empty_page.dart';
+import 'note_management_page.dart';
 
 class BookLearningShellPage extends StatefulWidget {
   const BookLearningShellPage({
@@ -39,6 +40,7 @@ class BookLearningShellPage extends StatefulWidget {
   @override
   State<BookLearningShellPage> createState() => _BookLearningShellPageState();
 }
+
 class _BookLearningShellPageState extends State<BookLearningShellPage> {
   late final BookLibraryService _library;
   late final BookRecognitionRepository _recognition;
@@ -277,7 +279,7 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
                     onBack: () => setState(() => _openBookId = null),
                   ),
           ),
-          const _EmptyDestinationPage(),
+          const NoteManagementPage(key: PageStorageKey('book_learning_notes')),
           DiscoverEmptyPage(
             onBackToBooks: () =>
                 _changeDestination(BookLearningDestination.books),

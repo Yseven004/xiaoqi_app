@@ -50,10 +50,36 @@ void main() {
   final selection = {'id': 'notes', 'version_id': 'v1', 'type': 'plugin'};
   final previous = <String, dynamic>{
     'workflow_id': 'book-a',
+    'capability_scope_schema': 2,
     'capability': selection,
     'selected_capabilities': [selection],
     'selected_mcp_connections': ['reader'],
   };
+
+  test('old implicit activation cannot become a new user preference', () {
+    final legacy = {...previous}..remove('capability_scope_schema');
+    final resolved = resolveCapabilityScope(
+      {'workflow_id': 'book-a'},
+      [legacy],
+    );
+    expect(resolved['selected_capabilities'], isEmpty);
+    expect(resolved['selected_mcp_connections'], isEmpty);
+  });
+
+  test('one-turn image action and runtime activation are never inherited', () {
+    final resolved = resolveCapabilityScope(
+      {'workflow_id': 'book-a'},
+      [
+        {
+          ...previous,
+          'capability': {'type': 'action', 'id': 'create-image'},
+          'task_active_capabilities': [selection],
+        },
+      ],
+    );
+    expect(resolved['capability'], isNull);
+    expect(resolved['task_active_capabilities'], isNull);
+  });
 
   test(
     'ordinary followup inherits exact versions and connections only in its workflow',

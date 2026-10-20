@@ -900,6 +900,16 @@ class _NoteEditorPageState extends State<NoteEditorPage>
         newAttachments: attachmentsToSave,
       );
       final id = result.$1;
+      if (widget.bookId != null && widget.bookId != value.bookId) {
+        await _db.addNoteBookReference(
+          noteId: id,
+          bookId: widget.bookId!,
+          bookName: widget.bookName.trim().isEmpty
+              ? value.bookName
+              : widget.bookName,
+          bookPage: value.bookPage,
+        );
+      }
       _note = value.copyWith(id: id);
       _pendingChatSource = null;
       if (attachmentsToSave.isNotEmpty) {
@@ -2675,6 +2685,16 @@ class _NoteEditorPageState extends State<NoteEditorPage>
               onClose: () => Navigator.pop(sheetContext),
             ),
             _AddTile(
+              icon: Icons.link_rounded,
+              title: '引用笔记',
+              subtitle: '插入稳定的笔记链接',
+              color: _ink,
+              onTap: () {
+                Navigator.pop(sheetContext);
+                unawaited(_pickNoteReference());
+              },
+            ),
+            _AddTile(
               icon: Icons.format_quote_outlined,
               title: '引用',
               subtitle: '插入引用段落',
@@ -2709,6 +2729,57 @@ class _NoteEditorPageState extends State<NoteEditorPage>
         ),
       ),
     );
+  }
+
+  Future<void> _pickNoteReference() async {
+    final currentId = _note?.id;
+    final notes = (await _db.queryAllNotes())
+        .where((item) => item.id != null && item.id != currentId)
+        .toList(growable: false);
+    if (!mounted || notes.isEmpty) {
+      if (mounted) AppToast.show(context, '暂无可引用的其他笔记');
+      return;
+    }
+    final selected = await showModalBottomSheet<Note>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (sheetContext) => ListView(
+        shrinkWrap: true,
+        children: notes
+            .map(
+              (item) => ListTile(
+                title: Text(item.title.trim().isEmpty ? '未命名笔记' : item.title),
+                subtitle: Text(
+                  item.bookName.trim().isEmpty ? '无来源' : item.bookName,
+                ),
+                onTap: () => Navigator.pop(sheetContext, item),
+              ),
+            )
+            .toList(),
+      ),
+    );
+    if (!mounted || selected?.id == null) return;
+    final selection = _quillController.selection;
+    final start = selection.start.clamp(
+      0,
+      _quillController.document.length - 1,
+    );
+    final length = selection.isValid ? selection.end - selection.start : 0;
+    final label =
+        '[[${selected!.title.trim().isEmpty ? '未命名笔记' : selected.title}]]';
+    _quillController.replaceText(
+      start,
+      length,
+      label,
+      TextSelection.collapsed(offset: start + label.length),
+    );
+    _quillController.formatText(
+      start,
+      label.length,
+      quill.LinkAttribute('note://${selected.id}'),
+    );
+    _onContentChanged();
   }
 
   Future<File> _persistImage(XFile image) async {

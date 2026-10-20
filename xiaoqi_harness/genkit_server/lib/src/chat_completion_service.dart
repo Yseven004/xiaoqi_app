@@ -5,10 +5,10 @@ import 'dart:io';
 import 'package:genkit/genkit.dart';
 import 'package:genkit_openai/genkit_openai.dart';
 import 'package:shelf/shelf.dart';
+import 'model_limits.dart';
 
-typedef ChatCompletionGenerator = Future<String> Function(
-  ChatCompletionInput input,
-);
+typedef ChatCompletionGenerator =
+    Future<String> Function(ChatCompletionInput input);
 
 class ChatCompletionInput {
   const ChatCompletionInput({
@@ -41,7 +41,6 @@ class ChatCompletionService {
 
   static const _maxRequestBytes = 8 * 1024 * 1024;
   static const _maxImageBytes = 5 * 1024 * 1024;
-  static const _defaultMaxTokens = 2048;
 
   final ChatCompletionGenerator _generate;
   final Map<String, String> _environment;
@@ -68,11 +67,7 @@ class ChatCompletionService {
     }
 
     final temperature = _temperature();
-    final maxTokens = _maxTokens(
-      body['max_output_tokens'] ??
-          body['max_tokens'] ??
-          body['max_completion_tokens'],
-    );
+    final maxTokens = ModelLimits.forModel(selection.modelId).maxOutputTokens;
 
     try {
       final content = await _generate(
@@ -129,11 +124,15 @@ class ChatCompletionService {
   }
 
   _ModelSelection? _modelSelection(Object? rawModel) {
-    final modelId = (rawModel?.toString().trim().isNotEmpty == true
+    final modelId =
+        (rawModel?.toString().trim().isNotEmpty == true
             ? rawModel.toString().trim()
             : _environment['XIAOQI_DEFAULT_TEXT_MODEL']?.trim()) ??
         '';
-    final selectedModel = modelId.isEmpty ? 'mimo-v2.5' : modelId;
+    final selectedModel = modelId.isEmpty ? 'mimo-v2.6-flash' : modelId;
+    if (!const {'deepseek-flash', 'mimo-v2.6-flash'}.contains(selectedModel)) {
+      return null;
+    }
     if (!RegExp(r'^[A-Za-z0-9._:-]{1,128}$').hasMatch(selectedModel)) {
       return null;
     }
@@ -164,7 +163,9 @@ class ChatCompletionService {
   }
 
   List<Message> _messages(Object? rawMessages) {
-    if (rawMessages is! List || rawMessages.isEmpty || rawMessages.length > 64) {
+    if (rawMessages is! List ||
+        rawMessages.isEmpty ||
+        rawMessages.length > 64) {
       throw const FormatException('messages 必须包含 1 到 64 条消息');
     }
     final output = <Message>[];
@@ -212,7 +213,9 @@ class ChatCompletionService {
             throw const FormatException('图片总大小不能超过 5 MB');
           }
           contentParts.add(
-            MediaPart(media: Media(contentType: match.group(1), url: url)),
+            MediaPart(
+              media: Media(contentType: match.group(1), url: url),
+            ),
           );
         }
       }
@@ -226,13 +229,6 @@ class ChatCompletionService {
     final value =
         double.tryParse(_environment['XIAOQI_TEXT_TEMPERATURE'] ?? '') ?? 0.4;
     return value.clamp(0.0, 2.0).toDouble();
-  }
-
-  static int _maxTokens(Object? value) {
-    final parsed = value is num
-        ? value.toInt()
-        : int.tryParse(value?.toString() ?? '');
-    return (parsed ?? _defaultMaxTokens).clamp(1, 4096);
   }
 
   static String _baseUrl(String? configured, String fallback) {
@@ -271,7 +267,9 @@ class ChatCompletionService {
 
   static Response _error(int status, String message) => Response(
     status,
-    body: jsonEncode({'error': {'message': message}}),
+    body: jsonEncode({
+      'error': {'message': message},
+    }),
     headers: _headers,
   );
 }

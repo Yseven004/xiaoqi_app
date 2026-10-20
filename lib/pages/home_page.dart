@@ -61,6 +61,7 @@ import '../widgets/app_toast.dart';
 import '../widgets/add_chat_note_sheet.dart';
 import 'email_login_page.dart';
 import 'note_editor_page.dart';
+import 'note_management_page.dart';
 import 'book_learning_shell_page.dart';
 import 'drawing_board_page.dart';
 import 'extension_market_page.dart';
@@ -2861,6 +2862,7 @@ $materialIndex
     final turnMetadata = <String, dynamic>{
       'task_id': taskId,
       'workflow_id': conversationId,
+      'user_message_id': question.id,
       'capability_scope_operation': question.capabilityScopeOperation,
       'model_id': modelId,
       'reasoning_level': reasoningLevel,
@@ -6874,29 +6876,59 @@ $text''';
               ),
             ),
           ),
-          if (showNewConversation)
-            Align(
-              alignment: Alignment.centerRight,
-              child: Semantics(
-                button: true,
-                label: '新建会话',
-                child: InkResponse(
-                  onTap: _startNewConversationForCurrentBookContext,
-                  radius: 22,
-                  child: SizedBox(
-                    width: 44,
-                    height: 44,
-                    child: Center(
-                      child: SvgPicture.asset(
-                        'assets/images/home_new_conversation_icon.svg',
-                        width: 25.5,
-                        height: 25.5,
+          Align(
+            alignment: Alignment.centerRight,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Semantics(
+                  button: true,
+                  label: '笔记',
+                  child: InkResponse(
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const NoteManagementPage(),
+                        ),
+                      );
+                    },
+                    radius: 22,
+                    child: SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: Center(
+                        child: SvgPicture.asset(
+                          'assets/images/home_reply_note.svg',
+                          width: 25.5,
+                          height: 25.5,
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
+                if (showNewConversation)
+                  Semantics(
+                    button: true,
+                    label: '新建会话',
+                    child: InkResponse(
+                      onTap: _startNewConversationForCurrentBookContext,
+                      radius: 22,
+                      child: SizedBox(
+                        width: 44,
+                        height: 44,
+                        child: Center(
+                          child: SvgPicture.asset(
+                            'assets/images/home_new_conversation_icon.svg',
+                            width: 25.5,
+                            height: 25.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
+          ),
           _SpaceSwitcher(
             title: _spaceTitle,
             expanded: _spaceMenuOpen,

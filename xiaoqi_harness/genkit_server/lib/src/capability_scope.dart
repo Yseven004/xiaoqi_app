@@ -28,7 +28,11 @@ Map<String, dynamic> resolveCapabilityScope(
   String idOf(Object? item) =>
       (item is Map ? item['id'] : item)?.toString() ?? '';
   for (final key in ['selected_capabilities', 'selected_mcp_connections']) {
-    final prior = (previous?[key] as List?) ?? const [];
+    // Old snapshots merged implicit activation into selection. Without the
+    // v2 provenance marker, inherited execution preferences are ambiguous.
+    final prior = previous?['capability_scope_schema'] == 2
+        ? (previous?[key] as List?) ?? const []
+        : const [];
     final next = operation == 'inherit'
         ? prior
         : operation == 'clear'
@@ -46,10 +50,16 @@ Map<String, dynamic> resolveCapabilityScope(
       .toList();
   result['capability_scope_operation'] = operation;
   if (operation == 'inherit' &&
+      previous?['capability_scope_schema'] == 2 &&
       previous?['capability'] is Map &&
+      (previous!['capability'] as Map)['type'] != 'action' &&
       current['capability'] == null) {
-    result['capability'] = previous!['capability'];
+    result['capability'] = previous['capability'];
   }
   if (operation == 'clear') result.remove('capability');
+  // Runtime activation is not a preference and must not leak into a new turn.
+  result.remove('task_active_capabilities');
+  result.remove('task_active_mcp_connections');
+  result['capability_scope_schema'] = 2;
   return result;
 }

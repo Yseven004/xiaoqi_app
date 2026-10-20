@@ -97,7 +97,7 @@ Future<void> main(List<String> args) async {
       tenantId: 'personal',
       taskId: 'turn',
       request: {
-        'model_id': 'mimo-test',
+        'model_id': 'mimo-v2.6-flash',
         'current_turn_text': textOnly
             ? '请用纯文字整理这段材料，不需要图片或文件。'
             : '请整理成两页视觉学习笔记',

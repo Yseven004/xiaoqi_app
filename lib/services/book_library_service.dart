@@ -43,6 +43,7 @@ class RecoveredCaptureBatch {
   final Map<int, CapturePagePlacement> placements;
   final int? selectedBookId;
 }
+
 class BookLibraryService {
   BookLibraryService({
     DatabaseService? databaseService,
@@ -80,7 +81,7 @@ class BookLibraryService {
       normalized.toMap()
         ..remove('id')
         ..remove('created_at'),
-      where: 'id = ?',
+      where: 'id = ? AND is_deleted = 0',
       whereArgs: [id],
     );
     if (normalized.coverPath.isEmpty && normalized.coverUrl.isNotEmpty) {
@@ -151,7 +152,7 @@ class BookLibraryService {
     final db = await _databaseService.database;
     final rows = await db.query(
       'books',
-      where: 'id = ?',
+      where: 'id = ? AND is_deleted = 0',
       whereArgs: [id],
       limit: 1,
     );
@@ -165,7 +166,7 @@ class BookLibraryService {
     final threshold = _dateOnly(
       DateTime.now().subtract(const Duration(days: 29)),
     );
-    final where = <String>[];
+    final where = <String>['b.is_deleted = 0'];
     final whereArgs = <Object?>[threshold];
     final normalizedSearch = query.searchText.trim().toLowerCase();
     if (normalizedSearch.isNotEmpty) {
@@ -202,7 +203,10 @@ class BookLibraryService {
         '''
       SELECT b.*,
         (SELECT COUNT(*) FROM notes n
-         WHERE n.book_id = b.id AND n.is_deleted = 0) AS note_count,
+         WHERE n.is_deleted = 0 AND (n.book_id = b.id OR EXISTS (
+           SELECT 1 FROM note_book_references nref
+           WHERE nref.note_id = n.id AND nref.book_id = b.id
+         ))) AS note_count,
         (SELECT COUNT(*) FROM capture_pages p
            INNER JOIN capture_batches batch ON batch.id = p.batch_id
          WHERE batch.selected_book_id = b.id AND p.status != 'removed')
@@ -246,14 +250,17 @@ class BookLibraryService {
     final rows = await db.rawQuery(
       '''SELECT b.*,
           (SELECT COUNT(*) FROM notes n
-           WHERE n.book_id = b.id AND n.is_deleted = 0) AS note_count,
+           WHERE n.is_deleted = 0 AND (n.book_id = b.id OR EXISTS (
+             SELECT 1 FROM note_book_references nref
+             WHERE nref.note_id = n.id AND nref.book_id = b.id
+           ))) AS note_count,
           (SELECT COUNT(*) FROM capture_pages p
              INNER JOIN capture_batches batch ON batch.id = p.batch_id
            WHERE batch.selected_book_id = b.id AND p.status != 'removed')
             AS recognized_page_count,
           (SELECT COUNT(*) FROM book_study_activity a
            WHERE a.book_id = b.id AND a.activity_date >= ?) AS active_days
-        FROM books b WHERE b.id = ? LIMIT 1''',
+        FROM books b WHERE b.id = ? AND b.is_deleted = 0 LIMIT 1''',
       [threshold, bookId],
     );
     if (rows.isEmpty) return null;
@@ -275,8 +282,10 @@ class BookLibraryService {
     final db = await _databaseService.database;
     final rows = await db.query(
       'notes',
-      where: 'book_id = ? AND is_deleted = 0',
-      whereArgs: [bookId],
+      where: '''is_deleted = 0 AND (book_id = ? OR id IN (
+        SELECT note_id FROM note_book_references WHERE book_id = ?
+      ))''',
+      whereArgs: [bookId, bookId],
       orderBy: 'is_pinned DESC, pinned_at DESC, updated_at DESC, id DESC',
     );
     return rows.map(Note.fromMap).toList(growable: false);
@@ -652,11 +661,7 @@ class BookLibraryService {
       final now = DateTime.now().toIso8601String();
       await db.update(
         'book_sources',
-        {
-          'file_size': fileSize,
-          'status': 'ready',
-          'updated_at': now,
-        },
+        {'file_size': fileSize, 'status': 'ready', 'updated_at': now},
         where: 'id = ?',
         whereArgs: [existingRecord.id],
       );
@@ -872,19 +877,15 @@ class BookLibraryService {
         where: 'source_id = ? AND is_active = 1',
         whereArgs: [source.id],
       );
-      await txn.insert(
-        'book_source_document_revisions',
-        {
-          'source_id': source.id,
-          'base_content_hash': sourceRows.first['content_hash'],
-          'document_hash': documentHash,
-          'document_json': json,
-          'created_at': now,
-          'updated_at': now,
-          'is_active': 1,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      await txn.insert('book_source_document_revisions', {
+        'source_id': source.id,
+        'base_content_hash': sourceRows.first['content_hash'],
+        'document_hash': documentHash,
+        'document_json': json,
+        'created_at': now,
+        'updated_at': now,
+        'is_active': 1,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
       await txn.update(
         'book_sources',
         {'updated_at': now},
@@ -920,10 +921,7 @@ class BookLibraryService {
       );
       await txn.update(
         'book_sources',
-        {
-          'is_primary': 1,
-          'updated_at': DateTime.now().toIso8601String(),
-        },
+        {'is_primary': 1, 'updated_at': DateTime.now().toIso8601String()},
         where: 'id = ? AND book_id = ?',
         whereArgs: [sourceId, bookId],
       );
@@ -937,7 +935,8 @@ class BookLibraryService {
   }) async {
     final db = await _databaseService.database;
     final startedAt = DateTime.now().toIso8601String();
-    final runId = 'catalog:${source.id}:${DateTime.now().microsecondsSinceEpoch}';
+    final runId =
+        'catalog:${source.id}:${DateTime.now().microsecondsSinceEpoch}';
     final claimed = await db.update(
       'book_sources',
       {
@@ -964,11 +963,7 @@ class BookLibraryService {
       await db.transaction((txn) async {
         final current = await txn.query(
           'book_sources',
-          columns: const [
-            'content_hash',
-            'catalog_run_id',
-            'catalog_status',
-          ],
+          columns: const ['content_hash', 'catalog_run_id', 'catalog_status'],
           where: 'id = ?',
           whereArgs: [source.id],
           limit: 1,
@@ -1037,11 +1032,7 @@ class BookLibraryService {
       await db.transaction((txn) async {
         final current = await txn.query(
           'book_sources',
-          columns: const [
-            'catalog_status',
-            'catalog_run_id',
-            'content_hash',
-          ],
+          columns: const ['catalog_status', 'catalog_run_id', 'content_hash'],
           where: 'id = ?',
           whereArgs: [source.id],
           limit: 1,
@@ -1376,224 +1367,130 @@ class BookLibraryService {
     return deletedFiles.contains(_normalPath(filePath));
   }
 
-  Future<void> deleteBooks(Iterable<int> bookIds) async {
+  Future<void> _softDeleteBooks(List<int> ids) async {
+    final db = await _databaseService.database;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    final now = DateTime.now();
+    final deletedAt = now.toIso8601String();
+    final expiresAt = now.add(const Duration(days: 30)).toIso8601String();
+    await db.transaction((txn) async {
+      final batchId = await txn.insert('note_recycle_batches', {
+        'deleted_at': deletedAt,
+        'expires_at': expiresAt,
+      });
+      final notes = await txn.query(
+        'notes',
+        columns: ['id', 'book_id'],
+        where: 'book_id IN ($placeholders) AND is_deleted = 0',
+        whereArgs: ids,
+      );
+      for (final row in notes) {
+        final noteId = row['id'] as int;
+        final shared = await txn.rawQuery(
+          '''
+          SELECT r.book_id, r.book_name, r.book_page
+          FROM note_book_references r
+          LEFT JOIN books b ON b.id = r.book_id
+          WHERE r.note_id = ?
+            AND r.book_id NOT IN ($placeholders)
+            AND COALESCE(b.is_deleted, 0) = 0
+          ORDER BY r.is_primary DESC, r.created_at ASC
+          LIMIT 1
+        ''',
+          [noteId, ...ids],
+        );
+        if (shared.isNotEmpty) {
+          final reference = shared.first;
+          await txn.update(
+            'note_book_references',
+            {'is_primary': 0},
+            where: 'note_id = ?',
+            whereArgs: [noteId],
+          );
+          await txn.update(
+            'note_book_references',
+            {'is_primary': 1},
+            where: 'note_id = ? AND book_id = ?',
+            whereArgs: [noteId, reference['book_id']],
+          );
+          await txn.update(
+            'notes',
+            {
+              'book_id': reference['book_id'],
+              'book_name': reference['book_name'] as String? ?? '',
+              'book_page': reference['book_page'] as String? ?? '',
+              'updated_at': deletedAt,
+            },
+            where: 'id = ?',
+            whereArgs: [noteId],
+          );
+        } else {
+          await txn.update(
+            'notes',
+            {'is_deleted': 1, 'updated_at': deletedAt},
+            where: 'id = ?',
+            whereArgs: [noteId],
+          );
+          await txn.insert('note_recycle_items', {
+            'batch_id': batchId,
+            'note_id': noteId,
+            'book_id': row['book_id'],
+            'reason': 'book_delete',
+          });
+        }
+      }
+      await txn.update(
+        'books',
+        {
+          'is_deleted': 1,
+          'deleted_at': deletedAt,
+          'is_in_reading_space': 0,
+          'updated_at': deletedAt,
+        },
+        where: 'id IN ($placeholders)',
+        whereArgs: ids,
+      );
+    });
+  }
+
+  Future<void> restoreDeletedBooks(Iterable<int> bookIds) async {
     final ids = bookIds.toSet().toList(growable: false);
     if (ids.isEmpty) return;
     final db = await _databaseService.database;
     final placeholders = List.filled(ids.length, '?').join(',');
-    final noteRows = await db.query(
-      'notes',
-      columns: [
-        'photo_path',
-        'original_photo_path',
-        'pdf_path',
-        'source_photo_path',
-        'capture_page_id',
-        'capture_batch_id',
-      ],
-      where: 'book_id IN ($placeholders)',
-      whereArgs: ids,
-    );
-    final bookRows = await db.query(
-      'books',
-      columns: ['cover_path'],
-      where: 'id IN ($placeholders)',
-      whereArgs: ids,
-    );
-    final sourceRows = <Map<String, Object?>>[];
-    try {
-      sourceRows.addAll(
-        await db.query(
-          'book_sources',
-          columns: ['file_path', 'package_manifest_path'],
-          where: 'book_id IN ($placeholders)',
-          whereArgs: ids,
-        ),
-      );
-    } catch (_) {
-      // Older in-memory test databases may not include the optional source
-      // table; deleting the book itself remains safe.
-    }
-    final batchIds = <String>{
-      ...noteRows
-          .map((row) => row['capture_batch_id'] as String? ?? '')
-          .where((value) => value.isNotEmpty),
-    };
-    final selectedBatches = await db.query(
-      'capture_batches',
-      columns: ['id'],
-      where: 'selected_book_id IN ($placeholders)',
-      whereArgs: ids,
-    );
-    batchIds.addAll(selectedBatches.map((row) => row['id'] as String));
-    final pageIds = noteRows
-        .map((row) => row['capture_page_id'] as int?)
-        .whereType<int>()
-        .toSet();
-    final pageRows = <Map<String, Object?>>[];
-    if (batchIds.isNotEmpty) {
-      final batchPlaceholders = List.filled(batchIds.length, '?').join(',');
-      pageRows.addAll(
-        await db.query(
-          'capture_pages',
-          columns: ['id', 'original_path', 'processed_path'],
-          where: 'batch_id IN ($batchPlaceholders)',
-          whereArgs: batchIds.toList(),
-        ),
-      );
-    }
-    if (pageIds.isNotEmpty) {
-      final pagePlaceholders = List.filled(pageIds.length, '?').join(',');
-      pageRows.addAll(
-        await db.query(
-          'capture_pages',
-          columns: ['id', 'original_path', 'processed_path'],
-          where: 'id IN ($pagePlaceholders)',
-          whereArgs: pageIds.toList(),
-        ),
-      );
-    }
-    final filesToDelete = <String>{
-      ...bookRows.map((row) => row['cover_path'] as String? ?? ''),
-       ...sourceRows.expand(
-         (row) => [
-           row['file_path'] as String? ?? '',
-           row['package_manifest_path'] as String? ?? '',
-         ],
-       ),
-      ...noteRows.expand(
-        (row) => [
-          row['photo_path'] as String? ?? '',
-          row['original_photo_path'] as String? ?? '',
-          row['pdf_path'] as String? ?? '',
-          row['source_photo_path'] as String? ?? '',
-        ],
-      ),
-      ...pageRows.expand(
-        (row) => [
-          row['original_path'] as String? ?? '',
-          row['processed_path'] as String? ?? '',
-        ],
-      ),
-    }..removeWhere((path) => path.trim().isEmpty);
-
     await db.transaction((txn) async {
-      try {
-        await txn.delete(
-          'capture_source_links',
-          where:
-              'target_source_id IN (SELECT id FROM book_sources '
-              'WHERE book_id IN ($placeholders)) OR capture_page_id IN '
-              '(SELECT cp.id FROM capture_pages cp INNER JOIN capture_batches cb '
-              'ON cb.id = cp.batch_id WHERE cb.selected_book_id IN ($placeholders))',
-          whereArgs: [...ids, ...ids],
-        );
-      } catch (_) {
-        // Older in-memory databases may not include source-link tables.
-      }
-      await txn.delete(
-        'ai_usage',
-        where:
-            'note_id IN (SELECT id FROM notes WHERE book_id IN ($placeholders))',
+      await txn.update(
+        'books',
+        {
+          'is_deleted': 0,
+          'deleted_at': null,
+          'is_in_reading_space': 1,
+          'updated_at': DateTime.now().toIso8601String(),
+        },
+        where: 'id IN ($placeholders)',
         whereArgs: ids,
       );
-      await txn.delete(
-        'notes',
-        where: 'book_id IN ($placeholders)',
-        whereArgs: ids,
+      final items = await txn.query(
+        'note_recycle_items',
+        columns: ['note_id'],
+        where: 'book_id IN ($placeholders) AND reason = ?',
+        whereArgs: [...ids, 'book_delete'],
       );
-      final now = DateTime.now().toIso8601String();
-      await txn.rawUpdate(
-        'UPDATE capture_batches SET selected_book_id = NULL, updated_at = ? '
-        'WHERE selected_book_id IN ($placeholders)',
-        [now, ...ids],
-      );
-      if (batchIds.isNotEmpty) {
-        final batchPlaceholders = List.filled(batchIds.length, '?').join(',');
-        final remaining = await txn.query(
+      for (final item in items) {
+        await txn.update(
           'notes',
-          columns: ['capture_batch_id'],
-          where: 'capture_batch_id IN ($batchPlaceholders)',
-          whereArgs: batchIds.toList(),
-        );
-        final sharedBatchIds = remaining
-            .map((row) => row['capture_batch_id'] as String? ?? '')
-            .where((value) => value.isNotEmpty)
-            .toSet();
-        final deletableBatchIds = batchIds.difference(sharedBatchIds);
-        if (deletableBatchIds.isNotEmpty) {
-          final deletablePlaceholders = List.filled(
-            deletableBatchIds.length,
-            '?',
-          ).join(',');
-          await txn.delete(
-            'capture_pages',
-            where: 'batch_id IN ($deletablePlaceholders)',
-            whereArgs: deletableBatchIds.toList(),
-          );
-          await txn.delete(
-            'capture_batches',
-            where: 'id IN ($deletablePlaceholders)',
-            whereArgs: deletableBatchIds.toList(),
-          );
-        }
-      }
-      if (pageIds.isNotEmpty) {
-        final pagePlaceholders = List.filled(pageIds.length, '?').join(',');
-        await txn.delete(
-          'capture_pages',
-          where:
-              'id IN ($pagePlaceholders) AND NOT EXISTS ('
-              'SELECT 1 FROM notes WHERE notes.capture_page_id = capture_pages.id)',
-          whereArgs: pageIds.toList(),
+          {'is_deleted': 0, 'updated_at': DateTime.now().toIso8601String()},
+          where: 'id = ? AND is_deleted = 1',
+          whereArgs: [item['note_id']],
         );
       }
-      await txn.delete(
-        'book_category_links',
-        where: 'book_id IN ($placeholders)',
-        whereArgs: ids,
-      );
-      await txn.delete(
-        'book_study_activity',
-        where: 'book_id IN ($placeholders)',
-        whereArgs: ids,
-      );
-      await txn.delete(
-        'book_recognition_history',
-        where: 'book_id IN ($placeholders)',
-        whereArgs: ids,
-      );
-      try {
-        await txn.delete(
-          'book_sources',
-          where: 'book_id IN ($placeholders)',
-          whereArgs: ids,
-        );
-      } catch (_) {
-        // Keep compatibility with older in-memory databases.
-      }
-      await txn.delete('books', where: 'id IN ($placeholders)', whereArgs: ids);
     });
-    await _deleteBookFiles(filesToDelete, db);
-    for (final row in sourceRows) {
-      final manifestPath = row['package_manifest_path'] as String? ?? '';
-      if (manifestPath.trim().isEmpty) continue;
-      final stillReferenced = await db.query(
-        'book_sources',
-        columns: ['id'],
-        where: 'package_manifest_path = ?',
-        whereArgs: [manifestPath],
-        limit: 1,
-      );
-      if (stillReferenced.isEmpty) {
-        if (await _isManagedPackageManifest(manifestPath)) {
-          final packageDirectory = Directory(p.dirname(manifestPath));
-          if (await packageDirectory.exists()) {
-            await packageDirectory.delete(recursive: true);
-          }
-        }
-      }
-    }
+  }
+
+  Future<void> deleteBooks(Iterable<int> bookIds) async {
+    final ids = bookIds.toSet().toList(growable: false);
+    if (ids.isEmpty) return;
+    await _softDeleteBooks(ids);
   }
 
   Future<Set<String>> _deleteBookFiles(
@@ -2055,11 +1952,7 @@ class BookLibraryService {
     await db.transaction((txn) async {
       await txn.update(
         'capture_batches',
-        {
-          'status': 'cancelled',
-          'error_message': '用户取消图片识别',
-          'updated_at': now,
-        },
+        {'status': 'cancelled', 'error_message': '用户取消图片识别', 'updated_at': now},
         where: 'id = ? AND status = ?',
         whereArgs: [batchId, 'processing'],
       );
@@ -2163,46 +2056,48 @@ class BookLibraryService {
            ORDER BY cp.created_at ASC, cp.page_order ASC''',
         [bookId, bookId],
       );
-      return rows.map((row) {
-        final linkId = row['link_id'] as int?;
-        final link = linkId == null
-            ? null
-            : CaptureSourceLinkRecord.fromMap({
-                'id': linkId,
-                'capture_page_id': row['capture_page_id'],
-                'target_source_id': row['target_source_id'],
-                'target_source_version_id': row['target_source_version_id'],
-                'anchor_kind': row['anchor_kind'],
-                'anchor_json': row['anchor_json'],
-                'anchor_key': row['anchor_key'],
-                'mode': row['mode'],
-                'created_at': row['link_created_at'],
-                'updated_at': row['link_updated_at'],
-                'detached_at': row['link_detached_at'],
-                'detach_reason': row['link_detach_reason'],
-                'replaces_link_id': row['replaces_link_id'],
-              });
-        Note? note;
-        try {
-          if (row['id'] != null) note = Note.fromMap(row);
-        } catch (_) {
-          note = null;
-        }
-        return BookImageRecognitionEntry(
-          capturePageId: row['capture_page_id'] as int,
-          batchId: row['batch_id'] as String,
-          pageOrder: row['page_order'] as int,
-          inputKind: captureInputKindFromStorage(
-            row['input_kind'] as String?,
-          ),
-          status: row['status'] as String? ?? 'captured',
-          batchStatus: row['batch_status'] as String? ?? 'processing',
-          errorMessage: row['error_message'] as String? ?? '',
-          targetSourceName: row['target_source_name'] as String? ?? '',
-          note: note,
-          link: link,
-        );
-      }).toList(growable: false);
+      return rows
+          .map((row) {
+            final linkId = row['link_id'] as int?;
+            final link = linkId == null
+                ? null
+                : CaptureSourceLinkRecord.fromMap({
+                    'id': linkId,
+                    'capture_page_id': row['capture_page_id'],
+                    'target_source_id': row['target_source_id'],
+                    'target_source_version_id': row['target_source_version_id'],
+                    'anchor_kind': row['anchor_kind'],
+                    'anchor_json': row['anchor_json'],
+                    'anchor_key': row['anchor_key'],
+                    'mode': row['mode'],
+                    'created_at': row['link_created_at'],
+                    'updated_at': row['link_updated_at'],
+                    'detached_at': row['link_detached_at'],
+                    'detach_reason': row['link_detach_reason'],
+                    'replaces_link_id': row['replaces_link_id'],
+                  });
+            Note? note;
+            try {
+              if (row['id'] != null) note = Note.fromMap(row);
+            } catch (_) {
+              note = null;
+            }
+            return BookImageRecognitionEntry(
+              capturePageId: row['capture_page_id'] as int,
+              batchId: row['batch_id'] as String,
+              pageOrder: row['page_order'] as int,
+              inputKind: captureInputKindFromStorage(
+                row['input_kind'] as String?,
+              ),
+              status: row['status'] as String? ?? 'captured',
+              batchStatus: row['batch_status'] as String? ?? 'processing',
+              errorMessage: row['error_message'] as String? ?? '',
+              targetSourceName: row['target_source_name'] as String? ?? '',
+              note: note,
+              link: link,
+            );
+          })
+          .toList(growable: false);
     } catch (_) {
       try {
         late final List<Map<String, Object?>> rows;
@@ -2368,9 +2263,9 @@ class BookLibraryService {
           'target_source_id': sourceId,
           'target_source_version_id':
               ((source['source_version_id'] as String?)?.trim().isNotEmpty ==
-                      true
-                  ? source['source_version_id'] as String
-                  : source['content_hash'] as String? ?? ''),
+                  true
+              ? source['source_version_id'] as String
+              : source['content_hash'] as String? ?? ''),
           'anchor_kind': captureAnchorKind(anchor),
           'anchor_json': captureAnchorJson(anchor),
           'anchor_key': anchorKey,
@@ -2529,9 +2424,7 @@ class BookLibraryService {
       pages.add(
         CapturedPage(
           path: availablePath,
-          inputKind: captureInputKindFromStorage(
-            row['input_kind'] as String?,
-          ),
+          inputKind: captureInputKindFromStorage(row['input_kind'] as String?),
           captureBatchId: batchId,
           captureSequence: order,
         ),

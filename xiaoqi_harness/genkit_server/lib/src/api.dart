@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 import 'capability_import_service.dart';
 import 'capability_scope.dart';
+import 'artifact_context.dart';
 import 'release.dart';
 
 import 'package:crypto/crypto.dart';
@@ -60,29 +61,6 @@ String _networkMode(Object? value) => switch (value?.toString()) {
   'on' => 'on',
   _ => 'off',
 };
-
-bool _requestRequiresImage(Map<String, dynamic> body) {
-  final capability = body['capability'];
-  final selectedImageAction =
-      capability is Map &&
-      capability['type'] == 'action' &&
-      capability['id'] == 'create-image';
-  final rawContent = body.containsKey('current_turn_text')
-      ? body['current_turn_text']
-      : ((body['messages'] as List? ?? const []).whereType<Map>().lastWhere(
-          (message) => message['role'] == 'user',
-          orElse: () => const {},
-        )['content']);
-  final rawText = rawContent is List
-      ? rawContent
-            .whereType<Map>()
-            .map((part) => part['text']?.toString() ?? '')
-            .where((part) => part.isNotEmpty)
-            .join('\n')
-      : rawContent?.toString() ?? '';
-  return rawText.trim().isNotEmpty &&
-      (selectedImageAction || agentShouldGenerateImage(rawText));
-}
 
 ({String code, String message, String details}) _taskFailurePresentation(
   Object error, {
@@ -868,13 +846,24 @@ class XiaoqiApi {
       session.setMessages(messages);
 
       final request = Map<String, dynamic>.from(cleanConfig)
-        ..['remote_agent'] = true;
+        ..['remote_agent'] = true
+        ..['_visible_artifacts'] = visibleTaskArtifacts(
+          store,
+          tenantId,
+          messages
+              .take(currentUserIndex)
+              .where((m) => m.role == Role.user)
+              .map((m) => m.metadata?[_remoteAgentTurnMetadataKey])
+              .whereType<Map>()
+              .map((m) => m['task_id']?.toString() ?? ''),
+        );
       _ensureRemoteAgentTask(
         tenantId,
         taskId,
         context['device_id'],
         request['network_mode'],
       );
+      _bindRemoteUserMessage(tenantId, taskId, request);
       final binding = _canonical(request['selected_capabilities'] ?? const []);
       final taskKey = 'task/$tenantId/$taskId';
       final boundTask = store.get(taskKey)!;
@@ -1041,21 +1030,12 @@ class XiaoqiApi {
         _ => 'completed',
       });
       final resultMessages = result.messages.toList();
-      if (result.activeMcpConnections != null)
-        cleanConfig['selected_mcp_connections'] = result.activeMcpConnections;
-      if (result.activeCapabilities != null &&
-          result.activeCapabilities!.isNotEmpty) {
-        final active = <String, Map<String, dynamic>>{};
-        for (final entry in [
-          ...(cleanConfig['selected_capabilities'] as List? ?? const [])
-              .whereType<Map>(),
-          ...result.activeCapabilities!,
-        ]) {
-          active['${entry['id']}/${entry['component_id'] ?? ''}'] =
-              Map<String, dynamic>.from(entry);
-        }
-        cleanConfig['selected_capabilities'] = active.values.toList();
-      }
+      // Activation belongs to this task. It must never become a user-selected
+      // preference merely because the model loaded a skill or connector.
+      cleanConfig['task_active_capabilities'] =
+          result.activeCapabilities ?? const [];
+      cleanConfig['task_active_mcp_connections'] =
+          result.activeMcpConnections ?? const [];
       // Implicit activation belongs to this runtime, so an approved resume must
       // compare against the newly bound versions rather than the initial list.
       _mutateTask(
@@ -1065,6 +1045,9 @@ class XiaoqiApi {
           'selection_binding': _canonical(
             cleanConfig['selected_capabilities'] ?? const [],
           ),
+          'task_active_capabilities': cleanConfig['task_active_capabilities'],
+          'task_active_mcp_connections':
+              cleanConfig['task_active_mcp_connections'],
         },
       );
       final webSources =
@@ -1114,7 +1097,10 @@ class XiaoqiApi {
         }
       }
       final taskValue = store.get('task/$tenantId/$taskId')?.value ?? const {};
-      final requestedImage = _requestRequiresImage(request);
+      final resolvedScope = taskValue['turn_scope'];
+      final requestedImage = resolvedScope is Map
+          ? (resolvedScope['image_limit'] as num? ?? 0) > 0
+          : false;
       final storedArtifacts = (taskValue['artifacts'] as List? ?? const [])
           .whereType<Map>()
           .toList();
@@ -1153,6 +1139,51 @@ class XiaoqiApi {
       artifacts: session.getArtifacts(),
       finishReason: session.lastTurnFinishReason,
     );
+  }
+
+  void _bindRemoteUserMessage(
+    String tenantId,
+    String taskId,
+    Map<String, dynamic> request,
+  ) {
+    final messageId = _safeId(request['user_message_id'] ?? taskId, '消息 ID');
+    final workflowId = _safeId(request['workflow_id'] ?? taskId, '会话 ID');
+    final fingerprint = sha256
+        .convert(
+          utf8.encode(
+            _canonical([
+              request['current_turn_text'],
+              request['materials'] ?? const [],
+              request['selected_capabilities'] ?? const [],
+              request['selected_mcp_connections'] ?? const [],
+            ]),
+          ),
+        )
+        .toString();
+    final key = 'message-operation/$tenantId/$workflowId/$messageId';
+    for (var attempt = 0; attempt < 8; attempt++) {
+      final previous = store.get(key);
+      if (previous != null) {
+        if (previous.value['task_id'] != taskId ||
+            previous.value['fingerprint'] != fingerprint) {
+          throw const FormatException('同一消息已经绑定任务或内容发生变化，请读取原结果或发送新消息');
+        }
+        break;
+      }
+      try {
+        store.put(key, {'task_id': taskId, 'fingerprint': fingerprint}, null);
+        break;
+      } on RevisionConflict {
+        if (attempt == 7) rethrow;
+      }
+    }
+    _mutateTask('task/$tenantId/$taskId', (value) {
+      if (value['user_message_binding'] != null &&
+          value['user_message_binding'] != messageId) {
+        throw const FormatException('不能把已有任务用于另一条用户消息');
+      }
+      return {...value, 'user_message_binding': messageId};
+    });
   }
 
   void _ensureRemoteAgentTask(
@@ -1908,7 +1939,11 @@ class XiaoqiApi {
             .whereType<Map>()
             .map((item) => Map<String, dynamic>.from(item))
             .toList();
-        final partial = _requestRequiresImage(body) && artifacts.isEmpty;
+        final scope = current.value['turn_scope'];
+        final partial =
+            scope is Map &&
+            (scope['image_limit'] as num? ?? 0) > 0 &&
+            artifacts.isEmpty;
         final imageFailure = current.value['image_failure'];
         final partialReason = imageFailure is Map
             ? imageFailure['category']?.toString()
