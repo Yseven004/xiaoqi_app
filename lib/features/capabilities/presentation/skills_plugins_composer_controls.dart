@@ -663,9 +663,8 @@ class _SkillsPluginsComposerControlsState
       (record) => record.kind == CapabilityKind.plugin && record.showInMenu,
     );
     final hasSavedCapabilities = skills.isNotEmpty || plugins.isNotEmpty;
-    return Container(
+    return Padding(
       padding: const EdgeInsets.fromLTRB(10, 17, 10, 12),
-      decoration: _panelDecoration(),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -726,9 +725,8 @@ class _SkillsPluginsComposerControlsState
   }
 
   Widget _managePanel() {
-    return Container(
+    return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-      decoration: _panelDecoration(),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -809,7 +807,13 @@ class _SkillsPluginsComposerControlsState
     );
   }
 
-  Widget _panel() => _manage ? _managePanel() : _menuPanel();
+  Widget _panel() => Container(
+    clipBehavior: Clip.antiAlias,
+    decoration: _panelDecoration(),
+    child: SingleChildScrollView(
+      child: _manage ? _managePanel() : _menuPanel(),
+    ),
+  );
 
   Widget _buildMenuOverlay(BuildContext context, OverlayChildLayoutInfo info) {
     final target = MatrixUtils.transformRect(
@@ -850,7 +854,7 @@ class _SkillsPluginsComposerControlsState
           groupId: _menuTapRegionGroup,
           child: ConstrainedBox(
             constraints: BoxConstraints(maxHeight: availableHeight),
-            child: SingleChildScrollView(child: _panel()),
+            child: _panel(),
           ),
         ),
       ),
