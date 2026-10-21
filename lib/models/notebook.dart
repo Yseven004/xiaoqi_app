@@ -2,6 +2,8 @@ class Notebook {
   const Notebook({
     this.id,
     required this.name,
+    this.bookId,
+    this.isDefault = false,
     this.category = '默认分类',
     this.description = '',
     this.coverIndex = 0,
@@ -22,6 +24,8 @@ class Notebook {
 
   final int? id;
   final String name;
+  final int? bookId;
+  final bool isDefault;
   final String category;
   final String description;
   final int coverIndex;
@@ -46,6 +50,8 @@ class Notebook {
     return Notebook(
       id: map['id'] as int?,
       name: map['name'] as String? ?? '未命名笔记本',
+      bookId: map['book_id'] as int?,
+      isDefault: (map['is_default'] as int? ?? 0) == 1,
       category: map['category'] as String? ?? '默认分类',
       description: map['description'] as String? ?? '',
       coverIndex: map['cover_index'] as int? ?? 0,
@@ -69,6 +75,8 @@ class Notebook {
     return {
       if (id != null && id! > 0) 'id': id,
       'name': name,
+      'book_id': bookId,
+      'is_default': isDefault ? 1 : 0,
       'category': category,
       'description': description,
       'cover_index': coverIndex,
@@ -90,6 +98,8 @@ class Notebook {
   Notebook copyWith({
     int? id,
     String? name,
+    Object? bookId = _sentinel,
+    bool? isDefault,
     String? category,
     String? description,
     int? coverIndex,
@@ -110,6 +120,8 @@ class Notebook {
     return Notebook(
       id: id ?? this.id,
       name: name ?? this.name,
+      bookId: identical(bookId, _sentinel) ? this.bookId : bookId as int?,
+      isDefault: isDefault ?? this.isDefault,
       category: category ?? this.category,
       description: description ?? this.description,
       coverIndex: coverIndex ?? this.coverIndex,

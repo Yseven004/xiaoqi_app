@@ -33,6 +33,7 @@ import '../services/note_actions.dart';
 import '../services/speech_recognition_service.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/message_selection_action_card.dart';
+import '../widgets/notebook_cover.dart';
 
 class NoteEditorPage extends StatefulWidget {
   const NoteEditorPage({
@@ -41,16 +42,20 @@ class NoteEditorPage extends StatefulWidget {
     this.existingNote,
     this.bookId,
     this.bookName = '',
+    this.autoNotebookBookId,
     this.chatSource,
-    this.isBottomSheet = false,
   });
 
-  final int notebookId;
+  final int? notebookId;
+  final int? autoNotebookBookId;
   final Note? existingNote;
   final int? bookId;
   final String bookName;
   final ChatNoteSourceRecord? chatSource;
-  final bool isBottomSheet;
+
+  /// The shared note editor is always presented with the confirmed compact
+  /// header and toolbar. The former standalone editor variant was retired.
+  final bool isBottomSheet = true;
 
   @override
   State<NoteEditorPage> createState() => _NoteEditorPageState();
@@ -82,9 +87,10 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   final _textColorAnchorKey = GlobalKey();
 
   late quill.QuillController _quillController;
-  late int _notebookId;
+  late int? _notebookId;
+  Notebook? _selectedNotebook;
+  String _notebookBookTitle = '';
   Note? _note;
-  Notebook? _notebook;
   List<Notebook> _notebooks = const [];
   Timer? _saveTimer;
   Future<Note?>? _pendingSave;
@@ -144,10 +150,18 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   Offset? _lastEditorTapPosition;
   TextSelection? _lastObservedEditorSelection;
 
-  int? get _bookId => _note?.bookId ?? widget.bookId;
+  int? get _bookId {
+    if (_note != null) return _note!.bookId;
+    if (_selectedNotebook != null) return _selectedNotebook!.bookId;
+    return widget.autoNotebookBookId ?? widget.bookId;
+  }
 
-  String get _bookName =>
-      _note?.bookName.isNotEmpty == true ? _note!.bookName : widget.bookName;
+  String get _bookName => _bookId == null
+      ? ''
+      : _note?.bookName ??
+            (_notebookBookTitle.isNotEmpty
+                ? _notebookBookTitle
+                : widget.bookName);
 
   Color get _background => widget.isBottomSheet && !_nightMode
       ? Colors.white
@@ -233,7 +247,7 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     _editorFocus.addListener(_onChatInputFocusChanged);
     _loadNotebookContext();
     unawaited(_loadNoteAttachments());
-    if (widget.chatSource != null) {
+    if (_note == null || widget.chatSource != null) {
       _saveState = _SaveState.pending;
     }
   }
@@ -720,12 +734,30 @@ class _NoteEditorPageState extends State<NoteEditorPage>
 
   Future<void> _loadNotebookContext() async {
     try {
+      final notebookId = _notebookId;
       final notebooks = await _db.queryNotebooks();
-      final notebook = await _db.getNotebookById(_notebookId);
+      final selected = notebooks.where((item) => item.id == notebookId);
+      final bookId = selected.isNotEmpty
+          ? selected.first.bookId
+          : widget.autoNotebookBookId;
+      String title = '';
+      if (bookId != null) {
+        final db = await _db.database;
+        final books = await db.query(
+          'books',
+          columns: ['title'],
+          where: 'id = ?',
+          whereArgs: [bookId],
+          limit: 1,
+        );
+        if (books.isNotEmpty) title = books.first['title'] as String? ?? '';
+      }
       if (!mounted) return;
+      if (_notebookId != notebookId) return;
       setState(() {
         _notebooks = notebooks;
-        _notebook = notebook;
+        if (selected.isNotEmpty) _selectedNotebook = selected.first;
+        _notebookBookTitle = title;
       });
     } catch (error) {
       if (mounted) AppToast.show(context, '笔记本信息加载失败');
@@ -898,19 +930,16 @@ class _NoteEditorPageState extends State<NoteEditorPage>
         value,
         source: _pendingChatSource,
         newAttachments: attachmentsToSave,
+        autoNotebookBookId: widget.autoNotebookBookId,
+        supplementalBookId:
+            _pendingChatSource != null && widget.existingNote != null
+            ? widget.bookId
+            : null,
+        supplementalBookName: widget.bookName,
       );
-      final id = result.$1;
-      if (widget.bookId != null && widget.bookId != value.bookId) {
-        await _db.addNoteBookReference(
-          noteId: id,
-          bookId: widget.bookId!,
-          bookName: widget.bookName.trim().isEmpty
-              ? value.bookName
-              : widget.bookName,
-          bookPage: value.bookPage,
-        );
-      }
-      _note = value.copyWith(id: id);
+      _note = result.$1;
+      _notebookId = _note!.notebookId;
+      unawaited(_loadNotebookContext());
       _pendingChatSource = null;
       if (attachmentsToSave.isNotEmpty) {
         final savedPaths = attachmentsToSave
@@ -949,25 +978,22 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     if (_finishInProgress) return;
     _finishInProgress = true;
     if (_activeToolPanel != null) await _closeToolPanel();
+    if (!mounted) return;
     _unfocusEditorInputs();
-    Note? saved = _note;
-    if (_isEmptyChatNote) {
-      _saveTimer?.cancel();
-      final pendingSave = _pendingSave;
-      if (pendingSave != null) {
-        await pendingSave;
-        if (!mounted) return;
-      }
-      if (_signature() != _lastSavedSignature) {
-        saved = await _save(force: true);
-        if (!mounted) return;
-        if (_saveState == _SaveState.failed && _note?.id != null) {
-          _finishInProgress = false;
-          return;
-        }
-      }
+    _saveTimer?.cancel();
 
-      final noteId = _note?.id ?? saved?.id;
+    // Flush edits made during an earlier autosave before disposing the editor.
+    while (_pendingSave != null || _signature() != _lastSavedSignature) {
+      await (_pendingSave ?? _save(force: true));
+      if (!mounted) return;
+      if (_saveState == _SaveState.failed) {
+        _finishInProgress = false;
+        return;
+      }
+    }
+    final saved = _note;
+    if (_isEmptyChatNote) {
+      final noteId = saved?.id;
       if (noteId != null) {
         try {
           await _db.softDelete(noteId);
@@ -983,15 +1009,6 @@ class _NoteEditorPageState extends State<NoteEditorPage>
       setState(() => _allowPop = true);
       Navigator.of(context).pop(const NoteEditorResult.unchanged());
       return;
-    }
-
-    if (_signature() != _lastSavedSignature) {
-      saved = await _save(force: true);
-      if (!mounted) return;
-      if (_saveState == _SaveState.failed) {
-        _finishInProgress = false;
-        return;
-      }
     }
     setState(() => _allowPop = true);
     final result = saved == null || !_didChange
@@ -1967,39 +1984,55 @@ class _NoteEditorPageState extends State<NoteEditorPage>
       title: '添加内容',
       content: Padding(
         padding: const EdgeInsets.only(bottom: 12, top: 4),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: _AddPanelAction(
-                asset: 'image',
-                label: '图片',
-                onTap: () {
-                  unawaited(_closeToolPanel());
-                  unawaited(_pickImageAttachments(camera: false));
-                },
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: _AddPanelAction(
+                    asset: 'image',
+                    label: '图片',
+                    onTap: () {
+                      unawaited(_closeToolPanel());
+                      unawaited(_pickImageAttachments(camera: false));
+                    },
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _AddPanelAction(
+                    asset: 'add_a_photo',
+                    label: '拍照上传',
+                    onTap: () {
+                      unawaited(_closeToolPanel());
+                      unawaited(_pickImageAttachments(camera: true));
+                    },
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _AddPanelAction(
+                    asset: 'attach_file',
+                    label: '文件上传',
+                    onTap: () {
+                      unawaited(_closeToolPanel());
+                      unawaited(_pickFileAttachments());
+                    },
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _AddPanelAction(
-                asset: 'add_a_photo',
-                label: '拍照上传',
-                onTap: () {
-                  unawaited(_closeToolPanel());
-                  unawaited(_pickImageAttachments(camera: true));
-                },
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _AddPanelAction(
-                asset: 'attach_file',
-                label: '文件上传',
-                onTap: () {
-                  unawaited(_closeToolPanel());
-                  unawaited(_pickFileAttachments());
-                },
-              ),
+            const SizedBox(height: 12),
+            _MoreTile(
+              label: '引用笔记',
+              icon: Icons.menu_book_outlined,
+              svgAsset: 'book-open-text',
+              color: _ink,
+              onTap: () async {
+                await _closeToolPanel();
+                if (mounted) await _pickNoteReference();
+              },
             ),
           ],
         ),
@@ -3226,19 +3259,21 @@ class _NoteEditorPageState extends State<NoteEditorPage>
                     .map(
                       (item) => ListTile(
                         minTileHeight: 56,
-                        leading: Container(
+                        leading: SizedBox(
                           width: 34,
                           height: 44,
-                          decoration: BoxDecoration(
-                            gradient: NotebookTheme.coverGradient(
-                              item.coverIndex,
-                            ),
-                            borderRadius: BorderRadius.circular(6),
+                          child: NotebookCover(
+                            notebook: item,
+                            showTitle: false,
                           ),
                         ),
                         title: Text(item.name, style: TextStyle(color: _ink)),
                         subtitle: Text(
-                          item.category,
+                          item.isDefault
+                              ? '全局默认 · 不关联书籍'
+                              : item.bookId == null
+                              ? '不关联书籍'
+                              : '关联书籍笔记本',
                           style: TextStyle(color: _muted),
                         ),
                         trailing: item.id == currentId
@@ -3259,8 +3294,10 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     if (_note?.id == null) {
       setState(() {
         _notebookId = selected.id!;
-        _notebook = selected;
+        _selectedNotebook = selected;
       });
+      await _loadNotebookContext();
+      if (!mounted) return;
       _onContentChanged();
       AppToast.show(context, '将保存到“${selected.name}”');
       return;
@@ -3268,11 +3305,13 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     final saved = await _save(force: true);
     if (saved?.id == null) return;
     try {
-      await _db.moveNoteToNotebook(saved!.id!, selected.id!);
+      final moved = await _db.moveNoteToNotebook(saved!.id!, selected.id!);
       _notebookId = selected.id!;
-      _note = saved.copyWith(notebookId: selected.id);
+      _selectedNotebook = selected;
+      _note = moved;
       if (!mounted) return;
-      setState(() => _notebook = selected);
+      await _loadNotebookContext();
+      if (!mounted) return;
       _lastSavedSignature = _signature();
       AppToast.show(context, '已移动到“${selected.name}”');
     } catch (_) {
@@ -3428,6 +3467,16 @@ class _NoteEditorPageState extends State<NoteEditorPage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              ListTile(
+                title: Text(
+                  '保存到：${_selectedNotebook?.name ?? widget.bookName}',
+                  style: TextStyle(color: _ink),
+                ),
+                subtitle: Text(
+                  _bookId == null ? '不关联书籍' : '关联书籍：$_bookName',
+                  style: TextStyle(color: _muted),
+                ),
+              ),
               SwitchListTile(
                 secondary: widget.isBottomSheet
                     ? _ChatNoteIcon(_nightMode ? 'sun' : 'moon', color: _ink)
@@ -3589,16 +3638,8 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   @override
   Widget build(BuildContext context) {
     final keyboardHidden = MediaQuery.viewInsetsOf(context).bottom <= 0;
-    final savedAndIdle = _saveState == _SaveState.saved && _pendingSave == null;
-    final shouldDeleteEmptyNoteOnReturn = _isEmptyChatNote && _note?.id != null;
     return PopScope<NoteEditorResult>(
-      canPop:
-          _allowPop ||
-          (widget.isBottomSheet &&
-              _activeToolPanel == null &&
-              keyboardHidden &&
-              savedAndIdle &&
-              !shouldDeleteEmptyNoteOnReturn),
+      canPop: _allowPop,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
         if (_activeToolPanel != null) {
@@ -3625,207 +3666,93 @@ class _NoteEditorPageState extends State<NoteEditorPage>
         child: Scaffold(
           backgroundColor: _background,
           resizeToAvoidBottomInset: true,
-          appBar: widget.isBottomSheet
-              ? null
-              : AppBar(
-                  backgroundColor: _background,
-                  surfaceTintColor: Colors.transparent,
-                  leading: IconButton(
-                    tooltip: '返回并保存',
-                    onPressed: _finish,
-                    icon: const Icon(Icons.arrow_back),
-                  ),
-                  actions: [
-                    IconButton(
-                      tooltip: '撤销',
-                      onPressed: _quillController.hasUndo
-                          ? () => setState(_quillController.undo)
-                          : null,
-                      icon: const Icon(Icons.undo),
-                    ),
-                    IconButton(
-                      tooltip: '重做',
-                      onPressed: _quillController.hasRedo
-                          ? () => setState(_quillController.redo)
-                          : null,
-                      icon: const Icon(Icons.redo),
-                    ),
-                    IconButton(
-                      tooltip: '更多',
-                      onPressed: () => _invokeChatEditorTool(_showMoreMenu),
-                      icon: const Icon(Icons.more_vert),
-                    ),
-                    IconButton(
-                      tooltip: '完成并保存',
-                      onPressed: _finish,
-                      icon: const Icon(Icons.check, size: 30),
-                    ),
-                    const SizedBox(width: 4),
-                  ],
-                ),
+          appBar: null,
           body: SafeArea(
-            top: false,
-            left: false,
-            right: false,
             child: Stack(
               clipBehavior: Clip.none,
               children: [
                 Column(
                   children: [
-                    widget.isBottomSheet
-                        ? SizedBox(
-                            height: 56,
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                              ),
-                              child: Row(
-                                children: [
-                                  _ChatNoteIcon(
-                                    'note-pencil',
-                                    size: 22,
-                                    color: _ink,
-                                  ),
-                                  const SizedBox(width: 9),
-                                  Text(
-                                    '笔记',
-                                    style: TextStyle(
-                                      color: _ink,
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                  const Spacer(),
-                                  ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 106,
-                                    ),
-                                    child: Semantics(
-                                      button: _saveState == _SaveState.failed,
-                                      child: InkWell(
-                                        borderRadius: BorderRadius.circular(8),
-                                        onTap: _saveState == _SaveState.failed
-                                            ? () => _save(force: true)
-                                            : null,
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 4,
-                                            vertical: 8,
-                                          ),
-                                          child: Text(
-                                            _saveLabel,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            textAlign: TextAlign.right,
-                                            style: TextStyle(
-                                              color:
-                                                  _saveState ==
-                                                      _SaveState.failed
-                                                  ? NotebookTheme.danger
-                                                  : _muted,
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  IconButton(
-                                    tooltip: '更多',
-                                    onPressed: () =>
-                                        _invokeChatEditorTool(_showMoreMenu),
-                                    visualDensity: VisualDensity.compact,
-                                    constraints: const BoxConstraints.tightFor(
-                                      width: 48,
-                                      height: 48,
-                                    ),
-                                    icon: _ChatNoteIcon(
-                                      'dots-three-vertical',
-                                      size: 22,
-                                      color: _ink,
-                                    ),
-                                  ),
-                                  IconButton(
-                                    tooltip: '返回添加笔记',
-                                    onPressed: _finish,
-                                    visualDensity: VisualDensity.compact,
-                                    constraints: const BoxConstraints.tightFor(
-                                      width: 48,
-                                      height: 48,
-                                    ),
-                                    icon: _ChatNoteIcon(
-                                      'undo',
-                                      size: 22,
-                                      color: _ink,
-                                    ),
-                                  ),
-                                ],
+                    SizedBox(
+                      height: 56,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        child: Row(
+                          children: [
+                            _ChatNoteIcon('note-pencil', size: 22, color: _ink),
+                            const SizedBox(width: 9),
+                            Text(
+                              '笔记',
+                              style: TextStyle(
+                                color: _ink,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
                               ),
                             ),
-                          )
-                        : Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 2, 20, 8),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: InkWell(
-                                    borderRadius: BorderRadius.circular(8),
-                                    onTap: _selectNotebook,
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 8,
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          Icon(
-                                            Icons.menu_book_outlined,
-                                            size: 17,
-                                            color: _muted,
-                                          ),
-                                          const SizedBox(width: 7),
-                                          Flexible(
-                                            child: Text(
-                                              _notebook?.name ?? '当前笔记本',
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                color: _muted,
-                                                fontSize: 14,
-                                              ),
-                                            ),
-                                          ),
-                                          Icon(
-                                            Icons.keyboard_arrow_down,
-                                            color: _muted,
-                                            size: 19,
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                TextButton.icon(
-                                  onPressed: _saveState == _SaveState.failed
+                            const Spacer(),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 106),
+                              child: Semantics(
+                                button: _saveState == _SaveState.failed,
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(8),
+                                  onTap: _saveState == _SaveState.failed
                                       ? () => _save(force: true)
                                       : null,
-                                  icon: Icon(
-                                    _saveState == _SaveState.failed
-                                        ? Icons.error_outline
-                                        : Icons.cloud_done_outlined,
-                                    size: 16,
-                                  ),
-                                  label: Text(_saveLabel),
-                                  style: TextButton.styleFrom(
-                                    foregroundColor:
-                                        _saveState == _SaveState.failed
-                                        ? NotebookTheme.danger
-                                        : _muted,
-                                    disabledForegroundColor: _muted,
-                                    minimumSize: const Size(48, 44),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                      vertical: 8,
+                                    ),
+                                    child: Text(
+                                      _saveLabel,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      textAlign: TextAlign.right,
+                                      style: TextStyle(
+                                        color: _saveState == _SaveState.failed
+                                            ? NotebookTheme.danger
+                                            : _muted,
+                                        fontSize: 13,
+                                      ),
+                                    ),
                                   ),
                                 ),
-                              ],
+                              ),
                             ),
-                          ),
+                            IconButton(
+                              tooltip: '更多',
+                              onPressed: () =>
+                                  _invokeChatEditorTool(_showMoreMenu),
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 48,
+                                height: 48,
+                              ),
+                              icon: _ChatNoteIcon(
+                                'dots-three-vertical',
+                                size: 22,
+                                color: _ink,
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '返回笔记列表',
+                              onPressed: _finish,
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 48,
+                                height: 48,
+                              ),
+                              icon: _ChatNoteIcon(
+                                'undo',
+                                size: 22,
+                                color: _ink,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                     Divider(height: 1, color: _divider),
                     Expanded(
                       child: GestureDetector(

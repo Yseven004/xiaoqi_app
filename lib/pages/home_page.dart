@@ -41,8 +41,6 @@ import '../features/capabilities/presentation/skills_plugins_composer_controls.d
 import '../models/book_library_item.dart';
 import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
-import '../models/note_editor_result.dart';
-import '../models/notebook.dart';
 import '../services/book_library_service.dart';
 import '../services/ai_service.dart';
 import '../services/database_service.dart';
@@ -58,9 +56,7 @@ import '../widgets/home_chat_attachment_controls.dart';
 import '../widgets/home_chat_model_selector.dart';
 import '../widgets/message_selection_action_card.dart';
 import '../widgets/app_toast.dart';
-import '../widgets/add_chat_note_sheet.dart';
 import 'email_login_page.dart';
-import 'note_editor_page.dart';
 import 'note_management_page.dart';
 import 'book_learning_shell_page.dart';
 import 'drawing_board_page.dart';
@@ -502,6 +498,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _latestScrollEpoch = 0;
   bool _replyBodyOverflowsMessageCanvas = false;
   bool _composerExpanded = false;
+  bool _notePanelOpen = false;
   bool _composerSizeTransitioning = false;
   bool _taskSearchKeepsComposerFixed = false;
   bool _keyboardOverlayLayoutLocked = false;
@@ -5095,22 +5092,6 @@ $text''';
         : inReadingSpace && bookId == _selectedReadingTaskBookId
         ? _selectedReadingTaskBookName
         : '';
-    final db = DatabaseService();
-    List<Notebook> notebooks;
-    try {
-      notebooks = await db.queryNotebooks();
-    } catch (_) {
-      if (mounted) AppToast.show(context, '笔记本加载失败，请稍后重试');
-      return;
-    }
-    if (!mounted) return;
-    if (notebooks.isEmpty) {
-      AppToast.show(context, '暂时找不到可用笔记本，请稍后重试');
-      return;
-    }
-    final defaultNotebook =
-        notebooks.where((notebook) => notebook.name == '默认笔记本').firstOrNull ??
-        notebooks.first;
     final request = ChatNoteCaptureRequest(
       conversationId: conversation.id,
       messageId: message.id,
@@ -5122,90 +5103,38 @@ $text''';
       bookId: bookId,
       bookName: bookName,
     );
+    await _openNotesPanel(
+      chatSource: ChatNoteSourceRecord.fromRequest(request),
+    );
+  }
 
-    Future<void> openEditor(ChatNoteCaptureSelection destination) async {
-      if (!mounted) return;
-      final existingNote = destination.existingNote;
-      await showModalBottomSheet<NoteEditorResult>(
-        context: context,
-        isScrollControlled: true,
-        isDismissible: false,
-        enableDrag: true,
-        useRootNavigator: true,
-        useSafeArea: true,
-        backgroundColor: Colors.white,
-        barrierColor: Colors.transparent,
-        elevation: 0,
-        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
-        constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width),
-        builder: (_) => SizedBox.expand(
-          child: ColoredBox(
-            color: Colors.white,
-            child: NoteEditorPage(
-              notebookId: existingNote?.notebookId ?? destination.notebook.id!,
-              existingNote: existingNote,
-              bookId: existingNote != null
-                  ? existingNote.bookId
-                  : destination.keepBookAssociation
-                  ? bookId
-                  : null,
-              bookName: existingNote != null
-                  ? existingNote.bookName
-                  : destination.keepBookAssociation
-                  ? bookName
-                  : '',
-              chatSource: ChatNoteSourceRecord.fromRequest(request),
-              isBottomSheet: true,
-            ),
-          ),
-        ),
-      );
-    }
-
+  Future<void> _openNotesPanel({ChatNoteSourceRecord? chatSource}) async {
+    if (_notePanelOpen) return;
+    _notePanelOpen = true;
+    final conversation = _conversation;
+    final inReadingSpace = _space == _HomeSpace.reading;
+    final bookId =
+        conversation?.bookId ??
+        (inReadingSpace ? _selectedReadingTaskBookId : null);
+    final bookName = conversation?.bookName.trim().isNotEmpty == true
+        ? conversation!.bookName
+        : inReadingSpace && bookId == _selectedReadingTaskBookId
+        ? _selectedReadingTaskBookName
+        : '';
     try {
       await _showKeyboardStableDialog<void>(
-        (dialogContext) {
-          final media = MediaQuery.of(dialogContext);
-          final panelHeight =
-              media.size.height *
-              (media.size.shortestSide >= 600 ? 0.60 : 0.88);
-          return Align(
-            alignment: Alignment.bottomCenter,
-            child: SizedBox(
-              width: double.infinity,
-              height: panelHeight,
-              child: ClipRRect(
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(28),
-                ),
-                child: DecoratedBox(
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Color(0xFFF4F6F8), Colors.white],
-                    ),
-                  ),
-                  child: Material(
-                    type: MaterialType.transparency,
-                    child: AddChatNoteSheet(
-                      notebooks: notebooks,
-                      defaultNotebook: defaultNotebook,
-                      bookId: bookId,
-                      bookName: bookName,
-                      onSelect: openEditor,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
+        (_) => NoteManagementPage(
+          asPanel: true,
+          initialBookId: bookId,
+          initialBookName: bookName,
+          chatSource: chatSource,
+        ),
         slideFromBottom: true,
         safeArea: false,
         keepLayoutLockedAfterClose: true,
       );
     } finally {
+      _notePanelOpen = false;
       _releaseKeyboardOverlayLayoutLockSafely();
     }
   }
@@ -6885,13 +6814,7 @@ $text''';
                   button: true,
                   label: '笔记',
                   child: InkResponse(
-                    onTap: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => const NoteManagementPage(),
-                        ),
-                      );
-                    },
+                    onTap: () => unawaited(_openNotesPanel()),
                     radius: 22,
                     child: SizedBox(
                       width: 44,

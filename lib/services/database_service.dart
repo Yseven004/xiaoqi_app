@@ -20,7 +20,7 @@ class DatabaseService {
 
   static Database? _database;
   static const String _dbName = 'xiaoqi.db';
-  static const int _dbVersion = 33;
+  static const int _dbVersion = 34;
   static const int homeNotebookLimit = 7;
   static const int pinnedNotebookLimit = 10;
   static const Duration deletedNotebookRetention = Duration(days: 30);
@@ -55,6 +55,8 @@ class DatabaseService {
       CREATE TABLE notebooks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
+        book_id INTEGER,
+        is_default INTEGER NOT NULL DEFAULT 0,
         category TEXT NOT NULL DEFAULT '默认分类',
         description TEXT NOT NULL DEFAULT '',
         cover_index INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +77,7 @@ class DatabaseService {
     final now = DateTime.now().toIso8601String();
     await db.insert('notebooks', {
       'name': '默认笔记本',
+      'is_default': 1,
       'category': '随手记录',
       'description': '',
       'cover_index': 0,
@@ -149,6 +152,10 @@ class DatabaseService {
     await _createChatNoteSourceTable(db);
     await _createNoteAttachmentTable(db);
     await _createNoteRelationTables(db);
+    await db.execute(
+      'ALTER TABLE note_book_references ADD COLUMN is_manual INTEGER NOT NULL DEFAULT 0',
+    );
+    await _createNotebookBookIndexes(db);
 
     await _createBookRecognitionTables(db);
     await _createBookSourceTables(db);
@@ -686,6 +693,33 @@ class DatabaseService {
       ''');
       debugPrint('[XiaoQi] DB: v32→v33 笔记引用与回收批次迁移完成');
     }
+    if (oldVersion < 34 && newVersion >= 34) {
+      await db.execute('ALTER TABLE notebooks ADD COLUMN book_id INTEGER');
+      await db.execute(
+        'ALTER TABLE notebooks ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0',
+      );
+      await db.execute(
+        'ALTER TABLE note_book_references ADD COLUMN is_manual INTEGER NOT NULL DEFAULT 0',
+      );
+      await db.execute(
+        'UPDATE note_book_references SET is_manual = 1 WHERE is_primary = 0',
+      );
+      await db.execute('''UPDATE notebooks SET is_default = 1 WHERE id = (
+        SELECT id FROM notebooks WHERE is_deleted = 0 AND is_archived = 0
+        ORDER BY CASE WHEN name = '默认笔记本' THEN 0 ELSE 1 END, id LIMIT 1
+      )''');
+      await _createNotebookBookIndexes(db);
+      await _defaultNotebookId(db);
+    }
+  }
+
+  static Future<void> _createNotebookBookIndexes(DatabaseExecutor db) async {
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_notebooks_book ON notebooks(book_id, is_deleted, is_archived)',
+    );
+    await db.execute(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_notebooks_default ON notebooks(is_default) WHERE is_default = 1 AND is_deleted = 0',
+    );
   }
 
   static Future<void> _createNoteAttachmentTable(DatabaseExecutor db) async {
@@ -1101,7 +1135,7 @@ class DatabaseService {
     final rows = await executor.query(
       'notebooks',
       columns: ['id'],
-      where: 'is_deleted = 0 AND is_archived = 0',
+      where: 'is_default = 1 AND is_deleted = 0 AND is_archived = 0',
       orderBy: 'id ASC',
       limit: 1,
     );
@@ -1109,6 +1143,7 @@ class DatabaseService {
     final now = DateTime.now().toIso8601String();
     return executor.insert('notebooks', {
       'name': '默认笔记本',
+      'is_default': 1,
       'category': '随手记录',
       'description': '',
       'cover_index': 0,
@@ -1132,8 +1167,72 @@ class DatabaseService {
     Note note,
   ) async {
     final map = note.toMap();
-    map['notebook_id'] ??= await _defaultNotebookId(executor);
+    map['notebook_id'] ??= note.bookId != null
+        ? await _bookNotebookId(executor, note.bookId!)
+        : await _defaultNotebookId(executor);
+    if (note.id == null) await _applyNotebookBook(executor, map);
     return map;
+  }
+
+  Future<int> _bookNotebookId(DatabaseExecutor txn, int bookId) async {
+    final book = await txn.query(
+      'books',
+      columns: ['title'],
+      where: 'id = ? AND is_deleted = 0',
+      whereArgs: [bookId],
+      limit: 1,
+    );
+    if (book.isEmpty) throw StateError('关联书籍已删除');
+    final rows = await txn.query(
+      'notebooks',
+      columns: ['id'],
+      where: 'book_id = ? AND is_deleted = 0 AND is_archived = 0',
+      whereArgs: [bookId],
+      orderBy: 'id',
+      limit: 1,
+    );
+    if (rows.isNotEmpty) return rows.first['id'] as int;
+    final now = DateTime.now().toIso8601String();
+    return txn.insert('notebooks', {
+      'name': book.first['title'],
+      'book_id': bookId,
+      'cover_index': 0,
+      'created_at': now,
+      'updated_at': now,
+    });
+  }
+
+  Future<void> _applyNotebookBook(
+    DatabaseExecutor txn,
+    Map<String, dynamic> map,
+  ) async {
+    final rows = await txn.query(
+      'notebooks',
+      where: 'id = ? AND is_deleted = 0 AND is_archived = 0',
+      whereArgs: [map['notebook_id']],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw StateError('目标笔记本不可用');
+    final bookId = rows.first['book_id'] as int?;
+    final previousBookId = map['book_id'];
+    map['book_id'] = bookId;
+    if (bookId == null) {
+      map['book_name'] = '';
+    } else {
+      final books = await txn.query(
+        'books',
+        columns: ['title'],
+        where: 'id = ? AND is_deleted = 0',
+        whereArgs: [bookId],
+        limit: 1,
+      );
+      if (books.isEmpty) throw StateError('关联书籍已删除');
+      map['book_name'] = books.first['title'];
+    }
+    if (previousBookId != bookId) {
+      map['book_page'] = '';
+      // Capture identity is original provenance, not notebook ownership.
+    }
   }
 
   Future<void> _touchNotebook(
@@ -1148,6 +1247,23 @@ class DatabaseService {
       where: 'id = ? AND is_deleted = 0',
       whereArgs: [notebookId],
     );
+  }
+
+  Future<void> _protectDefaultNotebook(
+    DatabaseExecutor txn,
+    Iterable<int> ids,
+  ) async {
+    final values = ids.toSet().toList();
+    if (values.isEmpty) return;
+    final placeholders = List.filled(values.length, '?').join(',');
+    final rows = await txn.query(
+      'notebooks',
+      columns: ['id'],
+      where: 'id IN ($placeholders) AND is_default = 1',
+      whereArgs: values,
+      limit: 1,
+    );
+    if (rows.isNotEmpty) throw StateError('全局默认笔记本不能归档或删除');
   }
 
   List<int> _noteIdsFromDelta(String encodedDelta) {
@@ -1195,13 +1311,25 @@ class DatabaseService {
     }
 
     final bookId = map['book_id'] as int?;
-    if (bookId == null) return;
+    await txn.delete(
+      'note_book_references',
+      where:
+          'note_id = ? AND is_primary = 1 AND is_manual = 0 AND (book_id != ? OR ? IS NULL)',
+      whereArgs: [noteId, bookId, bookId],
+    );
     await txn.update(
       'note_book_references',
       {'is_primary': 0},
       where: 'note_id = ?',
       whereArgs: [noteId],
     );
+    await txn.update(
+      'note_source_snapshots',
+      {'is_primary': 0},
+      where: 'note_id = ? AND (book_id != ? OR ? IS NULL)',
+      whereArgs: [noteId, bookId, bookId],
+    );
+    if (bookId == null) return;
     await txn.insert('note_book_references', {
       'note_id': noteId,
       'book_id': bookId,
@@ -1225,12 +1353,22 @@ class DatabaseService {
       where: 'note_id = ? AND is_primary = 1',
       whereArgs: [noteId],
     );
+    int? sourcePageId = map['capture_page_id'] as int?;
+    if (sourcePageId != null) {
+      final pages = await txn.rawQuery(
+        '''SELECT p.id FROM capture_pages p
+        INNER JOIN capture_batches b ON b.id = p.batch_id
+        WHERE p.id = ? AND b.selected_book_id = ? LIMIT 1''',
+        [sourcePageId, bookId],
+      );
+      if (pages.isEmpty) sourcePageId = null;
+    }
     await txn.insert('note_source_snapshots', {
       'note_id': noteId,
       'book_id': bookId,
       'book_name': map['book_name'] as String? ?? '',
       'book_page': map['book_page'] as String? ?? '',
-      'capture_page_id': map['capture_page_id'],
+      'capture_page_id': sourcePageId,
       'created_at': now,
       'is_primary': 1,
     });
@@ -1289,14 +1427,21 @@ class DatabaseService {
     });
   }
 
-  Future<(int, List<NoteAttachment>)> saveNoteEditorSnapshot(
+  Future<(Note, List<NoteAttachment>)> saveNoteEditorSnapshot(
     Note note, {
     ChatNoteSourceRecord? source,
     List<NoteAttachment> newAttachments = const [],
+    int? autoNotebookBookId,
+    int? supplementalBookId,
+    String supplementalBookName = '',
   }) async {
     final db = await database;
     return db.transaction((txn) async {
-      final map = await _noteMap(txn, note);
+      final map = note.toMap();
+      map['notebook_id'] ??= autoNotebookBookId != null
+          ? await _bookNotebookId(txn, autoNotebookBookId)
+          : await _defaultNotebookId(txn);
+      if (note.id == null) await _applyNotebookBook(txn, map);
       final int noteId;
       if (note.id == null) {
         noteId = await txn.insert('notes', map);
@@ -1325,8 +1470,24 @@ class DatabaseService {
         );
       }
       await _syncNoteRelations(txn, noteId, map);
+      if (supplementalBookId != null && supplementalBookId != map['book_id']) {
+        final notebook = await txn.query(
+          'notebooks',
+          columns: ['is_default'],
+          where: 'id = ?',
+          whereArgs: [map['notebook_id']],
+        );
+        if (notebook.first['is_default'] != 1) {
+          await _addManualBookReference(
+            txn,
+            noteId,
+            supplementalBookId,
+            supplementalBookName,
+          );
+        }
+      }
       await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
-      return (noteId, savedAttachments);
+      return (Note.fromMap({...map, 'id': noteId}), savedAttachments);
     });
   }
 
@@ -1581,14 +1742,33 @@ class DatabaseService {
     String bookPage = '',
   }) async {
     final db = await database;
+    await db.transaction(
+      (txn) => _addManualBookReference(txn, noteId, bookId, bookName, bookPage),
+    );
+  }
+
+  Future<void> _addManualBookReference(
+    DatabaseExecutor db,
+    int noteId,
+    int bookId,
+    String bookName, [
+    String bookPage = '',
+  ]) async {
     await db.insert('note_book_references', {
       'note_id': noteId,
       'book_id': bookId,
       'book_name': bookName,
       'book_page': bookPage,
       'is_primary': 0,
+      'is_manual': 1,
       'created_at': DateTime.now().toIso8601String(),
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.update(
+      'note_book_references',
+      {'is_manual': 1},
+      where: 'note_id = ? AND book_id = ?',
+      whereArgs: [noteId, bookId],
+    );
   }
 
   Future<void> setNotePinned(int noteId, bool pinned) async {
@@ -1693,10 +1873,22 @@ class DatabaseService {
     String query = '',
     String category = 'all',
     String sort = 'updated',
+    int? bookId,
   }) async {
     final db = await database;
     final where = <String>[];
     final args = <Object?>[];
+    if (bookId != null) {
+      where.add('''b.is_default = 0 AND (b.book_id = ? OR EXISTS (
+        SELECT 1 FROM notes linked_note
+        WHERE linked_note.notebook_id = b.id AND linked_note.is_deleted = 0
+          AND (linked_note.book_id = ? OR EXISTS (
+            SELECT 1 FROM note_book_references linked_book
+            WHERE linked_book.note_id = linked_note.id AND linked_book.book_id = ?
+          ))
+      ))''');
+      args.addAll([bookId, bookId, bookId]);
+    }
 
     switch (status) {
       case 'home':
@@ -1774,6 +1966,7 @@ class DatabaseService {
     int coverIndex = 0,
     String coverPath = '',
     int? homeSlot,
+    int? bookId,
   }) async {
     final trimmedName = name.trim();
     if (trimmedName.isEmpty) {
@@ -1782,6 +1975,15 @@ class DatabaseService {
     final now = DateTime.now().toIso8601String();
     final db = await database;
     return db.transaction((txn) async {
+      if (bookId != null) {
+        final books = await txn.query(
+          'books',
+          columns: ['id'],
+          where: 'id = ? AND is_deleted = 0',
+          whereArgs: [bookId],
+        );
+        if (books.isEmpty) throw StateError('关联书籍已删除');
+      }
       final resolvedHomeSlot = homeSlot == null
           ? null
           : await _firstFreeHomeSlot(txn);
@@ -1790,6 +1992,7 @@ class DatabaseService {
       }
       return txn.insert('notebooks', {
         'name': trimmedName,
+        'book_id': bookId,
         'category': category.trim().isEmpty ? '默认分类' : category.trim(),
         'description': description.trim(),
         'cover_index': coverIndex,
@@ -1817,15 +2020,19 @@ class DatabaseService {
       throw ArgumentError('笔记本名称不能为空');
     }
     final db = await database;
+    final map =
+        notebook
+            .copyWith(
+              name: notebook.name.trim(),
+              updatedAt: DateTime.now().toIso8601String(),
+            )
+            .toMap()
+          ..remove('book_id')
+          ..remove('is_default');
     return db.update(
       'notebooks',
-      notebook
-          .copyWith(
-            name: notebook.name.trim(),
-            updatedAt: DateTime.now().toIso8601String(),
-          )
-          .toMap(),
-      where: 'id = ?',
+      map,
+      where: 'id = ? AND is_deleted = 0',
       whereArgs: [notebook.id],
     );
   }
@@ -1925,6 +2132,7 @@ class DatabaseService {
   Future<void> setNotebookArchived(int notebookId, bool archived) async {
     final db = await database;
     await db.transaction((txn) async {
+      if (archived) await _protectDefaultNotebook(txn, [notebookId]);
       if (!archived) {
         final target = await txn.query(
           'notebooks',
@@ -1991,12 +2199,11 @@ class DatabaseService {
     return maps.map(Note.fromMap).toList(growable: false);
   }
 
-  Future<void> moveNoteToNotebook(int noteId, int notebookId) async {
+  Future<Note> moveNoteToNotebook(int noteId, int notebookId) async {
     final db = await database;
-    await db.transaction((txn) async {
+    return db.transaction((txn) async {
       final notebook = await txn.query(
         'notebooks',
-        columns: ['id'],
         where: 'id = ? AND is_deleted = 0 AND is_archived = 0',
         whereArgs: [notebookId],
         limit: 1,
@@ -2006,29 +2213,36 @@ class DatabaseService {
       }
       final existing = await txn.query(
         'notes',
-        columns: ['notebook_id'],
         where: 'id = ? AND is_deleted = 0',
         whereArgs: [noteId],
         limit: 1,
       );
       final now = DateTime.now().toIso8601String();
+      if (existing.isEmpty) throw StateError('笔记不存在或已删除');
+      final map = Map<String, dynamic>.from(existing.first)
+        ..['notebook_id'] = notebookId;
+      await _applyNotebookBook(txn, map);
+      map['updated_at'] = now;
       final changed = await txn.update(
         'notes',
-        {'notebook_id': notebookId, 'updated_at': now},
+        map,
         where: 'id = ? AND is_deleted = 0',
         whereArgs: [noteId],
       );
       if (changed != 1) throw StateError('笔记不存在或已删除');
+      await _syncNoteRelations(txn, noteId, map);
       await _touchNotebook(txn, notebookId, now);
       if (existing.isNotEmpty) {
         await _touchNotebook(txn, existing.first['notebook_id'] as int?, now);
       }
+      return Note.fromMap(map);
     });
   }
 
   Future<void> deleteNotebook(int notebookId) async {
     final db = await database;
     await db.transaction((txn) async {
+      await _protectDefaultNotebook(txn, [notebookId]);
       final rows = await txn.query(
         'notebooks',
         columns: ['home_slot', 'is_pinned', 'pinned_at'],
@@ -2170,6 +2384,7 @@ class DatabaseService {
   }
 
   Future<void> permanentlyDeleteNotebook(int notebookId) async {
+    await _protectDefaultNotebook(await database, [notebookId]);
     final db = await database;
     String coverPath = '';
     await db.transaction((txn) async {
@@ -2308,6 +2523,7 @@ class DatabaseService {
     if (notebookIds.isEmpty) return;
     final db = await database;
     await db.transaction((txn) async {
+      if (archived) await _protectDefaultNotebook(txn, notebookIds);
       final placeholders = List.filled(notebookIds.length, '?').join(',');
       if (!archived) {
         final returningPinned =
@@ -2346,6 +2562,7 @@ class DatabaseService {
     if (notebookIds.isEmpty) return;
     final db = await database;
     await db.transaction((txn) async {
+      await _protectDefaultNotebook(txn, notebookIds);
       final now = DateTime.now().toIso8601String();
       for (final notebookId in notebookIds) {
         final rows = await txn.query(
@@ -2491,13 +2708,13 @@ class DatabaseService {
       var latestUpdatedAt = '';
       for (final note in notes) {
         final map = await _noteMap(txn, note);
-        ids.add(
-          await txn.insert(
-            'notes',
-            map,
-            conflictAlgorithm: ConflictAlgorithm.replace,
-          ),
+        final id = await txn.insert(
+          'notes',
+          map,
+          conflictAlgorithm: ConflictAlgorithm.replace,
         );
+        ids.add(id);
+        await _syncNoteRelations(txn, id, map);
         final notebookId = map['notebook_id'] as int?;
         if (notebookId != null) touchedNotebooks.add(notebookId);
         if (note.updatedAt.compareTo(latestUpdatedAt) > 0) {
@@ -2546,7 +2763,24 @@ class DatabaseService {
           );
           existingId = rows.isEmpty ? null : rows.first['id'] as int?;
         }
-        final value = existingId == null ? note : note.copyWith(id: existingId);
+        var value = note;
+        if (existingId != null) {
+          final rows = await txn.query(
+            'notes',
+            where: 'id = ?',
+            whereArgs: [existingId],
+            limit: 1,
+          );
+          final existing = Note.fromMap(rows.first);
+          // Capture retries keep a user's later notebook move and unlink.
+          value = note.copyWith(
+            id: existingId,
+            notebookId: existing.notebookId,
+            bookId: existing.bookId,
+            bookName: existing.bookName,
+            clearBookAssociation: existing.bookId == null,
+          );
+        }
         final map = await _noteMap(txn, value);
         map.remove('id');
         late final int id;
@@ -2561,7 +2795,8 @@ class DatabaseService {
           );
           id = existingId;
         }
-        persisted.add(value.copyWith(id: id));
+        await _syncNoteRelations(txn, id, map);
+        persisted.add(Note.fromMap({...map, 'id': id}));
         final notebookId = map['notebook_id'] as int?;
         if (notebookId != null) touchedNotebooks.add(notebookId);
         if (value.updatedAt.compareTo(latestUpdatedAt) > 0) {

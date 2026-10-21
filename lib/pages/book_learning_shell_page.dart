@@ -279,7 +279,11 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
                     onBack: () => setState(() => _openBookId = null),
                   ),
           ),
-          const NoteManagementPage(key: PageStorageKey('book_learning_notes')),
+          NoteManagementPage(
+            key: const PageStorageKey('book_learning_notes'),
+            active: _destination == BookLearningDestination.notes,
+            onClose: () => _changeDestination(BookLearningDestination.books),
+          ),
           DiscoverEmptyPage(
             onBackToBooks: () =>
                 _changeDestination(BookLearningDestination.books),

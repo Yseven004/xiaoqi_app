@@ -10,7 +10,7 @@ import '../services/database_service.dart';
 import '../widgets/action_chip.dart';
 import '../widgets/ai_analyze_button.dart';
 import 'ai_analysis_result_page.dart';
-import 'photo_note_edit_page.dart';
+import 'note_editor_page.dart';
 
 class PhotoNoteDetailPage extends StatefulWidget {
   final Note note;
@@ -117,9 +117,11 @@ class _PhotoNoteDetailPageState extends State<PhotoNoteDetailPage> {
     await Navigator.push(
       context,
       CupertinoPageRoute(
-        builder: (_) => PhotoNoteEditPage(
-          imagePath: _note.photoPath,
+        builder: (_) => NoteEditorPage(
+          notebookId: _note.notebookId ?? 1,
           existingNote: _note,
+          bookId: _note.bookId,
+          bookName: _note.bookName,
         ),
       ),
     );

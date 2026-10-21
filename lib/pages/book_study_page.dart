@@ -9,7 +9,6 @@ import '../models/book_category.dart';
 import '../models/book_library_item.dart';
 import '../models/book_recognition.dart';
 import '../models/book_source.dart';
-import '../models/note.dart';
 import '../services/book_library_service.dart';
 import '../utils/book_cover_palette.dart';
 import '../widgets/book_cover.dart';
@@ -18,11 +17,11 @@ import '../widgets/app_toast.dart';
 import '../widgets/book_cover_picker_sheet.dart';
 import '../widgets/book_metadata_form_sheet.dart';
 import '../widgets/book_paper_background.dart';
-import 'ai_note_detail_page.dart';
-import 'book_page_reader_page.dart';
 import 'book_sources_page.dart';
-import 'note_editor_page.dart';
-import 'photo_note_detail_page.dart';
+import 'note_management_page.dart';
+import '../models/notebook.dart';
+import '../services/database_service.dart';
+import '../widgets/notebook_cover.dart';
 
 class BookStudyPage extends StatefulWidget {
   const BookStudyPage({
@@ -43,11 +42,10 @@ class BookStudyPage extends StatefulWidget {
 class _BookStudyPageState extends State<BookStudyPage> {
   late final BookLibraryService _library;
   BookLibraryItem? _item;
-  List<Note> _notes = const [];
+  List<Notebook> _notebooks = const [];
   List<BookSourceRecord> _sources = const [];
   List<BookCategory> _categories = const [];
   bool _loading = true;
-  bool _showAllNotes = false;
   String? _error;
 
   @override
@@ -69,14 +67,16 @@ class _BookStudyPageState extends State<BookStudyPage> {
         }
         return;
       }
-      final notes = await _library.getNotesForBook(widget.bookId);
+      final notebooks = await DatabaseService().queryNotebooks(
+        bookId: widget.bookId,
+      );
       final sources = await _library.listSourcesForBook(widget.bookId);
       final categories = await _library.listCategories();
       unawaited(_library.recordStudyActivity(widget.bookId));
       if (!mounted) return;
       setState(() {
         _item = item;
-        _notes = notes;
+        _notebooks = notebooks;
         _sources = sources;
         _categories = categories;
         _loading = false;
@@ -106,25 +106,20 @@ class _BookStudyPageState extends State<BookStudyPage> {
     if (mounted) await _load();
   }
 
-  Future<void> _openNote(Note note) async {
-    Widget page;
-    if (note.type == 'photo') {
-      page = PhotoNoteDetailPage(note: note);
-    } else if (note.type == 'annotated_note') {
-      page = BookPageReaderPage(initialNote: note);
-    } else if (note.type == 'ai_generated' && note.contentDelta.isEmpty) {
-      page = AiNoteDetailPage(note: note);
-    } else {
-      page = NoteEditorPage(
-        notebookId: note.notebookId ?? 1,
-        existingNote: note,
-        bookId: widget.bookId,
-        bookName: _item?.book.title ?? note.bookName,
-      );
-    }
-    await Navigator.of(
-      context,
-    ).push<Object?>(MaterialPageRoute(builder: (_) => page));
+  Future<void> _openNotebook([Notebook? notebook]) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          backgroundColor: Colors.white,
+          body: NoteManagementPage(
+            initialBookId: widget.bookId,
+            initialBookName: _item?.book.title ?? '',
+            initialNotebookId: notebook?.id,
+            onClose: () => Navigator.of(context).pop(),
+          ),
+        ),
+      ),
+    );
     if (mounted) await _load();
   }
 
@@ -271,46 +266,6 @@ class _BookStudyPageState extends State<BookStudyPage> {
     }
   }
 
-  Future<void> _unlinkNote(Note note) async {
-    final noteId = note.id;
-    if (noteId == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('从本书移除笔记？'),
-        content: const Text('笔记和原图会保留，只是不再归入这本书。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('移除'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    await _library.unlinkNotesFromBook([noteId]);
-    await _load();
-  }
-
-  Future<void> _toggleNotePinned(Note note) async {
-    final noteId = note.id;
-    if (noteId == null) return;
-    try {
-      await _library.setNotePinned(noteId, !note.isPinned);
-      await _load();
-    } catch (error) {
-      if (!mounted) return;
-      AppToast.show(
-        context,
-        note.isPinned ? '取消置顶失败：$error' : '置顶失败：$error',
-      );
-    }
-  }
-
   Future<void> _shareBook() async {
     final item = _item;
     if (item == null) return;
@@ -439,41 +394,6 @@ class _BookStudyPageState extends State<BookStudyPage> {
     );
   }
 
-  void _showNoteActions(Note note) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        top: false,
-        child: Wrap(
-          children: [
-            ListTile(
-              leading: Icon(
-                note.isPinned
-                    ? PhosphorIconsRegular.pushPinSlash
-                    : PhosphorIconsRegular.pushPin,
-              ),
-              title: Text(note.isPinned ? '取消置顶' : '置顶笔记'),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                _toggleNotePinned(note);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.link_off_rounded),
-              title: const Text('从本书移除'),
-              subtitle: const Text('不会删除笔记或原图'),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                _unlinkNote(note);
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   void _showBookActions() {
     showModalBottomSheet<void>(
       context: context,
@@ -550,7 +470,6 @@ class _BookStudyPageState extends State<BookStudyPage> {
       );
     }
     final item = _item!;
-    final visibleNotes = _showAllNotes ? _notes : _notes.take(3);
     return BookPaperBackground(
       showBotanicalShadow: true,
       warmEditorial: true,
@@ -709,11 +628,11 @@ class _BookStudyPageState extends State<BookStudyPage> {
               Row(
                 children: [
                   const Expanded(
-                    child: Text('最近笔记', style: BookFlowTheme.heading),
+                    child: Text('笔记', style: BookFlowTheme.heading),
                   ),
-                  if (_notes.isNotEmpty)
+                  if (_notebooks.isNotEmpty)
                     TextButton(
-                      onPressed: () => setState(() => _showAllNotes = true),
+                      onPressed: () => _openNotebook(),
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -735,20 +654,68 @@ class _BookStudyPageState extends State<BookStudyPage> {
                 ],
               ),
               const SizedBox(height: 10),
-              if (_notes.isEmpty)
-                const _EmptyNotes()
+              if (_notebooks.isEmpty)
+                TextButton(
+                  onPressed: () => _openNotebook(),
+                  child: const Text('还没有关联笔记本，开始记笔记'),
+                )
               else
-                for (final note in visibleNotes)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: _BookNoteCard(
-                      note: note,
-                      onTap: () => _openNote(note),
-                      onLongPress: () => _unlinkNote(note),
-                      onTogglePinned: () => _toggleNotePinned(note),
-                      onMore: () => _showNoteActions(note),
-                    ),
-                  ),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final width = (constraints.maxWidth * .18).clamp(
+                      88.0,
+                      108.0,
+                    );
+                    final textScale =
+                        MediaQuery.textScalerOf(context).scale(14) / 14;
+                    return SizedBox(
+                      height: width * 1.5 + 12 + 24 * textScale,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _notebooks.length,
+                        separatorBuilder: (_, _) => const SizedBox(width: 20),
+                        itemBuilder: (context, index) {
+                          final notebook = _notebooks[index];
+                          return Semantics(
+                            button: true,
+                            label: '${notebook.name}，${notebook.noteCount} 篇笔记',
+                            child: InkWell(
+                              onTap: () => _openNotebook(notebook),
+                              borderRadius: BorderRadius.circular(8),
+                              child: SizedBox(
+                                width: width,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    SizedBox(
+                                      width: width,
+                                      height: width * 1.5,
+                                      child: ExcludeSemantics(
+                                        child: NotebookCover(
+                                          notebook: notebook,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    ExcludeSemantics(
+                                      child: Text(
+                                        '${notebook.noteCount} 篇笔记',
+                                        style: const TextStyle(
+                                          color: BookFlowTheme.inkSecondary,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    );
+                  },
+                ),
             ],
           ),
         ),
@@ -1272,195 +1239,4 @@ class _Stat extends StatelessWidget {
       ),
     );
   }
-}
-
-class _BookNoteCard extends StatelessWidget {
-  const _BookNoteCard({
-    required this.note,
-    required this.onTap,
-    required this.onLongPress,
-    required this.onTogglePinned,
-    required this.onMore,
-  });
-
-  final Note note;
-  final VoidCallback onTap;
-  final VoidCallback onLongPress;
-  final VoidCallback onTogglePinned;
-  final VoidCallback onMore;
-
-  @override
-  Widget build(BuildContext context) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: BookFlowTheme.detailSurfaceElevated,
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: BookFlowTheme.detailLine),
-      boxShadow: BookFlowTheme.detailCardShadow,
-    ),
-    child: Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(12),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        onLongPress: onLongPress,
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 8, 6, 8),
-          child: Stack(
-            children: [
-              IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Container(
-                      width: 84,
-                      constraints: const BoxConstraints(minHeight: 92),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 11,
-                      ),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [Color(0xFFF5EFE5), Color(0xFFEEE6D9)],
-                        ),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: const Color(0x66FFFFFF)),
-                      ),
-                      alignment: Alignment.topLeft,
-                      child: Text(
-                        note.bookPage.isEmpty ? '未标页码' : '第 ${note.bookPage} 页',
-                        maxLines: 2,
-                        style: const TextStyle(
-                          color: BookFlowTheme.ink,
-                          fontSize: 13.5,
-                          height: 1.35,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.only(right: 40),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              note.content.isEmpty
-                                  ? (note.title.isEmpty
-                                        ? '点击继续编辑笔记'
-                                        : note.title)
-                                  : note.content,
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: BookFlowTheme.ink,
-                                fontSize: 14.5,
-                                height: 1.58,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              _dateLabel(note.updatedAt),
-                              style: BookFlowTheme.caption,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Positioned(
-                top: -8,
-                right: -6,
-                child: IconButton(
-                  tooltip: note.isPinned ? '取消置顶' : '置顶笔记',
-                  onPressed: onTogglePinned,
-                  icon: Icon(
-                    note.isPinned
-                        ? PhosphorIconsFill.pushPin
-                        : PhosphorIconsRegular.pushPin,
-                  ),
-                  color: BookFlowTheme.detailPrimary,
-                  iconSize: 18,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 44,
-                    height: 44,
-                  ),
-                ),
-              ),
-              Positioned(
-                right: -6,
-                bottom: -8,
-                child: IconButton(
-                  tooltip: '笔记操作',
-                  onPressed: onMore,
-                  icon: Icon(PhosphorIconsBold.dotsThree),
-                  color: BookFlowTheme.inkSecondary,
-                  iconSize: 21,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 44,
-                    height: 44,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-
-  String _dateLabel(String timestamp) {
-    final value = DateTime.tryParse(timestamp);
-    if (value == null) return '最近更新';
-    final now = DateTime.now();
-    final difference = DateTime(
-      now.year,
-      now.month,
-      now.day,
-    ).difference(DateTime(value.year, value.month, value.day)).inDays;
-    if (difference == 0) return '今天';
-    if (difference == 1) return '昨天';
-    return '${value.month}月${value.day}日';
-  }
-}
-
-class _EmptyNotes extends StatelessWidget {
-  const _EmptyNotes();
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(24),
-    decoration: BoxDecoration(
-      color: BookFlowTheme.detailSurfaceElevated,
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: BookFlowTheme.detailLine),
-      boxShadow: BookFlowTheme.detailCardShadow,
-    ),
-    child: const Column(
-      children: [
-        Icon(
-          Icons.auto_stories_outlined,
-          color: BookFlowTheme.primary,
-          size: 30,
-        ),
-        SizedBox(height: 8),
-        Text(
-          '还没有笔记',
-          style: TextStyle(
-            color: BookFlowTheme.ink,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        SizedBox(height: 4),
-        Text('关联到这本书的笔记会显示在这里。', style: BookFlowTheme.caption),
-      ],
-    ),
-  );
 }

@@ -134,6 +134,8 @@ class _AiAnalysisResultPageState extends State<AiAnalysisResultPage>
         type: 'ai_generated',
         title: 'AI分析：$originalTitle',
         content: content,
+        notebookId: widget.originalNote.notebookId,
+        bookId: widget.originalNote.bookId,
         bookName: widget.originalNote.bookName,
         bookPage: widget.originalNote.bookPage,
         parentNoteId: widget.originalNote.id,
@@ -268,82 +270,88 @@ class _AiAnalysisResultPageState extends State<AiAnalysisResultPage>
                         const SizedBox(height: 40),
                         const Text(
                           '认真看了看，但好像没什么需要补充的。继续加油！',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: AppColors.hint,
-                          ),
+                          style: TextStyle(fontSize: 14, color: AppColors.hint),
                         ),
                       ],
 
                       // 📋 AI读到了
-                      if (hasRead) _buildSection(
-                        opacity: _section1Opacity,
-                        emoji: '📋',
-                        title: 'AI读到了',
-                        content: r.whatRead,
-                        color: AppColors.accent,
-                      ),
+                      if (hasRead)
+                        _buildSection(
+                          opacity: _section1Opacity,
+                          emoji: '📋',
+                          title: 'AI读到了',
+                          content: r.whatRead,
+                          color: AppColors.accent,
+                        ),
 
                       // ✅ 记得不错的地方
-                      if (hasGood) _buildSection(
-                        opacity: _section2Opacity,
-                        emoji: '✅',
-                        title: '记得不错的地方',
-                        content: r.goodPoints,
-                        color: const Color(0xFF4CAF50),
-                      ),
+                      if (hasGood)
+                        _buildSection(
+                          opacity: _section2Opacity,
+                          emoji: '✅',
+                          title: '记得不错的地方',
+                          content: r.goodPoints,
+                          color: const Color(0xFF4CAF50),
+                        ),
 
                       // ⚠️ 还可以补充
-                      if (hasMissing) _buildSection(
-                        opacity: _section3Opacity,
-                        emoji: '⚠️',
-                        title: '还可以补充',
-                        content: r.missingPoints,
-                        color: const Color(0xFFFF9800),
-                      ),
+                      if (hasMissing)
+                        _buildSection(
+                          opacity: _section3Opacity,
+                          emoji: '⚠️',
+                          title: '还可以补充',
+                          content: r.missingPoints,
+                          color: const Color(0xFFFF9800),
+                        ),
 
                       // 💡 理解提醒
-                      if (hasCorrection) _buildSection(
-                        opacity: _section4Opacity,
-                        emoji: '💡',
-                        title: '理解提醒',
-                        content: r.understandingCorrection,
-                        color: r.understandingCorrection.contains('理解没偏差')
-                            ? const Color(0xFF4CAF50)
-                            : const Color(0xFF2196F3),
-                      ),
+                      if (hasCorrection)
+                        _buildSection(
+                          opacity: _section4Opacity,
+                          emoji: '💡',
+                          title: '理解提醒',
+                          content: r.understandingCorrection,
+                          color: r.understandingCorrection.contains('理解没偏差')
+                              ? const Color(0xFF4CAF50)
+                              : const Color(0xFF2196F3),
+                        ),
 
                       // 🤔 想一想
-                      if (hasQuestions) _buildSection(
-                        opacity: _section5Opacity,
-                        emoji: '🤔',
-                        title: '想一想',
-                        content: r.thoughtQuestions,
-                        color: const Color(0xFF9C27B0),
-                      ),
+                      if (hasQuestions)
+                        _buildSection(
+                          opacity: _section5Opacity,
+                          emoji: '🤔',
+                          title: '想一想',
+                          content: r.thoughtQuestions,
+                          color: const Color(0xFF9C27B0),
+                        ),
 
                       // 💬 点评
-                      if (hasComment) AnimatedBuilder(
-                        animation: _footerOpacity,
-                        builder: (context, child) {
-                          return Opacity(
-                            opacity: _footerOpacity.value,
-                            child: Padding(
-                              padding: const EdgeInsets.only(top: 8, bottom: 16),
-                              child: Text(
-                                '💬 ${r.encouragingComment}',
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontStyle: FontStyle.italic,
-                                  color: AppColors.textSecondary,
-                                  height: 1.5,
+                      if (hasComment)
+                        AnimatedBuilder(
+                          animation: _footerOpacity,
+                          builder: (context, child) {
+                            return Opacity(
+                              opacity: _footerOpacity.value,
+                              child: Padding(
+                                padding: const EdgeInsets.only(
+                                  top: 8,
+                                  bottom: 16,
+                                ),
+                                child: Text(
+                                  '💬 ${r.encouragingComment}',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontStyle: FontStyle.italic,
+                                    color: AppColors.textSecondary,
+                                    height: 1.5,
+                                  ),
                                 ),
                               ),
-                            ),
-                          );
-                        },
-                      ),
+                            );
+                          },
+                        ),
                     ],
                   ),
                 ),
@@ -360,11 +368,14 @@ class _AiAnalysisResultPageState extends State<AiAnalysisResultPage>
                     child: SizedBox(
                       height: 48,
                       child: ElevatedButton(
-                        onPressed: (_isSaving || _showSuccess) ? null : _onSaveAsNote,
+                        onPressed: (_isSaving || _showSuccess)
+                            ? null
+                            : _onSaveAsNote,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppColors.accent,
-                          disabledBackgroundColor:
-                              _showSuccess ? AppColors.accent : AppColors.disabled,
+                          disabledBackgroundColor: _showSuccess
+                              ? AppColors.accent
+                              : AppColors.disabled,
                           foregroundColor: AppColors.onAccent,
                           disabledForegroundColor: AppColors.onAccent,
                           shape: RoundedRectangleBorder(
@@ -382,18 +393,18 @@ class _AiAnalysisResultPageState extends State<AiAnalysisResultPage>
                                 ],
                               )
                             : _isSaving
-                                ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: AppColors.onAccent,
-                                    ),
-                                  )
-                                : const Text(
-                                    '保存为笔记',
-                                    style: TextStyle(fontSize: 16),
-                                  ),
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: AppColors.onAccent,
+                                ),
+                              )
+                            : const Text(
+                                '保存为笔记',
+                                style: TextStyle(fontSize: 16),
+                              ),
                       ),
                     ),
                   ),
@@ -425,10 +436,7 @@ class _AiAnalysisResultPageState extends State<AiAnalysisResultPage>
               children: [
                 Row(
                   children: [
-                    Text(
-                      emoji,
-                      style: const TextStyle(fontSize: 18),
-                    ),
+                    Text(emoji, style: const TextStyle(fontSize: 18)),
                     const SizedBox(width: 6),
                     Text(
                       title,
