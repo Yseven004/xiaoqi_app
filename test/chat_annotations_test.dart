@@ -232,33 +232,61 @@ void main() {
     await tester.pumpWidget(screen());
     await tester.pumpAndSettle();
     expect(find.byType(ChatAnnotationPin), findsOneWidget);
+    void expectPinOnQuote() {
+      final paragraph = tester.renderObject<RenderBox>(
+        find.text('这是稍长的开头。目标原文。后面还有一些内容，供换行使用。'),
+      );
+      final boxes = chatTextQuoteBoxes(
+        paragraph,
+        const ChatAnnotation(id: 'quote', quote: '目标原文', startOffset: 10),
+      );
+      expect(
+        tester.getTopLeft(find.byType(ChatAnnotationPin)) +
+            ChatAnnotationPin.textAnchor,
+        paragraph.localToGlobal(boxes.last.bottomRight),
+      );
+    }
+
+    expectPinOnQuote();
     final before = tester.getTopLeft(find.byType(ChatAnnotationPin));
     width = 140;
     comment = '已修改评论';
     await tester.pumpWidget(screen());
     await tester.pumpAndSettle();
     expect(tester.getTopLeft(find.byType(ChatAnnotationPin)), isNot(before));
+    expectPinOnQuote();
     await tester.tap(find.byType(ChatAnnotationPin));
     expect(opened, '已修改评论');
   });
 
   testWidgets(
-    'dismissing an optional comment retains typed text through route exit',
+    'dismissing an unsubmitted comment cancels without blocking the outside tap',
     (tester) async {
       String? comment;
+      var completed = false;
+      var outsideTaps = 0;
       await tester.pumpWidget(
         MaterialApp(
           home: Builder(
             builder: (context) => Scaffold(
-              body: TextButton(
-                onPressed: () async {
-                  comment = await showChatAnnotationComment(
-                    context,
-                    initialText: '',
-                    anchor: const Offset(300, 300),
-                  );
-                },
-                child: const Text('注释'),
+              body: Column(
+                children: [
+                  TextButton(
+                    onPressed: () async {
+                      comment = await showChatAnnotationComment(
+                        context,
+                        initialText: '',
+                        anchor: const Offset(300, 300),
+                      );
+                      completed = true;
+                    },
+                    child: const Text('注释'),
+                  ),
+                  TextButton(
+                    onPressed: () => outsideTaps++,
+                    child: const Text('其他原文'),
+                  ),
+                ],
               ),
             ),
           ),
@@ -267,9 +295,120 @@ void main() {
       await tester.tap(find.text('注释'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '保留这段评论');
-      await tester.tapAt(const Offset(10, 10));
+      expect(tester.getTopLeft(find.byType(ChatAnnotationInput)).dy, 308);
+      await tester.tap(find.text('其他原文'));
       await tester.pumpAndSettle();
-      expect(comment, '保留这段评论');
+      expect(completed, isTrue);
+      expect(comment, isNull);
+      expect(outsideTaps, 1);
+      expect(find.byType(ChatAnnotationInput), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('only explicit submission commits a nonempty comment', (
+    tester,
+  ) async {
+    String? comment;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                comment = await showChatAnnotationComment(
+                  context,
+                  initialText: '',
+                  anchor: const Offset(300, 200),
+                );
+              },
+              child: const Text('注释'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('注释'));
+    await tester.pumpAndSettle();
+    IconButton submit() => tester.widget<IconButton>(
+      find.byWidgetPredicate(
+        (widget) => widget is IconButton && widget.tooltip == '确认评论',
+      ),
+    );
+    expect(submit().onPressed, isNull);
+    await tester.enterText(find.byType(TextField), '  ');
+    await tester.pump();
+    expect(submit().onPressed, isNull);
+    await tester.enterText(find.byType(TextField), '  已保存注释  ');
+    await tester.pump();
+    expect(comment, isNull);
+    expect(submit().onPressed, isNotNull);
+    await tester.tap(find.byTooltip('确认评论'));
+    await tester.pumpAndSettle();
+    expect(comment, '已保存注释');
+    expect(find.byType(ChatAnnotationInput), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an unsaved text draft has no numbered pin', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatTextAnnotationLayer(
+            annotations: [],
+            draft: const ChatAnnotation(id: 'draft', quote: '选中原文'),
+            onTapAnnotation: (_, _) {},
+            child: const Text('这里是选中原文。'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(ChatAnnotationPin), findsNothing);
+  });
+
+  testWidgets(
+    'review editing follows the keyboard and cancels on keyboard dismissal',
+    (tester) async {
+      tester.view.physicalSize = const Size(600, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetViewInsets);
+      String? comment;
+      var completed = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              resizeToAvoidBottomInset: false,
+              body: TextButton(
+                onPressed: () async {
+                  comment = await showChatAnnotationComment(
+                    context,
+                    initialText: '原注释',
+                    anchor: Offset.zero,
+                    dockToKeyboard: true,
+                  );
+                  completed = true;
+                },
+                child: const Text('修改'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('修改'));
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(find.byType(ChatAnnotationInput)).bottom, 692);
+      await tester.enterText(find.byType(TextField), '尚未保存');
+      tester.view.resetViewInsets();
+      await tester.pumpAndSettle();
+      expect(completed, isTrue);
+      expect(comment, isNull);
+      expect(find.byType(ChatAnnotationInput), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
@@ -339,7 +478,7 @@ void main() {
         tester,
         () => find.byType(InteractiveViewer).evaluate().isNotEmpty,
       );
-      await tester.tap(find.text('评论'));
+      await tester.tap(find.text('注释'));
       await tester.pump();
       await tester.tapAt(
         tester.getRect(find.byType(InteractiveViewer).first).center,
@@ -369,8 +508,10 @@ void main() {
       await tester.tap(find.text('完成'));
       await tester.pumpAndSettle();
       expect(completed, isNull);
-      expect(find.text('2 条评论'), findsOneWidget);
+      expect(find.text('2 条注释'), findsOneWidget);
       await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('注释'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('完成'));
       await tester.pumpAndSettle();

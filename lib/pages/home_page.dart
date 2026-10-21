@@ -546,6 +546,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   List<ChatAnnotation> _annotations = const [];
   Future<void> _annotationSaveQueue = Future<void>.value();
   int _annotationDraftEpoch = 0;
+  VoidCallback? _dismissAnnotationComment;
+  int _annotationCommentEpoch = 0;
+  bool _annotationCommentOwnsLayoutLock = false;
+  bool _textAnnotationEditorVisible = false;
   Map<String, Object?>? _activeSkillWorkflow;
   CapabilityDraft? _pendingSkillDraftReview;
   String? _activeCapabilityTaskId;
@@ -664,6 +668,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _dismissAnnotationComment?.call();
     WidgetsBinding.instance.removeObserver(this);
     _modelPreferences.defaultSelection.removeListener(_onDefaultModelChanged);
     _keyboardInsetSettleTimer?.cancel();
@@ -771,6 +776,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _restoreConversationDraft(AiConversationRecord conversation) {
+    _dismissAnnotationComment?.call();
     _clearAgentClarification();
     for (final attachment in _attachments) {
       _cancelAttachmentPreparation(attachment);
@@ -1463,7 +1469,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ? <ChatAnnotation>[]
           : (jsonDecode(raw) as List)
                 .map(ChatAnnotation.fromJson)
-                .where((a) => !a.isImage && a.quote.isNotEmpty)
+                .where(
+                  (a) =>
+                      !a.isImage &&
+                      a.quote.isNotEmpty &&
+                      a.comment.trim().isNotEmpty,
+                )
                 .toList();
       setState(
         () =>
@@ -1532,9 +1543,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final conversationId = _conversation?.id;
     if (conversationId == null) return;
-    if (!_annotations.any((a) => a.id == annotation.id)) {
-      _applyAnnotations([..._annotations, annotation]);
-    }
+    final existing = _annotations.any((a) => a.id == annotation.id);
     final comment = await _showAnnotationComment(
       initialText: annotation.comment,
       anchor: anchor,
@@ -1542,29 +1551,54 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted || _conversation?.id != conversationId || comment == null) {
       return;
     }
-    _applyAnnotations(
-      _annotations
-          .map((a) => a.id == annotation.id ? a.copyWith(comment: comment) : a)
-          .toList(),
-    );
+    if (comment.trim().isEmpty) return;
+    _applyAnnotations([
+      for (final a in _annotations)
+        if (a.id == annotation.id) a.copyWith(comment: comment) else a,
+      if (!existing) annotation.copyWith(comment: comment),
+    ]);
   }
 
   Future<String?> _showAnnotationComment({
     required String initialText,
     required Offset anchor,
+    BuildContext? editorContext,
+    Rect? Function()? resolveAnchor,
+    ScrollPosition? scrollPosition,
+    bool dockToKeyboard = false,
+    bool requireText = true,
   }) async {
-    final alreadyLocked = _keyboardOverlayLayoutLocked;
-    if (!alreadyLocked && mounted) {
-      setState(() => _keyboardOverlayLayoutLocked = true);
+    _dismissAnnotationComment?.call();
+    final epoch = ++_annotationCommentEpoch;
+    if (!_keyboardOverlayLayoutLocked ||
+        _unlockKeyboardOverlayLayoutAfterImeHides) {
+      _annotationCommentOwnsLayoutLock = true;
     }
+    _unlockKeyboardOverlayLayoutAfterImeHides = false;
+    setState(() {
+      _keyboardOverlayLayoutLocked = true;
+      _textAnnotationEditorVisible = !dockToKeyboard;
+    });
     try {
       return await showChatAnnotationComment(
-        context,
+        editorContext ?? context,
         initialText: initialText,
         anchor: anchor,
+        resolveAnchor: resolveAnchor,
+        scrollPosition: scrollPosition,
+        dockToKeyboard: dockToKeyboard,
+        requireText: requireText,
+        onDismissReady: (dismiss) => _dismissAnnotationComment = dismiss,
       );
     } finally {
-      if (!alreadyLocked) _releaseKeyboardOverlayLayoutLockSafely();
+      if (epoch == _annotationCommentEpoch) {
+        _dismissAnnotationComment = null;
+        if (mounted) setState(() => _textAnnotationEditorVisible = false);
+        if (_annotationCommentOwnsLayoutLock) {
+          _annotationCommentOwnsLayoutLock = false;
+          _releaseKeyboardOverlayLayoutLockSafely();
+        }
+      }
     }
   }
 
@@ -1575,8 +1609,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       showChatAnnotationReview(
         context,
         annotations: _annotations,
-        onEditComment: (initialText, anchor) =>
-            _showAnnotationComment(initialText: initialText, anchor: anchor),
+        onEditComment: (sheetContext, annotation) => _showAnnotationComment(
+          initialText: annotation.comment,
+          anchor: Offset.zero,
+          editorContext: sheetContext,
+          dockToKeyboard: true,
+          requireText: !annotation.isImage,
+        ),
         onChanged: (values) {
           if (mounted && _conversation?.id == id) _applyAnnotations(values);
         },
@@ -6913,6 +6952,13 @@ $text''';
                                         children: [
                                           _ConversationMessages(
                                             annotations: _annotations,
+                                            annotationBottomPadding:
+                                                _textAnnotationEditorVisible
+                                                ? MediaQuery.viewInsetsOf(
+                                                        context,
+                                                      ).bottom +
+                                                      160
+                                                : 0,
                                             onAnnotate: _annotateText,
                                             onPreviewImages: _openImageGallery,
                                             record:
@@ -9314,6 +9360,7 @@ class _ConversationMessages extends StatefulWidget {
     required this.onSelectQuestionVersion,
     required this.onOpenDraftReview,
     this.annotations = const [],
+    this.annotationBottomPadding = 0,
     required this.onAnnotate,
     required this.onPreviewImages,
   });
@@ -9354,6 +9401,7 @@ class _ConversationMessages extends StatefulWidget {
   final Future<bool> Function(String) onSelectQuestionVersion;
   final ValueChanged<String> onOpenDraftReview;
   final List<ChatAnnotation> annotations;
+  final double annotationBottomPadding;
   final Future<void> Function(ChatAnnotation, Offset) onAnnotate;
   final Future<void> Function(List<ChatImageSource>, int) onPreviewImages;
 
@@ -10071,7 +10119,10 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                 child: ListView.builder(
                   key: _messageViewportKey,
                   controller: widget.scrollController,
-                  padding: const EdgeInsets.only(top: 24, bottom: 20),
+                  padding: EdgeInsets.only(
+                    top: 24,
+                    bottom: 20 + widget.annotationBottomPadding,
+                  ),
                   itemCount: itemKeys.length,
                   findChildIndexCallback: (key) => childIndexByKey[key],
                   itemBuilder: (context, index) {

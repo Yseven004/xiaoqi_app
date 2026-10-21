@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -26,6 +27,9 @@ class ChatAnnotationPin extends StatelessWidget {
   });
   final int number;
   final VoidCallback onTap;
+
+  // The SVG's anchor dot is at (20, 49), inside a 40 × 54 viewBox.
+  static const textAnchor = Offset(24, 44.1);
 
   @override
   Widget build(BuildContext context) => Semantics(
@@ -70,6 +74,8 @@ class ChatAnnotationInput extends StatelessWidget {
     this.onDelete,
     this.optional = false,
     this.autofocus = false,
+    this.focusNode,
+    this.requireText = false,
     super.key,
   });
   final TextEditingController controller;
@@ -77,6 +83,8 @@ class ChatAnnotationInput extends StatelessWidget {
   final VoidCallback? onDelete;
   final bool optional;
   final bool autofocus;
+  final FocusNode? focusNode;
+  final bool requireText;
 
   @override
   Widget build(BuildContext context) => Material(
@@ -94,12 +102,16 @@ class ChatAnnotationInput extends StatelessWidget {
           Expanded(
             child: TextField(
               controller: controller,
+              focusNode: focusNode,
               autofocus: autofocus,
               minLines: 1,
               maxLines: 4,
               maxLength: 4000,
               textInputAction: TextInputAction.done,
-              onSubmitted: (_) => onSubmit(),
+              onSubmitted: (_) {
+                if (!requireText || controller.text.trim().isNotEmpty)
+                  onSubmit();
+              },
               style: const TextStyle(color: Color(0xFF282828), fontSize: 15),
               decoration: InputDecoration(
                 border: InputBorder.none,
@@ -119,19 +131,27 @@ class ChatAnnotationInput extends StatelessWidget {
                 height: 19,
               ),
             ),
-          IconButton(
-            tooltip: '确认评论',
-            onPressed: onSubmit,
-            icon: Container(
-              width: 34,
-              height: 34,
-              alignment: Alignment.center,
-              decoration: const BoxDecoration(
-                color: Color(0xFF252525),
-                shape: BoxShape.circle,
-              ),
-              child: chatAnnotationIcon('arrow-up', size: 21),
-            ),
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: controller,
+            builder: (context, value, _) {
+              final enabled = !requireText || value.text.trim().isNotEmpty;
+              return IconButton(
+                tooltip: '确认评论',
+                onPressed: enabled ? onSubmit : null,
+                icon: Container(
+                  width: 34,
+                  height: 34,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: enabled
+                        ? const Color(0xFF252525)
+                        : const Color(0xFFB8B8B8),
+                    shape: BoxShape.circle,
+                  ),
+                  child: chatAnnotationIcon('arrow-up', size: 21),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -143,58 +163,193 @@ Future<String?> showChatAnnotationComment(
   BuildContext context, {
   required String initialText,
   required Offset anchor,
+  Rect? Function()? resolveAnchor,
+  ScrollPosition? scrollPosition,
+  bool dockToKeyboard = false,
+  bool requireText = true,
+  ValueChanged<VoidCallback>? onDismissReady,
 }) async {
-  final controller = TextEditingController(text: initialText);
-  try {
-    final route = DialogRoute<String>(
-      context: context,
-      barrierColor: Colors.transparent,
-      builder: (dialogContext) => LayoutBuilder(
-        builder: (context, constraints) {
-          final mq = MediaQuery.of(context);
-          final width = (constraints.maxWidth - 24).clamp(0.0, 360.0);
-          final safeTop = mq.padding.top + 8;
-          final keyboardTop = constraints.maxHeight - mq.viewInsets.bottom;
-          const fieldHeight = 160.0;
-          final bottom = math.min(
-            constraints.maxHeight - mq.padding.bottom,
-            keyboardTop,
-          );
-          final left = (anchor.dx - width / 2).clamp(
-            12.0,
-            constraints.maxWidth - width - 12,
-          );
-          final top = (anchor.dy - 90)
-              .clamp(
-                safeTop,
-                (bottom - fieldHeight - 8).clamp(safeTop, double.infinity),
-              )
-              .toDouble();
-          return Stack(
-            children: [
-              Positioned(
-                left: left,
-                top: top,
-                width: width,
-                child: ChatAnnotationInput(
-                  controller: controller,
-                  optional: true,
-                  onSubmit: () =>
-                      Navigator.of(dialogContext).pop(controller.text.trim()),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-    final result = await Navigator.of(context, rootNavigator: true).push(route);
-    final value = result ?? controller.text.trim();
-    await route.completed;
-    return value;
-  } finally {
-    controller.dispose();
+  final result = Completer<String?>();
+  void close(String? value) {
+    if (!result.isCompleted) result.complete(value);
   }
+
+  final overlay = Overlay.of(context, rootOverlay: true);
+  final history = LocalHistoryEntry(
+    impliesAppBarDismissal: false,
+    onRemove: () => close(null),
+  );
+  ModalRoute.of(context)?.addLocalHistoryEntry(history);
+  final entry = OverlayEntry(
+    builder: (context) => Positioned.fill(
+      child: _ChatAnnotationCommentPopover(
+        initialText: initialText,
+        anchor: anchor,
+        resolveAnchor: resolveAnchor,
+        scrollPosition: scrollPosition,
+        dockToKeyboard: dockToKeyboard,
+        requireText: requireText,
+        onClose: close,
+      ),
+    ),
+  );
+  overlay.insert(entry);
+  onDismissReady?.call(() => close(null));
+  try {
+    return await result.future;
+  } finally {
+    history.remove();
+    entry.remove();
+    entry.dispose();
+  }
+}
+
+class _ChatAnnotationCommentPopover extends StatefulWidget {
+  const _ChatAnnotationCommentPopover({
+    required this.initialText,
+    required this.anchor,
+    required this.resolveAnchor,
+    required this.scrollPosition,
+    required this.dockToKeyboard,
+    required this.requireText,
+    required this.onClose,
+  });
+
+  final String initialText;
+  final Offset anchor;
+  final Rect? Function()? resolveAnchor;
+  final ScrollPosition? scrollPosition;
+  final bool dockToKeyboard;
+  final bool requireText;
+  final ValueChanged<String?> onClose;
+
+  @override
+  State<_ChatAnnotationCommentPopover> createState() =>
+      _ChatAnnotationCommentPopoverState();
+}
+
+class _ChatAnnotationCommentPopoverState
+    extends State<_ChatAnnotationCommentPopover> {
+  late final _controller = TextEditingController(text: widget.initialText);
+  final _focus = FocusNode();
+  final _fieldKey = GlobalKey();
+  double _fieldHeight = 56;
+  late Rect _anchor = Rect.fromLTWH(widget.anchor.dx, widget.anchor.dy, 0, 0);
+  bool _scheduled = false;
+  bool _keyboardWasVisible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.scrollPosition?.addListener(_onScroll);
+  }
+
+  void _onScroll() {
+    if (mounted) setState(() {});
+  }
+
+  void _revealAnchor(double safeTop, double bottom) {
+    if (_scheduled) return;
+    _scheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scheduled = false;
+      if (!mounted) return;
+      final height = _fieldKey.currentContext?.size?.height;
+      if (height != null && (height - _fieldHeight).abs() > .5) {
+        setState(() => _fieldHeight = height);
+      }
+      if (widget.dockToKeyboard) return;
+      final anchor = widget.resolveAnchor?.call();
+      if (widget.resolveAnchor != null && anchor == null) {
+        widget.onClose(null);
+        return;
+      }
+      if (anchor != null && anchor != _anchor) {
+        setState(() => _anchor = anchor);
+      }
+      final position = widget.scrollPosition;
+      if (anchor == null ||
+          position == null ||
+          !position.hasContentDimensions) {
+        return;
+      }
+      final needed = anchor.bottom + 16 + (height ?? _fieldHeight) - bottom;
+      final delta = needed > 0 ? needed : math.min(0.0, anchor.top - safeTop);
+      final target = (position.pixels + delta)
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+      if ((target - position.pixels).abs() > .5) position.jumpTo(target);
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.scrollPosition?.removeListener(_onScroll);
+    _focus.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final media = MediaQuery.of(context);
+      if (media.viewInsets.bottom > 0) _keyboardWasVisible = true;
+      if (widget.dockToKeyboard &&
+          _keyboardWasVisible &&
+          media.viewInsets.bottom == 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) widget.onClose(null);
+        });
+      }
+      final safeTop = media.padding.top + 8;
+      final bottom =
+          constraints.maxHeight -
+          math.max(media.viewInsets.bottom, media.padding.bottom);
+      final width = math.max(0.0, constraints.maxWidth - 24);
+      final fieldWidth = widget.dockToKeyboard ? width : math.min(width, 360.0);
+      final origin =
+          (Overlay.of(context, rootOverlay: true).context.findRenderObject()
+                  as RenderBox)
+              .localToGlobal(Offset.zero);
+      final anchor = _anchor.bottomRight - origin;
+      final left = (anchor.dx - fieldWidth / 2).clamp(
+        12.0,
+        math.max(12.0, constraints.maxWidth - fieldWidth - 12),
+      );
+      _revealAnchor(safeTop + origin.dy, bottom + origin.dy);
+      return Stack(
+        children: [
+          Positioned(
+            left: widget.dockToKeyboard ? 12 : left.toDouble(),
+            top: widget.dockToKeyboard
+                ? null
+                : math.max(safeTop, anchor.dy + 8),
+            bottom: widget.dockToKeyboard
+                ? math.max(media.viewInsets.bottom, media.padding.bottom) + 8
+                : null,
+            width: fieldWidth,
+            child: TapRegion(
+              onTapOutside: (_) => widget.onClose(null),
+              child: ChatAnnotationInput(
+                key: _fieldKey,
+                controller: _controller,
+                focusNode: _focus,
+                autofocus: widget.dockToKeyboard,
+                requireText: widget.requireText,
+                optional: !widget.requireText,
+                onSubmit: () {
+                  final value = _controller.text.trim();
+                  if (widget.requireText && value.isEmpty) return;
+                  widget.onClose(value);
+                },
+              ),
+            ),
+          ),
+        ],
+      );
+    },
+  );
 }
 
 class ChatAnnotationTray extends StatelessWidget {
@@ -211,51 +366,73 @@ class ChatAnnotationTray extends StatelessWidget {
   Widget build(BuildContext context) => Align(
     alignment: Alignment.centerLeft,
     child: Padding(
-      padding: const EdgeInsets.only(left: 6, right: 10, top: 10, bottom: 6),
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          OutlinedButton.icon(
-            onPressed: onTap,
-            icon: chatAnnotationIcon(
-              'comment',
-              color: const Color(0xFF555555),
-              size: 17,
-            ),
-            label: Text('${annotations.length} 条注释'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: const Color(0xFF333333),
-              minimumSize: const Size(48, 42),
-              side: const BorderSide(color: Color(0xFFE3E3E3)),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
-              ),
-            ),
-          ),
-          Positioned(
-            right: -7,
-            top: -7,
-            child: Material(
-              color: Colors.white,
-              shape: const CircleBorder(),
-              elevation: 2,
-              child: IconButton(
-                tooltip: '删除所有注释',
-                onPressed: onRemove,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(
-                  width: 32,
-                  height: 32,
-                ),
-                icon: const Icon(
-                  Icons.close,
-                  size: 17,
-                  color: Color(0xFF666666),
+      padding: const EdgeInsets.fromLTRB(6, 4, 0, 4),
+      child: Material(
+        color: Colors.white,
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: Color(0xFFD5D8DE)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            InkWell(
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                child: SizedBox(
+                  height: 48,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      chatAnnotationIcon(
+                        'comment',
+                        color: const Color(0xFF555B62),
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${annotations.length} 条注释',
+                        style: const TextStyle(
+                          color: Color(0xFF303134),
+                          fontSize: 15,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
+            Container(width: 1, height: 24, color: const Color(0xFFD5D8DE)),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: '删除所有注释',
+              onPressed: onRemove,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+              icon: Container(
+                width: 34,
+                height: 34,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(
+                  color: Color(0xFFF2F2F2),
+                  shape: BoxShape.circle,
+                ),
+                child: SvgPicture.asset(
+                  'assets/icons/chat_note_editor/x.svg',
+                  width: 16,
+                  height: 16,
+                  colorFilter: const ColorFilter.mode(
+                    Color(0xFF303134),
+                    BlendMode.srcIn,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -265,7 +442,10 @@ Future<void> showChatAnnotationReview(
   BuildContext context, {
   required List<ChatAnnotation> annotations,
   required ValueChanged<List<ChatAnnotation>> onChanged,
-  required Future<String?> Function(String initialText, Offset anchor)
+  required Future<String?> Function(
+    BuildContext context,
+    ChatAnnotation annotation,
+  )
   onEditComment,
 }) async {
   var current = List<ChatAnnotation>.of(annotations);
@@ -329,11 +509,8 @@ Future<void> showChatAnnotationReview(
                             ),
                             onTap: () async {
                               final value = await onEditComment(
-                                a.comment,
-                                Offset(
-                                  MediaQuery.sizeOf(context).width / 2,
-                                  180,
-                                ),
+                                sheetContext,
+                                a,
                               );
                               if (value == null || !context.mounted) return;
                               update(
@@ -419,17 +596,56 @@ Future<void> showChatAnnotationReview(
         );
 }
 
+/// Measures the quote against the rendered paragraphs, in the root's coordinates.
+List<Rect> chatTextQuoteBoxes(RenderBox root, ChatAnnotation annotation) {
+  final paragraphs = <({RenderParagraph box, String text, int start})>[];
+  var plain = '';
+  void visit(RenderObject object) {
+    if (object is RenderParagraph) {
+      final text = object.text.toPlainText(includePlaceholders: false);
+      paragraphs.add((box: object, text: text, start: plain.length));
+      plain += '$text\n';
+    } else {
+      object.visitChildren(visit);
+    }
+  }
+
+  visit(root);
+  final range = locateChatQuote(
+    plain,
+    annotation.quote,
+    annotation.startOffset,
+  );
+  if (range == null) return const [];
+  final boxes = <Rect>[];
+  for (final p in paragraphs) {
+    final start = (range.start - p.start).clamp(0, p.text.length);
+    final end = (range.end - p.start).clamp(0, p.text.length);
+    if (end <= start) continue;
+    for (final box in p.box.getBoxesForSelection(
+      TextSelection(baseOffset: start, extentOffset: end),
+    )) {
+      boxes.add(
+        box.toRect().shift(p.box.localToGlobal(Offset.zero, ancestor: root)),
+      );
+    }
+  }
+  return boxes;
+}
+
 class ChatTextAnnotationLayer extends StatefulWidget {
   const ChatTextAnnotationLayer({
     required this.child,
     required this.annotations,
     this.annotationNumbers = const {},
+    this.draft,
     required this.onTapAnnotation,
     super.key,
   });
   final Widget child;
   final List<ChatAnnotation> annotations;
   final Map<String, int> annotationNumbers;
+  final ChatAnnotation? draft;
   final void Function(ChatAnnotation, Offset) onTapAnnotation;
   @override
   State<ChatTextAnnotationLayer> createState() =>
@@ -450,35 +666,12 @@ class _ChatTextAnnotationLayerState extends State<ChatTextAnnotationLayer> {
       if (!mounted) return;
       final root = _contentKey.currentContext?.findRenderObject();
       if (root is! RenderBox || !root.hasSize) return;
-      final paragraphs = <({RenderParagraph box, String text, int start})>[];
-      var plain = '';
-      void visit(RenderObject object) {
-        if (object is RenderParagraph) {
-          final text = object.text.toPlainText(includePlaceholders: false);
-          paragraphs.add((box: object, text: text, start: plain.length));
-          plain += '$text\n';
-        } else {
-          object.visitChildren(visit);
-        }
-      }
-
-      visit(root);
       final marks = <({ChatAnnotation annotation, List<Rect> boxes})>[];
-      for (final a in widget.annotations) {
-        final range = locateChatQuote(plain, a.quote, a.startOffset);
-        if (range == null) continue;
-        final boxes = <Rect>[];
-        for (final p in paragraphs) {
-          final start = (range.start - p.start).clamp(0, p.text.length);
-          final end = (range.end - p.start).clamp(0, p.text.length);
-          if (end <= start) continue;
-          for (final b in p.box.getBoxesForSelection(
-            TextSelection(baseOffset: start, extentOffset: end),
-          )) {
-            final offset = p.box.localToGlobal(Offset.zero, ancestor: root);
-            boxes.add(b.toRect().shift(offset));
-          }
-        }
+      for (final a in [
+        ...widget.annotations,
+        if (widget.draft != null) widget.draft!,
+      ]) {
+        final boxes = chatTextQuoteBoxes(root, a);
         if (boxes.isNotEmpty) marks.add((annotation: a, boxes: boxes));
       }
       String signature(
@@ -511,37 +704,28 @@ class _ChatTextAnnotationLayerState extends State<ChatTextAnnotationLayer> {
                   child: ColoredBox(color: Color(0x263B82F6)),
                 ),
               ),
-            Positioned(
-              left: (mark.boxes.last.right - 18)
-                  .clamp(
-                    0.0,
-                    (_contentSize.width - 48).clamp(0.0, double.infinity),
-                  )
-                  .toDouble(),
-              top: (mark.boxes.last.bottom - 5)
-                  .clamp(
-                    0.0,
-                    (_contentSize.height - 54).clamp(0.0, double.infinity),
-                  )
-                  .toDouble(),
-              child: Builder(
-                builder: (pinContext) => ChatAnnotationPin(
-                  number:
-                      widget.annotationNumbers[mark.annotation.id] ??
-                      widget.annotations.indexWhere(
-                            (a) => a.id == mark.annotation.id,
-                          ) +
-                          1,
-                  onTap: () {
-                    final box = pinContext.findRenderObject() as RenderBox;
-                    widget.onTapAnnotation(
-                      mark.annotation,
-                      box.localToGlobal(Offset.zero),
-                    );
-                  },
+            if (mark.annotation.id != widget.draft?.id)
+              Positioned(
+                left: mark.boxes.last.right - ChatAnnotationPin.textAnchor.dx,
+                top: mark.boxes.last.bottom - ChatAnnotationPin.textAnchor.dy,
+                child: Builder(
+                  builder: (pinContext) => ChatAnnotationPin(
+                    number:
+                        widget.annotationNumbers[mark.annotation.id] ??
+                        widget.annotations.indexWhere(
+                              (a) => a.id == mark.annotation.id,
+                            ) +
+                            1,
+                    onTap: () {
+                      final box = pinContext.findRenderObject() as RenderBox;
+                      widget.onTapAnnotation(
+                        mark.annotation,
+                        box.localToGlobal(ChatAnnotationPin.textAnchor),
+                      );
+                    },
+                  ),
                 ),
               ),
-            ),
           ],
         ],
       );
