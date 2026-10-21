@@ -36,6 +36,7 @@ class ReadingSpaceSidebar extends StatefulWidget {
     required this.onOpenBook,
     required this.onOpenChapter,
     required this.onOpenConversation,
+    this.onOpenConversationMatch,
     required this.onOpenLibrary,
     required this.onOpenExtensionMarket,
     this.onConversationChanged,
@@ -49,6 +50,8 @@ class ReadingSpaceSidebar extends StatefulWidget {
   final ValueChanged<BookLibraryItem> onOpenBook;
   final void Function(BookLibraryItem item, BookTocEntry entry) onOpenChapter;
   final ValueChanged<AiConversationRecord> onOpenConversation;
+  final void Function(AiConversationRecord record, String? messageId)?
+  onOpenConversationMatch;
   final VoidCallback onOpenLibrary;
   final VoidCallback onOpenExtensionMarket;
   final ValueChanged<AiConversationRecord>? onConversationChanged;
@@ -77,6 +80,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
       widget.historyService ?? AiConversationHistoryService.instance;
 
   List<BookLibraryItem> _books = const [];
+  Map<int, String> _bookNamesById = const {};
   Map<int, List<AiConversationRecord>> _bookConversations = const {};
   List<AiConversationRecord> _independentConversations = const [];
   bool _selectionMode = false;
@@ -139,6 +143,11 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
       _sortConversations(independent);
       setState(() {
         _books = books;
+        _bookNamesById = {
+          for (final item in allBooks)
+            if (item.book.id != null && item.book.title.trim().isNotEmpty)
+              item.book.id!: item.book.title.trim(),
+        };
         _bookConversations = byId;
         _independentConversations = independent;
         _loading = false;
@@ -162,6 +171,50 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
   }
 
   void _showInfo(String title) => setState(() => _infoTitle = title);
+
+  List<AiConversationRecord> get _allConversations {
+    final byId = <String, AiConversationRecord>{};
+    for (final conversations in _bookConversations.values) {
+      for (final record in conversations) {
+        byId[record.id] = record;
+      }
+    }
+    for (final record in _independentConversations) {
+      byId[record.id] = record;
+    }
+    return byId.values.toList(growable: false);
+  }
+
+  String _searchBookName(AiConversationRecord record) {
+    final persistedName = record.bookName.trim();
+    if (persistedName.isNotEmpty) return persistedName;
+    return _bookNamesById[record.bookId]?.trim() ?? '';
+  }
+
+  void _openSearch() {
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierLabel: '搜索阅读空间',
+      barrierColor: Colors.white,
+      transitionDuration: Duration.zero,
+      pageBuilder: (searchContext, animation, secondaryAnimation) {
+        return _ReadingSpaceSearchPage(
+          records: _allConversations,
+          bookNameForRecord: _searchBookName,
+          onOpenConversation: (record, messageId) {
+            Navigator.of(searchContext).pop();
+            final callback = widget.onOpenConversationMatch;
+            if (callback != null) {
+              callback(record, messageId);
+            } else {
+              widget.onOpenConversation(record);
+            }
+          },
+        );
+      },
+    );
+  }
 
   void _toggleBook(BookLibraryItem item) {
     final id = item.book.id;
@@ -191,8 +244,10 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     required double menuHeight,
   }) {
     final anchor = anchorContext.findRenderObject()! as RenderBox;
-    final overlay = Overlay.of(anchorContext).context.findRenderObject()! as RenderBox;
-    final sidebar = _sidebarKey.currentContext!.findRenderObject()! as RenderBox;
+    final overlay =
+        Overlay.of(anchorContext).context.findRenderObject()! as RenderBox;
+    final sidebar =
+        _sidebarKey.currentContext!.findRenderObject()! as RenderBox;
     final anchorRect = Rect.fromPoints(
       anchor.localToGlobal(Offset.zero, ancestor: overlay),
       anchor.localToGlobal(
@@ -216,10 +271,9 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     final below = anchorRect.bottom + 4;
     final top = below + menuHeight <= safeBottom
         ? below
-        : (anchorRect.top - menuHeight - 4).clamp(
-            safeTop,
-            safeBottom - menuHeight,
-          ).toDouble();
+        : (anchorRect.top - menuHeight - 4)
+              .clamp(safeTop, safeBottom - menuHeight)
+              .toDouble();
     return RelativeRect.fromRect(
       Rect.fromLTWH(left, top, 0, 0),
       Offset.zero & overlay.size,
@@ -512,10 +566,8 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     }
   }
 
-  Set<int> get _selectableBookIds => _books
-      .map((item) => item.book.id)
-      .whereType<int>()
-      .toSet();
+  Set<int> get _selectableBookIds =>
+      _books.map((item) => item.book.id).whereType<int>().toSet();
 
   void _toggleAllBooks() {
     final ids = _selectableBookIds;
@@ -862,7 +914,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
               button: true,
               label: '搜索阅读空间',
               child: InkResponse(
-                onTap: () => _showInfo('搜索'),
+                onTap: _openSearch,
                 radius: 24,
                 child: SizedBox(
                   width: 48,
@@ -949,22 +1001,22 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
       trailing: _selectionMode
           ? null
           : Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Builder(
-            builder: (context) => _SmallAction(
-              label: '更多在读书籍操作',
-              icon: PhosphorIconsBold.dotsThree,
-              onTap: () => _showReadingBookMenu(context),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Builder(
+                  builder: (context) => _SmallAction(
+                    label: '更多在读书籍操作',
+                    icon: PhosphorIconsBold.dotsThree,
+                    onTap: () => _showReadingBookMenu(context),
+                  ),
+                ),
+                _SmallAction(
+                  label: '从书库添加',
+                  icon: PhosphorIconsRegular.plus,
+                  onTap: widget.onOpenLibrary,
+                ),
+              ],
             ),
-          ),
-          _SmallAction(
-            label: '从书库添加',
-            icon: PhosphorIconsRegular.plus,
-            onTap: widget.onOpenLibrary,
-          ),
-        ],
-      ),
       children: [
         if (_selectionMode && _selectionKind == _SidebarSelectionKind.books)
           _buildSelectionHeader(),
@@ -1020,10 +1072,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
             onPressed: selected.isEmpty
                 ? null
                 : () => _deleteConversations(selected),
-            icon: Icon(
-              PhosphorIconsRegular.trash,
-              size: 19,
-            ),
+            icon: Icon(PhosphorIconsRegular.trash, size: 19),
             label: const Text('删除'),
             style: TextButton.styleFrom(
               foregroundColor: const Color(0xFFB94A45),
@@ -1039,7 +1088,8 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     final selected = _books
         .where((item) => _selectedBookIds.contains(item.book.id))
         .toList(growable: false);
-    final shouldPin = selected.isEmpty || selected.any((item) => !item.isPinned);
+    final shouldPin =
+        selected.isEmpty || selected.any((item) => !item.isPinned);
     final enabled = selected.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
@@ -1054,10 +1104,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
               Expanded(
                 child: TextButton.icon(
                   onPressed: enabled ? _applyBookPinSelection : null,
-                  icon: Icon(
-                    PhosphorIconsRegular.pushPin,
-                    size: 19,
-                  ),
+                  icon: Icon(PhosphorIconsRegular.pushPin, size: 19),
                   label: Text(shouldPin ? '置顶' : '取消置顶'),
                   style: TextButton.styleFrom(
                     foregroundColor: _ink,
@@ -1071,11 +1118,10 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
               ),
               Expanded(
                 child: TextButton.icon(
-                  onPressed: enabled ? _removeSelectedBooksFromReadingSpace : null,
-                  icon: Icon(
-                    PhosphorIconsRegular.trash,
-                    size: 19,
-                  ),
+                  onPressed: enabled
+                      ? _removeSelectedBooksFromReadingSpace
+                      : null,
+                  icon: Icon(PhosphorIconsRegular.trash, size: 19),
                   label: const Text('移出在读'),
                   style: TextButton.styleFrom(
                     foregroundColor: const Color(0xFFB94A45),
@@ -1139,8 +1185,8 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     final bookId = item.book.id;
     final expanded = bookId != null && _expandedBookId == bookId;
     final branch = expanded ? _expandedBranch : null;
-    final selecting = _selectionMode &&
-        _selectionKind == _SidebarSelectionKind.books;
+    final selecting =
+        _selectionMode && _selectionKind == _SidebarSelectionKind.books;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Column(
@@ -1414,10 +1460,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
           const SizedBox(height: 10),
           TextButton.icon(
             onPressed: _load,
-            icon: Icon(
-              PhosphorIconsRegular.arrowClockwise,
-              size: 17,
-            ),
+            icon: Icon(PhosphorIconsRegular.arrowClockwise, size: 17),
             label: const Text('重试'),
           ),
         ],
@@ -1443,10 +1486,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
             alignment: Alignment.centerLeft,
             child: TextButton.icon(
               onPressed: () => setState(() => _infoTitle = null),
-              icon: Icon(
-                PhosphorIconsRegular.arrowLeft,
-                size: 19,
-              ),
+              icon: Icon(PhosphorIconsRegular.arrowLeft, size: 19),
               label: const Text('返回'),
               style: TextButton.styleFrom(
                 foregroundColor: _ink,
@@ -1555,6 +1595,433 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _ReadingSpaceSearchHit {
+  const _ReadingSpaceSearchHit({
+    required this.record,
+    required this.snippet,
+    required this.messageId,
+  });
+
+  final AiConversationRecord record;
+  final String snippet;
+  final String? messageId;
+}
+
+class _ReadingSpaceSearchGroup {
+  const _ReadingSpaceSearchGroup({
+    required this.key,
+    required this.label,
+    required this.isIndependent,
+    required this.hits,
+  });
+
+  final String key;
+  final String label;
+  final bool isIndependent;
+  final List<_ReadingSpaceSearchHit> hits;
+
+  DateTime get latestUpdated => hits.first.record.updatedAt;
+}
+
+class _ReadingSpaceSearchPage extends StatefulWidget {
+  const _ReadingSpaceSearchPage({
+    required this.records,
+    required this.bookNameForRecord,
+    required this.onOpenConversation,
+  });
+
+  final List<AiConversationRecord> records;
+  final String Function(AiConversationRecord) bookNameForRecord;
+  final void Function(AiConversationRecord record, String? messageId)
+  onOpenConversation;
+
+  @override
+  State<_ReadingSpaceSearchPage> createState() =>
+      _ReadingSpaceSearchPageState();
+}
+
+class _ReadingSpaceSearchPageState extends State<_ReadingSpaceSearchPage> {
+  static const _ink = Color(0xFF252932);
+  static const _mutedInk = Color(0xFF737A84);
+  static const _line = Color(0xFFE9EBEE);
+  static const _highlight = Color(0xFFE7EAED);
+
+  late final TextEditingController _queryController;
+  late final FocusNode _queryFocusNode;
+  String _query = '';
+  String? _selectedGroupKey;
+
+  @override
+  void initState() {
+    super.initState();
+    _queryController = TextEditingController();
+    _queryFocusNode = FocusNode();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _queryFocusNode.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _queryController.dispose();
+    _queryFocusNode.dispose();
+    super.dispose();
+  }
+
+  List<_ReadingSpaceSearchGroup> _groupsForQuery(String query) {
+    final normalized = query.trim().toLowerCase();
+    if (normalized.isEmpty) return const [];
+
+    final grouped = <String, List<_ReadingSpaceSearchHit>>{};
+    final labels = <String, String>{};
+    final independentKeys = <String>{};
+    for (final record in widget.records) {
+      final bookName = widget.bookNameForRecord(record).trim();
+      final matchesBookName =
+          bookName.isNotEmpty && bookName.toLowerCase().contains(normalized);
+      if (!record.matches(query) && !matchesBookName) continue;
+
+      AiConversationMessage? message;
+      for (final candidate in record.messages) {
+        if (!candidate.isDeletedMarker &&
+            candidate.text.toLowerCase().contains(normalized)) {
+          message = candidate;
+          break;
+        }
+      }
+      final snippet = message == null
+          ? ''
+          : _snippetFor(message.text, normalized);
+      final groupKey = bookName.isEmpty ? '__independent__' : bookName;
+      labels[groupKey] = bookName.isEmpty ? '独立会话' : bookName;
+      if (bookName.isEmpty) independentKeys.add(groupKey);
+      (grouped[groupKey] ??= <_ReadingSpaceSearchHit>[]).add(
+        _ReadingSpaceSearchHit(
+          record: record,
+          snippet: snippet,
+          messageId: message?.id,
+        ),
+      );
+    }
+
+    final groups = grouped.entries.map((entry) {
+      final hits = [...entry.value]
+        ..sort((a, b) => b.record.updatedAt.compareTo(a.record.updatedAt));
+      return _ReadingSpaceSearchGroup(
+        key: entry.key,
+        label: labels[entry.key] ?? entry.key,
+        isIndependent: independentKeys.contains(entry.key),
+        hits: hits,
+      );
+    }).toList();
+    groups.sort((a, b) {
+      if (a.isIndependent != b.isIndependent) {
+        return a.isIndependent ? 1 : -1;
+      }
+      final updated = b.latestUpdated.compareTo(a.latestUpdated);
+      return updated != 0 ? updated : a.label.compareTo(b.label);
+    });
+    return groups;
+  }
+
+  static String _snippetFor(String text, String normalized) {
+    final lower = text.toLowerCase();
+    final index = lower.indexOf(normalized);
+    if (index < 0) return '';
+    final start = index > 20 ? index - 20 : 0;
+    final end = (index + normalized.length + 36).clamp(0, text.length).toInt();
+    return '${start > 0 ? '…' : ''}${text.substring(start, end)}'
+        '${end < text.length ? '…' : ''}';
+  }
+
+  void _setQuery(String value) {
+    setState(() {
+      _query = value;
+      if (_query.trim().isEmpty) _selectedGroupKey = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final groups = _groupsForQuery(_query);
+    final selectedGroup = groups
+        .where((group) => group.key == _selectedGroupKey)
+        .firstOrNull;
+    final activeGroup = selectedGroup ?? (groups.isEmpty ? null : groups.first);
+    final showNoResults = _query.trim().isNotEmpty && groups.isEmpty;
+
+    return Material(
+      color: Colors.white,
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF3F4F5),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 14),
+                          SvgPicture.asset(
+                            'assets/images/reading_sidebar_search.svg',
+                            width: 28,
+                            height: 28,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: TextField(
+                              controller: _queryController,
+                              focusNode: _queryFocusNode,
+                              autofocus: true,
+                              onChanged: _setQuery,
+                              textInputAction: TextInputAction.search,
+                              style: const TextStyle(
+                                color: _ink,
+                                fontSize: 20,
+                                height: 1.1,
+                              ),
+                              decoration: const InputDecoration(
+                                hintText: '搜索会话',
+                                hintStyle: TextStyle(
+                                  color: Color(0xFF9EA4AB),
+                                  fontSize: 18,
+                                ),
+                                border: InputBorder.none,
+                                isCollapsed: true,
+                              ),
+                            ),
+                          ),
+                          if (_query.isNotEmpty)
+                            IconButton(
+                              tooltip: '清除搜索词',
+                              onPressed: () {
+                                _queryController.clear();
+                                _setQuery('');
+                                _queryFocusNode.requestFocus();
+                              },
+                              icon: const DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: Color(0xFFB7BCC2),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: SizedBox(
+                                  width: 25,
+                                  height: 25,
+                                  child: Icon(
+                                    PhosphorIconsRegular.x,
+                                    color: Colors.white,
+                                    size: 17,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    style: TextButton.styleFrom(
+                      foregroundColor: _ink,
+                      minimumSize: const Size(54, 48),
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                    ),
+                    child: const Text('取消', style: TextStyle(fontSize: 18)),
+                  ),
+                ],
+              ),
+            ),
+            if (_query.trim().isNotEmpty && groups.isNotEmpty)
+              SizedBox(
+                height: 48,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      for (final group in groups) ...[
+                        _buildGroupTab(group, activeGroup?.key == group.key),
+                        const SizedBox(width: 8),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            const Divider(height: 1, color: _line),
+            Expanded(
+              child: _query.trim().isEmpty
+                  ? const SizedBox.expand()
+                  : showNoResults
+                  ? _buildNoResults()
+                  : ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+                      itemCount: activeGroup?.hits.length ?? 0,
+                      separatorBuilder: (_, _) =>
+                          const Divider(height: 1, color: _line),
+                      itemBuilder: (context, index) =>
+                          _buildHitRow(activeGroup!.hits[index]),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGroupTab(_ReadingSpaceSearchGroup group, bool selected) {
+    final label = group.isIndependent ? group.label : '《${group.label}》';
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: label,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => setState(() => _selectedGroupKey = group.key),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: selected ? _ink : const Color(0xFFF3F4F5),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            child: Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white : _ink,
+                fontSize: 15,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHitRow(_ReadingSpaceSearchHit hit) {
+    final title = hit.record.displayTitle;
+    final updatedAt = hit.record.updatedAt.toLocal();
+    final date = updatedAt.millisecondsSinceEpoch == 0
+        ? '日期未知'
+        : '${updatedAt.month}/${updatedAt.day}';
+    return Semantics(
+      button: true,
+      label: title,
+      child: InkWell(
+        onTap: () => widget.onOpenConversation(hit.record, hit.messageId),
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _highlightedText(
+                title,
+                _query,
+                style: const TextStyle(
+                  color: _ink,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                  height: 1.35,
+                ),
+              ),
+              if (hit.snippet.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                _highlightedText(
+                  hit.snippet,
+                  _query,
+                  style: const TextStyle(
+                    color: _mutedInk,
+                    fontSize: 15,
+                    height: 1.45,
+                  ),
+                  maxLines: 2,
+                ),
+              ],
+              const SizedBox(height: 6),
+              Text(
+                date,
+                style: const TextStyle(color: Color(0xFF9EA4AB), fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNoResults() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 80),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SvgPicture.asset(
+              'assets/icons/capabilities/help_outline.svg',
+              width: 72,
+              height: 72,
+              colorFilter: const ColorFilter.mode(
+                Color(0xFFA6ABB2),
+                BlendMode.srcIn,
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              '无搜索结果',
+              style: TextStyle(color: _mutedInk, fontSize: 20, height: 1.3),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static Widget _highlightedText(
+    String text,
+    String query, {
+    required TextStyle style,
+    int? maxLines,
+  }) {
+    final normalized = query.trim().toLowerCase();
+    if (normalized.isEmpty) return Text(text, style: style, maxLines: maxLines);
+    final lower = text.toLowerCase();
+    final spans = <TextSpan>[];
+    var cursor = 0;
+    while (cursor < text.length) {
+      final index = lower.indexOf(normalized, cursor);
+      if (index < 0) {
+        spans.add(TextSpan(text: text.substring(cursor)));
+        break;
+      }
+      if (index > cursor) {
+        spans.add(TextSpan(text: text.substring(cursor, index)));
+      }
+      final end = (index + normalized.length).clamp(0, text.length).toInt();
+      spans.add(
+        TextSpan(
+          text: text.substring(index, end),
+          style: style.copyWith(backgroundColor: _highlight),
+        ),
+      );
+      cursor = end;
+    }
+    return Text.rich(
+      TextSpan(style: style, children: spans),
+      maxLines: maxLines,
+      overflow: maxLines == null ? TextOverflow.clip : TextOverflow.ellipsis,
     );
   }
 }
@@ -1799,16 +2266,14 @@ class _SidebarCheck extends StatelessWidget {
         color: selected ? _ReadingSpaceSidebarState._ink : Colors.white,
         borderRadius: BorderRadius.circular(4),
         border: Border.all(
-          color: selected ? _ReadingSpaceSidebarState._ink : const Color(0xFFB8BDC4),
+          color: selected
+              ? _ReadingSpaceSidebarState._ink
+              : const Color(0xFFB8BDC4),
           width: 1.3,
         ),
       ),
       child: selected
-          ? Icon(
-              PhosphorIconsBold.check,
-              size: 14,
-              color: Colors.white,
-            )
+          ? Icon(PhosphorIconsBold.check, size: 14, color: Colors.white)
           : null,
     );
     if (onTap == null) return mark;

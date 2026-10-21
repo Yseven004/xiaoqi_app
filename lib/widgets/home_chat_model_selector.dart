@@ -16,14 +16,15 @@ class HomeChatModelSelector extends StatefulWidget {
     super.key,
     required this.selection,
     required this.onChanged,
+    this.enabled = true,
   });
 
   final HomeChatModelSelection selection;
   final ValueChanged<HomeChatModelSelection> onChanged;
+  final bool enabled;
 
   @override
-  State<HomeChatModelSelector> createState() =>
-      _HomeChatModelSelectorState();
+  State<HomeChatModelSelector> createState() => _HomeChatModelSelectorState();
 }
 
 class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
@@ -47,6 +48,9 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
   @override
   void didUpdateWidget(covariant HomeChatModelSelector oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.enabled && !widget.enabled && _isOpen) {
+      _closeMenu();
+    }
     _scheduleOverlayRefresh();
   }
 
@@ -107,7 +111,10 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
     final anchorRect = localOrigin & anchorObject.size;
     final media = MediaQuery.of(overlayContext);
     final viewport = media.size;
-    final width = math.max(1.0, math.min(_modelMenuMaxWidth, viewport.width - 24));
+    final width = math.max(
+      1.0,
+      math.min(_modelMenuMaxWidth, viewport.width - 24),
+    );
     const preferredPanelHeight = 240.0;
     final safeTop = media.padding.top + 8;
     final availableHeight = math.max(
@@ -196,6 +203,7 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
       child: SizedBox.expand(
         child: Semantics(
           button: true,
+          enabled: widget.enabled,
           expanded: _isOpen,
           label:
               '模型 ${widget.selection.model.name}，思考程度 ${widget.selection.reasoningLevel.label}',
@@ -207,74 +215,79 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
               highlightColor: Colors.transparent,
               hoverColor: Colors.transparent,
               onHighlightChanged: (pressed) {
+                if (!widget.enabled) return;
                 if (_isPressed != pressed) setState(() => _isPressed = pressed);
               },
-              onTap: _toggleMenu,
+              onTap: widget.enabled ? _toggleMenu : null,
               child: Center(
-                child: Container(
-                  key: _anchorKey,
-                  width: double.infinity,
-                  height: 40,
-                  child: AnimatedScale(
-                    scale: _isPressed ? .985 : 1,
-                    duration: const Duration(milliseconds: 140),
-                    curve: Curves.easeOutCubic,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        Positioned.fill(
-                          child: SvgPicture.asset(
-                            'assets/images/home_model_selector_button.svg',
-                            fit: BoxFit.fill,
-                            excludeFromSemantics: true,
+                child: AnimatedOpacity(
+                  opacity: widget.enabled ? 1 : .45,
+                  duration: const Duration(milliseconds: 120),
+                  child: Container(
+                    key: _anchorKey,
+                    width: double.infinity,
+                    height: 40,
+                    child: AnimatedScale(
+                      scale: _isPressed ? .985 : 1,
+                      duration: const Duration(milliseconds: 140),
+                      curve: Curves.easeOutCubic,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Positioned.fill(
+                            child: SvgPicture.asset(
+                              'assets/images/home_model_selector_button.svg',
+                              fit: BoxFit.fill,
+                              excludeFromSemantics: true,
+                            ),
                           ),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          child: Row(
-                            children: [
-                              SvgPicture.asset(
-                                widget.selection.model.iconAsset,
-                                width: 22,
-                                height: 22,
-                                colorFilter:
-                                    widget.selection.model.id ==
-                                            HomeChatModelOption.mimo.id
-                                        ? const ColorFilter.mode(
-                                            Color(0xFFFF6900),
-                                            BlendMode.srcIn,
-                                          )
-                                        : null,
-                                excludeFromSemantics: true,
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  widget.selection.model.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: _ink,
-                                    fontSize: 14.5,
-                                    fontWeight: FontWeight.w500,
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            child: Row(
+                              children: [
+                                SvgPicture.asset(
+                                  widget.selection.model.iconAsset,
+                                  width: 22,
+                                  height: 22,
+                                  colorFilter:
+                                      widget.selection.model.id ==
+                                          HomeChatModelOption.mimo.id
+                                      ? const ColorFilter.mode(
+                                          Color(0xFFFF6900),
+                                          BlendMode.srcIn,
+                                        )
+                                      : null,
+                                  excludeFromSemantics: true,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    widget.selection.model.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: _ink,
+                                      fontSize: 14.5,
+                                      fontWeight: FontWeight.w500,
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 4),
-                              AnimatedRotation(
-                                turns: _isOpen ? .5 : 0,
-                                duration: const Duration(milliseconds: 160),
-                                curve: Curves.easeInOut,
-                                child: Icon(
-                                  PhosphorIconsRegular.caretDown,
-                                  size: 15,
-                                  color: _mutedInk,
+                                const SizedBox(width: 4),
+                                AnimatedRotation(
+                                  turns: _isOpen ? .5 : 0,
+                                  duration: const Duration(milliseconds: 160),
+                                  curve: Curves.easeInOut,
+                                  child: Icon(
+                                    PhosphorIconsRegular.caretDown,
+                                    size: 15,
+                                    color: _mutedInk,
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -321,13 +334,15 @@ class HomeChatModelPickerPanel extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-          for (var index = 0;
-              index < HomeChatModelOption.options.length;
-              index++) ...[
+          for (
+            var index = 0;
+            index < HomeChatModelOption.options.length;
+            index++
+          ) ...[
             _ModelOptionRow(
               model: HomeChatModelOption.options[index],
-              selected: selection.model.id ==
-                  HomeChatModelOption.options[index].id,
+              selected:
+                  selection.model.id == HomeChatModelOption.options[index].id,
               isHomeOverlay: isHomeOverlay,
               onTap: () => onChanged(
                 selection.withModel(HomeChatModelOption.options[index]),
@@ -486,8 +501,9 @@ class _ReasoningLevelControl extends StatelessWidget {
                                   child: DecoratedBox(
                                     decoration: isHomeOverlay
                                         ? BoxDecoration(
-                                            borderRadius:
-                                                BorderRadius.circular(24),
+                                            borderRadius: BorderRadius.circular(
+                                              24,
+                                            ),
                                             boxShadow: const [
                                               BoxShadow(
                                                 color: Color(0x1465717E),
@@ -519,12 +535,14 @@ class _ReasoningLevelControl extends StatelessWidget {
                                         child: Text(
                                           levels[index].label,
                                           style: TextStyle(
-                                            color: levels[index] ==
+                                            color:
+                                                levels[index] ==
                                                     selection.reasoningLevel
                                                 ? _ink
                                                 : _mutedInk,
                                             fontSize: isHomeOverlay ? 15 : 13,
-                                            fontWeight: levels[index] ==
+                                            fontWeight:
+                                                levels[index] ==
                                                     selection.reasoningLevel
                                                 ? FontWeight.w500
                                                 : FontWeight.w400,
@@ -586,9 +604,7 @@ class _ModelOptionRow extends StatelessWidget {
                   curve: Curves.easeOut,
                   child: DecoratedBox(
                     decoration: selected && isHomeOverlay
-                        ? BoxDecoration(
-                            borderRadius: BorderRadius.circular(13),
-                          )
+                        ? BoxDecoration(borderRadius: BorderRadius.circular(13))
                         : const BoxDecoration(),
                     child: Align(
                       alignment: Alignment.center,

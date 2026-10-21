@@ -517,7 +517,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _latestScrollRequiresFollow = false;
   bool _userScrollingMessages = false;
   AiConversationRecord? _conversation;
+  AiConversationRecord? _readingConversationForSpaceSwitch;
   int _conversationPresentationRevision = 0;
+  String? _conversationFocusMessageId;
   int? _selectedReadingTaskBookId;
   String _selectedReadingTaskBookName = '';
   String? _pendingReplyParentId;
@@ -757,6 +759,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) _showReplyError('微信分享中没有可添加的图片或文件');
       return;
     }
+    if (_space != _HomeSpace.reading) _switchSpace(_HomeSpace.reading);
     await _startNewConversation();
     if (!mounted) return;
     await _importPickedFiles(picked, 'wechat');
@@ -884,6 +887,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _toggleAttachmentPanel() async {
+    if (_space != _HomeSpace.reading) return;
     if (_voicePanelVisible || _composerExpanded) return;
     if (_attachmentPanelOpen || _attachmentPanelPending) {
       _setAttachmentPanel(open: false);
@@ -1001,6 +1005,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _addAttachments(int action) async {
+    if (_space != _HomeSpace.reading) return;
     if (_attachments.length >= 9) {
       _showReplyError('每个会话最多添加 9 个文件');
       return;
@@ -1311,6 +1316,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _openDrawingBoard({HomeChatAttachment? editing}) async {
+    if (_space != _HomeSpace.reading) return;
     final conversation = _conversation;
     if (conversation == null) return;
     if (editing == null && _attachments.length >= 9) {
@@ -2146,6 +2152,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _setSelectedModel(HomeChatModelSelection selection) {
+    if (_space != _HomeSpace.reading) return;
     if (_isDeletingReply || _savingMessageEdit) return;
     final current =
         _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
@@ -2176,6 +2183,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _setNetworkMode(String mode) {
+    if (_space != _HomeSpace.reading) return;
     if (!const {'on', 'off'}.contains(mode)) return;
     final current =
         _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
@@ -2549,6 +2557,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _sendMessage() async {
+    if (_space != _HomeSpace.reading) return;
     if (_isSelectingAnswerVersion || _isSelectingQuestionVersion) {
       _showReplyError('版本正在保存，请稍后发送');
       return;
@@ -2845,6 +2854,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _sendAgentInterruption() async {
+    if (_space != _HomeSpace.reading) return;
     final taskId = _activeRemoteAgentTaskId;
     final conversationId = _activeRemoteAgentConversationId;
     final text = _composerController.messageText.trim();
@@ -5577,6 +5587,7 @@ $text''';
   }
 
   Future<void> _openNotesPanel({ChatNoteSourceRecord? chatSource}) async {
+    if (_space != _HomeSpace.reading) return;
     if (_notePanelOpen) return;
     _notePanelOpen = true;
     final conversation = _conversation;
@@ -6487,6 +6498,7 @@ $text''';
     int? bookId,
     String bookName = '',
   }) async {
+    if (_space != _HomeSpace.reading) return;
     _activeSkillWorkflow = null;
     _composerController.clearCapabilities();
     _pendingSkillDraftReview = null;
@@ -6520,6 +6532,7 @@ $text''';
   }
 
   void _startNewConversationForCurrentBookContext() {
+    if (_space != _HomeSpace.reading) return;
     final currentConversation = _conversation;
     final inReadingSpace = _space == _HomeSpace.reading;
     final bookId = inReadingSpace
@@ -6535,6 +6548,7 @@ $text''';
   }
 
   void _startIndependentConversation() {
+    if (_space != _HomeSpace.reading) return;
     unawaited(_startNewConversation());
   }
 
@@ -6650,6 +6664,69 @@ $text''';
     setState(() => _spaceMenuOpen = !_spaceMenuOpen);
   }
 
+  void _switchSpace(_HomeSpace nextSpace) {
+    if (_space == nextSpace) {
+      setState(() => _spaceMenuOpen = false);
+      return;
+    }
+    if (_voicePanelVisible) unawaited(_cancelVoiceInput());
+    _dismissComposerFocus();
+    _setComposerExpanded(false);
+    _abandonMessageEdit();
+    _cacheCurrentDraft();
+
+    if (nextSpace == _HomeSpace.learning) {
+      _readingConversationForSpaceSwitch = _conversation;
+      _requestGeneration++;
+      _abortActiveAgentTurn?.call();
+      _abortActiveAgentTurn = null;
+      _activeCapabilityTaskId = null;
+      _activeRemoteAgentTaskId = null;
+      _activeRemoteAgentConversationId = null;
+      _pendingReplyParentId = null;
+      _pendingContinuationMessageId = null;
+      _continuingReplyId = null;
+      _isContinuingReply = false;
+      _isGenerating = false;
+      _isPreparingToSend = false;
+      _activeSkillWorkflow = null;
+      _pendingSkillDraftReview = null;
+      _clearStreamingReply();
+      _attachments = const [];
+      _annotations = const [];
+      ++_annotationDraftEpoch;
+      _attachmentPanelOpen = false;
+      _attachmentPanelPending = false;
+      _conversation = AiConversationRecord.empty(enableAutoTitle: true);
+      _conversationFocusMessageId = null;
+      _messages.clear();
+      _composerController.setMessage('', null);
+    } else {
+      final conversation =
+          _readingConversationForSpaceSwitch ??
+          AiConversationRecord.empty(enableAutoTitle: true);
+      _readingConversationForSpaceSwitch = null;
+      _conversation = conversation;
+      _conversationFocusMessageId = null;
+      _conversationPresentationRevision++;
+      _messages
+        ..clear()
+        ..addAll(conversation.messages);
+      _clearStreamingReply();
+      _isGenerating = false;
+      _isPreparingToSend = false;
+      _restoreConversationDraft(conversation);
+      unawaited(_resumePendingCapabilityTask(conversation));
+    }
+
+    setState(() {
+      _space = nextSpace;
+      _spaceMenuOpen = false;
+      _taskSearchKeepsComposerFixed = false;
+      _releaseTaskSearchLayoutAfterKeyboardHides = false;
+    });
+  }
+
   Future<void> _openReadingSidebar() async {
     if (_space != _HomeSpace.reading) return;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
@@ -6685,6 +6762,10 @@ $text''';
               },
               onOpenConversation: (record) {
                 _openConversationFromSidebar(record);
+                Navigator.of(dialogContext).pop();
+              },
+              onOpenConversationMatch: (record, messageId) {
+                _openConversationFromSidebar(record, messageId: messageId);
                 Navigator.of(dialogContext).pop();
               },
               onConversationChanged: (record) {
@@ -6727,7 +6808,10 @@ $text''';
     if (action != null) await action();
   }
 
-  void _openConversationFromSidebar(AiConversationRecord record) {
+  void _openConversationFromSidebar(
+    AiConversationRecord record, {
+    String? messageId,
+  }) {
     _activeSkillWorkflow = null;
     _pendingSkillDraftReview = null;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
@@ -6738,6 +6822,7 @@ $text''';
     setState(() {
       _space = _HomeSpace.reading;
       _conversation = record;
+      _conversationFocusMessageId = messageId;
       _conversationPresentationRevision++;
       _continuingReplyId = null;
       _pendingContinuationMessageId = null;
@@ -6754,7 +6839,9 @@ $text''';
     _restoreConversationDraft(record);
     unawaited(_resumePendingCapabilityTask(record));
     unawaited(_reconcileDraftTags(record.id));
-    _scrollToLatest(immediate: true);
+    if (messageId == null) {
+      _scrollToLatest(immediate: true);
+    }
   }
 
   void _cancelReplyBeforeConversationDelete(AiConversationRecord record) {
@@ -6968,6 +7055,8 @@ $text''';
                                                 ),
                                             presentationRevision:
                                                 _conversationPresentationRevision,
+                                            targetMessageId:
+                                                _conversationFocusMessageId,
                                             messages: _messages,
                                             scrollController:
                                                 _messagesScrollController,
@@ -7228,20 +7317,7 @@ $text''';
                         child: Center(
                           child: _SpaceMenu(
                             selectedSpace: _space,
-                            onSelect: (space) {
-                              if (_voicePanelVisible) {
-                                unawaited(_cancelVoiceInput());
-                              }
-                              _dismissComposerFocus();
-                              _setComposerExpanded(false);
-                              setState(() {
-                                _space = space;
-                                _spaceMenuOpen = false;
-                                _taskSearchKeepsComposerFixed = false;
-                                _releaseTaskSearchLayoutAfterKeyboardHides =
-                                    false;
-                              });
-                            },
+                            onSelect: _switchSpace,
                           ),
                         ),
                       ),
@@ -7298,9 +7374,12 @@ $text''';
               children: [
                 Semantics(
                   button: true,
+                  enabled: _space == _HomeSpace.reading,
                   label: '笔记',
                   child: InkResponse(
-                    onTap: () => unawaited(_openNotesPanel()),
+                    onTap: _space == _HomeSpace.reading
+                        ? () => unawaited(_openNotesPanel())
+                        : null,
                     radius: 22,
                     child: SizedBox(
                       width: 44,
@@ -7816,6 +7895,7 @@ class _HomeComposerState extends State<_HomeComposer> {
             >(
               () => _ComposerBlankLongPressGestureRecognizer(
                 shouldAcceptPointer: (event) =>
+                    widget.showReadingTasks &&
                     !widget.focusNode.hasFocus &&
                     _isBlankComposerPosition(event),
                 duration: const Duration(milliseconds: 450),
@@ -8134,7 +8214,10 @@ class _HomeComposerState extends State<_HomeComposer> {
                                         label: '添加内容',
                                         asset:
                                             'assets/images/home_composer_add.svg',
-                                        onTap: widget.onToggleAttachmentPanel,
+                                        enabled: widget.showReadingTasks,
+                                        onTap: widget.showReadingTasks
+                                            ? widget.onToggleAttachmentPanel
+                                            : null,
                                       ),
                                     ),
                                     const Spacer(),
@@ -8144,6 +8227,7 @@ class _HomeComposerState extends State<_HomeComposer> {
                                       height: _homeComposerTapTargetSize,
                                       child: HomeChatModelSelector(
                                         selection: widget.modelSelection,
+                                        enabled: widget.showReadingTasks,
                                         onChanged:
                                             widget.onModelSelectionChanged,
                                       ),
@@ -8156,6 +8240,7 @@ class _HomeComposerState extends State<_HomeComposer> {
                                           label: '语音输入',
                                           asset:
                                               'assets/images/home_composer_microphone.svg',
+                                          enabled: widget.showReadingTasks,
                                         ),
                                       ),
                                     const SizedBox(width: 4),
@@ -8167,7 +8252,8 @@ class _HomeComposerState extends State<_HomeComposer> {
                                           >(
                                             valueListenable: widget.controller,
                                             builder: (context, value, _) =>
-                                                widget.isGenerating &&
+                                                widget.showReadingTasks &&
+                                                    widget.isGenerating &&
                                                     widget.canSteerActiveTask
                                                 ? _AgentTaskComposerButtons(
                                                     canSend: value.text
@@ -8178,6 +8264,8 @@ class _HomeComposerState extends State<_HomeComposer> {
                                                   )
                                                 : _SendButton(
                                                     canSend:
+                                                        widget
+                                                            .showReadingTasks &&
                                                         (value.text
                                                                 .trim()
                                                                 .isNotEmpty ||
@@ -8190,6 +8278,8 @@ class _HomeComposerState extends State<_HomeComposer> {
                                                         !widget
                                                             .isSavingMessageEdit,
                                                     isGenerating:
+                                                        widget
+                                                            .showReadingTasks &&
                                                         widget.isGenerating,
                                                     onSend: widget.onSend,
                                                     onStop: widget.onStop,
@@ -9329,6 +9419,7 @@ class _ConversationMessages extends StatefulWidget {
     required this.onRetryAttachment,
     required this.record,
     required this.presentationRevision,
+    this.targetMessageId,
     required this.messages,
     required this.scrollController,
     required this.isGenerating,
@@ -9367,6 +9458,7 @@ class _ConversationMessages extends StatefulWidget {
 
   final AiConversationRecord record;
   final int presentationRevision;
+  final String? targetMessageId;
   final List<AiConversationMessage> messages;
   final ScrollController scrollController;
   final bool isGenerating;
@@ -9423,6 +9515,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   late ThemeData _assistantMarkdownTheme;
   _MessageSelectionAreaState? _activeSelectionArea;
   final Map<String, GlobalKey> _versionAnchorKeys = {};
+  final Map<String, GlobalKey> _messageAnchorKeys = {};
   final Set<String> _downloadingArtifactKeys = {};
   final Map<String, Future<Uint8List>> _artifactPreviewFutures = {};
   final GlobalKey _messageViewportKey = GlobalKey(
@@ -9441,6 +9534,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   void initState() {
     super.initState();
     _rebuildMessageRows();
+    _scheduleMessageFocus();
   }
 
   @override
@@ -9468,6 +9562,11 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       _versionAnchorEpoch++;
       _versionAnchorKeys.clear();
       _pendingVersionAnchor = null;
+    }
+    if (oldWidget.record.id != widget.record.id ||
+        oldWidget.presentationRevision != widget.presentationRevision ||
+        oldWidget.targetMessageId != widget.targetMessageId) {
+      _scheduleMessageFocus();
     }
     final messagesChanged = !_messagesMatchSnapshot();
     if (messagesChanged) {
@@ -9517,6 +9616,30 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       );
     }
   }
+
+  void _scheduleMessageFocus() {
+    final targetId = widget.targetMessageId;
+    if (targetId == null || targetId.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || widget.targetMessageId != targetId) return;
+      final targetContext = _messageAnchorKeys[targetId]?.currentContext;
+      if (targetContext == null) return;
+      unawaited(
+        Scrollable.ensureVisible(
+          targetContext,
+          alignment: .25,
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    });
+  }
+
+  GlobalKey _messageAnchorKey(String messageId) =>
+      _messageAnchorKeys.putIfAbsent(
+        messageId,
+        () => GlobalKey(debugLabel: 'message:$messageId'),
+      );
 
   bool _hasLatestReplyBody() {
     final streamingText = widget.streamingReply.value.trim();
@@ -10244,7 +10367,10 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                     if (row.text == null) {
                       return KeyedSubtree(
                         key: itemKeys[index],
-                        child: _userMessage(context, row.message),
+                        child: KeyedSubtree(
+                          key: _messageAnchorKey(row.message.id),
+                          child: _userMessage(context, row.message),
+                        ),
                       );
                     }
                     final segments = row.segments!;
@@ -10290,90 +10416,102 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                           );
                     return KeyedSubtree(
                       key: itemKeys[index],
-                      child: Padding(
-                        padding: const EdgeInsets.only(bottom: 20),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (isContinuing)
-                              ValueListenableBuilder<_AgentStreamPresentation>(
-                                valueListenable: widget.agentStreamPresentation,
-                                builder: (context, process, _) =>
-                                    process.currentStep.isEmpty &&
-                                        process.reasoning.isEmpty &&
-                                        process.events.isEmpty
-                                    ? const SizedBox.shrink()
-                                    : _AgentProcessPanel(
-                                        presentation: process,
-                                        onToggle: widget.onToggleAgentProcess,
-                                      ),
-                              )
-                            else if (row.message.hasAgentProcess)
-                              _SavedAgentProcessSummary(
-                                key: ValueKey('process:${row.message.id}'),
-                                summary:
-                                    row.message.agentProcessSummary ?? '思考过程',
-                                details: row.message.agentProcessDetails,
-                                durationMs: row.message.agentProcessDurationMs,
-                                status: savedChatProcessStatus(
-                                  row.message.agentProcessStatus,
-                                  isIncomplete: isStopped,
-                                ),
-                                initialExpanded:
-                                    row.message.agentProcessExpanded,
-                              )
-                            else if (isStopped)
-                              const _AgentStatusHeader(text: '已停止'),
-                            _messageSelection(
-                              row.message,
-                              'assistant:${row.message.id}:${row.message.text.hashCode}',
-                              isLatestAssistant
-                                  ? _measureLatestReplyBody(replyBody)
-                                  : replyBody,
-                            ),
-                            if (row.message.agentWebSources.isNotEmpty)
-                              _AgentSourcesCapsule(
-                                sources: row.message.agentWebSources,
-                                onTap: _showAgentSourcesSheet,
-                              ),
-                            if (row.message.capabilityMetadata != null)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 7, left: 2),
-                                child: CapabilityInlineTag(
-                                  data: row.message.capabilityMetadata!,
-                                  textStyle: const TextStyle(
-                                    color: Color(0xFF24272C),
-                                    fontSize: 16,
+                      child: KeyedSubtree(
+                        key: _messageAnchorKey(row.message.id),
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 20),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (isContinuing)
+                                ValueListenableBuilder<
+                                  _AgentStreamPresentation
+                                >(
+                                  valueListenable:
+                                      widget.agentStreamPresentation,
+                                  builder: (context, process, _) =>
+                                      process.currentStep.isEmpty &&
+                                          process.reasoning.isEmpty &&
+                                          process.events.isEmpty
+                                      ? const SizedBox.shrink()
+                                      : _AgentProcessPanel(
+                                          presentation: process,
+                                          onToggle: widget.onToggleAgentProcess,
+                                        ),
+                                )
+                              else if (row.message.hasAgentProcess)
+                                _SavedAgentProcessSummary(
+                                  key: ValueKey('process:${row.message.id}'),
+                                  summary:
+                                      row.message.agentProcessSummary ?? '思考过程',
+                                  details: row.message.agentProcessDetails,
+                                  durationMs:
+                                      row.message.agentProcessDurationMs,
+                                  status: savedChatProcessStatus(
+                                    row.message.agentProcessStatus,
+                                    isIncomplete: isStopped,
                                   ),
-                                  onTap:
-                                      row.message.capabilityMetadata?['type'] ==
-                                          'draft'
-                                      ? () {
-                                          final id = row
-                                              .message
-                                              .capabilityMetadata?['draft_id']
-                                              ?.toString();
-                                          if (id != null && id.isNotEmpty) {
-                                            widget.onOpenDraftReview(id);
+                                  initialExpanded:
+                                      row.message.agentProcessExpanded,
+                                )
+                              else if (isStopped)
+                                const _AgentStatusHeader(text: '已停止'),
+                              _messageSelection(
+                                row.message,
+                                'assistant:${row.message.id}:${row.message.text.hashCode}',
+                                isLatestAssistant
+                                    ? _measureLatestReplyBody(replyBody)
+                                    : replyBody,
+                              ),
+                              if (row.message.agentWebSources.isNotEmpty)
+                                _AgentSourcesCapsule(
+                                  sources: row.message.agentWebSources,
+                                  onTap: _showAgentSourcesSheet,
+                                ),
+                              if (row.message.capabilityMetadata != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    top: 7,
+                                    left: 2,
+                                  ),
+                                  child: CapabilityInlineTag(
+                                    data: row.message.capabilityMetadata!,
+                                    textStyle: const TextStyle(
+                                      color: Color(0xFF24272C),
+                                      fontSize: 16,
+                                    ),
+                                    onTap:
+                                        row
+                                                .message
+                                                .capabilityMetadata?['type'] ==
+                                            'draft'
+                                        ? () {
+                                            final id = row
+                                                .message
+                                                .capabilityMetadata?['draft_id']
+                                                ?.toString();
+                                            if (id != null && id.isNotEmpty) {
+                                              widget.onOpenDraftReview(id);
+                                            }
                                           }
-                                        }
-                                      : null,
-                                ),
-                              ),
-                            if (row.message.outputArtifacts.isNotEmpty)
-                              _assistantArtifactCards(row.message),
-                            if (isStopped)
-                              _continueReplyButton(
-                                () => unawaited(
-                                  widget.onContinueIncompleteReply(
-                                    row.message.id,
+                                        : null,
                                   ),
                                 ),
-                              ),
-                            if (!widget.isGenerating)
-                              _replyActionBar(row.message),
-                          ],
+                              if (row.message.outputArtifacts.isNotEmpty)
+                                _assistantArtifactCards(row.message),
+                              if (isStopped)
+                                _continueReplyButton(
+                                  () => unawaited(
+                                    widget.onContinueIncompleteReply(
+                                      row.message.id,
+                                    ),
+                                  ),
+                                ),
+                              if (!widget.isGenerating)
+                                _replyActionBar(row.message),
+                            ],
+                          ),
                         ),
                       ),
                     );
@@ -11699,17 +11837,20 @@ class _EmptyIconButton extends StatelessWidget {
   const _EmptyIconButton({
     required this.label,
     required this.asset,
+    this.enabled = true,
     this.onTap,
   });
 
   final String label;
   final String asset;
+  final bool enabled;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       button: true,
+      enabled: enabled,
       label: label,
       child: GestureDetector(
         onTap: onTap,
@@ -11718,12 +11859,16 @@ class _EmptyIconButton extends StatelessWidget {
           width: _homeComposerTapTargetSize,
           height: _homeComposerTapTargetSize,
           child: Center(
-            child: _ComposerGlassControl(
-              child: SvgPicture.asset(
-                asset,
-                width: 27,
-                height: 27,
-                fit: BoxFit.contain,
+            child: AnimatedOpacity(
+              opacity: enabled ? 1 : .45,
+              duration: const Duration(milliseconds: 120),
+              child: _ComposerGlassControl(
+                child: SvgPicture.asset(
+                  asset,
+                  width: 27,
+                  height: 27,
+                  fit: BoxFit.contain,
+                ),
               ),
             ),
           ),
