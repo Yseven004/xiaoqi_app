@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'chat_annotation.dart';
 
 /// A private local copy attached to a home chat message.
 class HomeChatAttachment {
@@ -24,6 +25,11 @@ class HomeChatAttachment {
     this.preparationPageCount,
     this.preparationCompletedPages,
     this.preparationExpiresAt,
+    this.originalImagePath,
+    this.originalImageName,
+    this.annotationImagePath,
+    this.imageAnnotations = const [],
+    this.annotationSnapshotDirty = false,
   });
 
   final String id;
@@ -45,6 +51,11 @@ class HomeChatAttachment {
   final int? preparationPageCount;
   final int? preparationCompletedPages;
   final DateTime? preparationExpiresAt;
+  final String? originalImagePath;
+  final String? originalImageName;
+  final String? annotationImagePath;
+  final List<ChatAnnotation> imageAnnotations;
+  final bool annotationSnapshotDirty;
 
   bool get isImage => mimeType.startsWith('image/');
   bool get exists => File(path).existsSync();
@@ -69,6 +80,13 @@ class HomeChatAttachment {
     'preparation_page_count': preparationPageCount,
     'preparation_completed_pages': preparationCompletedPages,
     'preparation_expires_at': preparationExpiresAt?.toUtc().toIso8601String(),
+    if (originalImagePath != null) 'original_image_path': originalImagePath,
+    if (originalImageName != null) 'original_image_name': originalImageName,
+    if (annotationImagePath != null)
+      'annotation_image_path': annotationImagePath,
+    if (imageAnnotations.isNotEmpty)
+      'image_annotations': imageAnnotations.map((a) => a.toJson()).toList(),
+    if (annotationSnapshotDirty) 'annotation_snapshot_dirty': true,
   };
 
   factory HomeChatAttachment.fromJson(Object? raw) {
@@ -103,6 +121,15 @@ class HomeChatAttachment {
       preparationExpiresAt: DateTime.tryParse(
         raw['preparation_expires_at']?.toString() ?? '',
       ),
+      originalImagePath: raw['original_image_path'] as String?,
+      originalImageName: raw['original_image_name'] as String?,
+      annotationImagePath: raw['annotation_image_path'] as String?,
+      imageAnnotations: raw['image_annotations'] is List
+          ? (raw['image_annotations'] as List)
+                .map(ChatAnnotation.fromJson)
+                .toList()
+          : const [],
+      annotationSnapshotDirty: raw['annotation_snapshot_dirty'] == true,
     );
   }
 
@@ -121,6 +148,8 @@ class HomeChatAttachment {
     int? preparationPageCount,
     int? preparationCompletedPages,
     DateTime? preparationExpiresAt,
+    List<ChatAnnotation>? imageAnnotations,
+    bool? annotationSnapshotDirty,
   }) => HomeChatAttachment(
     id: id,
     name: name,
@@ -148,5 +177,11 @@ class HomeChatAttachment {
     preparationCompletedPages:
         preparationCompletedPages ?? this.preparationCompletedPages,
     preparationExpiresAt: preparationExpiresAt ?? this.preparationExpiresAt,
+    originalImagePath: originalImagePath,
+    originalImageName: originalImageName,
+    annotationImagePath: annotationImagePath,
+    imageAnnotations: imageAnnotations ?? this.imageAnnotations,
+    annotationSnapshotDirty:
+        annotationSnapshotDirty ?? this.annotationSnapshotDirty,
   );
 }

@@ -23,6 +23,17 @@ class HomeChatDrawingResult {
   final String draftPath;
 }
 
+/// Lets an image viewer export its inline drawing surface without navigation.
+class DrawingSurfaceController {
+  _DrawingBoardPageState? _state;
+  bool get hasChanges =>
+      _state?._controller.performedActions.isNotEmpty ?? false;
+  Future<HomeChatDrawingResult?> export() async => _state?._exportForHost();
+  Future<Uint8List?> snapshot() =>
+      _state?._renderExport() ?? Future<Uint8List?>.value();
+  void suspendTools() => _state?._suspendTools();
+}
+
 class DrawingBoardPage extends StatefulWidget {
   const DrawingBoardPage({
     required this.conversationId,
@@ -30,6 +41,10 @@ class DrawingBoardPage extends StatefulWidget {
     this.draftPath,
     this.draftStore,
     this.imagePicker,
+    this.imageAspectRatio,
+    this.embedded = false,
+    this.surfaceController,
+    this.showToolbar = true,
     super.key,
   });
 
@@ -38,6 +53,10 @@ class DrawingBoardPage extends StatefulWidget {
   final String? draftPath;
   final HomeChatDrawingDraftStore? draftStore;
   final Future<Uint8List?> Function(ImageSource source)? imagePicker;
+  final double? imageAspectRatio;
+  final bool embedded;
+  final DrawingSurfaceController? surfaceController;
+  final bool showToolbar;
 
   @override
   State<DrawingBoardPage> createState() => _DrawingBoardPageState();
@@ -91,6 +110,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   bool _textEditing = false;
   Size _canvasSize = Size.zero;
   Size _canvasViewSize = Size.zero;
+  Size? _imageSceneSize;
   ObjectDrawable? _selectedObject;
   bool _showImageDeleteButton = false;
   ObjectDrawable? _transformBaseDrawable;
@@ -130,6 +150,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   @override
   void initState() {
     super.initState();
+    widget.surfaceController?._state = this;
     _store =
         widget.draftStore ??
         HomeChatDrawingDraftStore(accountScope: widget.accountScope);
@@ -149,6 +170,9 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
 
   @override
   void dispose() {
+    if (identical(widget.surfaceController?._state, this)) {
+      widget.surfaceController?._state = null;
+    }
     _saveTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _controller.removeListener(_onControllerChanged);
@@ -179,6 +203,16 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
         widget.conversationId,
         draftPath: widget.draftPath,
       );
+      final storedSize = draft.document['canvasSize'];
+      if (widget.embedded &&
+          storedSize is List &&
+          storedSize.length == 2 &&
+          storedSize.every((v) => v is num && v.isFinite && v > 0)) {
+        _imageSceneSize = Size(
+          (storedSize[0] as num).toDouble(),
+          (storedSize[1] as num).toDouble(),
+        );
+      }
       if (draft.backgroundBytes case final bytes?) {
         await _setBackground(bytes, persist: false);
         _backgroundPath = draft.document['backgroundPath'] as String?;
@@ -260,6 +294,8 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       final saved = <String, Object?>{
         ...document,
         'backgroundPath': _backgroundPath,
+        if (!_currentCanvasSize.isEmpty)
+          'canvasSize': [_currentCanvasSize.width, _currentCanvasSize.height],
       };
       final savedBackgroundPath = await _store.save(
         draft.path,
@@ -936,12 +972,14 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     _selectedObject = null;
     _showImageDeleteButton = false;
     _controller.deselectObjectDrawable();
-    _backgroundImage?.dispose();
-    _backgroundImage = null;
-    _backgroundBytes = null;
-    _backgroundPath = null;
-    _backgroundNeedsWrite = false;
-    _controller.background = const ColorBackgroundDrawable(color: _paper);
+    if (!widget.embedded) {
+      _backgroundImage?.dispose();
+      _backgroundImage = null;
+      _backgroundBytes = null;
+      _backgroundPath = null;
+      _backgroundNeedsWrite = false;
+      _controller.background = const ColorBackgroundDrawable(color: _paper);
+    }
     setState(() {
       _colorPopoverOpen = false;
       _imagePopoverOpen = false;
@@ -954,7 +992,15 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   }
 
   Future<void> _finish() async {
-    if (!_canEdit || !_hasContent) return;
+    final result = await _exportForHost();
+    if (result != null && mounted && !widget.embedded) {
+      Navigator.of(context).pop(result);
+    }
+  }
+
+  Future<HomeChatDrawingResult?> _exportForHost() async {
+    if (_textEditing) _commitInlineText();
+    if (!_canEdit || !_hasContent) return null;
     setState(() {
       _saving = true;
       _saveError = null;
@@ -966,11 +1012,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       final result = await _renderExport();
       final draft = _draft;
       if (draft == null) throw const FormatException('绘图草稿不存在');
-      if (mounted) {
-        Navigator.of(
-          context,
-        ).pop(HomeChatDrawingResult(pngBytes: result, draftPath: draft.path));
-      }
+      return HomeChatDrawingResult(pngBytes: result, draftPath: draft.path);
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -981,6 +1023,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+    return null;
   }
 
   Future<Uint8List> _renderExport() async {
@@ -991,7 +1034,13 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       Size(960, 1200),
       Size(768, 960),
     ];
-    for (final size in sizes) {
+    for (final candidate in sizes) {
+      final aspect = widget.imageAspectRatio;
+      final size = aspect == null
+          ? candidate
+          : aspect >= 1
+          ? Size(candidate.height, candidate.height / aspect)
+          : Size(candidate.height * aspect, candidate.height);
       final canvas = await _controller.renderImage(size);
       try {
         final data = await canvas.toByteData(format: ui.ImageByteFormat.png);
@@ -1045,6 +1094,15 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    if (widget.embedded) {
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          _canvasViewSize = constraints.biggest;
+          _imageSceneSize ??= constraints.biggest;
+          return _buildCanvasCard(colors, constraints.biggest);
+        },
+      );
+    }
     return PopScope<Object?>(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
@@ -1064,7 +1122,8 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
                   final availableWidth = screen.maxWidth;
                   final availableHeight = screen.maxHeight;
                   final isPortrait = availableHeight >= availableWidth;
-                  final aspectRatio = isPortrait ? 3 / 4 : 8 / 5;
+                  final aspectRatio =
+                      widget.imageAspectRatio ?? (isPortrait ? 3 / 4 : 8 / 5);
                   final maxWidth = availableWidth * .9;
                   final maxHeight = availableHeight * .76;
                   final defaultWidth = math.min(
@@ -1072,8 +1131,15 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
                     maxHeight * aspectRatio,
                   );
                   final defaultHeight = defaultWidth / aspectRatio;
-                  final width = _expanded ? availableWidth : defaultWidth;
-                  final height = _expanded ? availableHeight : defaultHeight;
+                  final expandedWidth = widget.imageAspectRatio == null
+                      ? availableWidth
+                      : math.min(availableWidth, availableHeight * aspectRatio);
+                  final width = _expanded ? expandedWidth : defaultWidth;
+                  final height = _expanded
+                      ? (widget.imageAspectRatio == null
+                            ? availableHeight
+                            : expandedWidth / aspectRatio)
+                      : defaultHeight;
 
                   return Center(
                     child: AnimatedContainer(
@@ -1131,9 +1197,26 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
             child: AbsorbPointer(
               key: const ValueKey('drawing-canvas-edit-lock'),
               absorbing: !_canEdit,
-              child: FlutterPainter(
-                controller: _controller,
-                onSelectedObjectDrawableChanged: _handlePainterObjectSelection,
+              child: Builder(
+                builder: (context) {
+                  final painter = RepaintBoundary(
+                    key: const ValueKey('drawing-canvas-repaint-boundary'),
+                    child: FlutterPainter(
+                      controller: _controller,
+                      onSelectedObjectDrawableChanged:
+                          _handlePainterObjectSelection,
+                    ),
+                  );
+                  if (!widget.embedded) return painter;
+                  return FittedBox(
+                    fit: BoxFit.fill,
+                    child: SizedBox(
+                      width: _imageSceneSize!.width,
+                      height: _imageSceneSize!.height,
+                      child: painter,
+                    ),
+                  );
+                },
               ),
             ),
           ),
@@ -1165,12 +1248,13 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           ),
         ),
       if (_textEditing) _buildInlineTextEditor(size),
-      Positioned(
-        top: 8,
-        left: 12,
-        right: 12,
-        child: _buildToolbar(colors, size),
-      ),
+      if (widget.showToolbar)
+        Positioned(
+          top: 8,
+          left: 12,
+          right: 12,
+          child: _buildToolbar(colors, size),
+        ),
       if (_colorPopoverOpen || _imagePopoverOpen || _eraserPopoverOpen)
         Positioned.fill(
           child: GestureDetector(
@@ -1229,7 +1313,8 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
             ),
           ),
         ),
-      Positioned(right: 14, bottom: 14, child: _buildFinishButton()),
+      if (!widget.embedded)
+        Positioned(right: 14, bottom: 14, child: _buildFinishButton()),
     ],
   );
 
@@ -1269,6 +1354,14 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       _imagePopoverOpen = false;
       _eraserPopoverOpen = false;
     });
+  }
+
+  void _suspendTools() {
+    if (_textEditing) _commitInlineText();
+    _textFocusNode.unfocus();
+    _dismissPopovers();
+    _hideEraserCursor();
+    _deselectObject();
   }
 
   Widget _buildInlineTextEditor(Size canvasSize) => Positioned.fill(
@@ -1419,17 +1512,18 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
                 ),
               ),
             ),
-            _toolbarIconButton(
-              key: const ValueKey('drawing-expand'),
-              tooltip: _expanded ? '还原画板' : '放大画板',
-              icon: 'assets/images/home_composer_expand.svg',
-              color: _ink,
-              onPressed: _canEdit
-                  ? () => setState(() => _expanded = !_expanded)
-                  : null,
-              width: sideWidth,
-              iconSize: iconSize,
-            ),
+            if (!widget.embedded)
+              _toolbarIconButton(
+                key: const ValueKey('drawing-expand'),
+                tooltip: _expanded ? '还原画板' : '放大画板',
+                icon: 'assets/images/home_composer_expand.svg',
+                color: _ink,
+                onPressed: _canEdit
+                    ? () => setState(() => _expanded = !_expanded)
+                    : null,
+                width: sideWidth,
+                iconSize: iconSize,
+              ),
           ],
         ),
       );

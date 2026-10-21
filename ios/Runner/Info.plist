@@ -74,6 +74,8 @@
 	<string>小七需要相机权限来拍照记录笔记</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>小七需要相册权限来选择图片</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>小七需要将图片保存到您的照片图库</string>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

@@ -43,9 +43,11 @@ import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
 import '../services/book_library_service.dart';
 import '../services/ai_service.dart';
-import '../services/database_service.dart';
 import '../services/home_chat_attachment_preparer.dart';
 import '../services/home_chat_drawing_draft_store.dart';
+import '../models/chat_annotation.dart';
+import '../widgets/chat_annotation_controls.dart';
+import '../widgets/chat_image_gallery.dart';
 import '../services/home_chat_model_preferences.dart';
 import '../services/speech_recognition_service.dart';
 import '../widgets/reading_task_book_creation.dart';
@@ -541,6 +543,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _loadingRecentPhotos = false;
   bool _preparingAttachments = false;
   List<HomeChatAttachment> _attachments = const [];
+  List<ChatAnnotation> _annotations = const [];
+  Future<void> _annotationSaveQueue = Future<void>.value();
+  int _annotationDraftEpoch = 0;
   Map<String, Object?>? _activeSkillWorkflow;
   CapabilityDraft? _pendingSkillDraftReview;
   String? _activeCapabilityTaskId;
@@ -779,10 +784,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     _attachmentPanelOpen = false;
     _attachments = const [];
+    _annotations = const [];
+    ++_annotationDraftEpoch;
     unawaited(_loadAttachments(conversation.id));
   }
 
   Future<void> _loadAttachments(String conversationId) async {
+    await _loadAnnotationDraft(conversationId);
     final preferences = await SharedPreferences.getInstance();
     final raw = preferences.getString(
       'home-chat-draft-attachments:$conversationId',
@@ -800,7 +808,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           .where((item) => item.exists)
           .toList(growable: false);
       if (_conversation?.id == conversationId) {
-        setState(() => _attachments = restored);
+        setState(() {
+          _attachments = restored;
+          _annotations = [
+            ..._annotations.where((a) => !a.isImage),
+            ...restored.expand((a) => a.imageAnnotations),
+          ];
+        });
         for (final attachment in restored) {
           _attachmentPreparer.start(attachment);
         }
@@ -814,16 +828,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_editingQuestion != null) return;
     final id = _conversation?.id;
     if (id == null) return;
+    final snapshot = _attachments
+        .where((item) => item.exists)
+        .map((item) => item.toJson())
+        .toList();
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    final saved = await preferences.setString(
       'home-chat-draft-attachments:$id',
-      jsonEncode(
-        _attachments
-            .where((item) => item.exists)
-            .map((item) => item.toJson())
-            .toList(),
-      ),
+      jsonEncode(snapshot),
     );
+    if (!saved) throw StateError('附件草稿保存失败');
   }
 
   void _onAttachmentPreparationChanged() {
@@ -1262,6 +1276,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _removeAttachment(HomeChatAttachment attachment) async {
+    _annotations = _annotations
+        .where((a) => a.attachmentId != attachment.id)
+        .toList();
     _removedAttachmentIds.add(attachment.id);
     _cancelAttachmentPreparation(attachment);
     _attachments = _attachments
@@ -1430,11 +1447,341 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _loadAnnotationDraft(String conversationId) async {
+    final epoch = _annotationDraftEpoch;
+    await _annotationSaveQueue.catchError((Object _) {});
+    final scope = await _currentDrawingAccountScope();
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('home-chat-annotations:$scope:$conversationId');
+    if (!mounted ||
+        epoch != _annotationDraftEpoch ||
+        _conversation?.id != conversationId) {
+      return;
+    }
+    try {
+      final values = raw == null
+          ? <ChatAnnotation>[]
+          : (jsonDecode(raw) as List)
+                .map(ChatAnnotation.fromJson)
+                .where((a) => !a.isImage && a.quote.isNotEmpty)
+                .toList();
+      setState(
+        () =>
+            _annotations = [...values, ..._annotations.where((a) => a.isImage)],
+      );
+    } on FormatException {
+      _showReplyError('注释草稿无法读取');
+    } on TypeError {
+      _showReplyError('注释草稿无法读取');
+    }
+  }
+
+  Future<void> _persistAnnotationDraft() {
+    final id = _conversation?.id;
+    if (id == null || _editingQuestion != null) return Future<void>.value();
+    final values = _annotations
+        .where((a) => !a.isImage)
+        .map((a) => a.toJson())
+        .toList();
+    final scope = _currentDrawingAccountScope();
+    return _annotationSaveQueue = _annotationSaveQueue
+        .catchError((Object _) {})
+        .then((_) async {
+          final key = 'home-chat-annotations:${await scope}:$id';
+          final prefs = await SharedPreferences.getInstance();
+          if (!await prefs.setString(key, jsonEncode(values))) {
+            throw StateError('注释草稿保存失败');
+          }
+        });
+  }
+
+  void _applyAnnotations(List<ChatAnnotation> values) {
+    ++_annotationDraftEpoch;
+    setState(() {
+      _annotations = List.of(values);
+      _attachments = _attachments.map((item) {
+        if (item.originalImagePath == null) return item;
+        final comments = values
+            .where((a) => a.attachmentId == item.id)
+            .toList();
+        final changed =
+            jsonEncode(comments.map((a) => a.toJson()).toList()) !=
+            jsonEncode(item.imageAnnotations.map((a) => a.toJson()).toList());
+        return item.copyWith(
+          imageAnnotations: comments,
+          annotationSnapshotDirty: item.annotationSnapshotDirty || changed,
+        );
+      }).toList();
+    });
+    unawaited(
+      _persistAnnotationDraft().catchError((Object _) {
+        if (mounted) _showReplyError('注释草稿保存失败，请重试');
+      }),
+    );
+    unawaited(
+      _persistAttachments().catchError((Object _) {
+        if (mounted) _showReplyError('附件注释保存失败，请重试');
+      }),
+    );
+  }
+
+  Future<void> _annotateText(ChatAnnotation annotation, Offset anchor) async {
+    if (_editingQuestion != null) {
+      _showReplyError('请先完成当前消息修改');
+      return;
+    }
+    final conversationId = _conversation?.id;
+    if (conversationId == null) return;
+    if (!_annotations.any((a) => a.id == annotation.id)) {
+      _applyAnnotations([..._annotations, annotation]);
+    }
+    final comment = await _showAnnotationComment(
+      initialText: annotation.comment,
+      anchor: anchor,
+    );
+    if (!mounted || _conversation?.id != conversationId || comment == null) {
+      return;
+    }
+    _applyAnnotations(
+      _annotations
+          .map((a) => a.id == annotation.id ? a.copyWith(comment: comment) : a)
+          .toList(),
+    );
+  }
+
+  Future<String?> _showAnnotationComment({
+    required String initialText,
+    required Offset anchor,
+  }) async {
+    final alreadyLocked = _keyboardOverlayLayoutLocked;
+    if (!alreadyLocked && mounted) {
+      setState(() => _keyboardOverlayLayoutLocked = true);
+    }
+    try {
+      return await showChatAnnotationComment(
+        context,
+        initialText: initialText,
+        anchor: anchor,
+      );
+    } finally {
+      if (!alreadyLocked) _releaseKeyboardOverlayLayoutLockSafely();
+    }
+  }
+
+  void _reviewAnnotations() {
+    if (_editingQuestion != null) return;
+    final id = _conversation?.id;
+    unawaited(
+      showChatAnnotationReview(
+        context,
+        annotations: _annotations,
+        onEditComment: (initialText, anchor) =>
+            _showAnnotationComment(initialText: initialText, anchor: anchor),
+        onChanged: (values) {
+          if (mounted && _conversation?.id == id) _applyAnnotations(values);
+        },
+      ),
+    );
+  }
+
+  Future<void> _openPendingImage(HomeChatAttachment attachment) async {
+    final images = _attachments
+        .where((a) => a.isImage)
+        .map((a) => ChatImageSource.fromAttachment(a, pending: true))
+        .toList();
+    final index = images.indexWhere((a) => a.id == attachment.id);
+    if (index >= 0) await _openImageGallery(images, index);
+  }
+
+  Future<void> _openImageGallery(
+    List<ChatImageSource> images,
+    int index,
+  ) async {
+    final id = _conversation?.id;
+    if (id == null || images.isEmpty) return;
+    _dismissComposerFocus();
+    final scope = await _currentDrawingAccountScope();
+    if (!mounted || _conversation?.id != id) return;
+    await Navigator.of(context).push<void>(
+      PageRouteBuilder<void>(
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => ChatImageGallery(
+          images: images,
+          initialIndex: index,
+          conversationId: id,
+          accountScope: scope,
+          onComplete: (edits) => _stageImageEdits(id, scope, edits),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _stageImageEdits(
+    String conversationId,
+    String scope,
+    List<ChatImageEdit> edits,
+  ) async {
+    if (!mounted ||
+        _conversation?.id != conversationId ||
+        await _currentDrawingAccountScope() != scope) {
+      throw StateError('会话或账号已变化，编辑尚未提交');
+    }
+    if (_editingQuestion != null) throw StateError('请先完成当前消息修改');
+    if (_attachments.length + edits.where((e) => !e.source.pending).length >
+        9) {
+      throw StateError('最多添加 9 个附件，请先移除部分附件；本次编辑已保留');
+    }
+    final previous = _attachments;
+    final previousAnnotations = _annotations;
+    final created = <File>[];
+    try {
+      final root = await getApplicationSupportDirectory();
+      final safeId = conversationId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+      final directory = Directory(
+        '${root.path}/home_chat_image_edits/$scope/$safeId',
+      );
+      await directory.create(recursive: true);
+      var updated = List<HomeChatAttachment>.of(previous);
+      var annotations = List<ChatAnnotation>.of(previousAnnotations);
+      for (final edit in edits) {
+        final id = edit.source.pending
+            ? edit.source.id
+            : 'image_${DateTime.now().microsecondsSinceEpoch}';
+        if (edit.source.pending && !updated.any((a) => a.id == id)) {
+          throw StateError('待发送图片已被移除');
+        }
+        final stem =
+            '${directory.path}/${DateTime.now().microsecondsSinceEpoch}';
+        Future<File> write(String suffix, Uint8List bytes) async {
+          final file = File('$stem.$suffix');
+          final temp = File('${file.path}.tmp');
+          created.add(temp);
+          await temp.writeAsBytes(bytes, flush: true);
+          await temp.rename(file.path);
+          created.add(file);
+          return file;
+        }
+
+        final original = await write('original', edit.originalBytes);
+        final clean = await write('working', edit.imageBytes);
+        final comments = edit.annotations
+            .map((a) => a.copyWith(attachmentId: id))
+            .toList();
+        final png = await renderChatAnnotatedImage(edit.imageBytes, comments);
+        if (png.length > 5 * 1024 * 1024) {
+          throw StateError('标注图片超过 5 MB，请简化标注后重试');
+        }
+        final image = await write('png', png);
+        final base = edit.source.name
+            .replaceAll(RegExp(r'[\\/:*?"<>|\u0000-\u001F]'), '_')
+            .replaceFirst(RegExp(r'\.[^.]+$'), '');
+        final attachment = HomeChatAttachment(
+          id: id,
+          name: '标注_$base.png',
+          path: image.path,
+          mimeType: 'image/png',
+          byteLength: png.length,
+          source: 'drawing',
+          originalImagePath: original.path,
+          originalImageName: edit.source.name,
+          annotationImagePath: clean.path,
+          imageAnnotations: comments,
+          drawingDraftPath: edit.drawingDraftPath,
+          drawingDraftScope: scope,
+        );
+        if (edit.source.pending) {
+          updated = updated.map((a) => a.id == id ? attachment : a).toList();
+        } else {
+          updated.add(attachment);
+        }
+        annotations = [
+          ...annotations.where((a) => a.attachmentId != id),
+          ...comments,
+        ];
+      }
+      if (!mounted ||
+          _conversation?.id != conversationId ||
+          await _currentDrawingAccountScope() != scope) {
+        throw StateError('会话或账号已变化，编辑尚未提交');
+      }
+      setState(() {
+        _attachments = updated;
+        _annotations = annotations;
+      });
+      await _persistAttachments();
+      for (final edit in edits) {
+        if (edit.source.pending && edit.source.attachment != null) {
+          _cancelAttachmentPreparation(edit.source.attachment!);
+        }
+      }
+      for (final a in updated.where((a) => !previous.contains(a))) {
+        _attachmentPreparer.start(a);
+      }
+    } catch (_) {
+      if (mounted && _conversation?.id == conversationId) {
+        setState(() {
+          _attachments = previous;
+          _annotations = previousAnnotations;
+        });
+        try {
+          await _persistAttachments();
+        } catch (_) {}
+      }
+      for (final file in created.reversed) {
+        try {
+          if (await file.exists()) await file.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _refreshAnnotationSnapshots() async {
+    final id = _conversation?.id;
+    for (final attachment in List<HomeChatAttachment>.of(_attachments)) {
+      if (!attachment.annotationSnapshotDirty) continue;
+      final bytes = await File(
+        attachment.annotationImagePath ?? attachment.path,
+      ).readAsBytes();
+      final png = await renderChatAnnotatedImage(
+        bytes,
+        attachment.imageAnnotations,
+      );
+      if (png.length > 5 * 1024 * 1024) throw StateError('标注图片超过 5 MB');
+      final file = File(
+        '${attachment.path}.${DateTime.now().microsecondsSinceEpoch}.png',
+      );
+      await file.writeAsBytes(png, flush: true);
+      if (!mounted ||
+          _conversation?.id != id ||
+          !_attachments.any((a) => a.id == attachment.id)) {
+        await file.delete();
+        return;
+      }
+      _cancelAttachmentPreparation(attachment);
+      final refreshed = attachment.copyWith(
+        path: file.path,
+        byteLength: png.length,
+        remoteAttachmentId: null,
+        contentHash: '',
+        annotationSnapshotDirty: false,
+      );
+      setState(
+        () => _attachments = _attachments
+            .map((a) => a.id == attachment.id ? refreshed : a)
+            .toList(),
+      );
+      await _persistAttachments();
+    }
+  }
+
   Future<void> _deleteDrawingDrafts(
     String conversationId,
     Iterable<HomeChatAttachment> attachments,
   ) async {
     for (final attachment in attachments) {
+      if (attachment.originalImagePath != null) continue;
       final path = attachment.drawingDraftPath;
       if (path == null) continue;
       try {
@@ -2173,8 +2520,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _voicePanelVisible) {
       return;
     }
+    if (_attachments.any((a) => a.annotationSnapshotDirty)) {
+      setState(() => _isPreparingToSend = true);
+      try {
+        await _refreshAnnotationSnapshots();
+      } catch (_) {
+        if (mounted) _showReplyError('图片注释保存失败，内容已保留，请重试');
+        return;
+      } finally {
+        if (mounted) setState(() => _isPreparingToSend = false);
+      }
+      if (!mounted) return;
+    }
     final rawText = _composerController.messageText;
-    final text = rawText.trim();
+    final annotationsForMessage = List<ChatAnnotation>.of(_annotations);
+    final text = appendChatAnnotations(
+      rawText.trim(),
+      annotationsForMessage,
+      attachmentNames: {for (final a in _attachments) a.id: a.name},
+    );
     final selectedCapability = _composerController.messageMetadata();
     _normalizeCapabilityTextOffset(selectedCapability, rawText, text);
     final capabilityForMessage = selectedCapability ?? _activeSkillWorkflow;
@@ -2226,7 +2590,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         : capabilityForMessage['name']?.toString();
     var withUserMessage = current.copyWith(
       title: current.title.trim().isEmpty
-          ? (text.isEmpty ? capabilityTitle ?? '能力任务' : text)
+          ? (rawText.trim().isNotEmpty
+                ? rawText.trim()
+                : annotationsForMessage.isNotEmpty
+                ? '注释讨论'
+                : capabilityTitle ?? '能力任务')
           : current.title,
       messages: [...current.messages, userMessage],
       updatedAt: now,
@@ -2240,6 +2608,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _isContinuingReply = false;
     final requestGeneration = ++_requestGeneration;
     final conversationId = withUserMessage.id;
+
+    void restoreAnnotationDraft() {
+      if (!mounted ||
+          _conversation?.id != conversationId ||
+          (annotationsForMessage.isEmpty &&
+              !selectedAttachments.any((a) => a.originalImagePath != null))) {
+        return;
+      }
+      final ids = _annotations.map((a) => a.id).toSet();
+      setState(() {
+        _annotations = [
+          ...annotationsForMessage.where((a) => !ids.contains(a.id)),
+          ..._annotations,
+        ];
+        final attachmentIds = _attachments.map((a) => a.id).toSet();
+        _attachments = [
+          ...selectedAttachments.where((a) => !attachmentIds.contains(a.id)),
+          ..._attachments,
+        ];
+      });
+      if (_composerController.messageText.isEmpty) {
+        _composerController.setMessage(rawText, selectedCapability);
+      }
+      unawaited(_persistAnnotationDraft().catchError((Object _) {}));
+      unawaited(_persistAttachments().catchError((Object _) {}));
+    }
 
     setState(() {
       _conversation = withUserMessage;
@@ -2267,6 +2661,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _bookConversationFallbacks[bookId] = withUserMessage;
     }
     _attachments = const [];
+    _annotations = const [];
+    ++_annotationDraftEpoch;
+    unawaited(_persistAnnotationDraft().catchError((Object _) {}));
     _composerController.setMessage(
       '',
       const {'skill', 'plugin', 'mcp'}.contains(selectedCapability?['type'])
@@ -2284,6 +2681,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _clearStreamingReply();
         });
         _showReplyError('会话保存失败，云端任务未启动：$error');
+        restoreAnnotationDraft();
       }
       _pendingReplyParentId = null;
       return;
@@ -2330,6 +2728,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _showReplyError(
           error is FormatException ? error.message : '准备消息失败：$error',
         );
+        restoreAnnotationDraft();
         _stoppedEmptyReplyConversationId = conversationId;
         _stoppedEmptyReplyParentId = userMessage.id;
         _pendingReplyParentId = null;
@@ -2371,6 +2770,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
         _clearStreamingReply();
         _showReplyError('回复超时，请稍后重试');
+        restoreAnnotationDraft();
       }
     } on AiException catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -2380,6 +2780,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
         _clearStreamingReply();
         _showAgentTaskError(error);
+        restoreAnnotationDraft();
       }
     } catch (_) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -2389,6 +2790,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
         _clearStreamingReply();
         _showReplyError('回复失败，请稍后重试');
+        restoreAnnotationDraft();
       }
     } finally {
       if (mounted && requestGeneration == _requestGeneration) {
@@ -2944,6 +3346,12 @@ $materialIndex
               generation: generation,
               conversationId: conversationId,
             );
+            final artifactMetadata = chunk.artifact?.metadata;
+            if (artifactMetadata?['task_id'] == taskId) {
+              _prefetchArtifactImages(
+                _taskArtifacts(artifactMetadata?['artifacts']),
+              );
+            }
             final envelopes = genkit_a2ui.a2uiEnvelopesFromParts(
               chunk.raw.modelChunk?.content,
             );
@@ -3165,6 +3573,7 @@ $materialIndex
           artifacts.addAll(_taskArtifacts(metadata!['artifacts']));
         }
       }
+      _prefetchArtifactImages(artifacts);
       final processSummary = _agentProcessSummary();
       final durationMs = _finishAgentReasoningClock();
       _agentStreamPresentation.value = _agentStreamPresentation.value.copyWith(
@@ -3382,9 +3791,11 @@ $materialIndex
             completedSkillDocument = event['draft']?.toString();
             completedSkillFiles = _taskSkillFiles(event['files']);
             artifacts = _taskArtifacts(event['artifacts']);
+            _prefetchArtifactImages(artifacts);
             break;
           case 'artifacts_ready':
             artifacts = _taskArtifacts(event['artifacts']);
+            _prefetchArtifactImages(artifacts);
             break;
           case 'status':
             if (event['status']?.toString() == 'cancelled') {
@@ -4363,9 +4774,11 @@ $text''';
             skillDocument = event['draft']?.toString();
             skillFiles = _taskSkillFiles(event['files']);
             artifacts = _taskArtifacts(event['artifacts']);
+            _prefetchArtifactImages(artifacts);
             break;
           case 'artifacts_ready':
             artifacts = _taskArtifacts(event['artifacts']);
+            _prefetchArtifactImages(artifacts);
             break;
           case 'status':
             cancelled = event['status']?.toString() == 'cancelled';
@@ -4428,6 +4841,22 @@ $text''';
             .map((item) => Map<String, Object?>.from(item))
             .toList(growable: false)
       : const [];
+
+  void _prefetchArtifactImages(List<Map<String, Object?>> artifacts) {
+    for (final artifact in artifacts) {
+      if (artifact['media_type']?.toString().startsWith('image/') != true) {
+        continue;
+      }
+      final taskId = artifact['task_id']?.toString() ?? '';
+      final id = artifact['id']?.toString() ?? '';
+      if (taskId.isEmpty || id.isEmpty) continue;
+      unawaited(
+        CapabilityCloudSync.instance
+            .downloadTaskArtifact(taskId, id, cacheImage: true)
+            .then<void>((_) {}, onError: (Object _) {}),
+      );
+    }
+  }
 
   // Keep resource bytes separate from the model's Markdown presentation.
   Map<String, String>? _taskSkillFiles(Object? value) {
@@ -6483,6 +6912,9 @@ $text''';
                                         fit: StackFit.expand,
                                         children: [
                                           _ConversationMessages(
+                                            annotations: _annotations,
+                                            onAnnotate: _annotateText,
+                                            onPreviewImages: _openImageGallery,
                                             record:
                                                 _conversation ??
                                                 AiConversationRecord.empty(
@@ -6597,6 +7029,14 @@ $text''';
                                           ),
                                           child: _HomeComposer(
                                             key: _composerKey,
+                                            annotations: _annotations,
+                                            onReviewAnnotations:
+                                                _reviewAnnotations,
+                                            onRemoveAnnotations: () =>
+                                                _applyAnnotations(const []),
+                                            onPreviewImage: (item) => unawaited(
+                                              _openPendingImage(item),
+                                            ),
                                             onRequestLogin: _openEmailLogin,
                                             isSignedIn: _emailSignedIn,
                                             onSessionChanged: (signedIn) {
@@ -7083,6 +7523,10 @@ class _HomeComposer extends StatefulWidget {
     required this.attachmentPreparationStates,
     required this.onRetryAttachment,
     super.key,
+    this.annotations = const [],
+    this.onReviewAnnotations,
+    this.onRemoveAnnotations,
+    this.onPreviewImage,
     this.onRequestLogin,
     required this.isSignedIn,
     required this.onSessionChanged,
@@ -7141,6 +7585,10 @@ class _HomeComposer extends StatefulWidget {
   });
 
   final Future<bool> Function()? onRequestLogin;
+  final List<ChatAnnotation> annotations;
+  final VoidCallback? onReviewAnnotations;
+  final VoidCallback? onRemoveAnnotations;
+  final ValueChanged<HomeChatAttachment>? onPreviewImage;
   final bool isSignedIn;
   final ValueChanged<bool> onSessionChanged;
   final TextEditingController controller;
@@ -7442,8 +7890,16 @@ class _HomeComposerState extends State<_HomeComposer> {
                                 ],
                               ),
                             ),
+                          if (!widget.isEditingMessage &&
+                              widget.annotations.isNotEmpty)
+                            ChatAnnotationTray(
+                              annotations: widget.annotations,
+                              onTap: widget.onReviewAnnotations ?? () {},
+                              onRemove: widget.onRemoveAnnotations ?? () {},
+                            ),
                           if (widget.attachments.isNotEmpty)
                             HomeChatAttachmentTray(
+                              onPreviewImage: widget.onPreviewImage,
                               attachments: widget.attachments,
                               preparationStates:
                                   widget.attachmentPreparationStates,
@@ -7681,6 +8137,9 @@ class _HomeComposerState extends State<_HomeComposer> {
                                                                 .isNotEmpty ||
                                                             widget
                                                                 .attachments
+                                                                .isNotEmpty ||
+                                                            widget
+                                                                .annotations
                                                                 .isNotEmpty) &&
                                                         !widget
                                                             .isSavingMessageEdit,
@@ -8854,6 +9313,9 @@ class _ConversationMessages extends StatefulWidget {
     required this.onSelectVersion,
     required this.onSelectQuestionVersion,
     required this.onOpenDraftReview,
+    this.annotations = const [],
+    required this.onAnnotate,
+    required this.onPreviewImages,
   });
 
   final AiConversationRecord record;
@@ -8891,6 +9353,9 @@ class _ConversationMessages extends StatefulWidget {
   final Future<bool> Function(String) onSelectVersion;
   final Future<bool> Function(String) onSelectQuestionVersion;
   final ValueChanged<String> onOpenDraftReview;
+  final List<ChatAnnotation> annotations;
+  final Future<void> Function(ChatAnnotation, Offset) onAnnotate;
+  final Future<void> Function(List<ChatImageSource>, int) onPreviewImages;
 
   @override
   State<_ConversationMessages> createState() => _ConversationMessagesState();
@@ -9268,14 +9733,42 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
           for (final artifact in artifacts)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: _assistantArtifactCard(artifact),
+              child: _assistantArtifactCard(
+                artifact,
+                imageGroup: artifacts
+                    .where(
+                      (a) =>
+                          a['media_type']?.toString().startsWith('image/') ==
+                          true,
+                    )
+                    .toList(),
+              ),
             ),
         ],
       ),
     );
   }
 
-  Widget _assistantArtifactCard(Map<String, Object?> artifact) {
+  Future<Uint8List> _artifactImageBytes(String taskId, String id) {
+    final key = '$taskId:$id';
+    return _artifactPreviewFutures.putIfAbsent(key, () async {
+      try {
+        return await CapabilityCloudSync.instance.downloadTaskArtifact(
+          taskId,
+          id,
+          cacheImage: true,
+        );
+      } catch (_) {
+        _artifactPreviewFutures.remove(key);
+        rethrow;
+      }
+    });
+  }
+
+  Widget _assistantArtifactCard(
+    Map<String, Object?> artifact, {
+    List<Map<String, Object?>>? imageGroup,
+  }) {
     final name = artifact['name']!.toString();
     final artifactId = artifact['id']!.toString();
     final taskId = artifact['task_id']?.toString() ?? '';
@@ -9284,15 +9777,15 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     final isImage =
         artifact['media_type']?.toString().startsWith('image/') == true;
     final preview = isImage && taskId.isNotEmpty && artifactId.isNotEmpty
-        ? _artifactPreviewFutures.putIfAbsent(
-            key,
-            () => CapabilityCloudSync.instance.downloadTaskArtifact(
-              taskId,
-              artifactId,
-            ),
-          )
+        ? _artifactImageBytes(taskId, artifactId)
         : null;
-    if (isImage) return _assistantImageArtifact(artifact, preview);
+    if (isImage) {
+      return _assistantImageArtifact(
+        artifact,
+        preview,
+        imageGroup ?? [artifact],
+      );
+    }
 
     return Card(
       margin: EdgeInsets.zero,
@@ -9341,6 +9834,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   Widget _assistantImageArtifact(
     Map<String, Object?> artifact,
     Future<Uint8List>? preview,
+    List<Map<String, Object?>> imageGroup,
   ) {
     if (preview == null) return const Text('图片预览不可用');
     return FutureBuilder<Uint8List>(
@@ -9393,13 +9887,18 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                 color: Colors.transparent,
                 child: InkWell(
                   borderRadius: BorderRadius.circular(14),
-                  onTap: () => unawaited(_showImagePreview(bytes, artifact)),
+                  onTap: () =>
+                      unawaited(_showImagePreview(artifact, imageGroup)),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(14),
                     child: LayoutBuilder(
                       builder: (context, constraints) => Image.memory(
                         bytes,
                         width: constraints.maxWidth,
+                        cacheWidth:
+                            (constraints.maxWidth *
+                                    MediaQuery.devicePixelRatioOf(context))
+                                .ceil(),
                         fit: BoxFit.fitWidth,
                         errorBuilder: (context, error, stackTrace) =>
                             const AspectRatio(
@@ -9419,58 +9918,20 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   }
 
   Future<void> _showImagePreview(
-    Uint8List bytes,
     Map<String, Object?> artifact,
+    List<Map<String, Object?>> group,
   ) async {
-    await showDialog<void>(
-      context: context,
-      barrierColor: const Color(0xE6000000),
-      builder: (dialogContext) => Material(
-        color: const Color(0xF20D0D0F),
-        child: SafeArea(
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: InteractiveViewer(
-                  minScale: 0.8,
-                  maxScale: 5,
-                  child: Center(
-                    child: Image.memory(
-                      bytes,
-                      width: MediaQuery.sizeOf(dialogContext).width,
-                      height: MediaQuery.sizeOf(dialogContext).height * 0.84,
-                      fit: BoxFit.contain,
-                    ),
-                  ),
-                ),
-              ),
-              Positioned(
-                top: 4,
-                right: 8,
-                child: IconButton(
-                  tooltip: '关闭预览',
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  color: Colors.white,
-                  icon: const Icon(Icons.close),
-                ),
-              ),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 20,
-                child: Center(
-                  child: FilledButton.icon(
-                    onPressed: () => unawaited(_downloadArtifact(artifact)),
-                    icon: const Icon(Icons.download_outlined),
-                    label: const Text('下载图片'),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+    final images = group.map((item) {
+      final taskId = item['task_id']?.toString() ?? '';
+      final id = item['id']?.toString() ?? '';
+      final key = '$taskId:$id';
+      return ChatImageSource(
+        id: key,
+        name: item['name']?.toString() ?? '生成图片.png',
+        loadOriginal: () => _artifactImageBytes(taskId, id),
+      );
+    }).toList();
+    await widget.onPreviewImages(images, group.indexOf(artifact));
   }
 
   String _artifactSizeLabel(Object? value) {
@@ -9501,6 +9962,8 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       final bytes = await CapabilityCloudSync.instance.downloadTaskArtifact(
         taskId,
         artifactId,
+        cacheImage:
+            artifact['media_type']?.toString().startsWith('image/') == true,
       );
       if (!mounted) return;
       final originalName = artifact['name']?.toString() ?? '生成文件';
@@ -9889,6 +10352,18 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
               if (message.attachments.isNotEmpty)
                 HomeChatMessageAttachments(
                   attachments: message.attachments,
+                  onPreviewImage: (item) {
+                    final images = message.attachments
+                        .where((a) => a.isImage)
+                        .map((a) => ChatImageSource.fromAttachment(a))
+                        .toList();
+                    unawaited(
+                      widget.onPreviewImages(
+                        images,
+                        images.indexWhere((a) => a.id == item.id),
+                      ),
+                    );
+                  },
                   preparationStates: widget.attachmentPreparationStates,
                   onRetry: widget.onRetryAttachment,
                 ),
@@ -9973,6 +10448,19 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     onCopySelectedText: widget.onCopySelectedText,
     onEditMessage: widget.onEditMessage,
     onNote: widget.onNote,
+    annotationNumbers: {
+      for (var i = 0; i < widget.annotations.length; i++)
+        widget.annotations[i].id: i + 1,
+    },
+    annotations: widget.annotations
+        .where(
+          (a) =>
+              a.messageId == message.id &&
+              a.sourceHash ==
+                  sha256.convert(utf8.encode(message.text)).toString(),
+        )
+        .toList(),
+    onAnnotate: widget.onAnnotate,
     onSelectionAreaChanged: _handleSelectionAreaStateChanged,
     child: child,
   );
@@ -10577,6 +11065,9 @@ class _MessageSelectionArea extends StatefulWidget {
     required this.onCopySelectedText,
     required this.onEditMessage,
     required this.onNote,
+    required this.annotations,
+    required this.annotationNumbers,
+    required this.onAnnotate,
     required this.onSelectionAreaChanged,
     required this.child,
   });
@@ -10586,6 +11077,9 @@ class _MessageSelectionArea extends StatefulWidget {
   final Future<void> Function(String) onCopySelectedText;
   final ValueChanged<AiConversationMessage> onEditMessage;
   final void Function(AiConversationMessage, String, bool) onNote;
+  final List<ChatAnnotation> annotations;
+  final Map<String, int> annotationNumbers;
+  final Future<void> Function(ChatAnnotation, Offset) onAnnotate;
   final void Function(_MessageSelectionAreaState, bool) onSelectionAreaChanged;
   final Widget child;
 
@@ -10595,6 +11089,7 @@ class _MessageSelectionArea extends StatefulWidget {
 
 class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
   final _selectionAreaKey = GlobalKey<SelectionAreaState>();
+  final _selectionListener = SelectionListenerNotifier();
   String _selectedText = '';
   bool _hasSelection = false;
 
@@ -10614,6 +11109,7 @@ class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
   @override
   void dispose() {
     widget.onSelectionAreaChanged(this, false);
+    _selectionListener.dispose();
     super.dispose();
   }
 
@@ -10629,6 +11125,32 @@ class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
         _MessageSelectionActionCard(
           isUserMessage: widget.message.isUser,
           editEnabled: widget.editEnabled,
+          onAnnotate: widget.message.isUser
+              ? null
+              : () {
+                  final quote = _selectedText;
+                  final range = _selectionListener.registered
+                      ? _selectionListener.selection.range
+                      : null;
+                  final annotation = ChatAnnotation(
+                    id: 'text_${DateTime.now().microsecondsSinceEpoch}',
+                    messageId: widget.message.id,
+                    quote: quote,
+                    startOffset: range?.startOffset,
+                    endOffset: range?.endOffset,
+                    sourceHash: sha256
+                        .convert(utf8.encode(widget.message.text))
+                        .toString(),
+                  );
+                  region.hideToolbar();
+                  region.clearSelection();
+                  unawaited(
+                    widget.onAnnotate(
+                      annotation,
+                      anchors.secondaryAnchor ?? anchors.primaryAnchor,
+                    ),
+                  );
+                },
           onPrimaryAction: () {
             if (widget.message.isUser) {
               region.hideToolbar();
@@ -10656,17 +11178,26 @@ class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
     onPopInvokedWithResult: (didPop, result) {
       if (!didPop && _hasSelection) _clearSelection();
     },
-    child: SelectionArea(
-      key: _selectionAreaKey,
-      contextMenuBuilder: _buildContextMenu,
-      onSelectionChanged: (content) {
-        _selectedText = content?.plainText ?? '';
-        final hasSelection = _selectedText.isNotEmpty;
-        if (_hasSelection == hasSelection) return;
-        setState(() => _hasSelection = hasSelection);
-        widget.onSelectionAreaChanged(this, hasSelection);
-      },
-      child: widget.child,
+    child: ChatTextAnnotationLayer(
+      annotations: widget.annotations,
+      annotationNumbers: widget.annotationNumbers,
+      onTapAnnotation: (annotation, anchor) =>
+          unawaited(widget.onAnnotate(annotation, anchor)),
+      child: SelectionArea(
+        key: _selectionAreaKey,
+        contextMenuBuilder: _buildContextMenu,
+        onSelectionChanged: (content) {
+          _selectedText = content?.plainText ?? '';
+          final hasSelection = _selectedText.isNotEmpty;
+          if (_hasSelection == hasSelection) return;
+          setState(() => _hasSelection = hasSelection);
+          widget.onSelectionAreaChanged(this, hasSelection);
+        },
+        child: SelectionListener(
+          selectionNotifier: _selectionListener,
+          child: widget.child,
+        ),
+      ),
     ),
   );
 }
@@ -10677,12 +11208,14 @@ class _MessageSelectionActionCard extends StatelessWidget {
     required this.editEnabled,
     required this.onPrimaryAction,
     required this.onCopy,
+    this.onAnnotate,
   });
 
   final bool isUserMessage;
   final bool editEnabled;
   final VoidCallback onPrimaryAction;
   final VoidCallback onCopy;
+  final VoidCallback? onAnnotate;
 
   @override
   Widget build(BuildContext context) {
@@ -10695,6 +11228,7 @@ class _MessageSelectionActionCard extends StatelessWidget {
       primaryEnabled: !isUserMessage || editEnabled,
       onPrimaryAction: onPrimaryAction,
       onCopy: onCopy,
+      onAnnotate: isUserMessage ? null : onAnnotate,
     );
   }
 }

@@ -60,8 +60,10 @@ dependencies:
   genkit_a2ui: 0.4.0
   genui: 0.10.4
   a2ui_core: 0.1.1
+  flutter_cache_manager: 3.4.5
 
 dev_dependencies:
+  file: 7.0.1
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
@@ -78,6 +80,7 @@ flutter:
     - assets/icons/extensions/
     - assets/icons/chat_note_editor/
     - assets/icons/drawing/
+    - assets/icons/chat_annotations/
     - assets/icons/editor/
     - assets/icons/note_format/
     - assets/speech_models/

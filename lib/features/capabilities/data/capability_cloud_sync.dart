@@ -11,6 +11,7 @@ import 'package:genkit/experimental_client.dart' as genkit_client;
 import 'package:http/http.dart' as http;
 
 import '../../../config/api_config.dart';
+import '../../../services/task_artifact_image_cache.dart';
 import 'capability_models.dart';
 import 'capability_store.dart';
 
@@ -195,10 +196,15 @@ class AttachmentCloudException extends FormatException {
 }
 
 class CapabilityCloudSync {
-  CapabilityCloudSync._() : _client = http.Client();
+  CapabilityCloudSync._()
+    : _client = http.Client(),
+      _imageCache = TaskArtifactImageCache();
 
   @visibleForTesting
-  CapabilityCloudSync.forTesting(this._client);
+  CapabilityCloudSync.forTesting(
+    this._client, {
+    TaskArtifactImageCache? imageCache,
+  }) : _imageCache = imageCache ?? TaskArtifactImageCache();
 
   static final instance = CapabilityCloudSync._();
   static const _tokenKey = 'xiaoqi.capabilities.device_token.v1';
@@ -206,6 +212,7 @@ class CapabilityCloudSync {
   static const _emailKey = 'xiaoqi.auth.email.v1';
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
   final http.Client _client;
+  final TaskArtifactImageCache _imageCache;
   genkit_client.AgentApi<Map<String, dynamic>>? _remoteAgent;
   Future<void>? _syncing;
   bool _syncAgain = false;
@@ -976,20 +983,34 @@ class CapabilityCloudSync {
 
   Future<Uint8List> downloadTaskArtifact(
     String taskId,
-    String artifactId,
-  ) async {
-    final token = await _requireToken();
-    final response = await _client.get(
-      Uri.parse(
-        '$_baseUrl/agent/tasks/${Uri.encodeComponent(taskId)}/artifacts/${Uri.encodeComponent(artifactId)}',
-      ),
-      headers: _headers(token),
-    );
-    if (response.statusCode != 200) {
-      final decoded = _decode(response);
-      throw StateError(_errorMessage(decoded, '文件下载失败'));
+    String artifactId, {
+    bool cacheImage = false,
+  }) async {
+    final token = await _requireToken(verifyContract: !cacheImage);
+    Future<Uint8List> download() async {
+      if (cacheImage) await _verifyContract();
+      final response = await _client
+          .get(
+            Uri.parse(
+              '$_baseUrl/agent/tasks/${Uri.encodeComponent(taskId)}/artifacts/${Uri.encodeComponent(artifactId)}',
+            ),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 90));
+      if (response.statusCode != 200) {
+        final decoded = _decode(response);
+        throw StateError(_errorMessage(decoded, '文件下载失败'));
+      }
+      return response.bodyBytes;
     }
-    return response.bodyBytes;
+
+    if (!cacheImage) return download();
+    return _imageCache.load(
+      scope: jsonEncode([_baseUrl, token]),
+      taskId: taskId,
+      artifactId: artifactId,
+      download: download,
+    );
   }
 
   Future<String?> cancelTask(String taskId) async {
@@ -1111,20 +1132,27 @@ class CapabilityCloudSync {
     _checked(response);
   }
 
-  Future<String> _requireToken() async {
+  Future<String> _requireToken({bool verifyContract = true}) async {
     final token = await _secureStorage.read(key: _tokenKey);
     if (token == null || token.isEmpty) throw StateError('请先登录个人账号');
-    await _verifyContract();
+    if (verifyContract) await _verifyContract();
     return token;
   }
 
   DateTime? _contractCheckedAt;
-  Future<void> _verifyContract() async {
+  Future<void>? _contractVerification;
+  Future<void> _verifyContract() {
     if (_contractCheckedAt != null &&
         DateTime.now().difference(_contractCheckedAt!) <
             const Duration(seconds: 30)) {
-      return;
+      return Future<void>.value();
     }
+    return _contractVerification ??= _checkContract().whenComplete(() {
+      _contractVerification = null;
+    });
+  }
+
+  Future<void> _checkContract() async {
     final response = await _client
         .get(Uri.parse(_baseUrl).replace(path: '/health', query: null))
         .timeout(const Duration(seconds: 15));

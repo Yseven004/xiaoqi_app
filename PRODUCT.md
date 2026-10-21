@@ -42,6 +42,8 @@ android
 
 ## Evidence on Hand
 
+- `docs/design/chat-annotations-v1.md`：2026-10-21 已确认的聊天图片原位标注、评论、同组滑图与文字注释范围；已接入客户端，真机和页面视觉仍待用户验收。
+
 - `docs/product/2026-10-06-deepseek-project-brief.md`：产品方向、当前代码范围、维护约束和未验收边界。
 - `docs/architecture/2026-10-06-xiaoqi-single-server-harness-architecture.md`：当前目标架构、数据保存及工具权限约束；文档明确目标架构尚未全部迁移或验证。
 - `docs/design/skills-plugins-v1-state-spec.md` 与 `docs/design/skills-plugins-v1-asset-catalog.md`：已确认的技能 / 插件菜单交互与资产，仅适用于该界面，不构成全产品视觉规范。

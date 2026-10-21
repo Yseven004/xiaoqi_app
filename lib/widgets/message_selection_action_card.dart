@@ -8,6 +8,7 @@ class MessageSelectionActionCard extends StatelessWidget {
     required this.primaryAsset,
     required this.onPrimaryAction,
     this.onCopy,
+    this.onAnnotate,
     this.primaryEnabled = true,
   });
 
@@ -16,6 +17,7 @@ class MessageSelectionActionCard extends StatelessWidget {
   final bool primaryEnabled;
   final VoidCallback onPrimaryAction;
   final VoidCallback? onCopy;
+  final VoidCallback? onAnnotate;
 
   Widget _actionButton({
     required String label,
@@ -76,6 +78,14 @@ class MessageSelectionActionCard extends StatelessWidget {
             enabled: primaryEnabled,
           ),
           if (onCopy != null) ...[
+            if (onAnnotate != null) ...[
+              const SizedBox(width: 8),
+              _actionButton(
+                label: '注释',
+                asset: 'assets/icons/chat_annotations/comment.svg',
+                onPressed: onAnnotate!,
+              ),
+            ],
             const SizedBox(width: 8),
             _actionButton(
               label: '复制',

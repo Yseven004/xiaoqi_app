@@ -43,12 +43,18 @@ class HomeChatDrawingDraftStore {
   Future<HomeChatDrawingDraft> open(
     String conversationId, {
     String? draftPath,
+  }) => _open(conversationId, draftPath: draftPath);
+
+  Future<HomeChatDrawingDraft> _open(
+    String conversationId, {
+    String? draftPath,
+    bool createNew = false,
   }) async {
     final directory = await _conversationDirectory(conversationId);
     final isEditing = draftPath != null;
     if (draftPath == null) {
       final activeFile = File(p.join(directory, 'active.json'));
-      if (await activeFile.exists()) {
+      if (!createNew && await activeFile.exists()) {
         final activePath = (await activeFile.readAsString()).trim();
         if (_isInside(directory, activePath) &&
             await File(activePath).exists()) {
@@ -64,7 +70,7 @@ class HomeChatDrawingDraftStore {
         directory,
         'drawing_${DateTime.now().microsecondsSinceEpoch}_${Random().nextInt(1 << 32)}.json',
       );
-      await _replaceText(activeFile, draftPath);
+      if (!createNew) await _replaceText(activeFile, draftPath);
     } else if (!_isInside(directory, draftPath)) {
       throw const FormatException('绘图草稿路径无效');
     }
@@ -134,6 +140,33 @@ class HomeChatDrawingDraftStore {
       if (await previous.exists()) await previous.delete();
     }
     return backgroundPath;
+  }
+
+  /// Image previews edit a fork, so cancelling cannot change a queued image.
+  Future<HomeChatDrawingDraft> fork(
+    String conversationId, {
+    String? sourcePath,
+    required Uint8List backgroundBytes,
+  }) async {
+    final directory = await _conversationDirectory(conversationId);
+    if (sourcePath != null && !_isInside(directory, sourcePath)) {
+      throw const FormatException('绘图草稿路径无效');
+    }
+    final source = sourcePath == null
+        ? null
+        : await _read(sourcePath, isEditing: false);
+    final draft = await _open(conversationId, createNew: true);
+    try {
+      await save(
+        draft.path,
+        source?.document ?? draft.document,
+        backgroundBytes: source?.backgroundBytes ?? backgroundBytes,
+      );
+      return (await _read(draft.path, isEditing: false))!;
+    } catch (_) {
+      await delete(conversationId, draft.path);
+      rethrow;
+    }
   }
 
   Future<void> finish(String conversationId, String draftPath) async {

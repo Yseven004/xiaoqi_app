@@ -14,6 +14,7 @@ class HomeChatAttachmentTray extends StatelessWidget {
     required this.attachments,
     required this.onRemove,
     this.onEditDrawing,
+    this.onPreviewImage,
     this.preparationStates,
     this.onRetry,
     super.key,
@@ -22,6 +23,7 @@ class HomeChatAttachmentTray extends StatelessWidget {
   final List<HomeChatAttachment> attachments;
   final ValueChanged<HomeChatAttachment> onRemove;
   final ValueChanged<HomeChatAttachment>? onEditDrawing;
+  final ValueChanged<HomeChatAttachment>? onPreviewImage;
   final ValueListenable<Map<String, AttachmentPreparationState>>?
   preparationStates;
   final ValueChanged<HomeChatAttachment>? onRetry;
@@ -44,7 +46,9 @@ class HomeChatAttachmentTray extends StatelessWidget {
                 item.drawingDraftPath != null &&
                 onEditDrawing != null;
             final thumbnail = GestureDetector(
-              onTap: canEditDrawing
+              onTap: item.isImage && onPreviewImage != null
+                  ? () => onPreviewImage!(item)
+                  : canEditDrawing
                   ? () => onEditDrawing!(item)
                   : item.isImage
                   ? () => _showImage(context, item)
@@ -216,10 +220,12 @@ class HomeChatMessageAttachments extends StatelessWidget {
     required this.attachments,
     this.preparationStates,
     this.onRetry,
+    this.onPreviewImage,
     super.key,
   });
 
   final List<HomeChatAttachment> attachments;
+  final ValueChanged<HomeChatAttachment>? onPreviewImage;
   final ValueListenable<Map<String, AttachmentPreparationState>>?
   preparationStates;
   final ValueChanged<HomeChatAttachment>? onRetry;
@@ -252,24 +258,26 @@ class HomeChatMessageAttachments extends StatelessWidget {
               image: true,
               label: item.name,
               child: GestureDetector(
-                onTap: () => showDialog<void>(
-                  context: context,
-                  builder: (context) => Dialog(
-                    backgroundColor: Colors.transparent,
-                    insetPadding: const EdgeInsets.all(16),
-                    child: InteractiveViewer(
-                      child: Image.file(
-                        File(item.path),
-                        fit: BoxFit.contain,
-                        errorBuilder: (_, __, ___) => const Icon(
-                          Icons.broken_image_outlined,
-                          color: Colors.white,
-                          size: 48,
+                onTap: onPreviewImage != null
+                    ? () => onPreviewImage!(item)
+                    : () => showDialog<void>(
+                        context: context,
+                        builder: (context) => Dialog(
+                          backgroundColor: Colors.transparent,
+                          insetPadding: const EdgeInsets.all(16),
+                          child: InteractiveViewer(
+                            child: Image.file(
+                              File(item.path),
+                              fit: BoxFit.contain,
+                              errorBuilder: (_, __, ___) => const Icon(
+                                Icons.broken_image_outlined,
+                                color: Colors.white,
+                                size: 48,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(10),
                   child: Image.file(
