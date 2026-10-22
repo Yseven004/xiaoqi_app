@@ -21,12 +21,18 @@ def manifest(root: Path) -> dict[str, object]:
         f"file:{database.as_posix()}?mode=ro&immutable=1", uri=True
     )
     try:
+        if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise ValueError("SQLite integrity check failed")
         documents = [
             [str(row[0]), int(row[1])]
             for row in connection.execute(
                 "SELECT key, revision FROM documents ORDER BY key"
             )
         ]
+        document_hashes = {
+            str(row[0]): hashlib.sha256(str(row[1]).encode("utf-8")).hexdigest()
+            for row in connection.execute("SELECT key, document FROM documents ORDER BY key")
+        }
         object_rows = [
             str(row[0])
             for row in connection.execute("SELECT key FROM objects ORDER BY key")
@@ -48,6 +54,7 @@ def manifest(root: Path) -> dict[str, object]:
 
     return {
         "documents": documents,
+        "document_hashes": document_hashes,
         "object_keys": object_rows,
         "object_file_hashes": hashes,
         "counts": {

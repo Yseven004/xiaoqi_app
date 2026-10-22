@@ -3,7 +3,7 @@ param(
     [string]$Region = 'cn-hongkong',
     [string]$InstanceId = 'i-j6cdji1nji415swaliji',
     [string]$Profile = 'xiaoqi-remote-deploy',
-    [string]$Endpoint = 'ecs.cn-hongkong.aliyuncs.com',
+    [string]$Endpoint = 'ecs.aliyuncs.com',
     [string]$PublicHealthUrl = 'https://47-76-60-77.sslip.io/health'
 )
 
@@ -11,10 +11,10 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $RemoteRoot = '/opt/xiaoqi-single-server'
-$ChunkSize = 18KB
 $DeployDir = $PSScriptRoot
 $HarnessDir = Split-Path -Parent $DeployDir
 $ManagerPath = Join-Path $DeployDir 'release_manager.sh'
+. (Join-Path $DeployDir 'github_build.ps1')
 $serverReleaseSource = Get-Content -Raw -LiteralPath (Join-Path $HarnessDir 'genkit_server/lib/src/release.dart')
 $clientReleaseSource = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $HarnessDir) 'lib/config/release.dart')
 $productRelease = [regex]::Match($serverReleaseSource, "const releaseId = '([^']+)'").Groups[1].Value
@@ -29,7 +29,8 @@ function Invoke-AliyunJson {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
     $cliArguments = @($Arguments + @('--endpoint', $Endpoint))
-    for ($attempt = 1; $attempt -le 4; $attempt++) {
+    $maxAttempts = if ($Arguments[1] -like 'Describe*') { 4 } else { 1 }
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         $output = & aliyun @cliArguments 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0) {
             $parsed = $output | ConvertFrom-Json
@@ -37,11 +38,20 @@ function Invoke-AliyunJson {
                 return $parsed
             }
         }
-        if ($attempt -lt 4) {
+        if ($attempt -lt $maxAttempts) {
             Start-Sleep -Seconds (2 * $attempt)
         }
     }
-    throw "Alibaba Cloud command failed after 4 attempts:`n$output"
+    throw "Alibaba Cloud command $($Arguments[1]) failed after $maxAttempts attempt(s). A write is never blindly retried.`n$output"
+}
+
+function Get-OptionalField {
+    param($Value, [string]$Name, $Default = $null)
+    if ($null -ne $Value) {
+        $property = $Value.PSObject.Properties[$Name]
+        if ($null -ne $property) { return $property.Value }
+    }
+    return $Default
 }
 
 function Wait-RemoteCommand {
@@ -69,15 +79,22 @@ function Wait-RemoteCommand {
             Start-Sleep -Seconds $retryDelay
             continue
         }
-        $item = @($result.Invocation.InvocationResults.InvocationResult)[0]
-        if ($null -ne $item -and $item.InvocationStatus -in @('Success', 'Failed', 'Stopped', 'Aborted', 'Timeout')) {
-            $text = if ($item.Output) {
-                [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$item.Output))
+        $invocation = Get-OptionalField $result 'Invocation'
+        $results = Get-OptionalField $invocation 'InvocationResults'
+        $items = @(Get-OptionalField $results 'InvocationResult')
+        $item = if ($items.Count) { $items[0] } else { $null }
+        $state = Get-OptionalField $item 'InvocationStatus' 'Pending'
+        if ($state -in @('Success', 'Failed', 'Stopped', 'Aborted', 'Timeout')) {
+            $output = Get-OptionalField $item 'Output' ''
+            $exitCode = Get-OptionalField $item 'ExitCode'
+            $errorInfo = Get-OptionalField $item 'ErrorInfo' ''
+            $text = if ($output) {
+                [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$output))
             } else {
                 ''
             }
-            if ($item.InvocationStatus -ne 'Success' -or [int]$item.ExitCode -ne 0) {
-                throw "Remote command $($item.InvocationStatus) (exit $($item.ExitCode)):`n$text`n$($item.ErrorInfo)"
+            if ($state -ne 'Success' -or $null -eq $exitCode -or [int]$exitCode -ne 0) {
+                throw "Remote command $state (exit $(if($null -eq $exitCode){'unknown'}else{$exitCode})):`n$text`n$errorInfo"
             }
             return $text.Trim()
         }
@@ -107,6 +124,32 @@ function Invoke-RemoteCommand {
         '--KeepCommand', 'false'
     )
     return Wait-RemoteCommand -InvokeId ([string]$started.InvokeId) -TimeoutSeconds ($TimeoutSeconds + 30)
+}
+
+function Get-VerifiedPublicHealth {
+    param([Parameter(Mandatory)][string]$Url)
+    $healthUri = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$healthUri) -or
+        $healthUri.Scheme -ne 'https' -or $healthUri.Port -ne 443 -or
+        $healthUri.UserInfo -or $healthUri.Query -or $healthUri.Fragment -or
+        $healthUri.AbsolutePath -ne '/health' -or $healthUri.DnsSafeHost -notmatch '^[A-Za-z0-9.-]+$') {
+        throw 'Public health must be an HTTPS /health URL without credentials or query parameters.'
+    }
+    $localCheckSucceeded = $false
+    try {
+        $healthBody = & curl.exe --fail --silent --show-error --max-time 20 --url $Url 2>&1 | Out-String
+        $localCheckSucceeded = $LASTEXITCODE -eq 0
+    } catch { $localCheckSucceeded = $false }
+    $source = 'local'
+    if (-not $localCheckSucceeded) {
+        Write-Warning 'Local public TLS check failed; checking the same HTTPS endpoint through Cloud Assistant.'
+        $safeUrl = "https://$($healthUri.DnsSafeHost)/health"
+        $healthBody = Invoke-RemoteCommand -Script "curl --fail --silent --show-error --max-time 20 --url '$safeUrl'" -TimeoutSeconds 60
+        $source = 'cloud_assistant'
+    }
+    $health = $healthBody | ConvertFrom-Json
+    $health | Add-Member -NotePropertyName verification_source -NotePropertyValue $source
+    return $health
 }
 
 function Send-RemoteFile {
@@ -155,91 +198,115 @@ function Send-RemoteFile {
     throw "File upload timed out: $Name"
 }
 
+function Save-RemoteDeploymentLog {
+    param([string]$ReleaseId, [string]$LocalPath)
+    $offset = 0
+    $stream = [IO.File]::Open($LocalPath, [IO.FileMode]::Create)
+    try {
+        do {
+            $chunk = Invoke-RemoteCommand -Script "dd if='$RemoteRoot/logs/$ReleaseId.log' bs=3900 skip=$offset count=1 status=none | base64 -w0" -TimeoutSeconds 60
+            $bytes = [byte[]]@()
+            if ($chunk) { $bytes = [Convert]::FromBase64String($chunk) }
+            $stream.Write($bytes, 0, $bytes.Length)
+            $offset++
+        } while ($bytes.Length -eq 3900)
+    } finally { $stream.Dispose() }
+    Write-Host "DEPLOY_LOG $LocalPath"
+}
+
+function Wait-DeploymentJob {
+    param([string]$ReleaseId, [string]$LocalLog)
+    $deadline = (Get-Date).AddMinutes(50)
+    $lastPhase = ''
+    do {
+        try {
+            $snapshot = Invoke-RemoteCommand -Script "if test -f '$RemoteRoot/incoming/$ReleaseId/result'; then printf 'RESULT='; cat '$RemoteRoot/incoming/$ReleaseId/result'; else printf 'RESULT=running\n'; fi; grep 'PHASE=' '$RemoteRoot/logs/$ReleaseId.log' 2>/dev/null | tail -1 || true" -TimeoutSeconds 60
+        } catch {
+            Write-Warning 'Progress connection interrupted; the independent remote job is still tracked. No redeploy or cleanup was triggered.'
+            Start-Sleep -Seconds 15
+            continue
+        }
+        $phase = [regex]::Match($snapshot, 'PHASE=([^\r\n]+)').Groups[1].Value
+        if ($phase -and $phase -ne $lastPhase) { Write-Host "DEPLOY_PHASE $phase"; $lastPhase = $phase }
+        $result = [regex]::Match($snapshot, '(?m)^RESULT=([^\r\n]+)').Groups[1].Value
+        if ($result -match '^\d+$') {
+            Save-RemoteDeploymentLog -ReleaseId $ReleaseId -LocalPath $LocalLog
+            if ($result -ne '0') {
+                $tail = Get-Content -LiteralPath $LocalLog -Tail 16 | Out-String
+                throw "Remote deployment failed (exit $result). Full log: $LocalLog`n$tail"
+            }
+            return
+        }
+        Write-Host "DEPLOY_WAIT phase=$phase"
+        Start-Sleep -Seconds 15
+    } while ((Get-Date) -lt $deadline)
+    throw "Progress wait timed out. The remote job and log remain at $RemoteRoot/logs/$ReleaseId.log; do not start another deployment until its result is checked."
+}
+
 if (-not (Get-Command aliyun -ErrorAction SilentlyContinue)) {
     throw 'aliyun CLI is not installed.'
-}
-if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
-    throw 'tar.exe is not available.'
 }
 if (-not (Test-Path -LiteralPath $ManagerPath -PathType Leaf)) {
     throw "Missing release manager: $ManagerPath"
 }
 
-$gitRevision = (& git -C (Split-Path -Parent $HarnessDir) rev-parse --short HEAD 2>$null | Out-String).Trim()
-if (-not $gitRevision) { $gitRevision = 'nogit' }
+$mainCommit = Get-MainReleaseCommit -RepositoryRoot (Split-Path -Parent $HarnessDir)
+$gitRevision = $mainCommit.Substring(0, 7)
 $releaseId = "$(Get-Date -Format 'yyyyMMdd-HHmmss')-$gitRevision"
 $incomingDir = "$RemoteRoot/incoming/$releaseId"
-$tempDir = Join-Path ([IO.Path]::GetTempPath()) "xiaoqi-deploy-$releaseId"
-$archivePath = Join-Path $tempDir 'release.tgz'
-
-New-Item -ItemType Directory -Path $tempDir | Out-Null
+$localLockPath = Join-Path ([IO.Path]::GetTempPath()) 'xiaoqi-deploy-current.lock'
+$localLock = $null
+$jobStarted = $false
+$jobFinished = $false
+$logDir = Join-Path (Split-Path -Parent $HarnessDir) '.codex-artifacts/deploy'
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+$localLog = Join-Path $logDir "$releaseId.log"
 try {
-    Write-Host "[1/5] Packaging current source as $releaseId"
-    & tar.exe -czf $archivePath `
-        '--exclude=genkit_server/.dart_tool' `
-        '--exclude=genkit_server/.genkit' `
-        '--exclude=genkit_server/build' `
-        '--exclude=genkit_server/coverage' `
-        '--exclude=deploy/single-server.env' `
-        '--exclude=deploy/backups' `
-        '--exclude=deploy/__pycache__' `
-        '--exclude=deploy/harness-artifacts' `
-        '--exclude=deploy/xiaoqi-agent-worker.zip' `
-        -C $HarnessDir genkit_server deploy
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to create release archive.' }
-
-    $entries = & tar.exe -tzf $archivePath
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to inspect release archive.' }
-    if ($entries -match '(^|/)single-server\.env$') { throw 'Refusing to upload server environment secrets.' }
-    if ($entries -match '(^|/)\.dart_tool(/|$)') { throw 'Release archive contains .dart_tool.' }
-
-    $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
-    $archiveBytes = [IO.File]::ReadAllBytes($archivePath)
-
-    Write-Host '[2/5] Preparing the server upload area'
-    Invoke-RemoteCommand -Script "set -eu; install -d -m 700 '$RemoteRoot' '$RemoteRoot/incoming' '$incomingDir'; find '$incomingDir' -mindepth 1 -maxdepth 1 -type f -delete" -TimeoutSeconds 60 | Out-Null
-    Send-RemoteFile -TargetDir $RemoteRoot -Name 'release_manager.sh' -Bytes ([IO.File]::ReadAllBytes($ManagerPath)) -Mode '0700'
-
-    Write-Host '[3/5] Uploading the release'
-    $chunkCount = [Math]::Ceiling($archiveBytes.Length / $ChunkSize)
-    for ($index = 0; $index -lt $chunkCount; $index++) {
-        $offset = $index * $ChunkSize
-        $length = [Math]::Min($ChunkSize, $archiveBytes.Length - $offset)
-        $chunk = [byte[]]::new($length)
-        [Array]::Copy($archiveBytes, $offset, $chunk, 0, $length)
-        Send-RemoteFile -TargetDir $incomingDir -Name ('part-{0:D5}' -f $index) -Bytes $chunk
+    $localLock = [IO.File]::Open($localLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    Write-Host '[1/5] Checking the current server before building'
+    Invoke-RemoteCommand -Script "set -eu; install -d -m 700 '$RemoteRoot/incoming' '$incomingDir' '$RemoteRoot/logs'" -TimeoutSeconds 60 | Out-Null
+    foreach ($name in @('release_manager.sh', 'release_artifact.py', 'run_release_job.sh')) {
+        $source = (Get-Content -Raw -LiteralPath (Join-Path $DeployDir $name)) -replace "`r`n", "`n"
+        Send-RemoteFile -TargetDir $incomingDir -Name $name -Bytes ([Text.Encoding]::UTF8.GetBytes($source)) -Mode '0700'
     }
-    Invoke-RemoteCommand -Script "set -eu; cat '$incomingDir'/part-* > '$incomingDir/release.tgz'; printf '%s  %s\n' '$sha256' '$incomingDir/release.tgz' | sha256sum -c -" -TimeoutSeconds 120 | Out-Null
+    Invoke-RemoteCommand -Script "set -eu; bash -n '$incomingDir/release_manager.sh'; bash -n '$incomingDir/run_release_job.sh'; bash '$incomingDir/release_manager.sh' preflight" -TimeoutSeconds 180 | Write-Host
 
-    Write-Host '[4/5] Building, switching, and checking automatic rollback'
-    $deployOutput = Invoke-RemoteCommand -Script "set -eu; '$RemoteRoot/release_manager.sh' deploy '$incomingDir/release.tgz' '$releaseId' '$sha256'" -TimeoutSeconds 3600
-    Write-Host $deployOutput
+    Write-Host '[2/5] Building and testing on GitHub Actions (not on production)'
+    $build = Get-ServerBuildArtifact -RepositoryRoot (Split-Path -Parent $HarnessDir)
+    if ($build.Commit -ne $mainCommit -or (Get-MainReleaseCommit -RepositoryRoot (Split-Path -Parent $HarnessDir)) -ne $mainCommit) {
+        throw 'Main changed during the build. The current server was not switched; restart with the current reviewed main.'
+    }
+
+    Write-Host '[3/5] Starting the independent remote release job'
+    # A single short-lived artifact URL, without a GitHub or cloud credential.
+    $downloadConfig = 'url = "' + $build.DownloadUrl + '"' + "`n"
+    Send-RemoteFile -TargetDir $incomingDir -Name 'download.conf' -Bytes ([Text.Encoding]::UTF8.GetBytes($downloadConfig))
+    $launch = "set -eu; test ! -e '$incomingDir/started'; touch '$incomingDir/started'; nohup bash '$incomingDir/run_release_job.sh' '$releaseId' '$($build.Commit)' '$productRelease' '$contractVersion' </dev/null >/dev/null 2>&1 & echo JOB_STARTED"
+    # Mark ambiguous dispatches as started so finally never removes active inputs.
+    $jobStarted = $true
+    Invoke-RemoteCommand -Script $launch -TimeoutSeconds 60 | Write-Host
+
+    Write-Host '[4/5] Following download, validation, load, backup and activation'
+    Wait-DeploymentJob -ReleaseId $releaseId -LocalLog $localLog
+    $jobFinished = $true
 
     Write-Host '[5/5] Verifying the running service and restore point'
     $status = Invoke-RemoteCommand -Script "set -eu; '$RemoteRoot/release_manager.sh' status" -TimeoutSeconds 180
     Write-Host $status
-    $healthBody = & curl.exe --fail --silent --show-error --max-time 20 --url $PublicHealthUrl 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { throw "Public health check failed:`n$healthBody" }
-    $health = $healthBody | ConvertFrom-Json
-    if ($health.release_id -ne $productRelease -or $health.api_contract_version -ne $contractVersion) {
-        Invoke-RemoteCommand -Script "set -eu; '$RemoteRoot/release_manager.sh' rollback" -TimeoutSeconds 600 | Write-Host
-        throw 'Release/contract verification failed; automatic rollback requested.'
+    $health = Get-VerifiedPublicHealth -Url $PublicHealthUrl
+    if ($health.release_id -ne $productRelease -or $health.api_contract_version -ne $contractVersion -or $status -notmatch "current_release=$releaseId" -or $status -notmatch 'current_health=healthy') {
+        throw 'Independent release verification failed; inspect the retained remote job log before taking recovery action.'
     }
-    Write-Host "DEPLOYMENT_VERIFIED public_health=200 release=$releaseId product=$productRelease contract=$contractVersion"
+    try { Remove-OldBuildArtifacts -CurrentRunId $build.RunId } catch { Write-Warning 'Old GitHub artifact cleanup needs a retry; current deployment is healthy.' }
+    Write-Host "DEPLOYMENT_VERIFIED public_health=200 via=$($health.verification_source) release=$releaseId product=$productRelease contract=$contractVersion"
 }
 finally {
-    try {
-        Invoke-RemoteCommand -Script "set -eu; test -d '$incomingDir' && find '$incomingDir' -mindepth 1 -maxdepth 1 -type f -delete || true; rmdir '$incomingDir' 2>/dev/null || true" -TimeoutSeconds 60 | Out-Null
-    } catch {
-        Write-Warning "Could not clean remote upload files: $($_.Exception.Message)"
-    }
-    if (Test-Path -LiteralPath $tempDir) {
-        $resolvedTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-        $resolvedTempDir = [IO.Path]::GetFullPath($tempDir)
-        if (-not $resolvedTempDir.StartsWith($resolvedTempRoot, [StringComparison]::OrdinalIgnoreCase) -or
-            (Split-Path -Leaf $resolvedTempDir) -notlike 'xiaoqi-deploy-*') {
-            throw 'Refusing to remove a deployment temporary directory outside the verified temp root.'
+    if (-not $jobStarted -or $jobFinished) {
+        try {
+            Invoke-RemoteCommand -Script "set -eu; test -d '$incomingDir' && find '$incomingDir' -mindepth 1 -maxdepth 1 -type f -delete || true; rmdir '$incomingDir' 2>/dev/null || true" -TimeoutSeconds 60 | Out-Null
+        } catch {
+            Write-Warning 'Could not clean remote upload files; they remain for diagnosis.'
         }
-        Remove-Item -LiteralPath $tempDir -Recurse -Force
     }
+    if ($null -ne $localLock) { $localLock.Dispose() }
 }

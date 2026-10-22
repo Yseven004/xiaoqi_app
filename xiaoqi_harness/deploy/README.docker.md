@@ -35,7 +35,15 @@ powershell -ExecutionPolicy Bypass -File .\xiaoqi_harness\deploy\deploy_current.
 
 这个命令保留为 AI 的标准入口和紧急手工入口。AI 必须根据实际代码差异判断是否需要部署，并在交付时明确说明“已部署并验证”或“不需要部署”及原因。
 
-脚本先在后台构建新镜像，旧服务继续运行。构建成功后，它会保存上一版源码、镜像和数据，再切换到新版本；健康检查或数据核对失败时自动恢复上一版。成功后只保留当前运行版本和一份 `latest-good` 应急恢复点，旧镜像、旧备份和上传临时文件会被清理。服务器密钥始终留在 `/opt/xiaoqi-single-server/config/single-server.env`，不会打进发布包。
+已审核和检查的完整版本先正常提交、推送到 `main`，GitHub Actions 直接从 main 执行静态检查、完整测试和四个镜像构建，导出 `linux/amd64` 成品、镜像 ID、SHA256 清单和源码。不再使用单独的构建分支。
+
+部署入口要求工作区干净、本机 main 与 origin/main 完全一致；它不会自动暂存、提交或推送代码。脚本先检查线上空间、内存、架构和当前健康，再等待当前 main 的精确提交对应的成品。若成品已过期，会仅对相同 main 提交触发一次手动构建；构建失败、main 中途变化或成品来源不一致时，在切换前停止。线上服务器不再编译，也不会隐式构建镜像。
+
+构建成品通过短期 HTTPS 下载链接交给 ECS。服务器验证成品来源提交、版本、哈希和镜像 ID，然后运行合成探针，保存上一版源码、镜像和数据，再切换；健康、公网版本或数据核对失败时自动恢复上一版。任务独立于云助手连接执行，控制器丢线不取消部署，也不清理活动输入。完整日志在 `/opt/xiaoqi-single-server/logs/<release>.log`（权限 0600），完成后下载到本机 `.codex-artifacts/deploy/`。服务器保留最近七份日志。整个切换过程持有锁，重复部署会明确拒绝。
+
+切换与数据核对期间只开放 `/health`，普通请求短暂返回 503；核对和恢复点提交后才恢复业务访问，避免新写入被回滚覆盖。当前构建机与 ECS 均使用 containerd 存储；上传前必须通过镜像删除/重新导入校验。实际运行来源记录在 `current/.xiaoqi-artifact.json`。
+
+成功后只保留当前运行版本和一份 `latest-good` 应急恢复点，清理旧项目镜像标签、构建缓存和已结束的旧上传。服务器密钥始终留在 `/opt/xiaoqi-single-server/config/single-server.env`，不会进入仓库、Actions 或发布包；本机 Git Credential Manager 的 GitHub 凭据只在内存使用，ECS 仅取得单个成品的短期下载链接。
 
 需要手工查看或恢复时，通过阿里云助手执行服务器上的固定脚本：
 
@@ -46,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File .\xiaoqi_harness\deploy\deploy_current.
 
 不要使用 `docker compose down -v`，它会删除业务数据卷。
 
-Genkit 服务复用现有 `xiaoqi-data` 卷，SQLite 表结构及 `objects/` 文件布局保持一致，不复制或重写用户数据。Compose 只声明业务数据卷和 Caddy 证书卷。不要用 `docker compose down -v` 删除这些卷。代码执行镜像会在服务器构建；每个任务使用独立容器、临时卷和网络。默认网络关闭；用户为任务授权域名后，执行器才会创建该任务专属网络和 Squid 出口代理，代理只放行授权域名的 80/443 端口。任务结束或取消时会删除容器、代理、网络和临时卷。
+Genkit 服务复用现有 `xiaoqi-data` 卷，SQLite 表结构及 `objects/` 文件布局保持一致，不复制或重写用户数据。Compose 只声明业务数据卷和 Caddy 证书卷。不要用 `docker compose down -v` 删除这些卷。代码执行镜像由独立构建环境生成；每个任务使用独立容器、临时卷和网络。默认网络关闭；用户为任务授权域名后，执行器才会创建该任务专属网络和 Squid 出口代理，代理只放行授权域名的 80/443 端口。任务结束或取消时会删除容器、代理、网络和临时卷。
 
 沙箱容器使用非 root 用户、只读根文件系统、只挂载自己的任务卷、移除 Linux capabilities，并设置进程数、内存、CPU 和日志上限。Docker 容器仍共享 ECS 的 Linux 内核，隔离强度低于独立虚拟机；执行器的 Docker socket 权限等同于主机管理权限，因此不要把执行器端口公开给互联网或把 socket 挂载给 Dart API、MCP 或用户代码。
 

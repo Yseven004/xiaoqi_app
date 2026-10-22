@@ -54,6 +54,8 @@ app.*.map.json
 *.jks
 *.keystore
 /.codex-artifacts/
+# Local references for the cancelled market authoring UI.
+/docs/design/extension-market-creation/
 /.local/capability-chain-verification/
 **/.gradle/
 **/.kotlin/

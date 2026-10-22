@@ -1,0 +1,87 @@
+name: Server release artifact
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: server-release-artifact
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BUILDX_NO_DEFAULT_ATTESTATIONS: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Match production OCI image storage
+        run: |
+          # Keep image identities stable across docker save/load. Production
+          # uses containerd, whose image ID is the OCI manifest digest.
+          sudo mkdir -p /etc/docker
+          sudo python3 - <<'PY'
+          import json, pathlib
+          path = pathlib.Path('/etc/docker/daemon.json')
+          config = json.loads(path.read_text()) if path.exists() else {}
+          config.setdefault('features', {})['containerd-snapshotter'] = True
+          path.write_text(json.dumps(config))
+          PY
+          sudo systemctl restart docker
+          docker info --format '{{json .DriverStatus}}'
+      - name: Validate deployment scripts and recovery tests
+        run: |
+          bash -n xiaoqi_harness/deploy/release_manager.sh
+          bash -n xiaoqi_harness/deploy/run_release_job.sh
+          python3 -m unittest discover -s xiaoqi_harness/deploy -p 'test_*.py' -v
+          pwsh -NoProfile -File xiaoqi_harness/deploy/test_public_health.ps1
+          pwsh -NoProfile -File xiaoqi_harness/deploy/test_deploy_controller.ps1
+          pwsh -NoProfile -File xiaoqi_harness/deploy/test_github_build.ps1
+      - name: Build and test images off the production host
+        working-directory: xiaoqi_harness
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/build-logs"
+          for spec in 'app genkit_server/Dockerfile .' 'runner genkit_server/sandbox_runner/Dockerfile genkit_server/sandbox_runner' 'sandbox genkit_server/sandbox_image/Dockerfile genkit_server/sandbox_image' 'proxy genkit_server/sandbox_proxy/Dockerfile genkit_server/sandbox_proxy'; do
+            read -r name dockerfile context <<< "$spec"
+            case "$name" in
+              app) image=xiaoqi-genkit-server;;
+              runner) image=xiaoqi-sandbox-runner;;
+              sandbox) image=xiaoqi-code-sandbox;;
+              proxy) image=xiaoqi-sandbox-proxy;;
+            esac
+            docker build --platform linux/amd64 --provenance=false -f "$dockerfile" -t "$image:local" "$context" 2>&1 | tee "$RUNNER_TEMP/build-logs/$name.log"
+          done
+      - name: Export verified release
+        run: |
+          python3 xiaoqi_harness/deploy/release_artifact.py pack --root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/release" --commit "$GITHUB_SHA"
+          # Exercise the actual export/import boundary on the matching engine.
+          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep '^xiaoqi-' | xargs -r docker image rm
+          docker load --input "$RUNNER_TEMP/release/images.tar.gz"
+          python3 - "$RUNNER_TEMP/release/manifest.json" <<'PY'
+          import json, subprocess, sys
+          for expected in json.load(open(sys.argv[1]))['images']:
+              actual = json.loads(subprocess.check_output(['docker', 'inspect', expected['tag']]))[0]
+              assert (actual['Id'], actual['Os'], actual['Architecture']) == (expected['id'], expected['os'], expected['architecture']), 'Image roundtrip changed its identity'
+          print('IMAGE_ROUNDTRIP_VERIFIED')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-release
+          path: |
+            ${{ runner.temp }}/release/release.tgz
+            ${{ runner.temp }}/release/release.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: build-logs
+          path: ${{ runner.temp }}/build-logs
+          retention-days: 7
+          if-no-files-found: ignore

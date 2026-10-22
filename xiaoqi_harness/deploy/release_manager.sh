@@ -2,6 +2,11 @@
 set -Eeuo pipefail
 
 ROOT="/opt/xiaoqi-single-server"
+# Test roots are accepted only inside a dedicated temporary directory.
+if [[ "${XIAOQI_DEPLOY_TEST:-}" == 1 ]]; then
+  [[ "${XIAOQI_DEPLOY_ROOT:-}" == /tmp/xiaoqi-deploy-test-* ]] || exit 2
+  ROOT="$XIAOQI_DEPLOY_ROOT"
+fi
 CURRENT="$ROOT/current"
 CONFIG="$ROOT/config/single-server.env"
 RESTORE_ROOT="$ROOT/restore"
@@ -22,7 +27,7 @@ die() {
 }
 
 require_layout() {
-  [[ "$ROOT" == "/opt/xiaoqi-single-server" ]] || die "unsafe deployment root"
+  [[ "$ROOT" == "/opt/xiaoqi-single-server" || "${XIAOQI_DEPLOY_TEST:-}" == 1 ]] || die "unsafe deployment root"
   [[ -d "$CURRENT/deploy" ]] || die "current deployment not found"
   mkdir -p "$ROOT/config" "$RESTORE_ROOT"
   if [[ ! -f "$CONFIG" ]]; then
@@ -72,7 +77,7 @@ remove_tree() {
 
 clear_staging() {
   local staging="$ROOT/staging"
-  [[ "$staging" == "/opt/xiaoqi-single-server/staging" ]] || die "unsafe staging path"
+  [[ "$staging" == "$ROOT/staging" ]] || die "unsafe staging path"
   mkdir -p "$staging"
   find "$staging" -mindepth 1 -maxdepth 1 -type d -exec rm -rf -- {} +
 }
@@ -92,8 +97,8 @@ retag_to_local() {
   local image base
   for image in "${LOCAL_IMAGES[@]}"; do
     base="${image%:local}"
-    docker image inspect "$base:$suffix" >/dev/null
-    docker tag "$base:$suffix" "$image"
+    docker image inspect "$base:$suffix" >/dev/null || return 1
+    docker tag "$base:$suffix" "$image" || return 1
   done
 }
 
@@ -109,6 +114,7 @@ remove_image_tags() {
 write_store_manifest() {
   local output_dir="$1"
   local deploy_dir="$2"
+  cp "$deploy_dir/verify_store.py" "$output_dir/verify_store.py"
   docker run --rm \
     -v "$VOLUME:/data:ro" \
     -v "$deploy_dir:/deploy:ro" \
@@ -119,12 +125,14 @@ write_store_manifest() {
 
 compare_store_manifest() {
   local expected_dir="$1"
+  local verifier=/deploy/verify_store.py
+  [[ ! -f "$expected_dir/verify_store.py" ]] || verifier=/backup/verify_store.py
   docker run --rm \
     -v "$VOLUME:/data:ro" \
     -v "$CURRENT/deploy:/deploy:ro" \
     -v "$expected_dir:/backup:ro" \
     python:3.12-slim \
-    python /deploy/verify_store.py --root /data --compare /backup/store.json >/dev/null
+    python "$verifier" --root /data --compare /backup/store.json >/dev/null
 }
 
 backup_data() {
@@ -152,15 +160,21 @@ install_source() {
   [[ -f "$source_dir/genkit_server/pubspec.yaml" ]] || die "release is missing genkit_server/pubspec.yaml"
   [[ -f "$source_dir/deploy/compose.yaml" ]] || die "release is missing deploy/compose.yaml"
   remove_tree "$replacement"
-  mkdir -p "$replacement"
-  cp -a "$source_dir/genkit_server" "$replacement/genkit_server"
-  cp -a "$source_dir/deploy" "$replacement/deploy"
-  rm -f "$replacement/deploy/single-server.env"
-  ln -s "$CONFIG" "$replacement/deploy/single-server.env"
-  if [[ -d "$CURRENT" ]]; then
-    mv "$CURRENT" "$ROOT/staging/old-current-$$"
+  mkdir -p "$replacement" || return 1
+  cp -a "$source_dir/genkit_server" "$replacement/genkit_server" || return 1
+  cp -a "$source_dir/deploy" "$replacement/deploy" || return 1
+  if [[ -f "$source_dir/.xiaoqi-release" ]]; then
+    cp "$source_dir/.xiaoqi-release" "$replacement/.xiaoqi-release" || return 1
   fi
-  mv "$replacement" "$CURRENT"
+  if [[ -f "$source_dir/.xiaoqi-artifact.json" ]]; then
+    cp "$source_dir/.xiaoqi-artifact.json" "$replacement/.xiaoqi-artifact.json" || return 1
+  fi
+  rm -f "$replacement/deploy/single-server.env"
+  ln -s "$CONFIG" "$replacement/deploy/single-server.env" || return 1
+  if [[ -d "$CURRENT" ]]; then
+    mv "$CURRENT" "$ROOT/staging/old-current-$$" || return 1
+  fi
+  mv "$replacement" "$CURRENT" || return 1
   remove_tree "$ROOT/staging/old-current-$$"
 }
 
@@ -169,9 +183,9 @@ restore_source() {
   local unpack="$ROOT/staging/restore-$$"
   [[ -f "$restore_dir/source.tgz" ]] || die "restore source archive is missing"
   remove_tree "$unpack"
-  mkdir -p "$unpack"
-  tar -xzf "$restore_dir/source.tgz" -C "$unpack"
-  install_source "$unpack"
+  mkdir -p "$unpack" || return 1
+  tar -xzf "$restore_dir/source.tgz" -C "$unpack" || return 1
+  install_source "$unpack" || return 1
   remove_tree "$unpack"
 }
 
@@ -180,49 +194,217 @@ rollback_from() {
   local image_suffix="$2"
   local restore_data_flag="$3"
   set +e
-  compose --profile https stop app sandbox-runner caddy >/dev/null 2>&1
+  compose --profile https stop app sandbox-runner >/dev/null 2>&1
   set -e
-  retag_to_local "$image_suffix"
-  restore_source "$restore_dir"
-  if [[ "$restore_data_flag" == "yes" ]]; then
-    restore_data "$restore_dir"
+  if [[ -f "$restore_dir/images.json" ]]; then
+    python3 - "$restore_dir/images.json" <<'PY' || return 1
+import json, subprocess, sys
+for image in json.load(open(sys.argv[1])):
+    subprocess.run(['docker', 'tag', image['Id'], image['XiaoqiLocalTag']], check=True)
+PY
+  else
+    retag_to_local "$image_suffix" || return 1
   fi
-  compose --profile https up -d --remove-orphans app sandbox-runner caddy
+  restore_source "$restore_dir" || return 1
+  if [[ "$restore_data_flag" == "yes" ]]; then
+    restore_data "$restore_dir" || return 1
+  fi
+  compose --profile https up -d --no-build --pull never --remove-orphans app sandbox-runner caddy || return 1
   wait_healthy || die "automatic rollback ran, but restored service is not healthy"
+  if [[ "$restore_data_flag" == "yes" ]]; then
+    compare_store_manifest "$restore_dir" || return 1
+  fi
+  leave_maintenance || return 1
+  phase ROLLBACK_VERIFIED
+}
+
+phase() {
+  printf '%s PHASE=%s\n' "$(date -u +%FT%TZ)" "$1"
+}
+
+enter_maintenance() {
+  local host
+  host="$(grep -m1 '^XIAOQI_PUBLIC_HOST=' "$CONFIG" | cut -d= -f2- | tr -d '"\r')"
+  [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid public hostname"
+  # Allow health probes, but hold new writes until data verification commits.
+  compose exec -T caddy caddy reload --config - --adapter caddyfile <<EOF
+$host {
+  handle /health {
+    reverse_proxy app:8080
+  }
+  handle {
+    respond "Service updating. Please retry shortly." 503
+  }
+}
+EOF
+}
+
+leave_maintenance() {
+  compose exec -T caddy caddy reload --config - --adapter caddyfile < "$CURRENT/deploy/Caddyfile.docker"
+}
+
+preflight() {
+  phase PREFLIGHT
+  local tool available_kb memory_kb inodes data_kb
+  for tool in docker curl tar sha256sum python3 flock timeout df; do
+    command -v "$tool" >/dev/null || die "required tool missing: $tool"
+  done
+  docker info >/dev/null
+  [[ "$(uname -m)" == x86_64 ]] || die "release requires x86_64"
+  available_kb="$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')"
+  inodes="$(df -Pi "$ROOT" | awk 'NR==2 {print $4}')"
+  memory_kb="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+  data_kb="$(docker run --rm -v "$VOLUME:/data:ro" alpine:3.22 du -sk /data | awk '{print $1}')"
+  (( available_kb > 6 * 1024 * 1024 + 2 * data_kb )) || die "not enough disk for images and two data snapshots"
+  (( inodes > 10000 )) || die "not enough free inodes"
+  (( memory_kb > 384 * 1024 )) || die "less than 384 MiB available memory"
+  require_layout
+  wait_healthy || die "current service is not healthy; refusing to deploy"
+  printf 'PREFLIGHT_OK free_kib=%s available_memory_kib=%s\n' "$available_kb" "$memory_kb"
+}
+
+verify_loaded_images() {
+  python3 - "$1" <<'PY'
+import json, subprocess, sys
+manifest = json.load(open(sys.argv[1]))
+for image in manifest['images']:
+    actual = json.loads(subprocess.check_output(['docker', 'inspect', image['tag']]))[0]
+    if (actual['Id'], actual['Os'], actual['Architecture']) != (image['id'], image['os'], image['architecture']):
+        raise SystemExit('Loaded image does not match CI manifest')
+print('IMAGE_IDENTITIES_VERIFIED')
+PY
+}
+
+verify_public_release() {
+  local public_host body
+  public_host="$(grep -m1 '^XIAOQI_PUBLIC_HOST=' "$CONFIG" | cut -d= -f2- | tr -d '"\r')"
+  [[ "$public_host" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid public hostname"
+  body="$(curl --fail --silent --show-error --max-time 20 "https://$public_host/health")"
+  python3 - "$body" "$1" "$2" <<'PY'
+import json, sys
+h = json.loads(sys.argv[1])
+if (h.get('status'), h.get('release_id'), h.get('api_contract_version')) != ('ok', sys.argv[2], sys.argv[3]):
+    raise SystemExit('Public release/contract mismatch')
+print('PUBLIC_RELEASE_VERIFIED')
+PY
+}
+
+cleanup_success() {
+  phase CLEANUP
+  clear_staging
+  # Only this project's tags; retain the running images and one restore point.
+  local image tag
+  for image in "${LOCAL_IMAGES[@]}"; do
+    while IFS= read -r tag; do
+      [[ "$tag" == "${image%:local}:local" || "$tag" == "${image%:local}:restore" ]] && continue
+      docker image rm "$tag" >/dev/null 2>&1 || true
+    done < <(docker image ls --format '{{.Repository}}:{{.Tag}}' "${image%:local}" | sort -u)
+  done
+  docker image prune -f >/dev/null || true
+  docker builder prune -af >/dev/null || true
+  local directory
+  for directory in "$ROOT"/incoming/*; do
+    [[ -d "$directory" && "$directory" != "$ROOT/incoming/$DEPLOY_RELEASE_ID" ]] || continue
+    # Never delete another controller's active upload or download.
+    if [[ -f "$directory/result" || ! -e "$directory/started" ]]; then
+      find "$directory" -maxdepth 0 -mmin +120 -exec rm -rf -- {} +
+    fi
+  done
+  # Keep seven deployment diagnostics, never an unbounded log directory.
+  find "$ROOT/logs" -maxdepth 1 -name '*.log' -type f -printf '%T@ %p\n' | sort -nr | tail -n +8 | cut -d' ' -f2- | xargs -r rm -f --
+}
+
+deployment_exit() {
+  local rc=$?
+  trap - EXIT INT TERM
+  docker rm -f xiaoqi-release-probe >/dev/null 2>&1 || true
+  if (( rc != 0 )); then
+    phase DEPLOY_FAILED
+    if [[ "$DEPLOY_ROLLBACK_READY" == yes ]]; then
+      if [[ "$DEPLOY_ACTIVATION_STARTED" == yes ]]; then
+        if ! (set -Eeuo pipefail; rollback_from "$DEPLOY_RESTORE_DIR" rollback-next "$DEPLOY_DATA_SAVED"); then
+          printf 'ROLLBACK_FAILED: recovery files retained at %s\n' "$DEPLOY_RESTORE_DIR" >&2
+          exit 70
+        fi
+      else
+        retag_to_local rollback-next || exit 70
+        if [[ "$DEPLOY_MAINTENANCE" == yes ]]; then leave_maintenance || exit 70; fi
+      fi
+      remove_image_tags rollback-next
+    fi
+    remove_tree "$NEXT"
+    remove_tree "$DEPLOY_STAGE"
+  fi
+  exit "$rc"
+}
+
+recover_pending() {
+  [[ -d "$NEXT" ]] || return 0
+  phase RECOVER_INTERRUPTED_DEPLOYMENT
+  [[ -f "$NEXT/source.tgz" && -f "$NEXT/rollback-ready" ]] || die "incomplete recovery snapshot; refusing to replace it"
+  if [[ -f "$NEXT/activation-started" ]]; then
+    local data_saved=no
+    [[ ! -f "$NEXT/data-saved" ]] || data_saved=yes
+    enter_maintenance
+    rollback_from "$NEXT" rollback-next "$data_saved"
+  else
+    retag_to_local rollback-next
+    wait_healthy || die "interrupted deployment recovery is not healthy"
+  fi
+  remove_image_tags rollback-next
+  remove_tree "$NEXT"
 }
 
 deploy_release() {
   local archive="$1"
   local release_id="$2"
   local expected_sha="$3"
+  local commit="$4" product="$5" contract="$6"
   local stage="$ROOT/staging/$release_id"
   DEPLOY_ACTIVATION_STARTED="no"
   DEPLOY_DATA_SAVED="no"
   DEPLOY_STAGE="$stage"
+  DEPLOY_RELEASE_ID="$release_id"
+  DEPLOY_ROLLBACK_READY="no"
+  DEPLOY_RESTORE_DIR="$NEXT"
+  DEPLOY_MAINTENANCE=no
 
   [[ "$release_id" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid release id"
   [[ -f "$archive" ]] || die "release archive not found"
   [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$expected_sha" ]] || die "release archive checksum mismatch"
   require_layout
-  wait_healthy || die "current service is not healthy; refusing to deploy"
+  recover_pending
+  preflight
 
   clear_staging
-  remove_tree "$NEXT"
   mkdir -p "$NEXT" "$stage"
-  trap 'rc=$?; if (( rc != 0 )); then printf "DEPLOY_FAILED: restoring previous version\n" >&2; if [[ "$DEPLOY_ACTIVATION_STARTED" == "yes" ]]; then rollback_from "$NEXT" rollback-next "$DEPLOY_DATA_SAVED"; else retag_to_local rollback-next; fi; remove_image_tags rollback-next; remove_tree "$NEXT"; remove_tree "$DEPLOY_STAGE"; fi; exit $rc' EXIT
+  trap deployment_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
+  phase VERIFY_ARTIFACT
+  python3 "$(dirname "$0")/release_artifact.py" unpack --archive "$archive" --output "$stage" --commit "$commit" --product "$product" --contract "$contract"
   tar --exclude='./deploy/single-server.env' -czf "$NEXT/source.tgz" -C "$CURRENT" .
   tag_images rollback-next
-  tar -xzf "$archive" -C "$stage"
-  [[ -f "$stage/genkit_server/pubspec.yaml" ]] || die "invalid release archive"
-  ln -sfn "$CONFIG" "$stage/deploy/single-server.env"
-
-  # Keep image builds sequential on the 2 GB deployment host.
-  docker compose --parallel 1 \
-    -f "$stage/deploy/compose.yaml" \
-    --env-file "$CONFIG" \
-    --profile build-only \
-    build app sandbox-runner sandbox-image sandbox-proxy-image
+  python3 - "$NEXT/images.json" "${LOCAL_IMAGES[@]}" <<'PY'
+import json, subprocess, sys
+images = []
+for tag in sys.argv[2:]:
+    image = json.loads(subprocess.check_output(['docker', 'inspect', tag]))[0]
+    image['XiaoqiLocalTag'] = tag
+    images.append(image)
+with open(sys.argv[1], 'w') as stream:
+    json.dump(images, stream)
+PY
+  DEPLOY_ROLLBACK_READY="yes"
+  touch "$NEXT/rollback-ready"
+  phase LOAD_PREBUILT_IMAGES
+  timeout --kill-after=60s 600 docker load --input "$stage/images.tar.gz"
+  verify_loaded_images "$stage/manifest.json"
+  local image
+  for image in "${LOCAL_IMAGES[@]}"; do
+    docker tag "${image%:local}:build-$commit" "$image"
+  done
 
   docker run --rm --network none --entrypoint sh xiaoqi-code-sandbox:local \
     -ec 'command -v xelatex >/dev/null && kpsewhich xeCJK.sty >/dev/null && fc-match "Noto Sans CJK SC" | grep -qi "Noto Sans CJK SC"' \
@@ -230,40 +412,54 @@ deploy_release() {
 
   # Exercise the new runtime with synthetic data before touching the healthy
   # service or its persistent volume. A failure uses the existing rollback trap.
-  timeout 900 docker run --rm --env-file "$CONFIG" \
+  phase RUNTIME_PROBE
+  timeout --kill-after=30s 600 docker run --rm --name xiaoqi-release-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
     --entrypoint /app/bin/verify_capability_chain xiaoqi-genkit-server:local
 
+  phase HOLD_WRITES
+  DEPLOY_MAINTENANCE=yes
+  enter_maintenance
   DEPLOY_ACTIVATION_STARTED="yes"
+  touch "$NEXT/activation-started"
+  phase BACKUP_DATA
   compose stop app
   backup_data "$NEXT"
-  write_store_manifest "$NEXT" "$stage/deploy"
+  write_store_manifest "$NEXT" "$stage/source/deploy"
   DEPLOY_DATA_SAVED="yes"
+  touch "$NEXT/data-saved"
 
-  install_source "$stage"
+  phase ACTIVATE
+  install_source "$stage/source"
+  cp "$stage/manifest.json" "$CURRENT/.xiaoqi-artifact.json"
   printf '%s\n' "$release_id" > "$CURRENT/.xiaoqi-release"
-  compose --profile https up -d --remove-orphans app sandbox-runner caddy
+  compose --profile https up -d --no-build --pull never --remove-orphans app sandbox-runner caddy
+  phase VERIFY_HEALTH_AND_DATA
   wait_healthy
   compare_store_manifest "$NEXT"
+  verify_public_release "$product" "$contract"
 
   remove_tree "$LATEST"
   mv "$NEXT" "$LATEST"
+  DEPLOY_RESTORE_DIR="$LATEST"
   printf '%s\n' "$release_id" > "$LATEST/replaced-by-release"
   remove_image_tags restore
-  local image base
+  local base
   for image in "${LOCAL_IMAGES[@]}"; do
     base="${image%:local}"
     docker tag "$base:rollback-next" "$base:restore"
   done
+  phase RESUME_TRAFFIC
+  leave_maintenance
   remove_image_tags rollback-next
   trap - EXIT
-  clear_staging || true
-  docker image prune -f >/dev/null || true
+  cleanup_success
   printf 'DEPLOY_OK release=%s rollback=latest-good\n' "$release_id"
 }
 
 manual_rollback() {
   require_layout
   [[ -d "$LATEST" ]] || die "no latest-good restore point"
+  enter_maintenance
   rollback_from "$LATEST" restore yes
   printf 'ROLLBACK_OK source=latest-good\n'
 }
@@ -282,13 +478,18 @@ show_status() {
 }
 
 mkdir -p "$ROOT"
-exec 9>"$ROOT/.deploy.lock"
-flock -n 9 || die "another deployment is already running"
+if [[ "${1:-}" != status ]]; then
+  exec 9>"$ROOT/.deploy.lock"
+  flock -n 9 || die "another deployment is already running"
+fi
 
 case "${1:-}" in
   deploy)
-    [[ $# -eq 4 ]] || die "usage: $0 deploy ARCHIVE RELEASE_ID SHA256"
-    deploy_release "$2" "$3" "$4"
+    [[ $# -eq 7 ]] || die "usage: $0 deploy ARCHIVE RELEASE_ID SHA256 COMMIT PRODUCT CONTRACT"
+    deploy_release "$2" "$3" "$4" "$5" "$6" "$7"
+    ;;
+  preflight)
+    preflight
     ;;
   rollback)
     [[ $# -eq 1 ]] || die "usage: $0 rollback"
