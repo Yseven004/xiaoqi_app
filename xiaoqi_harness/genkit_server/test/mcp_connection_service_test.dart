@@ -90,6 +90,118 @@ void main() {
   });
 
   test(
+    'draft test uses temporary credentials without storing a connection',
+    () async {
+      McpConnectionCredentials? seen;
+      final preview = McpConnectionService(
+        store,
+        discoverTools: (connection) async {
+          seen = connection;
+          return [
+            {'name': 'search', 'description': 'Search documents'},
+          ];
+        },
+      );
+      final result = await preview.testDraft('tenant-a', {
+        'name': 'Draft',
+        'url': 'https://example.com/mcp',
+        'bearer_token': 'temporary-secret',
+      });
+      expect(seen!.bearerToken, 'temporary-secret');
+      expect(result['saved'], isFalse);
+      expect(result['tool_count'], 1);
+      expect(jsonEncode(result), isNot(contains('temporary-secret')));
+      expect(store.list('mcp/'), isEmpty);
+    },
+  );
+
+  test(
+    'draft edits keep stored credentials tenant-scoped and never forward them to another host',
+    () async {
+      final saved = await service.save('tenant-a', {
+        'name': 'Original',
+        'url': 'https://example.com/mcp',
+        'bearer_token': 'saved-secret',
+      });
+      final before = jsonEncode(
+        store.get('mcp/tenant-a/${saved['id']}')!.value,
+      );
+      final preview = McpConnectionService(
+        store,
+        pepper: 'test-pepper-' * 4,
+        discoverTools: (connection) async {
+          expect(connection.bearerToken, 'saved-secret');
+          return [];
+        },
+      );
+      await preview.testDraft('tenant-a', {
+        'id': saved['id'],
+        'name': 'Unsaved name',
+        'url': 'https://example.com/new',
+      });
+      expect(
+        jsonEncode(store.get('mcp/tenant-a/${saved['id']}')!.value),
+        before,
+      );
+      await expectLater(
+        preview.testDraft('tenant-b', {
+          'id': saved['id'],
+          'name': 'No access',
+          'url': 'https://example.com/mcp',
+        }),
+        throwsStateError,
+      );
+      await expectLater(
+        preview.testDraft('tenant-a', {
+          'id': saved['id'],
+          'name': 'Other host',
+          'url': 'https://other.example/mcp',
+        }),
+        throwsFormatException,
+      );
+    },
+  );
+
+  test(
+    'draft tests reject unsafe inputs and hide transport credentials in errors',
+    () async {
+      final preview = McpConnectionService(
+        store,
+        discoverTools: (_) async => throw Exception('Bearer private-value'),
+      );
+      for (final input in [
+        {'name': '', 'url': 'https://example.com/mcp'},
+        {'name': 'Bad', 'url': 'https://localhost/mcp'},
+        {'name': 'Bad', 'url': 'https://127.0.0.1/mcp'},
+        {
+          'name': 'Bad',
+          'url': 'https://example.com/mcp',
+          'bearer_token': 'secret\r\nInjected: yes',
+        },
+      ]) {
+        await expectLater(
+          preview.testDraft('tenant-a', input),
+          throwsFormatException,
+        );
+      }
+      await expectLater(
+        preview.testDraft('tenant-a', {
+          'name': 'Good',
+          'url': 'https://example.com/mcp',
+        }),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'redacted error',
+            isNot(contains('private-value')),
+          ),
+        ),
+      );
+      expect(store.list('mcp/'), isEmpty);
+    },
+  );
+
+  test(
     'normalizes verified catalog entries without exposing OAuth secrets',
     () {
       final entry = McpCatalogEntry.fromJson({

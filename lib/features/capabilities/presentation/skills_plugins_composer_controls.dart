@@ -333,7 +333,7 @@ class _SkillsPluginsComposerControlsState
       setState(() => _pendingDeleteId = record.id);
       return;
     }
-    if (record.origin == 'github') {
+    if (record.isServerInstallation) {
       try {
         await CapabilityCloudSync.instance.manageInstallation(
           record,
@@ -357,7 +357,7 @@ class _SkillsPluginsComposerControlsState
   }
 
   Future<void> _toggleVisibility(CapabilityRecord record) async {
-    if (record.origin == 'github') {
+    if (record.isServerInstallation) {
       try {
         await CapabilityCloudSync.instance.manageInstallation(
           record,

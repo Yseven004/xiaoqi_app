@@ -204,6 +204,7 @@ class CapabilityRecord {
   final Map<String, dynamic> compatibility;
 
   bool get isDeleted => deletedAt != null;
+  bool get isServerInstallation => origin == 'github' || origin == 'upload';
   CapabilityVersion? get currentVersion {
     for (final version in versions.reversed) {
       if (version.id == currentVersionId) return version;

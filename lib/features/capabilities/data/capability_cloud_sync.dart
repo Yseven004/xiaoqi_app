@@ -560,7 +560,7 @@ class CapabilityCloudSync {
     }
 
     for (final record in await store.list(includeDeleted: true)) {
-      if (record.origin == 'github') continue;
+      if (record.isServerInstallation) continue;
       if (record.syncState == CapabilitySyncState.synced ||
           record.syncState == CapabilitySyncState.conflict) {
         continue;
@@ -1197,7 +1197,9 @@ class CapabilityCloudSync {
             headers: _headers(token),
             body: jsonEncode(body),
           )
-          .timeout(const Duration(seconds: 25)),
+          .timeout(
+            Duration(seconds: body.containsKey('archive_base64') ? 90 : 25),
+          ),
     );
     final id = started['id'].toString();
     onJob?.call(id);
@@ -1224,6 +1226,32 @@ class CapabilityCloudSync {
       }
     }
     throw StateError('等待超时，操作可能仍在服务器进行。请刷新已安装列表后再重试。');
+  }
+
+  Future<Map<String, dynamic>> capabilityImportPolicy() async {
+    final token = await _requireToken();
+    return _checked(
+      await _client
+          .get(
+            Uri.parse('$_baseUrl/capabilities/import-policy'),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 20)),
+    );
+  }
+
+  Future<Map<String, dynamic>> inspectCapabilityUpload({
+    required String fileName,
+    required List<int> bytes,
+    void Function(String id)? onJob,
+  }) {
+    if (fileName.trim().isEmpty || bytes.isEmpty) {
+      throw const FormatException('请先选择要上传的文件');
+    }
+    return runImportOperation({
+      'file_name': fileName.trim(),
+      'archive_base64': base64Encode(bytes),
+    }, onJob: onJob);
   }
 
   Future<void> cancelImportOperation(String id) async {
@@ -1358,6 +1386,29 @@ class CapabilityCloudSync {
               '$_baseUrl/mcp/connections/${Uri.encodeComponent(id)}/test',
             ),
             headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 45)),
+    );
+  }
+
+  Future<Map<String, dynamic>> testMcpConnectionDraft({
+    String? id,
+    required String name,
+    required String url,
+    String? bearerToken,
+  }) async {
+    final token = await _requireToken();
+    return _checked(
+      await _client
+          .post(
+            Uri.parse('$_baseUrl/mcp/connection-tests'),
+            headers: _headers(token),
+            body: jsonEncode({
+              if (id != null) 'id': id,
+              'name': name.trim(),
+              'url': url.trim(),
+              if (bearerToken != null) 'bearer_token': bearerToken.trim(),
+            }),
           )
           .timeout(const Duration(seconds: 45)),
     );

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="300" viewBox="0 0 220 300">
+ <rect width="220" height="300" rx="10" fill="#fff"/>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" fill="#242828">
+  <text x="14" y="25" font-size="9" font-weight="600">基于大语言模型的教育应用效果研究</text>
+  <path d="M14 33H206" stroke="#c8cccd"/>
+  <text x="14" y="56" font-size="9" font-weight="600">摘要</text>
+ </g>
+ <g fill="#e0e3e4">
+  <path d="M14 64h122v4H14zM14 73h113v4H14zM14 82h125v4H14zM14 91h104v4H14zM14 100h126v4H14zM14 109h116v4H14zM14 118h125v4H14zM14 127h100v4H14zM14 136h123v4H14zM14 145h114v4H14zM14 154h127v4H14zM14 163h108v4H14zM14 172h126v4H14zM14 181h111v4H14zM14 190h124v4H14zM14 199h117v4H14zM14 208h101v4H14zM14 217h125v4H14zM14 226h108v4H14zM14 235h124v4H14zM14 244h115v4H14zM14 253h126v4H14zM14 262h111v4H14zM14 271h118v4H14z"/>
+ </g>
+ <g fill="#a6adb0"><path d="M14 100h113v4H14zM14 109h97v4H14zM14 163h108v4H14zM14 172h117v4H14zM14 235h112v4H14zM14 244h101v4H14z"/></g>
+ <g fill="none" stroke="#788287" stroke-width=".8"><path d="M112 102h20V80h17M124 174h11v-26h14M119 246h17v-18h13"/></g>
+ <g fill="#eff1f2"><rect x="149" y="67" width="57" height="26" rx="5"/><rect x="149" y="135" width="57" height="26" rx="5"/><rect x="149" y="215" width="57" height="26" rx="5"/></g>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" font-size="8" text-anchor="middle" fill="#42494d"><text x="177.5" y="83">研究问题</text><text x="177.5" y="151">主要观点</text><text x="177.5" y="231">关键结论</text></g>
+ <g fill="#788287"><circle cx="112" cy="102" r="1.5"/><circle cx="124" cy="174" r="1.5"/><circle cx="119" cy="246" r="1.5"/></g>
+</svg>

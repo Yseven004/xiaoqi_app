@@ -18,8 +18,11 @@ Future<List<Map<String, dynamic>>> listAllMcpTools(
   String? cursor;
   for (var pageNumber = 0; pageNumber < 100; pageNumber++) {
     final page = await readPage(cursor).timeout(const Duration(seconds: 20));
-    tools.addAll((page['tools'] as List? ?? const []).whereType<Map>()
-        .map((tool) => Map<String, dynamic>.from(tool)));
+    tools.addAll(
+      (page['tools'] as List? ?? const []).whereType<Map>().map(
+        (tool) => Map<String, dynamic>.from(tool),
+      ),
+    );
     if (tools.length > 100) throw StateError('MCP 工具数量超过 100 个，当前暂不支持');
     cursor = page['nextCursor']?.toString();
     if (cursor == null || cursor.isEmpty) return tools;
@@ -158,12 +161,14 @@ class McpCatalogEntry {
 /// Tenant-scoped remote MCP connection storage and transport setup.
 /// Credentials are encrypted at rest using the server's existing secret.
 class McpConnectionService {
-  McpConnectionService(this.store, {String? pepper})
+  McpConnectionService(this.store, {String? pepper, this.discoverTools})
     : _pepper =
           pepper ?? Platform.environment['CAPABILITY_AUTH_CODE_PEPPER'] ?? '';
 
   final CloudStore store;
   final String _pepper;
+  final Future<List<Map<String, dynamic>>> Function(McpConnectionCredentials)?
+  discoverTools;
   static const _uuid = Uuid();
   static final _cipher = AesGcm.with256bits();
 
@@ -325,7 +330,7 @@ class McpConnectionService {
         : _uuid.v4();
     final key = _key(tenantId, id);
     final previous = store.get(key);
-    final suppliedToken = input['bearer_token']?.toString().trim();
+    final suppliedToken = _validatedToken(input['bearer_token']);
     final encrypted = suppliedToken == null || suppliedToken.isEmpty
         ? previous?.value['encrypted_bearer_token']
         : await _encrypt(suppliedToken);
@@ -371,6 +376,65 @@ class McpConnectionService {
           )
           .toList(growable: false),
     };
+  }
+
+  static String? _validatedToken(Object? raw) {
+    if (raw == null) return null;
+    if (raw is! String ||
+        raw.length > 4096 ||
+        RegExp(r'[\r\n]').hasMatch(raw)) {
+      throw const FormatException('访问令牌格式无效');
+    }
+    return raw.trim().isEmpty ? null : raw.trim();
+  }
+
+  Future<Map<String, Object?>> testDraft(
+    String tenantId,
+    Map<String, dynamic> input,
+  ) async {
+    final name = input['name']?.toString().trim() ?? '';
+    if (name.isEmpty || name.length > 80) {
+      throw const FormatException('连接名称需为 1–80 个字符');
+    }
+    final url = parseRemoteUrl(input['url']?.toString() ?? '');
+    var token = _validatedToken(input['bearer_token']);
+    if (input['id'] != null) {
+      final previous = await _read(tenantId, _safeId(input['id']));
+      if (token == null && previous.bearerToken != null) {
+        if (url.origin != previous.url.origin) {
+          throw const FormatException('服务器域名已改变，请重新填写访问令牌后测试');
+        }
+        token = previous.bearerToken;
+      }
+    }
+    try {
+      final tools = await _discoverTools(
+        McpConnectionCredentials(
+          id: 'preview-${_uuid.v4()}',
+          name: name,
+          url: url,
+          bearerToken: token,
+        ),
+      );
+      return {
+        'name': name,
+        'saved': false,
+        'tool_count': tools.length,
+        'tools': tools
+            .map(
+              (tool) => {
+                'name': tool['name']?.toString() ?? '',
+                'description': tool['description']?.toString() ?? '',
+              },
+            )
+            .toList(growable: false),
+      };
+    } on FormatException {
+      rethrow;
+    } on Object {
+      // Transport errors can contain credentials; never echo them to clients.
+      throw StateError('MCP 连接测试失败，请检查地址、访问令牌和服务状态');
+    }
   }
 
   Future<String> oauthCallback(Map<String, String> query) async {
@@ -469,10 +533,13 @@ class McpConnectionService {
   Future<List<Map<String, dynamic>>> _discoverTools(
     McpConnectionCredentials connection,
   ) async {
+    if (discoverTools != null) return discoverTools!(connection);
     final client = await connect(connection);
     try {
       await client.ready().timeout(const Duration(seconds: 20));
-      return await listAllMcpTools((cursor) => client.listTools(cursor: cursor));
+      return await listAllMcpTools(
+        (cursor) => client.listTools(cursor: cursor),
+      );
     } finally {
       await client.close();
     }

@@ -30,7 +30,7 @@ class SelectedSkills {
           .where((v) => v['id'] == versionId)
           .firstOrNull;
       if (version == null) throw StateError('扩展版本不存在，请刷新后重新选择');
-      final components = record['origin'] == 'github'
+      final components = const {'github', 'upload'}.contains(record['origin'])
           ? (version['components'] as List).whereType<Map>().toList()
           : <Map>[
               {

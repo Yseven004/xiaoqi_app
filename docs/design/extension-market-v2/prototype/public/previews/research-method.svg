@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="300" viewBox="0 0 220 300">
+ <rect width="220" height="300" rx="10" fill="#fff"/>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" fill="#242828"><text x="14" y="25" font-size="11" font-weight="600">3　研究方法</text><text x="14" y="49" font-size="9" font-weight="550">3.1　研究设计</text><text x="14" y="167" font-size="9" font-weight="550">3.2　实验结果</text></g>
+ <g fill="#e0e3e4"><path d="M14 60h192v4H14zM14 69h192v4H14zM14 78h179v4H14zM14 87h185v4H14zM14 96h121v4H14z"/></g>
+ <g fill="#fff" stroke="#9ca4a7" stroke-width=".8"><rect x="14" y="116" width="52" height="27" rx="3"/><rect x="84" y="116" width="52" height="27" rx="3"/><rect x="154" y="116" width="52" height="27" rx="3"/></g>
+ <g stroke="#788287" fill="none" stroke-width=".8"><path d="M67 129.5h15m-3-2 3 2-3 2M137 129.5h15m-3-2 3 2-3 2"/></g>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" fill="#42494d" font-size="7.5" text-anchor="middle"><text x="40" y="132">数据收集</text><text x="110" y="132">模型构建</text><text x="180" y="132">效果评估</text></g>
+ <rect x="14" y="179" width="192" height="100" rx="3" fill="#fff" stroke="#b8bfc1" stroke-width=".8"/><path d="M14 179h192v22H14z" fill="#eff1f2"/><path d="M14 201h192M14 227h192M14 253h192M76 179v100M120 179v100M164 179v100" fill="none" stroke="#c9ced0" stroke-width=".6"/>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" fill="#3f474a" font-size="7" text-anchor="middle"><text x="45" y="193">方法</text><text x="98" y="193">准确率</text><text x="142" y="193">召回率</text><text x="185" y="193">F1 值</text><text x="45" y="217">基线方法</text><text x="98" y="217">0.621</text><text x="142" y="217">0.598</text><text x="185" y="217">0.609</text><text x="45" y="243">方法 A</text><text x="98" y="243">0.736</text><text x="142" y="243">0.712</text><text x="185" y="243">0.724</text><text x="45" y="269">方法 B</text><text x="98" y="269">0.708</text><text x="142" y="269">0.690</text><text x="185" y="269">0.699</text></g>
+</svg>

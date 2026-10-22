@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="300" viewBox="0 0 220 300">
+ <rect width="220" height="300" rx="10" fill="#fff"/>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" fill="#242828"><text x="14" y="25" font-size="11" font-weight="600">4　讨论与结论</text><text x="14" y="49" font-size="9" font-weight="550">4.1　研究局限</text><text x="14" y="125" font-size="9" font-weight="550">4.2　后续研究方向</text></g>
+ <g fill="#4c5559"><circle cx="17" cy="64" r="1.5"/><circle cx="17" cy="80" r="1.5"/><circle cx="17" cy="96" r="1.5"/></g>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" fill="#5d6569" font-size="7.5"><text x="25" y="67">样本规模有限，结果仍需进一步验证。</text><text x="25" y="83">适用场景有边界，推广时需谨慎。</text><text x="25" y="99">部分指标仍有提升空间。</text></g>
+ <path d="M26 155v106" stroke="#adb4b7" stroke-width="1"/>
+ <g fill="#f1f2f3"><rect x="47" y="143" width="159" height="40" rx="6"/><rect x="47" y="193" width="159" height="40" rx="6"/><rect x="47" y="243" width="159" height="40" rx="6"/></g>
+ <g fill="#979fa3"><circle cx="26" cy="155" r="11"/><circle cx="26" cy="205" r="11"/><circle cx="26" cy="255" r="11"/></g>
+ <g font-family="'Segoe UI',sans-serif" fill="#fff" font-size="11" text-anchor="middle"><text x="26" y="159">1</text><text x="26" y="209">2</text><text x="26" y="259">3</text></g>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" fill="#333c40" font-size="8" font-weight="600"><text x="56" y="159">扩大数据范围</text><text x="56" y="209">引入多模态信息</text><text x="56" y="259">探索实际应用</text></g>
+ <g font-family="'Microsoft YaHei','PingFang SC',sans-serif" fill="#737c80" font-size="7"><text x="56" y="174">在更多领域验证方法的有效性。</text><text x="56" y="224">结合图像、表格等多源数据。</text><text x="56" y="274">在真实场景中评估使用效果。</text></g>
+</svg>

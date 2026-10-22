@@ -1,0 +1,46 @@
+// Runs only after authorization to use an isolated local Edge profile.
+import {chromium} from 'playwright-core';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+const evidence=path.resolve('evidence');await fs.mkdir(evidence,{recursive:true});
+const browser=await chromium.launch({executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',headless:true,args:['--no-first-run','--disable-extensions']});
+const context=await browser.newContext({viewport:{width:834,height:1327},deviceScaleFactor:1,serviceWorkers:'block'});
+const page=await context.newPage(),errors=[],results=[];
+page.on('pageerror',e=>errors.push(e.message));
+page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
+await context.route('**/*',route=>{const url=new URL(route.request().url());return url.hostname==='127.0.0.1'?route.continue():route.abort();});
+const check=async(name,fn)=>{await fn();results.push(name);console.log('PASS '+name);};
+const visible=async(locator)=>{await locator.waitFor({state:'visible'});};
+const shot=async(name)=>{await page.screenshot({path:path.join(evidence,name+'.png'),animations:'disabled'});};
+const home=async(kind='plugins')=>{await page.goto(`http://127.0.0.1:4173/#${kind}`);await visible(page.getByRole('heading',{name:kind==='skills'?'技能':'插件',exact:true}));};
+const add=()=>page.getByRole('button',{name:'添加',exact:true}).first().click();
+try{
+ await home();await shot('tablet-home');
+ await check('tablet two-column layout and local brand assets',async()=>{const n=await page.locator('.extension-grid').first().evaluate(e=>getComputedStyle(e).gridTemplateColumns.split(' ').length);if(n!==2)throw Error('Tablet grid is not two columns');const bad=await page.locator('.brand img').evaluateAll(xs=>xs.filter(x=>!x.complete||x.naturalWidth===0).map(x=>x.src));if(bad.length)throw Error('Missing icons: '+bad.join(', '));});
+ await add();await shot('tablet-menu');
+ await page.getByRole('menuitem',{name:'添加自定义 MCP 服务器'}).click();await shot('tablet-mcp');
+ await check('MCP validation, failure, recovery and save',async()=>{const d=page.getByRole('dialog');await d.getByLabel('名称',{exact:true}).fill('我的资料库');await d.getByLabel('服务器地址').fill('http://example.com/mcp');await d.getByRole('button',{name:'添加',exact:true}).click();await visible(d.getByRole('alert'));await d.getByLabel('服务器地址').fill('https://fail.example.com/mcp');await d.getByRole('button',{name:'测试连接'}).click();await visible(d.getByText('暂时无法连接。请检查地址或访问令牌后重试。'));await d.getByLabel('服务器地址').fill('https://example.com/mcp');await d.getByRole('button',{name:'测试连接'}).click();await visible(d.getByText('连接成功，可以添加'));await d.getByRole('button',{name:'添加',exact:true}).click();await visible(page.getByRole('button',{name:/我的资料库/}).first());});
+ await check('search typing keeps focus and clears correctly',async()=>{const search=page.getByRole('searchbox');await search.pressSequentially('GitHub');await visible(page.getByRole('heading',{name:'搜索结果'}));if(await page.locator('.extension-row').count()!==1)throw Error('Wrong search results');await page.getByRole('button',{name:'清除搜索'}).click();});
+ await page.getByRole('button',{name:'已安装',exact:true}).click();await shot('tablet-installed');
+ await page.getByRole('button',{name:/GitHub 管理代码/}).click();await shot('tablet-detail');
+ await home();await page.getByRole('button',{name:'管理连接',exact:true}).click();await shot('tablet-connections');
+ await home('skills');await shot('tablet-skills');await add();await page.getByRole('menuitem',{name:'使用编辑器创建'}).click();await shot('tablet-editor');
+ await check('editor name validation, files and draft recovery',async()=>{await page.getByLabel('技能名称').fill('Bad Name');await page.getByLabel('技能描述').fill('把阅读材料整理为笔记');if(!await page.getByRole('button',{name:'创建',exact:true}).isDisabled())throw Error('Invalid name allowed');await page.getByLabel('技能名称').fill('reading-notes');await page.getByRole('button',{name:'上传',exact:true}).click();await page.getByRole('menuitem',{name:'新建文本文件'}).click();await page.getByRole('dialog').getByLabel('文件名').fill('references.md');await page.getByRole('dialog').getByRole('button',{name:'创建',exact:true}).click();await page.getByLabel('技能文件内容').fill('# 参考资料');await page.getByRole('button',{name:'返回',exact:true}).click();await visible(page.getByRole('dialog',{name:'保留这份草稿？'}));await page.getByRole('button',{name:'保留草稿',exact:true}).click();await visible(page.getByRole('heading',{name:'草稿',exact:true}));await page.getByRole('button',{name:'reading-notes 继续编辑'}).click();if(await page.getByLabel('技能名称').inputValue()!=='reading-notes')throw Error('Draft not restored');await page.getByRole('button',{name:'创建',exact:true}).click();await visible(page.getByRole('button',{name:/reading-notes 把阅读材料/}));});
+ await add();await page.getByRole('menuitem',{name:'从设备上传'}).click();await shot('tablet-skill-upload');
+ await check('Markdown selection opens editable skill',async()=>{await page.getByRole('dialog').locator('input[type=file]').setInputFiles({name:'my-skill.md',mimeType:'text/markdown',buffer:Buffer.from('# 我的技能\n\n这是一段说明。')});await page.getByRole('button',{name:'查看并继续'}).click();if(!(await page.getByLabel('技能文件内容').inputValue()).includes('我的技能'))throw Error('Markdown was not read');await page.getByRole('button',{name:'返回',exact:true}).click();});
+ await add();await page.getByRole('menuitem',{name:'通过聊天创建'}).click();await shot('tablet-chat');
+ await check('ordinary chat to skill draft handoff',async()=>{for(const text of ['我想把读书笔记做成技能','输入是读书摘录，输出要分为概念和问题']){await page.getByLabel('消息',{exact:true}).fill(text);await page.getByRole('button',{name:'发送消息'}).click();}await page.getByRole('button',{name:/reading-notes 技能草稿/}).click();await visible(page.getByLabel('技能名称'));});
+ await home();await add();await page.getByRole('menuitem',{name:'上传插件压缩包'}).click();await shot('tablet-plugin-upload');
+ await check('GitHub import validation and demonstration completion',async()=>{await page.getByRole('button',{name:/从公开 GitHub 链接导入/}).click();const d=page.getByRole('dialog');await d.getByLabel('GitHub 链接').fill('https://example.com/repo');await d.getByRole('button',{name:'检查链接'}).click();await visible(d.getByRole('alert'));await d.getByLabel('GitHub 链接').fill('https://github.com/example/reading-kit');await d.getByRole('button',{name:'检查链接'}).click();await visible(d.getByText('可以继续导入'));await d.getByRole('button',{name:'导入',exact:true}).click();});
+ await page.setViewportSize({width:390,height:844});await home();await shot('phone-home');
+ await check('phone single-column layout and no horizontal overflow',async()=>{const n=await page.locator('.extension-grid').first().evaluate(e=>getComputedStyle(e).gridTemplateColumns.split(' ').length);if(n!==1)throw Error('Phone grid is not one column');if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw Error('Phone overflow');});
+ await add();await shot('phone-menu');await page.getByRole('menuitem',{name:'添加自定义 MCP 服务器'}).click();await shot('phone-mcp');await page.getByRole('button',{name:'关闭',exact:true}).click();
+ await home('skills');await add();await page.getByRole('menuitem',{name:'使用编辑器创建'}).click();await shot('phone-editor');
+ await check('phone file navigation',async()=>{await page.getByRole('button',{name:'SKILL.md',exact:true}).first().click();await visible(page.getByRole('heading',{name:'文件',exact:true}));await page.getByRole('button',{name:'返回编辑',exact:true}).click();await visible(page.getByLabel('技能名称'));});
+ await home('skills');await add();await page.getByRole('menuitem',{name:'从设备上传'}).click();await shot('phone-skill-upload');await page.getByRole('button',{name:'关闭',exact:true}).click();
+ await home();await page.getByRole('button',{name:'打开原型评审工具'}).click();await page.getByLabel('页面状态').selectOption('loading');await shot('phone-loading');await page.getByLabel('页面状态').selectOption('error');await shot('phone-error');await page.getByRole('button',{name:'关闭评审工具'}).click();await page.getByRole('button',{name:'重新加载'}).click();
+ await page.setViewportSize({width:320,height:720});await home();await check('320px layout remains usable',async()=>{if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw Error('320px overflow');});
+ if(errors.length)throw Error('Browser errors: '+errors.join(' | '));
+ await fs.writeFile(path.join(evidence,'interaction-results.json'),JSON.stringify({date:'2026-10-22',browser:'isolated headless Microsoft Edge',results,consoleErrors:errors},null,2));
+ console.log(JSON.stringify({passed:results.length,screenshots:evidence,consoleErrors:errors.length}));
+}catch(error){await shot('failure');await fs.writeFile(path.join(evidence,'failure.txt'),error.stack);throw error;}finally{await context.close();await browser.close();}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小七 · 原型评审说明</title>
+<style>body{font:15px/1.85 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color:#252525;margin:50px auto;max-width:720px;padding:0 24px 60px}h1{font-size:27px}h2{font-size:19px;margin-top:36px}p,li{color:#616161}a{color:#333;text-underline-offset:4px}li{padding:5px 0}.note{background:#f5f5f5;padding:16px 20px;border-radius:16px}table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;vertical-align:top;border-bottom:1px solid #e5e5e5;padding:12px 6px}th{color:#333}</style>
+<a href="/">返回原型</a><h1>插件与技能 · 设计评审</h1>
+<p class="note">主体视觉和三类详情设计图片已获确认，本轮更新 HTML 详情原型，等待你自行查看。安装、连接测试、GitHub 检查和聊天回复均为演示；不连接正式服务。请不要填写真实令牌。</p>
+<h2>这轮先看详情</h2>
+<ol>
+ <li><a href="/#plugins/detail/drive">插件详情 · Google Drive</a>：浅灰示例区、应用与技能列表、信息区；官方开发者统一为「第七世界」。点击示例可添加插件并带入演示聊天。</li>
+ <li><a href="/#plugins/detail/supabase">MCP 详情 · Supabase</a>：与插件共用视觉，展示工具与连接信息。添加后查看「管理」「在聊天中试用」和更多菜单；<a href="/#plugins/detail/github">GitHub</a> 默认已安装，可直接看管理状态。</li>
+ <li><a href="/#skills/detail/close-reading">技能详情 · 论文精读</a>：可折叠介绍、三列案例、底部操作，没有评分。案例可放大查看并带入演示聊天；卸载后可查看「添加技能」状态。</li>
+</ol>
+<p>「第七世界」是小七官方，统一配置在原型中；个人上传和导入内容保留个人提供方。示例工具清单、服务器地址和报告内容为演示，不代表真实服务契约。没有实际网站/隐私链接的条目显示「未提供」。</p>
+<h2>已确认的基础路径</h2>
+<p>插件首页保留顶部双页签、已安装图标、公开/个人和双列列表。添加菜单保留创建插件、上传压缩包、自定义 MCP。MCP 继续合并在插件中。</p>
+<ol>
+ <li>技能 → 添加 → 通过聊天创建：普通新会话带入创建引导；发送两轮消息可预览草稿交接。</li>
+ <li>技能 → 添加 → 使用编辑器创建：填写名称、描述与正文，添加文件或文件夹。</li>
+ <li>修改内容后返回：选择继续编辑、保留草稿或不保存。</li>
+ <li>技能 → 添加 → 从设备上传：Markdown 文件可预览编辑；压缩包仅演示交接，不真实解包。</li>
+</ol>
+<h2>状态与手机适配</h2>
+<p>左下角「设计预览」可切换 834 平板与 390 手机，以及市场的静态加载、空和错误状态。手机列表与技能案例为单列。浏览器点击、同状态截图对比和真机验证未执行，等待你验收。</p>
+<p>MCP 测试是演示规则：有效 HTTPS 地址显示成功，地址包含 <code>fail</code> 时显示连接失败；非 HTTPS 地址展示校验反馈，没有真实网络探测。</p>
+<h2>需要单独确认的接入边界</h2>
+<table><tr><th>路径</th><th>本轮原型</th><th>正式接入前</th></tr>
+<tr><td>现有 GitHub 导入、MCP</td><td>保留入口并重组视觉</td><td>复用并核对现有检查、授权和连接契约</td></tr>
+<tr><td>本地插件包</td><td>选择文件、添加完成状态</td><td>确认支持格式、体积、清单解析和安全检查</td></tr>
+<tr><td>技能编辑与上传</td><td>文件编辑、草稿、Markdown 下载；压缩包演示</td><td>确认文件树持久化、包解析、上传与创建契约</td></tr>
+<tr><td>聊天创建</td><td>普通聊天与草稿交接演示</td><td>接入现有新会话和创建引导；原型回复不代表模型效果</td></tr>
+<tr><td>详情与案例内容</td><td>演示的能力清单、报告与元信息</td><td>确认真实详情数据、工具清单、案例来源和链接契约</td></tr>
+</table>
+<h2>独立矢量素材</h2>
+<p>详情新增图标与报告预览使用独立 SVG，整张设计图片仅作参考。<a href="/detail-assets.html">查看详情资产预览</a> · <a href="/assets.html">品牌 SVG 预览</a> · <a href="/icons/detail/PHOSPHOR-LICENSE.txt">Phosphor MIT 许可证</a>。</p>
+<p>此次视觉确认不能视为真实安装、连接、安全检查、模型效果或原生设备验证已经通过。</p>
+</html>

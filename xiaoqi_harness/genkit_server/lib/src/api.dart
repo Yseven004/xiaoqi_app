@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'capability_import_service.dart';
 import 'capability_scope.dart';
 import 'artifact_context.dart';
@@ -425,6 +426,19 @@ class XiaoqiApi {
         '/v1/capabilities/imports',
         (Request r) => _authenticated(r, (d) => _importJob(r, d, false)),
       )
+      ..get(
+        '/v1/capabilities/import-policy',
+        (Request r) => _authenticated(
+          r,
+          (_) async => _json({
+            'upload_extensions': CapabilityImportService.uploadExtensions,
+            'max_archive_bytes': CapabilityImportService.maxArchiveBytes,
+            'max_expanded_bytes': CapabilityImportService.maxExpandedBytes,
+            'max_file_bytes': CapabilityImportService.maxFileBytes,
+            'max_files': CapabilityImportService.maxFiles,
+          }),
+        ),
+      )
       ..post(
         '/v1/capabilities/install',
         (Request r) => _authenticated(r, (d) => _importJob(r, d, true)),
@@ -571,6 +585,24 @@ class XiaoqiApi {
             return _error('连接器信息已在其他设备更新，请刷新后再保存', 409);
           } on Object {
             return _error('保存 MCP 连接器失败', 503);
+          }
+        }),
+      )
+      ..post(
+        '/v1/mcp/connection-tests',
+        (request) => _authenticated(request, (device) async {
+          try {
+            return _json(
+              await McpConnectionService(
+                store,
+              ).testDraft(device.tenant, await _body(request, 16 * 1024)),
+            );
+          } on FormatException catch (error) {
+            return _error(error.message, 400);
+          } on StateError catch (error) {
+            return _error(error.message, 502);
+          } on Object {
+            return _error('MCP 连接测试失败，请检查地址、访问令牌和服务状态', 502);
           }
         }),
       )
@@ -1522,7 +1554,10 @@ class XiaoqiApi {
     bool install,
   ) async {
     try {
-      final body = await _body(request, 8192);
+      final body = await _body(
+        request,
+        install ? 8192 : CapabilityImportService.maxUploadBodyBytes,
+      );
       if (store
               .list('import-job/${device.tenant}/', limit: 1000)
               .where((entry) => entry.$2.value['status'] == 'running')
@@ -1530,6 +1565,13 @@ class XiaoqiApi {
           2) {
         return _error('已有导入或安装进行中，请稍后重试', 429);
       }
+      final uploaded =
+          !install &&
+          (body.containsKey('file_name') || body.containsKey('archive_base64'));
+      if (uploaded && body.containsKey('url')) {
+        throw const FormatException('GitHub 链接与上传文件不能同时提交');
+      }
+      final upload = uploaded ? CapabilityImportService.readUpload(body) : null;
       final id = _uuid.v4();
       final key = 'import-job/${device.tenant}/$id';
       final cancellation = CancellationController();
@@ -1541,6 +1583,7 @@ class XiaoqiApi {
         'created_at': DateTime.now().toUtc().toIso8601String(),
       }, null);
       unawaited(() async {
+        String? createdInspection;
         try {
           final Map<String, dynamic> result;
           if (install) {
@@ -1558,12 +1601,20 @@ class XiaoqiApi {
               'record': _publicCapability(saved.value, saved.revision, false),
             };
           } else {
-            result = {
-              'inspection': await imports.inspect(
-                device.tenant,
-                body['url']?.toString() ?? '',
-              ),
-            };
+            final inspection = upload == null
+                ? await imports.inspect(
+                    device.tenant,
+                    body['url']?.toString() ?? '',
+                    cancellation: cancellation.token,
+                  )
+                : await imports.inspectUpload(
+                    device.tenant,
+                    upload.fileName,
+                    upload.bytes,
+                    cancellation: cancellation.token,
+                  );
+            createdInspection = inspection['id']?.toString();
+            result = {'inspection': inspection};
           }
           if (!install) cancellation.token.throwIfCancelled();
           final current = store.get(key)!;
@@ -1573,6 +1624,9 @@ class XiaoqiApi {
             ...result,
           }, current.revision);
         } catch (e) {
+          if (createdInspection != null) {
+            imports.discardInspection(device.tenant, createdInspection);
+          }
           final current = store.get(key)!;
           final message = e is FormatException
               ? e.message
@@ -1603,13 +1657,12 @@ class XiaoqiApi {
       final body = await _body(request, _maxJsonBytes);
       final raw = body['record'];
       if (raw is Map &&
-          (raw['origin'] == 'github' ||
-              store
-                      .get(
-                        'cap/${device.tenant}/${_safeId(raw['id'], '能力 ID')}',
-                      )
-                      ?.value['origin'] ==
-                  'github')) {
+          (const {'github', 'upload'}.contains(raw['origin']) ||
+              const {'github', 'upload'}.contains(
+                store
+                    .get('cap/${device.tenant}/${_safeId(raw['id'], '能力 ID')}')
+                    ?.value['origin'],
+              ))) {
         return _error('导入扩展只能通过安装、更新、启停或卸载接口管理', 400);
       }
       final record = await _normalizeCapability(device.tenant, body['record']);
@@ -2644,7 +2697,7 @@ class XiaoqiApi {
           final artifactKey = version.remove('artifact_key')?.toString() ?? '';
           if (includeContent &&
               artifactKey.isNotEmpty &&
-              document['origin'] != 'github') {
+              !const {'github', 'upload'}.contains(document['origin'])) {
             final files = store.getImmutable(artifactKey);
             version['content'] = utf8.decode(files['SKILL.md'] ?? const []);
             version['files'] = {
@@ -2707,12 +2760,16 @@ class XiaoqiApi {
   }
 
   static Future<Map<String, dynamic>> _body(Request request, int limit) async {
-    final raw = await request.read().toList();
-    final size = raw.fold<int>(0, (sum, part) => sum + part.length);
-    if (size > limit) throw const FormatException('请求内容过大');
-    final decoded = jsonDecode(
-      utf8.decode(raw.expand((part) => part).toList()),
-    );
+    final declared = int.tryParse(request.headers['content-length'] ?? '');
+    if (declared != null && declared > limit)
+      throw const FormatException('请求内容过大');
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in request.read()) {
+      if (bytes.length + chunk.length > limit)
+        throw const FormatException('请求内容过大');
+      bytes.add(chunk);
+    }
+    final decoded = jsonDecode(utf8.decode(bytes.takeBytes()));
     if (decoded is! Map) throw const FormatException('请求格式无效');
     return Map<String, dynamic>.from(decoded);
   }

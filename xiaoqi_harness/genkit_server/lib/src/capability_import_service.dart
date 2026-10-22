@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:io' as io;
+import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
@@ -22,20 +23,21 @@ typedef DependencyPreparer =
 class _BoundedBytes implements Sink<List<int>> {
   _BoundedBytes(this.limit);
   final int limit;
-  final bytes = <int>[];
+  final _buffer = BytesBuilder(copy: false);
+  Uint8List get bytes => _buffer.toBytes();
   @override
   void add(List<int> data) {
-    if (bytes.length + data.length > limit)
+    if (_buffer.length + data.length > limit)
       throw const FormatException('解压内容超过声明大小');
-    bytes.addAll(data);
+    _buffer.add(data);
   }
 
   @override
   void close() {}
 }
 
-/// GitHub is the only download origin. Repository content is data, never a
-/// command. Tests inject a downloader rather than weaken production URL checks.
+/// Only GitHub is downloaded. Uploaded packages pass the same inspection and
+/// installation gates; neither source is executed in the server process.
 class CapabilityImportService {
   CapabilityImportService(
     this.store, {
@@ -47,7 +49,10 @@ class CapabilityImportService {
   final DependencyPreparer? prepareDependencies;
   static const maxArchiveBytes = 20 * 1024 * 1024;
   static const maxExpandedBytes = 50 * 1024 * 1024;
+  static const maxFileBytes = 10 * 1024 * 1024;
   static const maxFiles = 3000;
+  static const maxUploadBodyBytes = ((maxArchiveBytes + 2) ~/ 3) * 4 + 65536;
+  static const uploadExtensions = ['zip', 'tgz', 'tar.gz', 'skill', 'md'];
   static const _uuid = Uuid();
   final _installing = <String>{};
 
@@ -190,7 +195,7 @@ class CapabilityImportService {
     throw const FormatException('公开仓库或分支不存在，请检查地址');
   }
 
-  Future<Map<String, dynamic>> inspect(String tenant, String url) async {
+  void _pruneInspections(String tenant) {
     for (final (key, doc) in store.list('import/$tenant/', limit: 1000)) {
       if (DateTime.parse(
         doc.value['expires_at'].toString(),
@@ -199,6 +204,15 @@ class CapabilityImportService {
         store.delete(key);
       }
     }
+  }
+
+  Future<Map<String, dynamic>> inspect(
+    String tenant,
+    String url, {
+    CancellationToken? cancellation,
+  }) async {
+    cancellation?.throwIfCancelled();
+    _pruneInspections(tenant);
     final source = parseUrl(url);
     final resolved = await _resolveRef(source.owner, source.repo, source.tail);
     final ref = resolved.ref;
@@ -212,10 +226,78 @@ class CapabilityImportService {
       maxArchiveBytes,
     );
     final files = decodeRepository(bytes);
+    cancellation?.throwIfCancelled();
     if (directory.isNotEmpty &&
         !files.keys.any((p) => p.startsWith('$directory/'))) {
       throw const FormatException('仓库内没有这个子目录');
     }
+    return _persistInspection(tenant, files, directory, {
+      'source_type': 'github',
+      'source_url': 'https://github.com/${source.owner}/${source.repo}',
+      'requested_url': url,
+      'ref': ref,
+      'commit': sha,
+    }, cancellation: cancellation);
+  }
+
+  static ({String fileName, List<int> bytes}) readUpload(
+    Map<String, dynamic> body,
+  ) {
+    if (body['file_name'] is! String || body['archive_base64'] is! String) {
+      throw const FormatException('请提供文件名和 Base64 编码的上传内容');
+    }
+    final name = (body['file_name'] as String).trim();
+    if (name.isEmpty ||
+        name.length > 180 ||
+        RegExp(r'[\x00-\x1f/\\:]').hasMatch(name) ||
+        !uploadExtensions.any(
+          (extension) => name.toLowerCase().endsWith('.$extension'),
+        )) {
+      throw const FormatException('请选择 ZIP、TGZ、TAR.GZ、SKILL 或 Markdown 文件');
+    }
+    final encoded = body['archive_base64'] as String;
+    if (encoded.isEmpty ||
+        encoded.length > ((maxArchiveBytes + 2) ~/ 3) * 4 ||
+        encoded.length % 4 != 0 ||
+        !RegExp(r'^[A-Za-z0-9+/]*={0,2}$').hasMatch(encoded)) {
+      throw const FormatException('上传内容无效或压缩包超过 20 MiB');
+    }
+    final bytes = base64Decode(encoded);
+    if (bytes.length > maxArchiveBytes) {
+      throw const FormatException('压缩包超过 20 MiB');
+    }
+    return (fileName: name, bytes: bytes);
+  }
+
+  Future<Map<String, dynamic>> inspectUpload(
+    String tenant,
+    String fileName,
+    List<int> bytes, {
+    CancellationToken? cancellation,
+  }) async {
+    cancellation?.throwIfCancelled();
+    // Let the accepted job response/cancel request run before bounded decoding.
+    await Future<void>.delayed(Duration.zero);
+    cancellation?.throwIfCancelled();
+    _pruneInspections(tenant);
+    final files = decodeUpload(fileName, bytes);
+    cancellation?.throwIfCancelled();
+    return _persistInspection(tenant, files, '', {
+      'source_type': 'upload',
+      'file_name': fileName,
+      'archive_sha256': sha256.convert(bytes).toString(),
+      'content_sha256': digestFiles(files),
+    }, cancellation: cancellation);
+  }
+
+  Map<String, dynamic> _persistInspection(
+    String tenant,
+    Map<String, List<int>> files,
+    String directory,
+    Map<String, dynamic> source, {
+    CancellationToken? cancellation,
+  }) {
+    cancellation?.throwIfCancelled();
     final candidates = discover(files, directory);
     final licenses = files.keys
         .where(
@@ -235,11 +317,8 @@ class CapabilityImportService {
     store.putImmutable(object, files);
     final inspection = <String, dynamic>{
       'id': id,
-      'source_url': 'https://github.com/${source.owner}/${source.repo}',
-      'requested_url': url,
-      'ref': ref,
+      ...source,
       'directory': directory,
-      'commit': sha,
       'candidates': candidates,
       'artifact_key': object,
       'created_at': DateTime.now().toUtc().toIso8601String(),
@@ -248,11 +327,122 @@ class CapabilityImportService {
           .add(const Duration(hours: 24))
           .toIso8601String(),
     };
-    store.put('import/$tenant/$id', inspection, null);
+    try {
+      cancellation?.throwIfCancelled();
+      store.put('import/$tenant/$id', inspection, null);
+    } on Object {
+      store.deleteImmutable(object);
+      rethrow;
+    }
     return publicInspection(inspection);
   }
 
-  static Map<String, List<int>> decodeRepository(List<int> bytes) {
+  void discardInspection(String tenant, String id) {
+    final key = 'import/$tenant/${safePath(id)}';
+    final inspection = store.get(key);
+    if (inspection == null) return;
+    store.deleteImmutable(inspection.value['artifact_key'].toString());
+    store.delete(key, expectedRevision: inspection.revision);
+  }
+
+  static Map<String, List<int>> decodeRepository(List<int> bytes) =>
+      _decodeZip(bytes, stripRepositoryRoot: true);
+
+  static String _uploadedPath(String name, {bool directory = false}) {
+    var path = name;
+    while (path.startsWith('./')) {
+      path = path.substring(2);
+    }
+    if (directory && path.endsWith('/'))
+      path = path.substring(0, path.length - 1);
+    if (directory && (path.isEmpty || path == '.')) return '';
+    return safePath(path);
+  }
+
+  static Map<String, List<int>> decodeUpload(String fileName, List<int> bytes) {
+    if (bytes.isEmpty || bytes.length > maxArchiveBytes) {
+      throw const FormatException('上传文件为空或超过 20 MiB');
+    }
+    final lower = fileName.toLowerCase();
+    final Map<String, List<int>> files;
+    try {
+      if (lower.endsWith('.md')) {
+        if (bytes.length > maxFileBytes)
+          throw const FormatException('单个文件超过 10 MiB');
+        utf8.decode(
+          bytes,
+        ); // Reject non-text files before treating them as skills.
+        files = {'SKILL.md': Uint8List.fromList(bytes)};
+      } else if (lower.endsWith('.zip') || lower.endsWith('.skill')) {
+        if (bytes.length < 4 || bytes[0] != 0x50 || bytes[1] != 0x4b) {
+          throw const FormatException('文件不是有效的 ZIP 压缩包');
+        }
+        files = _decodeZip(bytes, stripRepositoryRoot: false);
+      } else if (lower.endsWith('.tgz') || lower.endsWith('.tar.gz')) {
+        final sink = _BoundedBytes(maxExpandedBytes + maxFiles * 2048 + 1024);
+        final gzip = io.ZLibDecoder(gzip: true).startChunkedConversion(sink);
+        for (var offset = 0; offset < bytes.length; offset += 1024) {
+          gzip.add(
+            bytes.sublist(offset, (offset + 1024).clamp(0, bytes.length)),
+          );
+        }
+        gzip.close();
+        final tar = TarDecoder();
+        final seen = <String>{};
+        files = {};
+        var total = 0;
+        tar.decodeBytes(
+          sink.bytes,
+          verify: true,
+          callback: (_) {
+            final entry = tar.files.last;
+            if (tar.files.length > maxFiles)
+              throw const FormatException('压缩包文件过多');
+            if (!const ['', '0', '5'].contains(entry.typeFlag) ||
+                (entry.nameOfLinkedFile?.isNotEmpty ?? false)) {
+              throw const FormatException('不支持链接或特殊文件');
+            }
+            final directory = entry.typeFlag == '5';
+            final path = _uploadedPath(entry.filename, directory: directory);
+            if (path.isEmpty) return;
+            if (!seen.add(path)) throw const FormatException('压缩包包含重复路径');
+            if (directory) {
+              if (entry.size != 0) throw const FormatException('目录条目不能包含文件内容');
+              return;
+            }
+            total += entry.size;
+            if (entry.size > maxFileBytes || total > maxExpandedBytes) {
+              throw const FormatException('解压内容过大');
+            }
+            final content = entry.contentBytes!;
+            if (content.length != entry.size)
+              throw const FormatException('TAR 文件内容不完整');
+            files[path] = content;
+          },
+        );
+      } else {
+        throw const FormatException('不支持这个文件格式');
+      }
+    } on FormatException {
+      rethrow;
+    } on Object {
+      throw const FormatException('压缩包无效、已损坏或校验失败');
+    }
+    for (final name in files.keys) {
+      final parts = name.split('/');
+      for (var i = 1; i < parts.length; i++) {
+        if (files.containsKey(parts.take(i).join('/'))) {
+          throw const FormatException('文件与目录路径冲突');
+        }
+      }
+    }
+    return files;
+  }
+
+  static Map<String, List<int>> _decodeZip(
+    List<int> bytes, {
+    required bool stripRepositoryRoot,
+  }) {
     if (bytes.length > maxArchiveBytes)
       throw const FormatException('压缩包超过 20 MB');
     final directory = ZipDirectory()..read(InputMemoryStream(bytes));
@@ -267,8 +457,11 @@ class CapabilityImportService {
       final raw = header.filename.endsWith('/')
           ? header.filename.substring(0, header.filename.length - 1)
           : header.filename;
-      safePath(raw);
-      if (!seen.add(raw)) throw const FormatException('仓库包含重复路径');
+      final normalized = stripRepositoryRoot
+          ? safePath(raw)
+          : _uploadedPath(raw, directory: header.filename.endsWith('/'));
+      if (normalized.isEmpty) continue;
+      if (!seen.add(normalized)) throw const FormatException('仓库包含重复路径');
       final type = (header.externalFileAttributes >> 16) & 0xf000;
       if ((file.flags & 1) != 0 ||
           (type != 0 && type != 0x8000 && type != 0x4000)) {
@@ -276,15 +469,17 @@ class CapabilityImportService {
       }
       if (file.filename != header.filename)
         throw const FormatException('压缩包文件名不一致');
-      final parts = raw.split('/');
+      final parts = normalized.split('/');
       prefix ??= parts.first;
-      if (parts.first != prefix) throw const FormatException('仓库压缩包根目录不一致');
+      if (stripRepositoryRoot && parts.first != prefix)
+        throw const FormatException('仓库压缩包根目录不一致');
       if (header.filename.endsWith('/')) continue;
       total += header.uncompressedSize;
-      if (header.uncompressedSize > 10 * 1024 * 1024 ||
-          total > maxExpandedBytes)
+      if (header.uncompressedSize > maxFileBytes || total > maxExpandedBytes)
         throw const FormatException('解压内容过大');
-      final path = safePath(parts.skip(1).join('/'));
+      final path = stripRepositoryRoot
+          ? safePath(parts.skip(1).join('/'))
+          : normalized;
       final sink = _BoundedBytes(header.uncompressedSize);
       final compressed = file.getStream(decompress: false).toUint8List();
       if (file.compressionMethod == CompressionType.deflate) {
@@ -304,10 +499,11 @@ class CapabilityImportService {
       } else {
         throw const FormatException('仅支持标准 ZIP 存储或 deflate 压缩');
       }
-      if (sink.bytes.length != header.uncompressedSize ||
-          getCrc32(sink.bytes) != header.crc32)
+      final expanded = sink.bytes;
+      if (expanded.length != header.uncompressedSize ||
+          getCrc32(expanded) != header.crc32)
         throw const FormatException('压缩包内容校验失败');
-      files[path] = sink.bytes;
+      files[path] = expanded;
     }
     return files;
   }
@@ -684,9 +880,20 @@ class CapabilityImportService {
         .firstOrNull;
     if (candidate == null || candidate['status'] == 'unsupported')
       throw const FormatException('这个扩展没有可安装的技能');
-    final id =
-        'import-${sha256.convert(utf8.encode('${inspection['source_url']}/${candidate['root']}')).toString().substring(0, 32)}';
-    if (updateId != null && updateId != id)
+    final uploaded = inspection['source_type'] == 'upload';
+    final origin = uploaded ? 'upload' : 'github';
+    final sourceIdentity = uploaded
+        ? inspection['content_sha256']
+        : inspection['source_url'];
+    final inferredId =
+        '${uploaded ? 'upload' : 'import'}-${sha256.convert(utf8.encode('$sourceIdentity/${candidate['root']}')).toString().substring(0, 32)}';
+    if (uploaded &&
+        updateId != null &&
+        !RegExp(r'^upload-[a-f0-9]{32}$').hasMatch(updateId)) {
+      throw const FormatException('只能用本地包更新原本由本地包安装的扩展');
+    }
+    final id = uploaded && updateId != null ? updateId : inferredId;
+    if (!uploaded && updateId != null && updateId != id)
       throw const FormatException('更新来源与已安装扩展不一致');
     final key = 'cap/$tenant/$id';
     if (!_installing.add(key)) throw StateError('该扩展正在安装，请稍候');
@@ -698,7 +905,15 @@ class CapabilityImportService {
               current.revision != expectedRevision ||
               current.value['deleted_at'] != null))
         throw const FormatException('安装记录已变化，请刷新后重试');
-      final versionId = '${inspection['commit']}-${candidate['id']}';
+      if (uploaded &&
+          updateId != null &&
+          (current!.value['origin'] != 'upload' ||
+              current.value['kind'] != candidate['kind'] ||
+              current.value['name'] != candidate['name'])) {
+        throw const FormatException('上传包的名称或类型与原安装扩展不一致');
+      }
+      final versionId =
+          '${inspection[uploaded ? 'content_sha256' : 'commit']}-${candidate['id']}';
       if (current?.value['current_version_id'] == versionId &&
           current?.value['deleted_at'] == null)
         return current!;
@@ -720,9 +935,19 @@ class CapabilityImportService {
               : current.value['enabled'] ?? true,
           'updated_at': DateTime.now().toUtc().toIso8601String(),
           'compatibility': candidate,
+          'origin': origin,
           'source': {
-            for (final k in ['source_url', 'requested_url', 'commit', 'ref'])
-              k: inspection[k],
+            for (final k in [
+              'source_url',
+              'requested_url',
+              'commit',
+              'ref',
+              'source_type',
+              'file_name',
+              'archive_sha256',
+              'content_sha256',
+            ])
+              if (inspection.containsKey(k)) k: inspection[k],
             'root': candidate['root'],
           },
         }, current.revision);
@@ -789,10 +1014,19 @@ class CapabilityImportService {
         'show_in_menu': current?.value['show_in_menu'] ?? true,
         'enabled': current?.value['enabled'] ?? true,
         'deleted_at': null,
-        'origin': 'github',
+        'origin': origin,
         'source': {
-          for (final k in ['source_url', 'requested_url', 'commit', 'ref'])
-            k: inspection[k],
+          for (final k in [
+            'source_url',
+            'requested_url',
+            'commit',
+            'ref',
+            'source_type',
+            'file_name',
+            'archive_sha256',
+            'content_sha256',
+          ])
+            if (inspection.containsKey(k)) k: inspection[k],
           'root': candidate['root'],
         },
         'compatibility': candidate,
