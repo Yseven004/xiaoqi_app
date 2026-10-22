@@ -1,56 +1,127 @@
+import 'dart:convert';
+
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import 'package:xiaoqi_app/pages/extension_market_page.dart';
+import 'package:xiaoqi_app/features/capabilities/presentation/market_skill_editor.dart';
 
 void main() {
-  testWidgets('扩展市场主流程不使用路由转圈并支持筛选', (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1048, 1501));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    SharedPreferences.setMockInitialValues({
-      'xiaoqi_extension_market_installed_v1': ['paper-reader'],
-    });
+  setUp(() => SharedPreferences.setMockInitialValues({}));
 
-    await tester.pumpWidget(const MaterialApp(home: ExtensionMarketPage()));
-    await tester.pump();
-
-    expect(find.text('扩展市场'), findsOneWidget);
-    expect(find.text('论文精读'), findsWidgets);
-    expect(find.text('精选推荐'), findsOneWidget);
-    expect(find.text('论文检索'), findsOneWidget);
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-    await tester.tap(find.text('插件'));
-    await tester.pump();
-    expect(find.text('论文精读工作台'), findsWidgets);
-    expect(find.text('Scientific Agent Skills'), findsOneWidget);
-
-    await tester.tap(find.text('我创建的'));
-    await tester.pump();
-    expect(find.text('还没有创建的扩展'), findsOneWidget);
-    expect(find.textContaining('作者作品页在 V1 先保持空状态。'), findsOneWidget);
+  test('checked skill package keeps its actual name, content and binary attachment', () {
+    const document =
+        '---\nname: test-skill\ndescription: test description\n---\n\nActual instructions';
+    final package = Archive()
+      ..addFile(ArchiveFile.bytes('bundle/SKILL.md', utf8.encode(document)))
+      ..addFile(ArchiveFile.bytes('bundle/assets/data.bin', [0, 255, 7]));
+    final draft = skillDraftFromUpload(
+      fileName: 'skill.zip',
+      bytes: ZipEncoder().encode(package),
+      root: 'bundle',
+      policy: {
+        'max_files': 128,
+        'max_file_bytes': 2097152,
+        'max_expanded_bytes': 10485760,
+      },
+    );
+    expect(draft.name, 'test-skill');
+    expect(draft.content, document);
+    expect(base64Decode(draft.files['assets/data.bin']!), [0, 255, 7]);
+    expect(draft.files.containsKey('SKILL.md'), isFalse);
   });
 
-  testWidgets('GitHub 导入弹窗的取消和检查都能安全关闭', (tester) async {
-    SharedPreferences.setMockInitialValues({});
+  test('checked skill reader refuses traversal before creating a draft', () {
+    final package = Archive()
+      ..addFile(ArchiveFile.bytes('../SKILL.md', [1, 2, 3]));
+    expect(
+      () => skillDraftFromUpload(
+        fileName: 'skill.zip',
+        bytes: ZipEncoder().encode(package),
+        root: '',
+        policy: {
+          'max_files': 128,
+          'max_file_bytes': 2097152,
+          'max_expanded_bytes': 10485760,
+        },
+      ),
+      throwsFormatException,
+    );
+  });
 
+  testWidgets(
+    'V2 groups MCP under plugins without seeded marketplace entries',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(834, 1194));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(const MaterialApp(home: ExtensionMarketPage()));
+      await tester.pump();
+      expect(find.text('插件'), findsWidgets);
+      expect(find.text('MCP'), findsNothing);
+      expect(find.text('Scientific Agent Skills'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      await tester.tap(find.text('技能'));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'not-found');
+      await tester.pump();
+      expect(find.text('没有找到相关内容'), findsOneWidget);
+      expect(find.text('文献综述'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'chat creation returns an ordinary new-chat request without sending',
+    (tester) async {
+      ExtensionChatRequest? request;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () async {
+                  request = await Navigator.push<ExtensionChatRequest>(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const ExtensionMarketPage(
+                        initialKind: ExtensionKind.skill,
+                      ),
+                    ),
+                  );
+                },
+                child: const Text('打开市场'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开市场'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('添加'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('通过聊天创建'));
+      await tester.pumpAndSettle();
+      expect(request?.selection['id'], 'create-skill');
+      expect(request?.selection['type'], 'action');
+      expect(request?.prompt, isEmpty);
+    },
+  );
+
+  testWidgets('invalid GitHub URL stays in the dialog and can be cancelled', (
+    tester,
+  ) async {
     await tester.pumpWidget(const MaterialApp(home: ExtensionMarketPage()));
     await tester.pump();
-
-    await tester.tap(find.text('创建/导入'));
+    await tester.tap(find.text('添加'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('从公开 GitHub 导入'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-
-    await tester.tap(find.text('创建/导入'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('从公开 GitHub 导入'));
+    await tester.tap(find.text('从 GitHub 导入'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('开始检查'));
     await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
+    expect(find.textContaining('填写公开 GitHub'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.text('开始检查'), findsNothing);
   });
 }

@@ -1,5 +1,14 @@
 # 扩展市场 V2 · 资产清单
 
+## Flutter 接入 · 2026-10-23
+
+- 正式图标目录：`assets/icons/extension_market/`（13 品牌，viewBox 0 0 24 24）与 `detail/`（35 控件，viewBox 0 0 256 256）。复用下述原型来源与许可；12 个额外控件来自原型内联使用的同版 Phosphor，导出工具 `tool/prepare_extension_market_controls.cjs`。许可保留在资产目录。
+- 三个报告的 42 组 SVG text 已按原型首选 Microsoft YaHei 的字形转为独立路径，保存在 `docs/design/extension-market-v2/flutter-vectors/`，viewBox 0 0 220 300。转换工具 `tool/prepare_extension_market_vectors.py`；没有截图追踪、位图嵌入或字体文件再分发。
+- 独立预览：`.codex-artifacts/extension-market-v2/standalone-vectors.png`，图标 64×64、报告 220×300；已打开核对边界、轮廓、线宽和文字。它仅是资产预览，不是 Flutter 页面或真机证据。
+- 实际显示：轻列表框 40/图形25（品牌可28），详情框82/图形54、窄窗66/44；技能标识104/58、窄窗70/42；控制图标16–25，触控目标48。消费组件为 `MarketBrand`、`marketIcon`、市场与详情、上传/MCP表单、技能编辑器。默认/按下/焦点/禁用共用原始SVG，普通图标允许语义颜色映射，品牌保留来源色。
+- 用户最新要求所有扩展自行上传，不添加演示数据；三张报告仅保存在设计文档，不打包为运行时案例，不自动套用到用户上传技能。13 品牌也不会创建任何对应插件或连接记录。
+- 状态分开记录：原型方向已确认；独立资产已核对；源码已接入；Flutter组件/页面对比未执行；最终真机视觉冻结待用户验收。
+
 日期：2026-10-22。范围：`prototype/`。插件 / MCP / 技能三张详情方向图已获用户确认；HTML、矢量重建素材及其实际显示效果仍待用户手动验收。市场既有资产继续作为设计候选，未冻结为正式 Flutter 资产。
 
 ## 参考与验收边界

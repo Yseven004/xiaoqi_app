@@ -6552,6 +6552,20 @@ $text''';
     unawaited(_startNewConversation());
   }
 
+  Future<void> _openExtensionMarket({
+    ExtensionKind kind = ExtensionKind.plugin,
+  }) async {
+    final request = await Navigator.of(context).push<ExtensionChatRequest>(
+      MaterialPageRoute(builder: (_) => ExtensionMarketPage(initialKind: kind)),
+    );
+    if (request == null || !mounted) return;
+    if (_space != _HomeSpace.reading) setState(() => _space = _HomeSpace.reading);
+    await _startNewConversation();
+    if (!mounted) return;
+    _composerController.setMessage(request.prompt, request.selection);
+    _composerFocusNode.requestFocus();
+  }
+
   Future<AiConversationRecord?> _latestConversationForBook(
     int bookId,
     String bookName,
@@ -6784,11 +6798,7 @@ $text''';
                 Navigator.of(dialogContext).pop();
               },
               onOpenExtensionMarket: () {
-                actionAfterClose = () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const ExtensionMarketPage(),
-                  ),
-                );
+                actionAfterClose = _openExtensionMarket;
                 Navigator.of(dialogContext).pop();
               },
             ),
@@ -7197,6 +7207,10 @@ $text''';
                                                   .insertCapability(capability);
                                               _composerFocusNode.unfocus();
                                             },
+                                            onOpenExtensionMarket: () =>
+                                                _openExtensionMarket(
+                                                  kind: ExtensionKind.mcp,
+                                                ),
                                             pendingSkillDraftReview:
                                                 _pendingSkillDraftReview,
                                             onSaveSkillDraft: _saveSkillDraft,
@@ -7661,6 +7675,7 @@ class _HomeComposer extends StatefulWidget {
     required this.networkMode,
     required this.onNetworkModeChanged,
     required this.onCapabilitySelected,
+    required this.onOpenExtensionMarket,
     required this.onDrawingSelected,
     required this.onEditDrawing,
     required this.pendingSkillDraftReview,
@@ -7722,6 +7737,7 @@ class _HomeComposer extends StatefulWidget {
   final String networkMode;
   final ValueChanged<String> onNetworkModeChanged;
   final ValueChanged<Map<String, Object?>> onCapabilitySelected;
+  final VoidCallback onOpenExtensionMarket;
   final VoidCallback onDrawingSelected;
   final ValueChanged<HomeChatAttachment> onEditDrawing;
   final CapabilityDraft? pendingSkillDraftReview;
@@ -8371,14 +8387,7 @@ class _HomeComposerState extends State<_HomeComposer> {
         if (!widget.expanded)
           SkillsPluginsComposerControls(
             isReadingSpace: widget.showReadingTasks,
-            onManageMcp: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ExtensionMarketPage(
-                  initialKind: ExtensionKind.mcp,
-                  onMcpSelected: widget.onCapabilitySelected,
-                ),
-              ),
-            ),
+            onManageMcp: widget.onOpenExtensionMarket,
             onRequestLogin: widget.onRequestLogin,
             isSignedIn: widget.isSignedIn,
             onSessionChanged: widget.onSessionChanged,

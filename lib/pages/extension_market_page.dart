@@ -1,2832 +1,942 @@
 import 'dart:async';
 
 import 'package:app_links/app_links.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:yaml/yaml.dart';
 
-import '../widgets/app_toast.dart';
 import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../features/capabilities/data/capability_models.dart';
+import '../features/capabilities/data/capability_store.dart';
+import '../features/capabilities/presentation/market_ui.dart';
+import '../features/capabilities/presentation/market_skill_editor.dart';
+import '../widgets/app_toast.dart';
+
+part 'extension_market_details.dart';
+part 'extension_market_forms.dart';
 
 enum ExtensionKind { skill, plugin, mcp }
 
-enum ExtensionFilter { curated, installed, created }
-
-class ExtensionFeatureBlock {
-  const ExtensionFeatureBlock({
-    required this.title,
-    required this.description,
-    required this.illustration,
-    this.large = false,
-  });
-
-  final String title;
-  final String description;
-  final String illustration;
-  final bool large;
+class ExtensionChatRequest {
+  const ExtensionChatRequest(this.selection, {this.prompt = ''});
+  final Map<String, Object?> selection;
+  final String prompt;
 }
 
-class ExtensionEntry {
-  const ExtensionEntry({
+class _MarketEntry {
+  const _MarketEntry({
     required this.id,
-    required this.kind,
     required this.name,
-    required this.author,
     required this.description,
-    required this.iconAsset,
-    required this.iconBackground,
-    required this.authorBio,
-    required this.suitableFor,
-    required this.features,
-    required this.examples,
-    this.version = '1.0.0',
-    this.repository = 'xiaoqi/paper-reader',
-    this.importUrl,
-    this.installation,
+    required this.kind,
+    this.author = '',
+    this.url,
+    this.record,
+    this.catalog,
+    this.connection,
+    this.examples = const [],
+    this.category = '效率工具',
   });
-
-  final String id;
+  final String id, name, description, author, category;
   final ExtensionKind kind;
-  final String name;
-  final String author;
-  final String description;
-  final String iconAsset;
-  final Color iconBackground;
-  final String authorBio;
-  final String suitableFor;
-  final List<ExtensionFeatureBlock> features;
+  final String? url;
+  final CapabilityRecord? record;
+  final McpCatalogEntry? catalog;
+  final McpConnectionRecord? connection;
   final List<String> examples;
-  final String version;
-  final String repository;
-  final String? importUrl;
-  final CapabilityRecord? installation;
+  bool get installed => record != null || connection != null;
+  bool get personal =>
+      record != null || (connection != null && connection!.catalogId == null);
+  bool get editable =>
+      record != null &&
+      !record!.isServerInstallation &&
+      kind == ExtensionKind.skill;
+  String get developer => author.isEmpty ? '未提供' : author;
+  String get version =>
+      record?.currentVersion?.number.toString() ??
+      connection?.version ??
+      catalog?.version ??
+      '未提供';
+  String get asset {
+    final identity = name.toLowerCase();
+    for (final brand in const [
+      'github',
+      'notion',
+      'supabase',
+      'figma',
+      'slack',
+      'canva',
+      'linear',
+      'airtable',
+      'vercel',
+      'dropbox',
+      'todoist',
+      'shopify',
+    ]) {
+      if (identity.contains(brand)) return '$marketAssets$brand.svg';
+    }
+    if (identity.contains('google drive'))
+      return '${marketAssets}googledrive.svg';
+    return '${marketAssets}detail/${kind == ExtensionKind.skill ? 'file-text' : 'plugs'}.svg';
+  }
 
-  bool get isTrialCandidate => importUrl != null;
-
-  factory ExtensionEntry.installed(CapabilityRecord r) => ExtensionEntry(
-    id: r.id,
-    kind: r.kind == CapabilityKind.skill
-        ? ExtensionKind.skill
-        : ExtensionKind.plugin,
-    name: r.name,
-    author:
-        r.source['source_url']?.toString().split('/').elementAtOrNull(3) ??
-        '我的技能',
-    description: r.description,
-    iconAsset: 'assets/icons/capabilities/capability_skill_book.svg',
-    iconBackground: const Color(0xFFEFF6FF),
-    authorBio: '从公开仓库导入，作者信息以仓库为准。',
-    suitableFor: '在对话中选择后按需使用；实际效果需运行验证',
-    features: const [],
-    examples: [r.description],
-    version: r.currentVersionId.substring(
-      0,
-      r.currentVersionId.length.clamp(0, 12),
-    ),
-    repository:
-        r.source['source_url']?.toString().replaceFirst(
-          'https://github.com/',
-          '',
-        ) ??
-        '',
-    installation: r,
+  factory _MarketEntry.fromRecord(CapabilityRecord record) {
+    final sourceUrl = record.source['source_url']?.toString();
+    final uri = Uri.tryParse(sourceUrl ?? '');
+    Map metadata = const {};
+    try {
+      final match = RegExp(r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)')
+          .firstMatch(record.currentVersion?.content ?? '');
+      if (match != null) {
+        final parsed = loadYaml(match.group(1)!);
+        if (parsed is Map) metadata = parsed;
+      }
+    } catch (_) {
+      /* Keep malformed user documents readable without inventing metadata. */
+    }
+    final extra = metadata['metadata'];
+    final rawAuthor =
+        record.source['author']?.toString() ??
+        metadata['author']?.toString() ??
+        (extra is Map ? extra['author']?.toString() : null) ??
+        (uri?.host == 'github.com' && uri!.pathSegments.isNotEmpty
+            ? uri.pathSegments.first
+            : record.origin == 'local'
+            ? '你'
+            : '');
+    return _MarketEntry(
+      id: record.id,
+      name: record.name,
+      description: record.description,
+      kind: record.kind == CapabilityKind.skill
+          ? ExtensionKind.skill
+          : ExtensionKind.plugin,
+      author:
+          record.source['official'] == true ||
+              rawAuthor == '小七官方' ||
+              rawAuthor == '小七'
+          ? marketOfficialDeveloper
+          : rawAuthor,
+      url: sourceUrl,
+      record: record,
+      examples:
+          (metadata['examples'] is List
+                  ? metadata['examples'] as List
+                  : const [])
+              .whereType<String>()
+              .where((value) => value.trim().isNotEmpty)
+              .toList(),
+      category: record.kind == CapabilityKind.skill
+          ? '技能'
+          : record.origin == 'github'
+          ? '公开导入'
+          : '个人插件',
+    );
+  }
+  factory _MarketEntry.fromMcp(
+    McpCatalogEntry? catalog,
+    McpConnectionRecord? connection,
+  ) => _MarketEntry(
+    id: connection?.id ?? catalog!.id,
+    name: connection?.name ?? catalog!.name,
+    description:
+        catalog?.description ?? Uri.tryParse(connection?.url ?? '')?.host ?? '',
+    kind: ExtensionKind.mcp,
+    catalog: catalog,
+    connection: connection,
+    author: catalog == null
+        ? '你'
+        : Uri.tryParse(catalog.repository ?? '')?.pathSegments.firstOrNull ??
+              '',
+    url: connection?.url ?? catalog?.repository,
+    category: 'MCP 服务',
   );
-
-  String get kindLabel => switch (kind) {
-    ExtensionKind.skill => '技能',
-    ExtensionKind.plugin => '插件',
-    ExtensionKind.mcp => 'MCP',
-  };
 }
-
-class _CollectionCard {
-  const _CollectionCard({
-    required this.title,
-    required this.subtitle,
-    required this.asset,
-    required this.background,
-  });
-
-  final String title;
-  final String subtitle;
-  final String asset;
-  final Color background;
-}
-
-const _collectionCards = [
-  _CollectionCard(
-    title: '高效阅读与学习',
-    subtitle: '精读、摘要与知识整理',
-    asset: 'assets/icons/extensions/collection_reading.svg',
-    background: Color(0xFFFFF8E8),
-  ),
-  _CollectionCard(
-    title: '创作与表达',
-    subtitle: '写作、翻译与演示',
-    asset: 'assets/icons/extensions/collection_writing.svg',
-    background: Color(0xFFEFF6FF),
-  ),
-  _CollectionCard(
-    title: '研究与探索',
-    subtitle: '检索、分析与思维拓展',
-    asset: 'assets/icons/extensions/collection_research.svg',
-    background: Color(0xFFEFF7F0),
-  ),
-  _CollectionCard(
-    title: '整理你的工作流',
-    subtitle: '把零散内容变成行动',
-    asset: 'assets/icons/extensions/collection_reading.svg',
-    background: Color(0xFFF6F1FF),
-  ),
-  _CollectionCard(
-    title: '开发与效率',
-    subtitle: '让重复操作交给智能体',
-    asset: 'assets/icons/extensions/collection_writing.svg',
-    background: Color(0xFFF1F7F7),
-  ),
-];
-
-const _quickReadFeatures = [
-  ExtensionFeatureBlock(
-    title: '快速精读',
-    description: '先看懂论文讲什么，快速掌握研究背景、方法与结论。',
-    illustration: 'assets/icons/extensions/detail_quick_read.svg',
-    large: true,
-  ),
-  ExtensionFeatureBlock(
-    title: '重点解读',
-    description: '解释术语与难点，帮你理解关键论证。',
-    illustration: 'assets/icons/extensions/detail_explain.svg',
-  ),
-  ExtensionFeatureBlock(
-    title: '思维导图',
-    description: '把主要观点和关系整理成清晰结构。',
-    illustration: 'assets/icons/extensions/detail_mind_map.svg',
-  ),
-];
-
-const _curatedExtensions = [
-  ExtensionEntry(
-    id: 'paper-reader',
-    kind: ExtensionKind.skill,
-    name: '论文精读',
-    author: '小七官方',
-    description: '快速读懂论文并整理重点',
-    iconAsset: 'assets/icons/capabilities/capability_skill_book.svg',
-    iconBackground: Color(0xFFFFF7E8),
-    authorBio: '小七官方为阅读、学习与研究提供可靠的智能工具。',
-    suitableFor: 'PDF、网页、文档',
-    features: _quickReadFeatures,
-    examples: ['请帮我精读这篇论文，并整理出重点。', '解释这篇论文最难理解的部分，并生成思维导图。'],
-  ),
-  ExtensionEntry(
-    id: 'web-organizer',
-    kind: ExtensionKind.skill,
-    name: '网页整理',
-    author: '小七官方',
-    description: '提取正文并生成摘要笔记',
-    iconAsset: 'assets/icons/capabilities/capability_plugin_document.svg',
-    iconBackground: Color(0xFFEFF6FF),
-    authorBio: '小七官方为阅读、学习与研究提供可靠的智能工具。',
-    suitableFor: '网页、文章、资料',
-    features: _quickReadFeatures,
-    examples: ['整理这个网页的主要观点，并保留关键来源。'],
-  ),
-  ExtensionEntry(
-    id: 'weekly-review',
-    kind: ExtensionKind.skill,
-    name: '学习周报',
-    author: '小七官方',
-    description: '汇总阅读记录与下一步计划',
-    iconAsset: 'assets/icons/capabilities/description.svg',
-    iconBackground: Color(0xFFEFF9F1),
-    authorBio: '小七官方为阅读、学习与研究提供可靠的智能工具。',
-    suitableFor: '笔记、对话、任务',
-    features: _quickReadFeatures,
-    examples: ['根据本周的阅读记录，帮我生成周报和下周计划。'],
-  ),
-  ExtensionEntry(
-    id: 'full-translation',
-    kind: ExtensionKind.skill,
-    name: '全文翻译',
-    author: 'DeepL',
-    description: '保持语境的多语言文档翻译',
-    iconAsset: 'assets/icons/capabilities/capability_plugin_document.svg',
-    iconBackground: Color(0xFFFFF7E8),
-    authorBio: 'DeepL 提供保持语境与语气的多语言翻译能力。',
-    suitableFor: '网页、文档、对话',
-    features: _quickReadFeatures,
-    examples: ['将这份文档翻译成中文，并保留原有标题层级。'],
-    repository: 'DeepL/extension',
-  ),
-  ExtensionEntry(
-    id: 'knowledge-card',
-    kind: ExtensionKind.skill,
-    name: '知识卡片',
-    author: '小七官方',
-    description: '把关键概念整理成复习卡片',
-    iconAsset: 'assets/icons/capabilities/help_outline.svg',
-    iconBackground: Color(0xFFEFF6FB),
-    authorBio: '小七官方为阅读、学习与研究提供可靠的智能工具。',
-    suitableFor: '文字、书籍、课堂资料',
-    features: _quickReadFeatures,
-    examples: ['把这段内容整理成适合复习的知识卡片。'],
-  ),
-  ExtensionEntry(
-    id: 'mind-map',
-    kind: ExtensionKind.skill,
-    name: '思维导图',
-    author: '小七官方',
-    description: '把内容关系整理成结构图',
-    iconAsset: 'assets/icons/capabilities/mcp_connector.svg',
-    iconBackground: Color(0xFFEFF9F1),
-    authorBio: '小七官方为阅读、学习与研究提供可靠的智能工具。',
-    suitableFor: '文字、会议、研究资料',
-    features: _quickReadFeatures,
-    examples: ['把这篇文章的核心观点整理成思维导图。'],
-  ),
-  ExtensionEntry(
-    id: 'ppt-outline',
-    kind: ExtensionKind.skill,
-    name: 'PPT 大纲',
-    author: '小七官方',
-    description: '根据文档生成清晰演示结构',
-    iconAsset: 'assets/icons/capabilities/capability_plugin_document.svg',
-    iconBackground: Color(0xFFFFF7E8),
-    authorBio: '小七官方为阅读、学习与研究提供可靠的智能工具。',
-    suitableFor: '文档、提纲、研究材料',
-    features: _quickReadFeatures,
-    examples: ['根据这份文档生成一份 10 页的演示大纲。'],
-  ),
-  ExtensionEntry(
-    id: 'literature-search',
-    kind: ExtensionKind.skill,
-    name: '文献检索',
-    author: '知网',
-    description: '查找文献并整理引用信息',
-    iconAsset: 'assets/icons/capabilities/web_search.svg',
-    iconBackground: Color(0xFFEFF6FF),
-    authorBio: '知网提供面向研究工作的文献检索与引用整理能力。',
-    suitableFor: '研究主题、论文、引用',
-    features: _quickReadFeatures,
-    examples: ['帮我查找这个主题近五年的高质量文献，并整理引用。'],
-    repository: 'cnki/extension',
-  ),
-];
-
-const _pluginExtensions = [
-  ExtensionEntry(
-    id: 'paper-reader-plugin',
-    kind: ExtensionKind.plugin,
-    name: '论文精读工作台',
-    author: '小七官方',
-    description: '在会话中组合阅读、标注与摘要工具',
-    iconAsset: 'assets/icons/capabilities/capability_plugin_document.svg',
-    iconBackground: Color(0xFFEFF6FF),
-    authorBio: '小七官方为阅读、学习与研究提供可靠的智能工具。',
-    suitableFor: 'PDF、网页、文档',
-    features: _quickReadFeatures,
-    examples: ['打开论文工作台，帮我边读边整理重点。'],
-    repository: 'xiaoqi/paper-reader-plugin',
-  ),
-  ExtensionEntry(
-    id: 'writing-plugin',
-    kind: ExtensionKind.plugin,
-    name: '创作工作台',
-    author: '小七官方',
-    description: '把草稿、翻译和演示组织在一个工作流里',
-    iconAsset: 'assets/icons/capabilities/capability_plugin_document.svg',
-    iconBackground: Color(0xFFFFF7E8),
-    authorBio: '小七官方为创作、学习与研究提供可靠的智能工具。',
-    suitableFor: '文档、草稿、演示',
-    features: _quickReadFeatures,
-    examples: ['把这份草稿整理成可演示的内容结构。'],
-    repository: 'xiaoqi/writing-workbench',
-  ),
-];
-
-// These are real public repositories selected for manual end-to-end testing.
-// They are intentionally not presented as installed marketplace entries: the
-// user still has to inspect and install the fixed commit through the server.
-const _trialExtensions = [
-  ExtensionEntry(
-    id: 'trial-paper-lookup',
-    kind: ExtensionKind.skill,
-    name: '论文检索',
-    author: 'K-Dense',
-    description: '从多个学术数据库查论文、DOI、摘要和开放获取全文，并保留来源。',
-    iconAsset: 'assets/icons/capabilities/web_search.svg',
-    iconBackground: Color(0xFFEFF6FF),
-    authorBio: 'K-Dense Scientific Agent Skills 中的研究检索技能。',
-    suitableFor: '论文、课程作业、研究主题',
-    features: _quickReadFeatures,
-    examples: ['请检索近五年关于主动学习的论文，列出标题、年份、DOI 和可公开获取的全文链接。'],
-    version: '2.4',
-    repository:
-        'K-Dense-AI/scientific-agent-skills/tree/main/skills/paper-lookup',
-    importUrl:
-        'https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/paper-lookup',
-  ),
-  ExtensionEntry(
-    id: 'trial-literature-review',
-    kind: ExtensionKind.skill,
-    name: '文献综述',
-    author: 'K-Dense',
-    description: '按系统综述、范围综述或叙述综述流程整理研究问题、检索和证据边界。',
-    iconAsset: 'assets/icons/capabilities/help_outline.svg',
-    iconBackground: Color(0xFFFFF8E8),
-    authorBio: 'K-Dense Scientific Agent Skills 中的文献综述技能。',
-    suitableFor: '课程论文、研究综述、选题调研',
-    features: _quickReadFeatures,
-    examples: ['请围绕“生成式 AI 对学习效果的影响”设计一个可复核的文献综述检索和筛选方案。'],
-    version: '1.11',
-    repository:
-        'K-Dense-AI/scientific-agent-skills/tree/main/skills/literature-review',
-    importUrl:
-        'https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/literature-review',
-  ),
-  ExtensionEntry(
-    id: 'trial-scientific-agent-skills',
-    kind: ExtensionKind.plugin,
-    name: 'Scientific Agent Skills',
-    author: 'K-Dense',
-    description: '一套面向科研和学习的技能插件，包含论文检索、文献综述、科学写作和数据分析。',
-    iconAsset: 'assets/icons/capabilities/capability_plugin_document.svg',
-    iconBackground: Color(0xFFEFF9F1),
-    authorBio: 'K-Dense 的开源科学研究 Agent Skills 插件集合。',
-    suitableFor: '论文阅读、课程学习、科研分析',
-    features: _quickReadFeatures,
-    examples: ['请先使用可用的研究技能，帮我把“如何提升大学生的主动学习能力”拆成检索、比较和总结步骤。'],
-    version: '2.72.0',
-    repository: 'K-Dense-AI/scientific-agent-skills',
-    importUrl: 'https://github.com/K-Dense-AI/scientific-agent-skills',
-  ),
-  ExtensionEntry(
-    id: 'trial-scientific-writing',
-    kind: ExtensionKind.skill,
-    name: '科学写作',
-    author: 'K-Dense',
-    description: '把学习或研究材料整理成有证据边界、结构清晰的学术表达。',
-    iconAsset: 'assets/icons/capabilities/description.svg',
-    iconBackground: Color(0xFFEFF9F1),
-    authorBio: 'K-Dense Scientific Agent Skills 中的科学写作技能。',
-    suitableFor: '读书笔记、课程论文、研究摘要',
-    features: _quickReadFeatures,
-    examples: ['请根据下面的学习笔记，整理出研究问题、主要论点、证据和仍需核实的部分。'],
-    version: 'GitHub main',
-    repository:
-        'K-Dense-AI/scientific-agent-skills/tree/main/skills/scientific-writing',
-    importUrl:
-        'https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/scientific-writing',
-  ),
-];
-
-List<ExtensionEntry> _entriesFor(ExtensionKind kind) => switch (kind) {
-  ExtensionKind.skill => [
-    ..._curatedExtensions,
-    ..._trialExtensions.where((entry) => entry.kind == ExtensionKind.skill),
-  ],
-  ExtensionKind.plugin => [
-    ..._pluginExtensions,
-    ..._trialExtensions.where((entry) => entry.kind == ExtensionKind.plugin),
-  ],
-  ExtensionKind.mcp => const [],
-};
 
 class ExtensionMarketPage extends StatefulWidget {
   const ExtensionMarketPage({
-    this.initialKind = ExtensionKind.skill,
-    this.onMcpSelected,
+    this.initialKind = ExtensionKind.plugin,
     super.key,
   });
-
   final ExtensionKind initialKind;
-  final ValueChanged<Map<String, Object?>>? onMcpSelected;
-
   @override
   State<ExtensionMarketPage> createState() => _ExtensionMarketPageState();
 }
 
 class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
-  final _searchController = TextEditingController();
-  final _searchFocusNode = FocusNode();
-  final _carouselController = PageController();
-  final Set<String> _installedIds = {};
-  List<ExtensionEntry> _remoteEntries = [];
-  List<McpCatalogEntry> _mcpCatalog = const [];
-  List<McpConnectionRecord> _mcpConnections = const [];
-  final Set<String> _installingMcpIds = {};
-  StreamSubscription<Uri>? _appLinkSubscription;
-  bool _loadingMcpConnections = false;
-  String? _mcpLoadError;
-  String? _loadError;
-  Timer? _carouselTimer;
-  Timer? _resumeCarouselTimer;
-  int _carouselIndex = 0;
-  String _query = '';
-  ExtensionKind _kind = ExtensionKind.skill;
-  ExtensionFilter _filter = ExtensionFilter.curated;
-  bool _carouselStarted = false;
-
+  final _search = TextEditingController();
+  final _cloud = CapabilityCloudSync.instance;
+  List<CapabilityRecord> _records = [];
+  List<CapabilityDraft> _drafts = [];
+  List<McpConnectionRecord> _connections = [];
+  final Set<String> _busyIds = {};
+  late ExtensionKind _kind;
+  bool _personal = false, _loading = true, _loadingMcp = true;
+  String? _error, _mcpError, _listTitle;
+  StreamSubscription<Uri>? _links;
   @override
   void initState() {
     super.initState();
-    _kind = widget.initialKind;
-    _searchController.addListener(_handleSearchChanged);
-    unawaited(_restoreInstalled());
-    unawaited(_restoreMcpConnections());
-    _appLinkSubscription = AppLinks().uriLinkStream.listen(
-      _handleMcpAppLink,
-      onError: (_) {},
-    );
+    _kind = widget.initialKind == ExtensionKind.skill
+        ? ExtensionKind.skill
+        : ExtensionKind.plugin;
+    if (widget.initialKind == ExtensionKind.mcp) _listTitle = '连接管理';
+    _search.addListener(_searchChanged);
+    unawaited(_reload());
+    unawaited(_reloadMcp());
+    _links = AppLinks().uriLinkStream.listen((uri) {
+      if (uri.toString().contains('mcp') && uri.toString().contains('oauth'))
+        unawaited(_reloadMcp());
+    }, onError: (_) {});
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_carouselStarted ||
-        MediaQuery.maybeOf(context)?.disableAnimations == true) {
-      return;
-    }
-    _carouselStarted = true;
-    _carouselTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (!mounted || !_carouselController.hasClients) return;
-      final next = (_carouselIndex + 1) % _collectionCards.length;
-      _carouselController.animateToPage(
-        next,
-        duration: const Duration(milliseconds: 420),
-        curve: Curves.easeOutCubic,
-      );
-    });
-  }
-
+  void _searchChanged() => setState(() {});
   @override
   void dispose() {
-    _carouselTimer?.cancel();
-    _resumeCarouselTimer?.cancel();
-    _appLinkSubscription?.cancel();
-    _searchController
-      ..removeListener(_handleSearchChanged)
-      ..dispose();
-    _searchFocusNode.dispose();
-    _carouselController.dispose();
+    _links?.cancel();
+    _search.removeListener(_searchChanged);
+    _search.dispose();
     super.dispose();
   }
 
-  Future<void> _restoreInstalled() async {
+  Future<void> _reload() async {
+    if (mounted)
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
     try {
-      final records = await CapabilityCloudSync.instance
-          .installedCapabilities();
+      final store = CapabilityStore.instance;
+      final local = await store.list(includeDeleted: true);
+      final drafts = await CapabilityStore.instance.drafts();
       if (!mounted) return;
       setState(() {
-        _remoteEntries = records.map(ExtensionEntry.installed).toList();
-        _installedIds
-          ..clear()
-          ..addAll(records.map((r) => r.id));
-        _loadError = null;
+        _records = local;
+        _drafts = drafts;
       });
-    } catch (e) {
-      if (mounted) setState(() => _loadError = '加载安装记录失败：$e');
-    }
-  }
-
-  Future<void> _restoreMcpConnections() async {
-    setStateIfMounted(() => _loadingMcpConnections = true);
-    try {
-      final catalog = await CapabilityCloudSync.instance.listMcpCatalog();
-      final items = await CapabilityCloudSync.instance.listMcpConnections();
-      if (!mounted) return;
-      setState(() {
-        _mcpCatalog = catalog;
-        _mcpConnections = items;
-        _mcpLoadError = null;
-      });
-    } catch (error) {
-      if (mounted) setState(() => _mcpLoadError = '加载 MCP 连接器失败：$error');
-    } finally {
-      if (mounted) setState(() => _loadingMcpConnections = false);
-    }
-  }
-
-  void _handleMcpAppLink(Uri uri) {
-    if ((uri.scheme == 'xiaoqi' && uri.host == 'mcp' && uri.path == '/oauth') ||
-        (uri.path.contains('mcp') && uri.path.contains('oauth'))) {
-      unawaited(_restoreMcpConnections());
-    }
-  }
-
-  void setStateIfMounted(VoidCallback update) {
-    if (mounted) setState(update);
-  }
-
-  Future<void> _installMcp(McpCatalogEntry entry) async {
-    if (_installingMcpIds.contains(entry.id)) return;
-    setState(() => _installingMcpIds.add(entry.id));
-    try {
-      final connection = await CapabilityCloudSync.instance.installMcp(
-        entry.id,
+      bool hasUnsyncedLocal(Iterable<CapabilityRecord> records) => records.any(
+        (record) =>
+            !record.isServerInstallation &&
+            record.syncState != CapabilitySyncState.synced,
       );
-      if (!mounted) return;
-      await _restoreMcpConnections();
-      if (!mounted) return;
-      if (connection.needsLogin) {
-        AppToast.show(context, '已安装，请点击“登录”完成授权');
-      } else if (connection.isReady) {
-        AppToast.show(context, '已就绪，点击“开始使用”进入聊天');
-      } else {
-        AppToast.show(context, '已安装，正在连接服务');
+      // Push local edits and deletion markers before a remote list can replace
+      // them. Failed or conflicting sync must leave the local copy intact.
+      if (hasUnsyncedLocal(local)) {
+        await _cloud.syncNow();
+        final synced = await store.list(includeDeleted: true);
+        final syncedDrafts = await store.drafts();
+        if (!mounted) return;
+        setState(() {
+          _records = synced;
+          _drafts = syncedDrafts;
+        });
+        if (hasUnsyncedLocal(synced)) {
+          throw StateError('本机修改尚未完成同步，已保留本机记录');
+        }
       }
+      await _cloud.installedCapabilities();
+      if (!mounted) return;
+      final current = await CapabilityStore.instance.list();
+      if (mounted) setState(() => _records = current);
+    } catch (error) {
+      if (mounted) setState(() => _error = '安装记录同步失败：$error');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _reloadMcp() async {
+    if (mounted)
+      setState(() {
+        _loadingMcp = true;
+        _mcpError = null;
+      });
+    try {
+      final connections = await _cloud.listMcpConnections();
+      if (mounted)
+        setState(() {
+          _connections = connections;
+        });
+    } catch (error) {
+      if (mounted) setState(() => _mcpError = '连接列表加载失败：$error');
+    } finally {
+      if (mounted) setState(() => _loadingMcp = false);
+    }
+  }
+
+  List<_MarketEntry> get _installed =>
+      [
+            ..._records.where((r) => !r.isDeleted).map(_MarketEntry.fromRecord),
+            ..._connections.map((c) => _MarketEntry.fromMcp(null, c)),
+          ]
+          .where(
+            (e) => _kind == ExtensionKind.skill
+                ? e.kind == ExtensionKind.skill
+                : e.kind != ExtensionKind.skill,
+          )
+          .toList();
+  // Public here means a public source the user imported, never a seeded catalog.
+  List<_MarketEntry> get _public =>
+      _installed.where((entry) => entry.record?.origin == 'github').toList();
+  List<_MarketEntry> _matching(Iterable<_MarketEntry> entries) => entries
+      .where(
+        (e) => '${e.name} ${e.description} ${e.developer}'
+            .toLowerCase()
+            .contains(_search.text.trim().toLowerCase()),
+      )
+      .toList();
+  void _showList(String title) => setState(() {
+    _listTitle = title;
+    _search.clear();
+  });
+  Future<void> _import({
+    String? url,
+    bool upload = false,
+    CapabilityRecord? update,
+  }) async {
+    final result = await showDialog<Object?>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Theme(
+        data: marketTheme(context),
+        child: _PackageImportDialog(
+          url: url,
+          upload: upload,
+          skill: _kind == ExtensionKind.skill,
+          update: update,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (result is CapabilityDraft) await _edit(draft: result);
+    if (result == 'mcp') await _mcpForm();
+    if (mounted) await _reload();
+  }
+
+  Future<void> _edit({CapabilityDraft? draft, CapabilityRecord? record}) async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MarketSkillEditor(draft: draft, record: record),
+      ),
+    );
+    if (mounted) await _reload();
+  }
+
+  void _chat(_MarketEntry? entry, [String prompt = '']) {
+    Map<String, Object?> selected;
+    if (entry == null) {
+      selected = {'type': 'action', 'id': 'create-skill', 'name': '创建技能'};
+    } else if (entry.kind == ExtensionKind.mcp) {
+      final c = entry.connection;
+      if (c == null || !c.isReady) {
+        AppToast.show(context, '请先完成授权并连接服务器');
+        return;
+      }
+      selected = {
+        'type': 'mcp',
+        'id': c.id,
+        'name': c.name,
+        'url': c.url,
+        'has_bearer_token': c.hasBearerToken,
+        if (c.catalogId != null) 'catalog_id': c.catalogId,
+        if (c.version != null) 'version': c.version,
+      };
+    } else {
+      final r = entry.record;
+      if (r == null || !r.enabled) {
+        AppToast.show(context, '请先安装并启用此扩展');
+        return;
+      }
+      if (r.syncState != CapabilitySyncState.synced) {
+        AppToast.show(context, '技能尚未同步到服务器，请联网同步后重试');
+        return;
+      }
+      selected = {
+        'type': r.kind.name,
+        'id': r.id,
+        'name': r.name,
+        'version_id': r.currentVersionId,
+      };
+    }
+    Navigator.pop(context, ExtensionChatRequest(selected, prompt: prompt));
+  }
+
+  Future<void> _mcpForm([McpConnectionRecord? connection]) async {
+    await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Theme(
+        data: marketTheme(context),
+        child: _McpConnectionDialog(connection: connection),
+      ),
+    );
+    if (mounted) await _reloadMcp();
+  }
+
+  Future<bool> _confirm(String title, String body, String action) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (ctx) => MarketDialog(
+          title: title,
+          children: [Text(body, style: const TextStyle(height: 1.65))],
+          actions: [
+            marketButton('取消', () => Navigator.pop(ctx, false)),
+            marketButton(action, () => Navigator.pop(ctx, true), primary: true),
+          ],
+        ),
+      ) ==
+      true;
+  Future<void> _install(_MarketEntry entry) async {
+    if (_busyIds.contains(entry.id)) return;
+    setState(() => _busyIds.add(entry.id));
+    try {
+      await _installEntry(entry);
+    } finally {
+      if (mounted) setState(() => _busyIds.remove(entry.id));
+    }
+  }
+
+  Future<void> _installEntry(_MarketEntry entry) async {
+    if (entry.catalog == null) {
+      await _import(url: entry.url);
+      return;
+    }
+    if (entry.catalog!.status == McpInstallationState.unsupported) {
+      AppToast.show(context, entry.catalog!.reason ?? '暂不支持此服务');
+      return;
+    }
+    if (!await _confirm(
+      '安装 ${entry.name}',
+      '连接后，小七可在你的任务中调用其中的工具。需要访问外部数据时仍按任务确认。',
+      '安装插件',
+    ))
+      return;
+    try {
+      await _cloud.installMcp(entry.catalog!.id);
+      await _reloadMcp();
+      if (mounted) AppToast.show(context, '已安装，请在详情查看连接状态');
     } catch (error) {
       if (mounted) AppToast.show(context, '安装失败：$error');
-    } finally {
-      if (mounted) setState(() => _installingMcpIds.remove(entry.id));
     }
   }
 
-  Future<void> _loginMcp(McpConnectionRecord connection) async {
+  Future<void> _remove(_MarketEntry entry) async {
+    if (!await _confirm(
+      '移除 ${entry.name}？',
+      '移除后，小七将不再使用这项扩展。你可以稍后重新添加。',
+      '移除',
+    ))
+      return;
     try {
-      final uri = await CapabilityCloudSync.instance.startMcpLogin(
-        connection.id,
-      );
-      if (uri == null ||
-          !await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-        throw StateError('无法打开登录页面');
+      if (entry.connection != null) {
+        await _cloud.deleteMcpConnection(entry.connection!.id);
+        await _reloadMcp();
+      } else if (entry.record!.isServerInstallation) {
+        await _cloud.manageInstallation(entry.record!, uninstall: true);
+      } else {
+        await CapabilityStore.instance.markDeleted(entry.record!.id);
+        if (await _cloud.hasEmailSession) await _cloud.syncNow();
       }
-      if (mounted) AppToast.show(context, '请在打开的页面完成登录，完成后回到小栖');
+      if (mounted) {
+        await _reload();
+        if (mounted) AppToast.show(context, '已移除');
+      }
     } catch (error) {
-      if (mounted) AppToast.show(context, '登录暂不可用：$error');
+      if (mounted) {
+        await _reload();
+        if (mounted) AppToast.show(context, '移除未完成：$error');
+      }
     }
   }
 
-  Future<void> _reconnectMcp(McpConnectionRecord connection) async {
-    setState(() => _installingMcpIds.add(connection.id));
+  Future<void> _login(_MarketEntry entry) async {
     try {
-      await CapabilityCloudSync.instance.reconnectMcp(connection.id);
-      await _restoreMcpConnections();
-      if (mounted) AppToast.show(context, '连接状态已更新');
+      final uri = await _cloud.startMcpLogin(entry.connection!.id);
+      if (uri == null ||
+          !await launchUrl(uri, mode: LaunchMode.externalApplication))
+        throw StateError('无法打开授权页面');
+      if (mounted) AppToast.show(context, '请在浏览器完成授权后返回小七');
+    } catch (error) {
+      if (mounted) AppToast.show(context, '授权失败：$error');
+    }
+  }
+
+  Future<void> _reconnect(_MarketEntry entry) async {
+    try {
+      await _cloud.reconnectMcp(entry.connection!.id);
+      await _reloadMcp();
     } catch (error) {
       if (mounted) AppToast.show(context, '连接失败：$error');
-    } finally {
-      if (mounted) setState(() => _installingMcpIds.remove(connection.id));
     }
   }
 
-  Future<void> _deleteMcpConnection(McpConnectionRecord connection) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('删除连接器？'),
-        content: Text('删除“${connection.name}”后，它不会再出现在聊天入口中。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    try {
-      await CapabilityCloudSync.instance.deleteMcpConnection(connection.id);
-      await _restoreMcpConnections();
-      if (mounted) AppToast.show(context, '连接器已删除');
-    } catch (error) {
-      if (mounted) AppToast.show(context, '删除失败：$error');
-    }
-  }
-
-  void _startUsingMcp(McpConnectionRecord connection) {
-    if (!connection.isReady) {
-      AppToast.show(context, '连接尚未就绪，请先完成登录或重新连接');
-      return;
-    }
-    final selected = <String, Object?>{
-      'type': 'mcp',
-      'id': connection.id,
-      'name': connection.name,
-      'url': connection.url,
-      'has_bearer_token': connection.hasBearerToken,
-      if (connection.catalogId != null) 'catalog_id': connection.catalogId,
-      if (connection.version != null) 'version': connection.version,
-    };
-    final callback = widget.onMcpSelected;
-    if (callback == null) {
-      AppToast.show(context, '已就绪，请从聊天入口选择此工具');
-      return;
-    }
-    callback(selected);
-    Navigator.of(context).pop();
-  }
-
-  McpConnectionRecord? _mcpConnectionForCatalog(String catalogId) {
-    for (final connection in _mcpConnections) {
-      if (connection.catalogId == catalogId) return connection;
-    }
-    return null;
-  }
-
-  void _handleSearchChanged() {
-    setState(() => _query = _searchController.text.trim().toLowerCase());
-  }
-
-  void _applyInstalledChange(String id, bool installed) {
-    unawaited(_restoreInstalled());
-  }
-
-  void _toggleInstalled(ExtensionEntry entry) {
-    if (entry.isTrialCandidate) {
-      unawaited(_showImportDialog(initialUrl: entry.importUrl));
-      return;
-    }
-    _openDetail(entry);
-  }
-
-  bool _isInstalled(ExtensionEntry entry) =>
-      _installedIds.contains(entry.id) || _installationFor(entry) != null;
-
-  List<ExtensionEntry> _visibleEntries() {
-    final entries = _kind == ExtensionKind.mcp
-        ? <ExtensionEntry>[]
-        : _filter == ExtensionFilter.installed
-        ? _remoteEntries.where((e) => e.kind == _kind).toList()
-        : _entriesFor(_kind);
-    if (_filter == ExtensionFilter.created) return const [];
-    return entries
-        .where((entry) {
-          final matchesQuery =
-              _query.isEmpty ||
-              '${entry.name} ${entry.author} ${entry.description}'
-                  .toLowerCase()
-                  .contains(_query);
-          final matchesFilter =
-              _filter != ExtensionFilter.installed ||
-              _installedIds.contains(entry.id);
-          return matchesQuery && matchesFilter;
-        })
-        .toList(growable: false);
-  }
-
-  void _openDetail(ExtensionEntry entry) {
-    final installed = _installationFor(entry);
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ExtensionDetailPage(
-          entry: installed == null
-              ? entry
-              : ExtensionEntry.installed(installed),
-          installed: installed != null || _installedIds.contains(entry.id),
-          onInstallChanged: (installed) {
-            _applyInstalledChange(entry.id, installed);
+  Future<void> _open(_MarketEntry entry) async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (detailContext) => _MarketDetailPage(
+          entry: entry,
+          onInstall: _install,
+          onRemove: _remove,
+          onEdit: (current) => _edit(record: current.record),
+          onManage: (current) => current.connection != null
+              ? _mcpForm(current.connection)
+              : _manage(current),
+          onLogin: _login,
+          onReconnect: _reconnect,
+          refresh: () async {
+            if (entry.kind == ExtensionKind.mcp)
+              await _reloadMcp();
+            else
+              await _reload();
+            if (!mounted) return null;
+            return [..._installed, ..._public]
+                .where(
+                  (e) =>
+                      e.id == entry.id ||
+                      entry.catalog != null &&
+                          e.catalog?.id == entry.catalog!.id ||
+                      entry.url != null &&
+                          (e.url == entry.url ||
+                              e.record?.source['requested_url'] == entry.url),
+                )
+                .firstOrNull;
+          },
+          onChat: (updated, prompt) {
+            Navigator.pop(detailContext);
+            _chat(updated, prompt);
           },
         ),
       ),
     );
   }
 
-  CapabilityRecord? _installationFor(ExtensionEntry entry) {
-    if (entry.installation != null) return entry.installation;
-    if (_installedIds.contains(entry.id)) return null;
-    final requestedUrl = entry.importUrl;
-    if (requestedUrl == null) return null;
-    for (final record in _remoteEntries) {
-      final installation = record.installation;
-      if (installation == null) continue;
-      final sourceUrl =
-          installation.source['requested_url']?.toString() ??
-          installation.source['source_url']?.toString() ??
-          '';
-      if (sourceUrl == requestedUrl ||
-          sourceUrl.startsWith(requestedUrl) ||
-          requestedUrl.startsWith(sourceUrl)) {
-        return installation;
-      }
-    }
-    return null;
-  }
-
-  void _openCategory(String title, List<ExtensionEntry> entries) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ExtensionCategoryPage(
-          title: title,
-          entries: entries,
-          installedIds: _installedIds,
-          onChanged: _handleCategoryInstalledChanged,
-        ),
-      ),
-    );
-  }
-
-  void _handleCategoryInstalledChanged() {
-    unawaited(_restoreInstalled());
-  }
-
-  Future<void> _showCreateImportSheet() async {
-    if (_kind == ExtensionKind.mcp) {
-      AppToast.show(context, 'MCP 工具只能从已验证目录安装');
-      return;
-    }
-    ModalRoute<dynamic>? sheetRoute;
-    final action = await showModalBottomSheet<_MarketAction>(
-      context: context,
-      backgroundColor: Colors.white,
-      showDragHandle: true,
-      builder: (sheetContext) {
-        sheetRoute ??= ModalRoute.of(sheetContext);
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const ListTile(
-                title: Text(
-                  '创建或导入扩展',
-                  style: TextStyle(fontWeight: FontWeight.w700),
-                ),
-                subtitle: Text('V1 支持创建技能，或从公开 GitHub 仓库导入。'),
-              ),
-              ListTile(
-                leading: _assetIcon(
-                  'assets/icons/extensions/market_plus.svg',
-                  26,
-                ),
-                title: const Text('创建技能'),
-                subtitle: const Text('从聊天中整理成可重复调用的技能'),
-                onTap: () => Navigator.pop(sheetContext, _MarketAction.create),
-              ),
-              ListTile(
-                leading: _assetIcon(
-                  'assets/icons/extensions/github_mark.svg',
-                  26,
-                ),
-                title: const Text('从公开 GitHub 导入'),
-                subtitle: const Text('导入前会先检查清单、来源和安全性'),
-                onTap: () => Navigator.pop(sheetContext, _MarketAction.import),
-              ),
-              const SizedBox(height: 8),
-            ],
-          ),
-        );
-      },
-    );
-    await sheetRoute?.completed;
-    if (!mounted || action == null) return;
-    if (action == _MarketAction.create) {
-      AppToast.show(context, '创建技能将从当前会话继续');
-      return;
-    }
-    await _showImportDialog();
-  }
-
-  Future<void> _showImportDialog({String? initialUrl}) async {
+  Future<void> _manage(_MarketEntry entry) async {
+    final record = entry.record!;
     await showDialog<void>(
       context: context,
-      builder: (_) => _ImportInstallationDialog(initialUrl: initialUrl),
-    );
-    await _restoreInstalled();
-    if (mounted) setState(() => _filter = ExtensionFilter.installed);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final horizontal = MediaQuery.sizeOf(context).width < 640 ? 20.0 : 40.0;
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) => ListView(
-            padding: EdgeInsets.fromLTRB(horizontal, 12, horizontal, 48),
-            children: [
-              _buildTopBar(),
-              const SizedBox(height: 20),
-              _buildSearchField(),
-              const SizedBox(height: 28),
-              _buildKindTabs(),
-              const SizedBox(height: 22),
-              _buildFilters(),
-              if (_loadError != null)
-                TextButton(
-                  onPressed: _restoreInstalled,
-                  child: Text('$_loadError · 重试'),
-                ),
-              const SizedBox(height: 38),
-              if (_kind == ExtensionKind.mcp)
-                _buildMcpConnections(constraints.maxWidth - horizontal * 2)
-              else if (_filter == ExtensionFilter.created)
-                _buildCreatedEmptyState()
-              else ...[
-                _buildCollections(),
-                const SizedBox(height: 40),
-                _buildCategorySection(
-                  _filter == ExtensionFilter.installed ? '已安装' : '精选推荐',
-                  _visibleEntries(),
-                  constraints.maxWidth - horizontal * 2,
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMcpConnections(double contentWidth) {
-    final installed = _filter == ExtensionFilter.installed;
-    final catalogMatches = _mcpCatalog
-        .where(
-          (entry) =>
-              entry.status == McpInstallationState.ready || _query.isNotEmpty,
-        )
-        .where(
-          (entry) =>
-              _query.isEmpty ||
-              '${entry.name} ${entry.description} ${entry.package ?? ''} ${entry.reason ?? ''}'
-                  .toLowerCase()
-                  .contains(_query),
-        )
-        .toList(growable: false);
-    final connectionMatches = _mcpConnections
-        .where(
-          (connection) =>
-              _query.isEmpty ||
-              '${connection.name} ${connection.status.name} ${connection.error ?? ''}'
-                  .toLowerCase()
-                  .contains(_query),
-        )
-        .toList(growable: false);
-    final itemCount = installed
-        ? connectionMatches.length
-        : catalogMatches.length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text(
-          installed ? '已安装的 MCP' : '推荐的 MCP',
-          style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          installed
-              ? '登录状态和连接状态都在这里管理。需要授权时，小栖会打开服务商的登录页面。'
-              : '选择工具后，小栖会自动完成安装和连接；你不需要填写地址或令牌。',
-          style: const TextStyle(color: Color(0xFF68707C), height: 1.45),
-        ),
-        const SizedBox(height: 20),
-        if (_loadingMcpConnections)
-          const _McpStaticPlaceholder()
-        else if (_mcpLoadError != null)
-          TextButton.icon(
-            onPressed: _restoreMcpConnections,
-            icon: const Icon(Icons.refresh),
-            label: Text('$_mcpLoadError · 重试'),
-          )
-        else if (itemCount == 0)
-          _McpEmptyState(installed: installed)
-        else
-          GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: itemCount,
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: contentWidth < 680 ? 1 : 2,
-              mainAxisExtent: installed ? 164 : 142,
-              crossAxisSpacing: 16,
-              mainAxisSpacing: 14,
-            ),
-            itemBuilder: (context, index) => installed
-                ? _McpInstalledTile(
-                    connection: connectionMatches[index],
-                    busy: _installingMcpIds.contains(
-                      connectionMatches[index].id,
-                    ),
-                    onLogin: () => _loginMcp(connectionMatches[index]),
-                    onReconnect: () => _reconnectMcp(connectionMatches[index]),
-                    onDelete: () =>
-                        _deleteMcpConnection(connectionMatches[index]),
-                    onStartUsing: () =>
-                        _startUsingMcp(connectionMatches[index]),
-                  )
-                : _McpCatalogTile(
-                    entry: catalogMatches[index],
-                    connection: _mcpConnectionForCatalog(
-                      catalogMatches[index].id,
-                    ),
-                    busy: _installingMcpIds.contains(catalogMatches[index].id),
-                    onInstall: () => _installMcp(catalogMatches[index]),
-                    onLogin: (connection) => _loginMcp(connection),
-                    onStartUsing: (connection) => _startUsingMcp(connection),
-                  ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildTopBar() {
-    return Row(
-      children: [
-        _marketButton(
-          label: '返回扩展入口',
-          asset: 'assets/icons/extensions/market_back.svg',
-          onTap: () => Navigator.maybePop(context),
-          size: 30,
-          padding: 4,
-        ),
-        const SizedBox(width: 14),
-        const Expanded(
-          child: Text(
-            '扩展市场',
-            style: TextStyle(
-              fontSize: 32,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF10131A),
-            ),
-          ),
-        ),
-        if (_kind != ExtensionKind.mcp)
-          OutlinedButton.icon(
-            onPressed: _showCreateImportSheet,
-            icon: _assetIcon('assets/icons/extensions/market_plus.svg', 25),
-            label: const Text('创建/导入'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: const Color(0xFF10131A),
-              side: const BorderSide(color: Color(0xFFD9DEE7), width: 1.5),
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
-              textStyle: const TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildSearchField() {
-    return TextField(
-      controller: _searchController,
-      focusNode: _searchFocusNode,
-      textInputAction: TextInputAction.search,
-      onTapOutside: (_) => _searchFocusNode.unfocus(),
-      decoration: InputDecoration(
-        hintText: '搜索技能、插件或 MCP，例如：论文精读、网页资料整理',
-        hintStyle: const TextStyle(color: Color(0xFF66738D), fontSize: 18),
-        prefixIcon: Padding(
-          padding: const EdgeInsets.all(21),
-          child: SvgPicture.asset('assets/icons/extensions/market_search.svg'),
-        ),
-        filled: true,
-        fillColor: const Color(0xFFF3F5F8),
-        contentPadding: const EdgeInsets.symmetric(vertical: 22, horizontal: 8),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(16),
-          borderSide: BorderSide.none,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildKindTabs() {
-    return DecoratedBox(
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0xFFE4E8EE))),
-      ),
-      child: Row(
+      builder: (ctx) => MarketDialog(
+        title: '管理 ${entry.name}',
         children: [
-          for (final kind in ExtensionKind.values)
-            Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => setState(() => _kind = kind),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 160),
-                  padding: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                    border: Border(
-                      bottom: BorderSide(
-                        color: _kind == kind
-                            ? const Color(0xFF10131A)
-                            : Colors.transparent,
-                        width: 4,
-                      ),
-                    ),
-                  ),
-                  child: Text(
-                    switch (kind) {
-                      ExtensionKind.skill => '技能',
-                      ExtensionKind.plugin => '插件',
-                      ExtensionKind.mcp => 'MCP',
-                    },
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: const Color(0xFF10131A),
-                      fontSize: 22,
-                      fontWeight: _kind == kind
-                          ? FontWeight.w700
-                          : FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ),
-            ),
+          Text(entry.description, style: const TextStyle(height: 1.65)),
+          const SizedBox(height: 18),
+          Text('版本 ${entry.version} · ${record.enabled ? '已启用' : '已停用'}'),
+          if (record.isServerInstallation)
+            marketButton('检查更新', () {
+              Navigator.pop(ctx);
+              unawaited(
+                _import(update: record, upload: record.origin == 'upload'),
+              );
+            }, icon: 'link'),
         ],
-      ),
-    );
-  }
-
-  Widget _buildFilters() {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          _filterChip(
-            _kind == ExtensionKind.mcp ? '推荐' : '精选',
-            ExtensionFilter.curated,
-          ),
-          const SizedBox(width: 14),
-          _filterChip('已安装', ExtensionFilter.installed),
-          if (_kind != ExtensionKind.mcp) ...[
-            const SizedBox(width: 14),
-            _filterChip('我创建的', ExtensionFilter.created),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _filterChip(String label, ExtensionFilter filter) {
-    final selected = _filter == filter;
-    return GestureDetector(
-      onTap: () => setState(() => _filter = filter),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 14),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xFF16191F) : const Color(0xFFF2F4F7),
-          borderRadius: BorderRadius.circular(28),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: selected ? Colors.white : const Color(0xFF16191F),
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCollections() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          '精选合集',
-          style: TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 22),
-        Listener(
-          onPointerDown: (_) => _pauseCarousel(),
-          onPointerUp: (_) => _resumeCarouselLater(),
-          onPointerCancel: (_) => _resumeCarouselLater(),
-          child: SizedBox(
-            height: 220,
-            child: PageView.builder(
-              controller: _carouselController,
-              itemCount: _collectionCards.length,
-              onPageChanged: (index) {
-                if (!mounted) return;
-                setState(() => _carouselIndex = index);
-              },
-              itemBuilder: (context, index) {
-                final card = _collectionCards[index];
-                return _CollectionTile(card: card, selectedIndex: index);
-              },
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  void _pauseCarousel() {
-    _carouselTimer?.cancel();
-    _carouselTimer = null;
-    _resumeCarouselTimer?.cancel();
-    _resumeCarouselTimer = null;
-  }
-
-  void _resumeCarouselLater() {
-    _resumeCarouselTimer?.cancel();
-    _resumeCarouselTimer = Timer(const Duration(seconds: 8), () {
-      _resumeCarouselTimer = null;
-      if (!mounted || MediaQuery.maybeOf(context)?.disableAnimations == true) {
-        return;
-      }
-      _carouselTimer?.cancel();
-      _carouselTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-        if (!mounted || !_carouselController.hasClients) return;
-        final next = (_carouselIndex + 1) % _collectionCards.length;
-        _carouselController.animateToPage(
-          next,
-          duration: const Duration(milliseconds: 420),
-          curve: Curves.easeOutCubic,
-        );
-      });
-    });
-  }
-
-  Widget _buildCategorySection(
-    String title,
-    List<ExtensionEntry> entries,
-    double contentWidth,
-  ) {
-    final isEmpty = entries.isEmpty;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        InkWell(
-          onTap: isEmpty ? null : () => _openCategory(title, entries),
-          borderRadius: BorderRadius.circular(8),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 25,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                SvgPicture.asset(
-                  'assets/icons/extensions/market_arrow_right.svg',
-                  width: 22,
-                  height: 22,
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 18),
-        if (isEmpty)
-          _buildNoResults()
-        else
-          GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: entries.length,
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: contentWidth < 680 ? 1 : 2,
-              mainAxisExtent: 122,
-              crossAxisSpacing: 16,
-              mainAxisSpacing: 14,
-            ),
-            itemBuilder: (context, index) => _ExtensionCard(
-              entry: entries[index],
-              installed: _isInstalled(entries[index]),
-              onOpen: () => _openDetail(entries[index]),
-              onToggleInstall: () => _toggleInstalled(entries[index]),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildCreatedEmptyState() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 96),
-      child: Center(
-        child: Column(
-          children: [
-            Container(
-              width: 92,
-              height: 92,
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFF8E8),
-                borderRadius: BorderRadius.circular(28),
-              ),
-              child: SvgPicture.asset(
-                'assets/icons/capabilities/capability_skill_book.svg',
-              ),
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              '还没有创建的扩展',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              '你创建的技能会出现在这里。\n作者作品页在 V1 先保持空状态。',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Color(0xFF737E91),
-                fontSize: 17,
-                height: 1.55,
-              ),
-            ),
-            const SizedBox(height: 24),
-            OutlinedButton(
-              onPressed: _showCreateImportSheet,
-              child: const Text('创建技能'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildNoResults() {
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 38),
-      child: Center(
-        child: Text(
-          '没有找到匹配的扩展',
-          style: TextStyle(color: Color(0xFF737E91), fontSize: 17),
-        ),
-      ),
-    );
-  }
-}
-
-enum _MarketAction { create, import }
-
-class _ImportInstallationDialog extends StatefulWidget {
-  const _ImportInstallationDialog({this.update, this.initialUrl});
-  final CapabilityRecord? update;
-  final String? initialUrl;
-  @override
-  State<_ImportInstallationDialog> createState() =>
-      _ImportInstallationDialogState();
-}
-
-class _ImportInstallationDialogState extends State<_ImportInstallationDialog> {
-  final _url = TextEditingController();
-  Map<String, dynamic>? _inspection;
-  bool _busy = false;
-  String? _error;
-  String _progress = '';
-  String? _jobId;
-
-  void _onJob(String id) {
-    if (mounted) setState(() => _jobId = id);
-  }
-
-  Future<void> _cancel() async {
-    if (!_busy) {
-      Navigator.pop(context);
-      return;
-    }
-    if (_jobId == null) return;
-    setState(() => _progress = '正在取消，请等待服务器停止操作…');
-    try {
-      await CapabilityCloudSync.instance.cancelImportOperation(_jobId!);
-    } catch (e) {
-      if (mounted) setState(() => _error = '取消请求失败：$e');
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _url.text =
-        widget.initialUrl ??
-        widget.update?.source['requested_url']?.toString() ??
-        '';
-  }
-
-  @override
-  void dispose() {
-    _url.dispose();
-    super.dispose();
-  }
-
-  Future<void> _inspect() async {
-    setState(() {
-      _busy = true;
-      _error = null;
-      _inspection = null;
-      _progress = '检查中：固定仓库版本、识别技能和不支持的组件…';
-    });
-    try {
-      final result = await CapabilityCloudSync.instance.runImportOperation({
-        'url': _url.text.trim(),
-      }, onJob: _onJob);
-      if (mounted) {
-        setState(
-          () => _inspection = Map<String, dynamic>.from(
-            result['inspection'] as Map,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _install(Map candidate) async {
-    setState(() {
-      _busy = true;
-      _error = null;
-      _progress = '安装中：准备依赖、锁定版本；成功前不会显示为已安装。';
-    });
-    try {
-      await CapabilityCloudSync.instance.runImportOperation(
-        {
-          'inspection_id': _inspection!['id'],
-          'candidate_id': candidate['id'],
-          if (widget.update != null) 'update_id': widget.update!.id,
-          if (widget.update != null)
-            'expected_revision': widget.update!.cloudRevision,
-        },
-        install: true,
-        onJob: _onJob,
-      );
-      if (mounted) Navigator.pop(context, true);
-    } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !_busy,
-    child: AlertDialog(
-      title: Text(widget.update == null ? '从公开 GitHub 导入' : '检查并手动更新'),
-      content: SizedBox(
-        width: 520,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextField(
-                controller: _url,
-                enabled: !_busy,
-                keyboardType: TextInputType.url,
-                decoration: const InputDecoration(
-                  labelText: 'GitHub 仓库或子目录链接',
-                  hintText: 'https://github.com/owner/repository',
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                '安装兼容技能；远程 MCP 组件需配置账号连接。当前尚不支持 hooks 和专有客户端组件。检查不等于实际执行成功。',
-              ),
-              if (_busy)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  child: Text(_progress, semanticsLabel: _progress),
-                ),
-              if (_error != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Text(
-                    _error!,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-                ),
-              if (_inspection != null) ...[
-                const SizedBox(height: 16),
-                SelectableText('固定版本：${_inspection!['commit']}'),
-                if ((_inspection!['candidates'] as List).isEmpty)
-                  const Text('未找到符合格式的技能或技能型插件。'),
-                for (final c
-                    in (_inspection!['candidates'] as List).whereType<Map>())
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '${c['name']} · ${c['status'] == 'supported'
-                                ? '可安装'
-                                : c['status'] == 'partial'
-                                ? '部分支持'
-                                : '暂不支持'}',
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          Text(c['description']?.toString() ?? ''),
-                          for (final warning in (c['warnings'] as List? ?? []))
-                            Text(warning.toString()),
-                          for (final component
-                              in (c['components'] as List).whereType<Map>())
-                            Text(
-                              '${component['name']}：${component['status'] == 'supported' ? '格式支持，任务效果未验证' : (component['issues'] as List).join('；')}',
-                            ),
-                          const SizedBox(height: 8),
-                          FilledButton(
-                            onPressed: _busy || c['status'] == 'unsupported'
-                                ? null
-                                : () => _install(c),
-                            child: Text(
-                              c['status'] == 'partial'
-                                  ? '仅安装支持的技能'
-                                  : widget.update == null
-                                  ? '安装'
-                                  : '更新',
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: _busy && _jobId == null ? null : _cancel,
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: _busy ? null : _inspect,
-          child: Text(_inspection == null ? '开始检查' : '重新检查'),
-        ),
-      ],
-    ),
-  );
-}
-
-class _McpStaticPlaceholder extends StatelessWidget {
-  const _McpStaticPlaceholder();
-
-  @override
-  Widget build(BuildContext context) => GridView.builder(
-    shrinkWrap: true,
-    physics: const NeverScrollableScrollPhysics(),
-    itemCount: 4,
-    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-      crossAxisCount: 2,
-      mainAxisExtent: 142,
-      crossAxisSpacing: 16,
-      mainAxisSpacing: 14,
-    ),
-    itemBuilder: (_, _) => DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xFFF3F5F8),
-        borderRadius: BorderRadius.circular(16),
-      ),
-    ),
-  );
-}
-
-class _McpEmptyState extends StatelessWidget {
-  const _McpEmptyState({required this.installed});
-
-  final bool installed;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(24),
-    decoration: BoxDecoration(
-      color: const Color(0xFFF7F8FA),
-      borderRadius: BorderRadius.circular(16),
-    ),
-    child: Text(
-      installed ? '还没有安装 MCP 工具。切换到“推荐”开始安装。' : '暂时没有可直接接入的 MCP 工具。',
-      style: const TextStyle(color: Color(0xFF68707C), height: 1.45),
-    ),
-  );
-}
-
-class _McpCatalogTile extends StatelessWidget {
-  const _McpCatalogTile({
-    required this.entry,
-    required this.connection,
-    required this.busy,
-    required this.onInstall,
-    required this.onLogin,
-    required this.onStartUsing,
-  });
-
-  final McpCatalogEntry entry;
-  final McpConnectionRecord? connection;
-  final bool busy;
-  final VoidCallback onInstall;
-  final ValueChanged<McpConnectionRecord> onLogin;
-  final ValueChanged<McpConnectionRecord> onStartUsing;
-
-  @override
-  Widget build(BuildContext context) {
-    final installed = connection != null;
-    final ready = connection?.isReady == true;
-    final needsLogin = connection?.needsLogin == true;
-    final unsupported = entry.status == McpInstallationState.unsupported;
-    return _McpCard(
-      iconAsset: entry.iconAsset,
-      title: entry.name,
-      subtitle: entry.reason == null
-          ? entry.description
-          : '${entry.description}\n${entry.reason}',
-      badge: unsupported
-          ? '暂未支持'
-          : installed
-          ? _mcpStatusLabel(connection!.status)
-          : '已验证',
-      footer: Row(
-        children: [
-          Expanded(
-            child: Text(
-              '版本 ${entry.version}',
-              style: const TextStyle(color: Color(0xFF68707C), fontSize: 13),
-            ),
-          ),
-          if (busy)
-            const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          else if (needsLogin)
-            FilledButton(
-              onPressed: () => onLogin(connection!),
-              child: const Text('登录'),
-            )
-          else if (ready)
-            FilledButton(
-              onPressed: () => onStartUsing(connection!),
-              child: const Text('开始使用'),
-            )
-          else if (unsupported)
-            const FilledButton(onPressed: null, child: Text('暂未支持'))
-          else
-            FilledButton(
-              onPressed: installed ? null : onInstall,
-              child: Text(
-                installed ? _mcpStatusLabel(connection!.status) : '安装',
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _McpInstalledTile extends StatelessWidget {
-  const _McpInstalledTile({
-    required this.connection,
-    required this.busy,
-    required this.onLogin,
-    required this.onReconnect,
-    required this.onDelete,
-    required this.onStartUsing,
-  });
-
-  final McpConnectionRecord connection;
-  final bool busy;
-  final VoidCallback onLogin;
-  final VoidCallback onReconnect;
-  final VoidCallback onDelete;
-  final VoidCallback onStartUsing;
-
-  @override
-  Widget build(BuildContext context) {
-    final status = connection.status;
-    return _McpCard(
-      iconAsset: 'assets/icons/capabilities/mcp_connector.svg',
-      title: connection.name,
-      subtitle: connection.error ?? '已安装的工具会出现在聊天入口中。',
-      badge: _mcpStatusLabel(status),
-      footer: Row(
-        children: [
-          Expanded(
-            child: Text(
-              connection.toolCount == null
-                  ? '工具数量待发现'
-                  : '可用工具：${connection.toolCount}',
-              style: const TextStyle(color: Color(0xFF68707C), fontSize: 13),
-            ),
-          ),
-          if (busy)
-            const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          else if (connection.needsLogin)
-            FilledButton(onPressed: onLogin, child: const Text('登录'))
-          else if (connection.isReady)
-            FilledButton(onPressed: onStartUsing, child: const Text('开始使用'))
-          else
-            FilledButton(onPressed: onReconnect, child: const Text('重试连接')),
-          const SizedBox(width: 4),
-          PopupMenuButton<String>(
-            tooltip: '管理',
-            onSelected: (value) {
-              if (value == 'reconnect') onReconnect();
-              if (value == 'delete') onDelete();
+        actions: [
+          marketButton(
+            '卸载${entry.kind == ExtensionKind.skill ? '技能' : '插件'}',
+            () {
+              Navigator.pop(ctx);
+              unawaited(_remove(entry));
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'reconnect', child: Text('重新连接')),
-              PopupMenuItem(value: 'delete', child: Text('卸载')),
-            ],
+            icon: 'trash-danger',
           ),
+          marketButton(record.enabled ? '停用' : '启用', () async {
+            try {
+              await _cloud.manageInstallation(record, enabled: !record.enabled);
+              if (ctx.mounted) Navigator.pop(ctx);
+              await _reload();
+            } catch (error) {
+              if (ctx.mounted) AppToast.show(ctx, '修改失败：$error');
+            }
+          }),
+          marketButton('完成', () => Navigator.pop(ctx), primary: true),
         ],
       ),
     );
   }
-}
 
-class _McpCard extends StatelessWidget {
-  const _McpCard({
-    required this.iconAsset,
-    required this.title,
-    required this.subtitle,
-    required this.badge,
-    required this.footer,
-  });
-
-  final String iconAsset;
-  final String title;
-  final String subtitle;
-  final String badge;
-  final Widget footer;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(16),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(16),
-      border: Border.all(color: const Color(0xFFE2E6EC)),
-      boxShadow: const [
-        BoxShadow(
-          color: Color(0x08000000),
-          blurRadius: 12,
-          offset: Offset(0, 3),
-        ),
-      ],
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
+  PopupMenuItem<String> _menuItem(String value, String label, String icon) =>
+      PopupMenuItem(
+        value: value,
+        height: 48,
+        child: Row(
           children: [
-            _assetIcon(iconAsset, 42),
+            marketIcon(icon),
             const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFFEAF7EF),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(
-                badge,
-                style: const TextStyle(
-                  color: Color(0xFF217443),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
+            Flexible(child: Text(label)),
           ],
         ),
-        const SizedBox(height: 10),
-        Expanded(
-          child: Text(
-            subtitle,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: Color(0xFF68707C), height: 1.35),
-          ),
-        ),
-        const SizedBox(height: 10),
-        footer,
-      ],
+      );
+  Widget _addMenu() => PopupMenuButton<String>(
+    tooltip: '添加$_label',
+    color: Colors.white,
+    surfaceTintColor: Colors.transparent,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    onSelected: (action) {
+      switch (action) {
+        case 'chat':
+          _chat(null);
+        case 'editor':
+          unawaited(_edit());
+        case 'upload':
+          unawaited(_import(upload: true));
+        case 'github':
+          unawaited(_import());
+        case 'mcp':
+          unawaited(_mcpForm());
+      }
+    },
+    itemBuilder: (_) => _kind == ExtensionKind.skill
+        ? [
+            _menuItem('chat', '通过聊天创建', 'chat'),
+            _menuItem('editor', '使用编辑器创建', 'pencil'),
+            _menuItem('upload', '从设备上传', 'file-plus'),
+            _menuItem('github', '从 GitHub 导入', 'link'),
+          ]
+        : [
+            _menuItem('upload', '创建插件', 'edit'),
+            _menuItem('upload', '上传插件压缩包', 'file-plus'),
+            _menuItem('mcp', '添加自定义 MCP 服务器', 'paperclip'),
+            _menuItem('github', '从 GitHub 导入', 'link'),
+          ],
+    child: Container(
+      constraints: const BoxConstraints(minHeight: 48),
+      padding: const EdgeInsets.symmetric(horizontal: 17),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1D1D1D),
+        borderRadius: BorderRadius.circular(99),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('添加', style: TextStyle(color: Colors.white, fontSize: 15)),
+          const SizedBox(width: 9),
+          marketIcon('caret-down', size: 16, color: Colors.white),
+        ],
+      ),
     ),
   );
-}
-
-String _mcpStatusLabel(McpInstallationState status) => switch (status) {
-  McpInstallationState.installing => '安装中',
-  McpInstallationState.needsLogin => '待登录',
-  McpInstallationState.connecting => '连接中',
-  McpInstallationState.ready => '已就绪',
-  McpInstallationState.failed => '失败',
-  McpInstallationState.unsupported => '暂未支持',
-};
-
-class _CollectionTile extends StatelessWidget {
-  const _CollectionTile({required this.card, required this.selectedIndex});
-
-  final _CollectionCard card;
-  final int selectedIndex;
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(15),
-      child: Container(
-        color: card.background,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(28, 25, 18, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    card.title,
-                    style: const TextStyle(
-                      fontSize: 23,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    card.subtitle,
-                    style: const TextStyle(
-                      color: Color(0xFF4D6076),
-                      fontSize: 17,
-                    ),
-                  ),
-                  const Spacer(),
-                  Row(
-                    children: [
-                      const Text(
-                        '查看合集',
-                        style: TextStyle(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      SvgPicture.asset(
-                        'assets/icons/extensions/market_arrow_right.svg',
-                        width: 22,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            Positioned(
-              right: -2,
-              bottom: -4,
-              width: 380,
-              height: 160,
-              child: SvgPicture.asset(card.asset, fit: BoxFit.contain),
-            ),
-            Positioned(
-              right: 22,
-              bottom: 18,
+  String get _label => _kind == ExtensionKind.skill ? '技能' : '插件';
+  Widget _row(_MarketEntry entry) => ConstrainedBox(
+    constraints: const BoxConstraints(minHeight: 81),
+    child: Row(
+      children: [
+        Expanded(
+          child: InkWell(
+            onTap: () => _open(entry),
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
               child: Row(
                 children: [
-                  for (var index = 0; index < _collectionCards.length; index++)
-                    Container(
-                      width: 9,
-                      height: 9,
-                      margin: const EdgeInsets.only(left: 8),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: selectedIndex == index
-                            ? const Color(0xFF1A1D24)
-                            : const Color(0xFFD5D9E4),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ExtensionCard extends StatelessWidget {
-  const _ExtensionCard({
-    required this.entry,
-    required this.installed,
-    required this.onOpen,
-    required this.onToggleInstall,
-  });
-
-  final ExtensionEntry entry;
-  final bool installed;
-  final VoidCallback onOpen;
-  final VoidCallback onToggleInstall;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.white,
-      elevation: 1,
-      shadowColor: const Color(0x14000000),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Color(0xFFE9ECF1)),
-      ),
-      child: InkWell(
-        onTap: onOpen,
-        borderRadius: BorderRadius.circular(16),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Stack(
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(right: 48),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 78,
-                      height: 78,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: entry.iconBackground,
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: SvgPicture.asset(entry.iconAsset),
-                    ),
-                    const SizedBox(width: 18),
-                    Expanded(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            entry.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 7),
-                          Row(
-                            children: [
-                              _AuthorAvatar(name: entry.author, size: 24),
-                              const SizedBox(width: 7),
-                              Flexible(
-                                child: Text(
-                                  entry.author,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Color(0xFF718099),
-                                    fontSize: 15,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            entry.description,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Color(0xFF718099),
-                              fontSize: 15,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Positioned.fill(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: _CardActionButton(
-                    label: installed
-                        ? '卸载${entry.name}'
-                        : entry.isTrialCandidate
-                        ? '检查${entry.name}'
-                        : '安装${entry.name}',
-                    onTap: onToggleInstall,
-                    asset: installed
-                        ? 'assets/icons/extensions/market_check.svg'
-                        : 'assets/icons/extensions/market_add.svg',
-                    iconSize: 28,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CardActionButton extends StatelessWidget {
-  const _CardActionButton({
-    required this.label,
-    required this.onTap,
-    required this.asset,
-    required this.iconSize,
-  });
-
-  final String label;
-  final VoidCallback onTap;
-  final String asset;
-  final double iconSize;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      label: label,
-      child: InkResponse(
-        onTap: onTap,
-        radius: 24,
-        child: SizedBox(
-          width: 48,
-          height: 48,
-          child: Center(
-            child: SvgPicture.asset(asset, width: iconSize, height: iconSize),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class ExtensionCategoryPage extends StatefulWidget {
-  const ExtensionCategoryPage({
-    super.key,
-    required this.title,
-    required this.entries,
-    required this.installedIds,
-    required this.onChanged,
-  });
-
-  final String title;
-  final List<ExtensionEntry> entries;
-  final Set<String> installedIds;
-  final VoidCallback onChanged;
-
-  @override
-  State<ExtensionCategoryPage> createState() => _ExtensionCategoryPageState();
-}
-
-class _ExtensionCategoryPageState extends State<ExtensionCategoryPage> {
-  void _toggleInstalled(ExtensionEntry entry) {
-    _openDetail(entry);
-  }
-
-  void _openDetail(ExtensionEntry entry) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ExtensionDetailPage(
-          entry: entry,
-          installed: widget.installedIds.contains(entry.id),
-          onInstallChanged: (installed) {
-            if (installed) {
-              widget.installedIds.add(entry.id);
-            } else {
-              widget.installedIds.remove(entry.id);
-            }
-            widget.onChanged();
-            if (mounted) setState(() {});
-          },
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final horizontal = MediaQuery.sizeOf(context).width < 640 ? 20.0 : 40.0;
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) => ListView(
-            padding: EdgeInsets.fromLTRB(horizontal, 12, horizontal, 48),
-            children: [
-              Row(
-                children: [
-                  _marketButton(
-                    label: '返回扩展市场',
-                    asset: 'assets/icons/extensions/market_back.svg',
-                    onTap: () => Navigator.maybePop(context),
-                    size: 29,
-                    padding: 4,
-                  ),
+                  MarketBrand(entry.asset),
                   const SizedBox(width: 14),
-                  Text(
-                    widget.title,
-                    style: const TextStyle(
-                      fontSize: 25,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 28),
-              GridView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: widget.entries.length,
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: constraints.maxWidth - horizontal * 2 < 680
-                      ? 1
-                      : 2,
-                  mainAxisExtent: 122,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 14,
-                ),
-                itemBuilder: (context, index) {
-                  final entry = widget.entries[index];
-                  return _ExtensionCard(
-                    entry: entry,
-                    installed: widget.installedIds.contains(entry.id),
-                    onOpen: () => _openDetail(entry),
-                    onToggleInstall: () => _toggleInstalled(entry),
-                  );
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class ExtensionDetailPage extends StatefulWidget {
-  const ExtensionDetailPage({
-    super.key,
-    required this.entry,
-    required this.installed,
-    required this.onInstallChanged,
-  });
-
-  final ExtensionEntry entry;
-  final bool installed;
-  final ValueChanged<bool> onInstallChanged;
-
-  @override
-  State<ExtensionDetailPage> createState() => _ExtensionDetailPageState();
-}
-
-class _ExtensionDetailPageState extends State<ExtensionDetailPage> {
-  late final bool _installed = widget.installed;
-
-  Future<void> _openRepository() async {
-    final uri = Uri.parse('https://github.com/${widget.entry.repository}');
-    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!opened && mounted) AppToast.show(context, '暂时无法打开 GitHub 链接');
-  }
-
-  Future<void> _toggleInstall() async {
-    final record = widget.entry.installation;
-    if (record == null) {
-      final importUrl = widget.entry.importUrl;
-      if (importUrl == null) {
-        AppToast.show(context, '精选预览尚未上架，请从 GitHub 导入真实扩展');
-        return;
-      }
-      final installed = await showDialog<bool>(
-        context: context,
-        builder: (_) => _ImportInstallationDialog(initialUrl: importUrl),
-      );
-      if (installed == true && mounted) {
-        widget.onInstallChanged(true);
-        Navigator.pop(context);
-      }
-      return;
-    }
-    final operation = await showDialog<String>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('管理已安装扩展'),
-        children: [
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx, 'toggle'),
-            child: Text(record.enabled ? '停用' : '启用'),
-          ),
-          if (record.origin == 'github')
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(ctx, 'update'),
-              child: const Text('检查更新（失败保留原版本）'),
-            ),
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx, 'delete'),
-            child: const Text('卸载'),
-          ),
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-        ],
-      ),
-    );
-    if (!mounted || operation == null) return;
-    try {
-      if (operation == 'update') {
-        await showDialog<void>(
-          context: context,
-          builder: (_) => _ImportInstallationDialog(update: record),
-        );
-      } else {
-        await CapabilityCloudSync.instance.manageInstallation(
-          record,
-          enabled: !record.enabled,
-          uninstall: operation == 'delete',
-        );
-      }
-      widget.onInstallChanged(operation != 'delete');
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      if (mounted) AppToast.show(context, '操作失败：$e');
-    }
-  }
-
-  void _openAuthor() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ExtensionAuthorPage(
-          author: widget.entry.author,
-          bio: widget.entry.authorBio,
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final horizontal = MediaQuery.sizeOf(context).width < 640 ? 20.0 : 40.0;
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) => ListView(
-            padding: EdgeInsets.fromLTRB(horizontal, 12, horizontal, 54),
-            children: [
-              _buildTopBar(),
-              const SizedBox(height: 28),
-              _buildHeader(constraints.maxWidth - horizontal * 2),
-              const SizedBox(height: 24),
-              const Divider(color: Color(0xFFE4E8EE)),
-              const SizedBox(height: 32),
-              _buildFeatureSection(constraints.maxWidth - horizontal * 2),
-              const SizedBox(height: 38),
-              const Divider(color: Color(0xFFE4E8EE)),
-              const SizedBox(height: 32),
-              _buildUsageSection(),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTopBar() {
-    return Row(
-      children: [
-        _marketButton(
-          label: '返回扩展市场',
-          asset: 'assets/icons/extensions/market_back.svg',
-          onTap: () => Navigator.maybePop(context),
-          size: 29,
-          padding: 4,
-        ),
-        const SizedBox(width: 14),
-        const Text(
-          '扩展详情',
-          style: TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildHeader(double contentWidth) {
-    final information = Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: contentWidth < 700 ? 112 : 140,
-          height: contentWidth < 700 ? 112 : 140,
-          padding: const EdgeInsets.all(28),
-          decoration: BoxDecoration(
-            color: widget.entry.iconBackground,
-            borderRadius: BorderRadius.circular(22),
-          ),
-          child: SvgPicture.asset(widget.entry.iconAsset),
-        ),
-        const SizedBox(width: 30),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                widget.entry.name,
-                style: const TextStyle(
-                  fontSize: 32,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 10),
-              InkWell(
-                onTap: _openAuthor,
-                borderRadius: BorderRadius.circular(8),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
-                  child: Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    runSpacing: 6,
-                    children: [
-                      _AuthorAvatar(name: widget.entry.author, size: 32),
-                      Text(
-                        widget.entry.author,
-                        style: const TextStyle(
-                          color: Color(0xFF32435B),
-                          fontSize: 17,
-                        ),
-                      ),
-                      SvgPicture.asset(
-                        'assets/icons/extensions/market_arrow_right.svg',
-                        width: 20,
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 15,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFE8F4FF),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          widget.entry.kindLabel,
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          entry.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                            color: Color(0xFF2971BD),
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w500,
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  SvgPicture.asset(
-                    'assets/icons/extensions/verified.svg',
-                    width: 23,
-                  ),
-                  const SizedBox(width: 7),
-                  Flexible(
-                    child: Text(
-                      widget.entry.installation == null
-                          ? '尚未上架 · 仅预览'
-                          : '已安装 · ${widget.entry.installation!.enabled ? "已启用" : "已停用"} · 任务效果需运行验证',
-                      style: const TextStyle(
-                        color: Color(0xFF6B7890),
-                        fontSize: 16,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 13),
-              Row(
-                children: [
-                  Text(
-                    '版本  ${widget.entry.version}',
-                    style: const TextStyle(
-                      color: Color(0xFF66738A),
-                      fontSize: 16,
-                    ),
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 12),
-                    child: Text(
-                      '·',
-                      style: TextStyle(color: Color(0xFF66738A), fontSize: 18),
-                    ),
-                  ),
-                  Flexible(
-                    child: InkWell(
-                      onTap: _openRepository,
-                      borderRadius: BorderRadius.circular(6),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 3),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            SvgPicture.asset(
-                              'assets/icons/extensions/github_mark.svg',
-                              width: 22,
-                            ),
-                            const SizedBox(width: 8),
-                            Flexible(
-                              child: Text(
-                                widget.entry.repository,
-                                style: const TextStyle(
-                                  color: Color(0xFF1D5FBF),
-                                  fontSize: 16,
-                                  decoration: TextDecoration.underline,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            SvgPicture.asset(
-                              'assets/icons/extensions/external_link.svg',
-                              width: 20,
-                            ),
-                          ],
+                        const SizedBox(height: 5),
+                        Text(
+                          entry.description,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            color: marketMuted,
+                          ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
                 ],
+              ),
+            ),
+          ),
+        ),
+        if (!entry.installed)
+          marketIconButton(
+            'plus-light',
+            '添加 ${entry.name}',
+            _busyIds.contains(entry.id) ? null : () => _install(entry),
+          )
+        else
+          PopupMenuButton<String>(
+            tooltip: '管理 ${entry.name}',
+            icon: marketIcon('dots', size: 25),
+            color: Colors.white,
+            surfaceTintColor: Colors.transparent,
+            onSelected: (action) {
+              switch (action) {
+                case 'detail':
+                  unawaited(_open(entry));
+                case 'edit':
+                  unawaited(_edit(record: entry.record));
+                case 'settings':
+                  unawaited(_mcpForm(entry.connection));
+                case 'remove':
+                  unawaited(_remove(entry));
+              }
+            },
+            itemBuilder: (_) => [
+              _menuItem('detail', '查看详情', 'info'),
+              if (entry.editable) _menuItem('edit', '编辑技能', 'edit'),
+              if (entry.connection != null)
+                _menuItem('settings', '连接设置', 'gear'),
+              _menuItem(
+                'remove',
+                entry.connection == null ? '移除' : '移除连接',
+                'trash-danger',
               ),
             ],
           ),
-        ),
       ],
-    );
-
-    if (contentWidth < 700) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          information,
-          const SizedBox(height: 22),
-          _installButton(),
-          const SizedBox(height: 24),
-          _description(),
-          const SizedBox(height: 22),
-          _suitableFor(),
-        ],
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(child: information),
-            const SizedBox(width: 28),
-            _installButton(),
-          ],
-        ),
-        const SizedBox(height: 24),
-        Padding(
-          padding: const EdgeInsets.only(left: 170),
-          child: _description(),
-        ),
-        const SizedBox(height: 22),
-        _suitableFor(),
-      ],
-    );
-  }
-
-  Widget _description() {
-    return Text(
-      widget.entry.description,
-      style: const TextStyle(
-        fontSize: 20,
-        fontWeight: FontWeight.w600,
-        height: 1.45,
+    ),
+  );
+  Widget _grid(List<_MarketEntry> entries) => entries.isEmpty
+      ? marketEmpty('没有找到相关内容', '试试其他关键词，或从添加菜单导入。')
+      : MarketGrid(children: entries.map(_row).toList());
+  Widget _searchField() => TextField(
+    controller: _search,
+    decoration: InputDecoration(
+      hintText: '搜索$_label',
+      prefixIcon: Padding(
+        padding: const EdgeInsets.all(14),
+        child: marketIcon('search-light'),
       ),
-    );
-  }
-
-  Widget _suitableFor() {
-    return Row(
-      children: [
-        SvgPicture.asset('assets/icons/extensions/device.svg', width: 25),
-        const SizedBox(width: 12),
-        const Text(
-          '适用于：',
-          style: TextStyle(color: Color(0xFF5F6D84), fontSize: 17),
-        ),
-        Text(
-          widget.entry.suitableFor,
-          style: const TextStyle(color: Color(0xFF5F6D84), fontSize: 17),
-        ),
-      ],
-    );
-  }
-
-  Widget _installButton() {
-    final canImport =
-        widget.entry.installation == null && widget.entry.importUrl != null;
-    return FilledButton(
-      onPressed: widget.entry.installation == null && !canImport
+      suffixIcon: _search.text.isEmpty
           ? null
-          : _toggleInstall,
-      style: FilledButton.styleFrom(
-        backgroundColor: _installed
-            ? const Color(0xFFEAF7EF)
-            : const Color(0xFF121416),
-        foregroundColor: _installed ? const Color(0xFF277744) : Colors.white,
-        minimumSize: const Size(174, 62),
-        padding: const EdgeInsets.symmetric(horizontal: 30),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        textStyle: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
+          : IconButton(
+              tooltip: '清除搜索',
+              onPressed: _search.clear,
+              icon: marketIcon('close', size: 17),
+            ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(99)),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(99),
+        borderSide: const BorderSide(color: Color(0xFFD9D9D9)),
       ),
-      child: Text(
-        widget.entry.installation == null
-            ? canImport
-                  ? '检查并安装'
-                  : '尚未上架'
-            : '管理安装',
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(99),
+        borderSide: const BorderSide(color: Color(0xFF888888), width: 2),
       ),
-    );
-  }
-
-  Widget _buildFeatureSection(double contentWidth) {
-    final record = widget.entry.installation;
-    if (record != null) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    ),
+  );
+  @override
+  Widget build(BuildContext context) => Theme(
+    data: marketTheme(context),
+    child: PopScope(
+      canPop: _listTitle == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop)
+          setState(() {
+            _listTitle = null;
+            _search.clear();
+          });
+      },
+      child: MarketFrame(
         children: [
-          const Text(
-            '已安装组件',
-            style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 16),
-          for (final c
-              in (record.compatibility['components'] as List? ?? const [])
-                  .whereType<Map>())
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                '${c['name']}：${c['status'] == 'supported' ? "已安装，任务效果待运行验证" : (c['issues'] as List? ?? []).join("；")}',
-              ),
-            ),
-          for (final warning
-              in (record.compatibility['warnings'] as List? ?? const []))
-            Text(warning.toString()),
-          const SizedBox(height: 12),
-          const Text('远程 MCP 组件需绑定账号连接；当前尚不支持 hooks 和专有客户端组件。实际执行状态以任务结果为准。'),
-          if (record.source['commit'] != null)
-            SelectableText('仓库版本：${record.source['commit']}'),
-        ],
-      );
-    }
-    final features = widget.entry.features;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          '你可以用它做什么',
-          style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          '从快速理解到深入梳理，按你的需要处理内容。',
-          style: TextStyle(color: Color(0xFF61708A), fontSize: 17),
-        ),
-        const SizedBox(height: 24),
-        SizedBox(
-          height: contentWidth < 700 ? 340 : 380,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            clipBehavior: Clip.none,
-            itemCount: features.length,
-            separatorBuilder: (_, _) => const SizedBox(width: 18),
-            itemBuilder: (context, index) {
-              final feature = features[index];
-              return SizedBox(
-                width:
-                    contentWidth *
-                    (contentWidth < 700
-                        ? (feature.large ? .88 : .74)
-                        : (feature.large ? .56 : .40)),
-                child: _FeatureTile(feature: feature),
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildUsageSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          '如何使用',
-          style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 10),
-        Text(
-          '把内容发到对话里，选择「${widget.entry.name}」，然后直接提问。',
-          style: const TextStyle(
-            color: Color(0xFF61708A),
-            fontSize: 17,
-            height: 1.45,
-          ),
-        ),
-        const SizedBox(height: 26),
-        const Text(
-          '例如：',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 14),
-        for (var index = 0; index < widget.entry.examples.length; index++)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: Text(
-              '${index + 1}.   ${widget.entry.examples[index]}',
-              style: const TextStyle(fontSize: 18, height: 1.5),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _FeatureTile extends StatelessWidget {
-  const _FeatureTile({required this.feature});
-
-  final ExtensionFeatureBlock feature;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      label: '查看${feature.title}配图',
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: () => _showPreview(context),
-          borderRadius: BorderRadius.circular(16),
-          child: Container(
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: feature.large
-                  ? const Color(0xFFFFF9EB)
-                  : const Color(0xFFF1F8FF),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Stack(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(26, 24, 24, 18),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        feature.title,
-                        style: const TextStyle(
-                          fontSize: 25,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        feature.description,
-                        style: const TextStyle(
-                          color: Color(0xFF52667F),
-                          fontSize: 16,
-                          height: 1.45,
-                        ),
-                      ),
-                    ],
-                  ),
+          Row(
+            children: [
+              if (_listTitle == null) ...[
+                marketIconButton(
+                  'back',
+                  '退出扩展市场',
+                  () => Navigator.pop(context),
                 ),
-                Positioned(
-                  left: feature.large ? 16 : 8,
-                  right: feature.large ? 16 : 8,
-                  bottom: feature.large ? 0 : -2,
-                  height: feature.large ? 320 : 170,
-                  child: SvgPicture.asset(
-                    feature.illustration,
-                    fit: BoxFit.contain,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _showPreview(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (dialogContext) => Dialog(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 760, maxHeight: 680),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        feature.title,
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
+                for (final kind in [ExtensionKind.plugin, ExtensionKind.skill])
+                  Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: marketButton(
+                      kind == ExtensionKind.plugin ? '插件' : '技能',
+                      () => setState(() {
+                        _kind = kind;
+                        _personal = false;
+                        _search.clear();
+                      }),
+                      selected: _kind == kind,
+                      outlined: false,
                     ),
-                    IconButton(
-                      tooltip: '关闭',
-                      onPressed: () => Navigator.pop(dialogContext),
-                      icon: const Icon(Icons.close),
-                    ),
-                  ],
+                  ),
+                const Spacer(),
+              ] else ...[
+                marketButton(
+                  _label,
+                  () => setState(() {
+                    _listTitle = null;
+                    _search.clear();
+                  }),
                 ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: InteractiveViewer(
-                    child: SvgPicture.asset(feature.illustration),
+                marketIcon('caret-right', size: 16),
+                Expanded(child: Text(_listTitle!)),
+              ],
+              if (_kind == ExtensionKind.plugin &&
+                  MediaQuery.sizeOf(context).width > 430)
+                marketIconButton('gear', '管理连接', () => _showList('连接管理')),
+              _addMenu(),
+            ],
+          ),
+          marketHeading(
+            _listTitle ?? _label,
+            subtitle: _listTitle == '已安装'
+                ? '管理你添加的$_label'
+                : _listTitle == '连接管理'
+                ? '查看和管理已连接的 MCP 服务器。'
+                : _kind == ExtensionKind.plugin
+                ? '连接你的工具，让小七与你协同工作'
+                : '用于扩展小七能力的说明与工作方法',
+          ),
+          _searchField(),
+          if (_error != null) marketError(_error!, _reload),
+          if (_kind == ExtensionKind.plugin && _mcpError != null)
+            marketError(_mcpError!, _reloadMcp),
+          if (_listTitle != null) ...[
+            const SizedBox(height: 24),
+            if (_listTitle == '连接管理') ...[
+              marketButton('添加连接', () => _mcpForm(), icon: 'plus'),
+              if (_loadingMcp)
+                marketSkeleton()
+              else
+                _grid(
+                  _matching(
+                    _installed.where((e) => e.kind == ExtensionKind.mcp),
                   ),
                 ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class ExtensionAuthorPage extends StatelessWidget {
-  const ExtensionAuthorPage({
-    super.key,
-    required this.author,
-    required this.bio,
-  });
-
-  final String author;
-  final String bio;
-
-  @override
-  Widget build(BuildContext context) {
-    final horizontal = MediaQuery.sizeOf(context).width < 640 ? 20.0 : 40.0;
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: ListView(
-          padding: EdgeInsets.fromLTRB(horizontal, 12, horizontal, 48),
-          children: [
-            Row(
-              children: [
-                _marketButton(
-                  label: '返回扩展详情',
-                  asset: 'assets/icons/extensions/market_back.svg',
-                  onTap: () => Navigator.maybePop(context),
-                  size: 29,
-                  padding: 4,
-                ),
-                const SizedBox(width: 14),
-                const Text(
-                  '作者详情',
-                  style: TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
-                ),
-              ],
-            ),
-            const SizedBox(height: 42),
-            Center(child: _AuthorAvatar(name: author, size: 88)),
-            const SizedBox(height: 18),
-            Center(
-              child: Text(
-                author,
-                style: const TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w700,
+            ] else if (_loading)
+              marketSkeleton()
+            else
+              _grid(
+                _matching(
+                  _listTitle == '已安装'
+                      ? _installed
+                      : _public.where((e) => e.category == _listTitle),
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
-            Center(
-              child: Text(
-                bio,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Color(0xFF66738A),
-                  fontSize: 17,
-                  height: 1.5,
-                ),
+          ] else if (_search.text.trim().isNotEmpty) ...[
+            marketSection('搜索结果'),
+            _grid(
+              _matching(
+                {
+                  for (final e in [..._public, ..._installed]) e.id: e,
+                }.values,
               ),
             ),
-            const SizedBox(height: 40),
-            const Divider(color: Color(0xFFE4E8EE)),
-            const SizedBox(height: 30),
-            const Text(
-              '发布的作品',
-              style: TextStyle(fontSize: 27, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 72, horizontal: 24),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF8F9FB),
-                borderRadius: BorderRadius.circular(18),
-              ),
-              child: const Column(
+          ] else ...[
+            marketSection('已安装', onTap: () => _showList('已安装')),
+            if (_loading)
+              marketSkeleton()
+            else if (_installed.isEmpty)
+              Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   Text(
-                    '暂无作品',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                    '还没有安装$_label',
+                    style: const TextStyle(color: marketMuted),
                   ),
-                  SizedBox(height: 10),
-                  Text(
-                    '个人作者作品页在 V1 先保持空状态。',
-                    style: TextStyle(color: Color(0xFF738097), fontSize: 16),
+                  TextButton(
+                    onPressed: () => _import(upload: true),
+                    child: const Text('添加一个'),
                   ),
                 ],
+              )
+            else if (_kind == ExtensionKind.plugin)
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: _installed
+                      .map(
+                        (e) => Padding(
+                          padding: const EdgeInsets.only(right: 10),
+                          child: Tooltip(
+                            message: e.name,
+                            child: InkWell(
+                              onTap: () => _open(e),
+                              child: Padding(
+                                padding: const EdgeInsets.all(4),
+                                child: MarketBrand(e.asset),
+                              ),
+                            ),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              )
+            else
+              _grid(_installed),
+            if (_kind == ExtensionKind.plugin) ...[
+              const SizedBox(height: 25),
+              Wrap(
+                spacing: 6,
+                children: [
+                  marketButton(
+                    '公开',
+                    () => setState(() => _personal = false),
+                    selected: !_personal,
+                    outlined: false,
+                  ),
+                  marketButton(
+                    '个人',
+                    () => setState(() => _personal = true),
+                    selected: _personal,
+                    outlined: false,
+                  ),
+                  if (MediaQuery.sizeOf(context).width <= 430)
+                    marketIconButton('gear', '管理连接', () => _showList('连接管理')),
+                ],
               ),
-            ),
+              if (_personal) ...[
+                marketSection('个人插件'),
+                _grid(_installed.where((e) => e.personal).toList()),
+              ] else ...[
+                for (final category
+                    in _public.map((e) => e.category).toSet()) ...[
+                  marketSection(category, onTap: () => _showList(category)),
+                  _grid(
+                    _public
+                        .where((e) => e.category == category)
+                        .take(6)
+                        .toList(),
+                  ),
+                ],
+                if (_loadingMcp) marketSkeleton(),
+              ],
+            ] else ...[
+              if (_drafts.isNotEmpty) ...[
+                marketSection('草稿', count: '${_drafts.length}'),
+                MarketGrid(
+                  children: _drafts
+                      .map(
+                        (draft) => ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const MarketBrand(
+                            '${marketAssets}detail/file-text.svg',
+                          ),
+                          title: Text(
+                            draft.name.isEmpty ? '未命名技能' : draft.name,
+                          ),
+                          subtitle: const Text('继续编辑'),
+                          trailing: marketIcon('caret-right', size: 18),
+                          onTap: () => _edit(draft: draft),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
+            ],
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _AuthorAvatar extends StatelessWidget {
-  const _AuthorAvatar({required this.name, required this.size});
-
-  final String name;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final initial = name.trim().isEmpty ? '?' : name.trim().substring(0, 1);
-    return Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: const Color(0xFFEAF4FF),
-        border: Border.all(color: const Color(0xFFD8E8FA)),
-      ),
-      child: Text(
-        initial,
-        style: TextStyle(
-          color: const Color(0xFF2E74B8),
-          fontSize: size * .42,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-}
-
-Widget _assetIcon(String asset, double size) =>
-    SvgPicture.asset(asset, width: size, height: size);
-
-Widget _marketButton({
-  required String label,
-  required String asset,
-  required VoidCallback onTap,
-  required double size,
-  required double padding,
-}) {
-  return Semantics(
-    button: true,
-    label: label,
-    child: InkResponse(
-      onTap: onTap,
-      radius: 25,
-      child: Padding(
-        padding: EdgeInsets.all(padding),
-        child: SvgPicture.asset(asset, width: size, height: size),
+        ],
       ),
     ),
   );
