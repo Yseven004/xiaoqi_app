@@ -12,11 +12,12 @@
 
 ## Layout Spec 与资产
 
-沿用技能已接入尺寸：834×1194 平板概念视口、约 30dp 页面留白、108dp 编辑图标、52dp 固定底部按钮；窄屏沿用现有断点与滚动、键盘避让。插件只替换类型和内容摘要，不改变确认稿布局。MCP 沿用最大 600dp 的既有连接弹窗，在名称左侧加入约 80dp 图标及更换按钮。
+沿用技能已接入尺寸：834×1194 平板概念视口、约 30dp 页面留白、108dp 编辑图标、52dp 固定底部按钮；窄屏沿用现有断点与滚动、键盘避让。插件只替换类型和内容摘要，不改变确认稿布局。MCP 连接弹窗按用户 2026-10-23 追加反馈调整为最大宽 760dp、18dp 圆角、32dp 内边距；图标 128dp（窄屏 88dp），右下角 48dp 小铅笔触控区；浅灰输入框及外置字段标签，底部用分隔线，矩形按钮左侧测试连接、右侧取消／保存。
 
 | 资产 | 来源与许可 | viewBox／显示尺寸 | 状态与消费组件 |
 | --- | --- | --- | --- |
 | `assets/icons/capabilities/mcp_connector.svg` | [Phosphor core regular/plugs.svg](https://github.com/phosphor-icons/core/blob/main/assets/regular/plugs.svg)，2026-10-23 读取原始路径；[MIT](https://github.com/phosphor-icons/core/blob/main/LICENSE)。复用原始轮廓，仅固定默认填充颜色。 | `0 0 256 256`；胶囊约18、菜单约20–25、列表约40、详情约82、连接表单约80dp外框。 | 独立预览后接入；状态通过背景、文字、禁用及语义颜色表达，不改图形；自定义图标属于连接数据。 |
+| `assets/icons/extension_market/detail/pencil.svg` | 项目已有图标，复用于编辑入口。 | `0 0 64 64`；显示20dp，位于48dp触控区内。 | 图标右下角覆盖按钮；语义标签「编辑图标」，点击仍打开现有图标选择器。 |
 
 独立预览：`.codex-artifacts/extension-authoring/mcp-connector.png`。用户参考是形状依据，不裁用截图。资产预览不构成 Flutter 页面或设备验证。
 
@@ -33,11 +34,12 @@
 - 代码接入完成：共用技能／插件编辑器、同页导入、私有草稿恢复、预览发布、作者权限，以及 MCP 连接图标保存与全局默认图形。
 - 服务端 `dart analyze lib test`：通过，无问题；完整 `dart test --reporter expanded`：191 项通过。覆盖插件包导入／发布／安装隔离、非法路径、公开包凭据拒绝、MCP 图标校验与原令牌保留。
 - 变更文件 `dart format` 与 `git diff --check`：通过；格式化只能证明语法可解析，不等于 Flutter 编译通过。
-- 独立 MCP SVG 已在 128×128 预览核对轮廓；页面同状态视觉对比尚未执行。
+- 独立 MCP SVG 已在 128×128 预览核对轮廓；按用户反馈完成连接弹窗布局、按钮与铅笔入口修正。页面同状态视觉对比尚未执行。
 - 共享版本：`2026-10-23-extension-authoring-1`，API contract `21`。提交 `77a8a0d49e01f13fd50f1bb70b7b817be482b296` 已通过 [GitHub Actions 预构建](https://github.com/Yseven004/xiaoqi_app/actions/runs/39941345806)，并由现有部署脚本发布。
 - ECS 部署日志 `.codex-artifacts/deploy/20261023-184535-77a8a0d.log` 记录 `DEPLOY_OK`、公开 release 检查通过及流量恢复。部署后通过 Cloud Assistant 再次确认：`current_release=20261023-184535-77a8a0d`、`current_health=healthy`、`restore_point=latest-good`、`restore_data=present`；公开 `/health` 返回 `status=ok`、release 与 contract `21`。本机到 HTTPS 地址的请求遇到 EOF，健康复核改由服务器执行成功。
 - 服务器：已部署并验证。生产数据与健康检查已通过，保留一个 `latest-good` 紧急恢复点。
 - 客户端 Flutter analyze／test／build／run 及真机验证未执行，待用户本机验证。部署不等于客户端重建、页面视觉验收或真机验收。
+- 后续仅按用户对比图反馈调整 Flutter MCP 弹窗布局与图标编辑入口；这是 Flutter-only 改动，server deployment not needed。尚未运行 Flutter analyze、构建或设备截图验收。
 
 ## 回滚与验收
 

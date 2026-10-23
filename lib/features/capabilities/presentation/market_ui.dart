@@ -388,6 +388,11 @@ class MarketDialog extends StatefulWidget {
     this.canClose = true,
     this.leadingAction,
     this.moveWithKeyboard = false,
+    this.maxWidth = 600,
+    this.cornerRadius = 25,
+    this.contentPadding = const EdgeInsets.all(24),
+    this.actionsDivider = false,
+    this.fixedActions = false,
     super.key,
   });
   final String title;
@@ -395,6 +400,9 @@ class MarketDialog extends StatefulWidget {
   final bool canClose;
   final Widget? leadingAction;
   final bool moveWithKeyboard;
+  final double maxWidth, cornerRadius;
+  final EdgeInsetsGeometry contentPadding;
+  final bool actionsDivider, fixedActions;
   @override
   State<MarketDialog> createState() => _MarketDialogState();
 }
@@ -405,6 +413,41 @@ class _MarketDialogState extends State<MarketDialog> {
   double? _restingTop;
   double? _restingHeight;
   double _keyboardHeight = 0;
+
+  bool get _hasActions =>
+      widget.actions.isNotEmpty || widget.leadingAction != null;
+
+  Widget _actionRow(BuildContext context, BoxConstraints constraints) {
+    final actions = Wrap(
+      alignment: WrapAlignment.end,
+      spacing: 10,
+      runSpacing: 10,
+      children: widget.actions,
+    );
+    if (widget.leadingAction == null) return actions;
+    if (constraints.maxWidth < 500 ||
+        MediaQuery.textScalerOf(context).scale(15) > 18) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Align(alignment: Alignment.centerLeft, child: widget.leadingAction!),
+          const SizedBox(height: 16),
+          actions,
+        ],
+      );
+    }
+    return Row(
+      children: [
+        widget.leadingAction!,
+        const SizedBox(width: 16),
+        Expanded(child: actions),
+      ],
+    );
+  }
+
+  Widget _actionArea(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => _actionRow(context, constraints),
+  );
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -461,17 +504,17 @@ class _MarketDialogState extends State<MarketDialog> {
             insetAnimationDuration: Duration.zero,
             insetPadding: EdgeInsets.fromLTRB(18, top, 18, 18),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(25),
+              borderRadius: BorderRadius.circular(widget.cornerRadius),
             ),
             child: ConstrainedBox(
               key: _cardKey,
               constraints: BoxConstraints(
-                maxWidth: 600,
+                maxWidth: widget.maxWidth,
                 minHeight: pinned && widget.moveWithKeyboard ? heightLimit : 0,
                 maxHeight: heightLimit,
               ),
               child: Padding(
-                padding: const EdgeInsets.all(24),
+                padding: widget.contentPadding,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -504,51 +547,22 @@ class _MarketDialogState extends State<MarketDialog> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             ...widget.children,
-                            if (widget.actions.isNotEmpty ||
-                                widget.leadingAction != null) ...[
+                            if (_hasActions && !widget.fixedActions) ...[
                               const SizedBox(height: 20),
-                              LayoutBuilder(
-                                builder: (context, constraints) {
-                                  final actions = Wrap(
-                                    alignment: WrapAlignment.end,
-                                    spacing: 10,
-                                    runSpacing: 10,
-                                    children: widget.actions,
-                                  );
-                                  if (widget.leadingAction == null)
-                                    return actions;
-                                  if (constraints.maxWidth < 500 ||
-                                      MediaQuery.textScalerOf(
-                                            context,
-                                          ).scale(15) >
-                                          18) {
-                                    return Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.stretch,
-                                      children: [
-                                        Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: widget.leadingAction!,
-                                        ),
-                                        const SizedBox(height: 16),
-                                        actions,
-                                      ],
-                                    );
-                                  }
-                                  return Row(
-                                    children: [
-                                      widget.leadingAction!,
-                                      const SizedBox(width: 16),
-                                      Expanded(child: actions),
-                                    ],
-                                  );
-                                },
-                              ),
+                              _actionArea(context),
                             ],
                           ],
                         ),
                       ),
                     ),
+                    if (_hasActions && widget.fixedActions) ...[
+                      if (widget.actionsDivider) ...[
+                        const Divider(height: 1, color: marketLine),
+                        const SizedBox(height: 20),
+                      ] else
+                        const SizedBox(height: 20),
+                      _actionArea(context),
+                    ],
                   ],
                 ),
               ),

@@ -469,6 +469,69 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
     _error = null;
     _result = null;
   });
+
+  Future<void> _chooseIcon() async {
+    final icon = await chooseSkillIcon(context, _icon, defaultAsset: 'mcp');
+    if (icon != null && mounted) setState(() => _icon = icon);
+  }
+
+  Widget _fieldLabel(String label, {String? suffix}) => Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: Text.rich(
+      TextSpan(
+        text: label,
+        children: [
+          if (suffix != null)
+            TextSpan(
+              text: suffix,
+              style: const TextStyle(
+                color: marketMuted,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+        ],
+      ),
+      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+    ),
+  );
+
+  InputDecoration _inputDecoration(String hint) => InputDecoration(
+    hintText: hint,
+    hintStyle: const TextStyle(color: Color(0xFF89919C)),
+    filled: true,
+    fillColor: const Color(0xFFF1F2F4),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+    border: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: const BorderSide(color: Color(0xFFDDE1E6)),
+    ),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: const BorderSide(color: Color(0xFFDDE1E6)),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: const BorderSide(color: Color(0xFF888888), width: 2),
+    ),
+  );
+
+  Widget _actionButton(
+    String label,
+    VoidCallback? onPressed, {
+    required double width,
+    bool primary = false,
+  }) => SizedBox(
+    width: width,
+    child: marketButton(
+      label,
+      onPressed,
+      primary: primary,
+      radius: 9,
+      height: 58,
+      fontSize: 16,
+    ),
+  );
+
   Future<void> _submit({required bool test}) async {
     final uri = Uri.tryParse(_url.text.trim());
     if (_name.text.trim().isEmpty ||
@@ -523,69 +586,104 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
     title: widget.connection == null ? '添加自定义 MCP 服务器' : '连接设置',
     moveWithKeyboard: true,
     canClose: !_busy,
+    maxWidth: 760,
+    cornerRadius: 18,
+    contentPadding: const EdgeInsets.fromLTRB(32, 26, 32, 28),
+    actionsDivider: true,
+    fixedActions: true,
     children: [
       const Text(
         '连接你信任的 MCP 服务器，让小七使用其中的工具。',
-        style: TextStyle(color: marketMuted, height: 1.65),
+        style: TextStyle(color: marketMuted, fontSize: 15, height: 1.65),
       ),
-      const SizedBox(height: 20),
-      Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 96,
-            child: Column(
-              children: [
-                SkillPresentationIcon(_icon, size: 80),
-                if (widget.connection?.catalogId == null) ...[
-                  const SizedBox(height: 10),
-                  marketButton(
-                    '更换图标',
-                    _busy
-                        ? null
-                        : () async {
-                            final icon = await chooseSkillIcon(
-                              context,
-                              _icon,
-                              defaultAsset: 'mcp',
-                            );
-                            if (icon != null && mounted)
-                              setState(() => _icon = icon);
-                          },
-                    fontSize: 13,
-                    radius: 10,
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: 20),
-          Expanded(
-            child: TextField(
-              controller: _name,
-              enabled: !_busy,
-              autofocus: false,
-              onChanged: _changed,
-              decoration: const InputDecoration(
-                labelText: '名称',
-                hintText: '例如：我的资料库',
+      const SizedBox(height: 24),
+      Builder(
+        builder: (context) {
+          final iconSize = MediaQuery.sizeOf(context).width < 600
+              ? 88.0
+              : 128.0;
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: iconSize,
+                height: iconSize,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    SkillPresentationIcon(_icon, size: iconSize),
+                    if (widget.connection?.catalogId == null)
+                      Positioned(
+                        right: -8,
+                        bottom: -8,
+                        child: Tooltip(
+                          message: '编辑图标',
+                          child: Material(
+                            color: Colors.white,
+                            elevation: 2,
+                            shadowColor: const Color(0x22000000),
+                            shape: const CircleBorder(
+                              side: BorderSide(color: Color(0xFFDDE1E6)),
+                            ),
+                            child: InkWell(
+                              customBorder: const CircleBorder(),
+                              onTap: _busy ? null : _chooseIcon,
+                              child: const SizedBox(
+                                width: 48,
+                                height: 48,
+                                child: Center(
+                                  child: SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: marketIcon('pencil', size: 20),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-          ),
-        ],
+              const SizedBox(width: 28),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _fieldLabel('名称'),
+                      TextField(
+                        controller: _name,
+                        enabled: !_busy,
+                        onChanged: _changed,
+                        decoration: _inputDecoration('例如：我的资料库'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
-      const SizedBox(height: 20),
+      const SizedBox(height: 48),
+      _fieldLabel('服务器地址'),
       TextField(
         controller: _url,
         enabled: !_busy,
         onChanged: _changed,
         keyboardType: TextInputType.url,
-        decoration: const InputDecoration(
-          labelText: '服务器地址',
-          hintText: 'https://example.com/mcp',
-          helperText: '使用 HTTPS 连接远程服务器',
-        ),
+        decoration: _inputDecoration('https://example.com/mcp'),
       ),
+      const SizedBox(height: 8),
+      const Text(
+        '使用 HTTPS 连接远程服务器。',
+        style: TextStyle(color: marketMuted, fontSize: 14, height: 1.5),
+      ),
+      const SizedBox(height: 28),
+      _fieldLabel('访问令牌', suffix: '  ·  可选'),
       TextField(
         controller: _token,
         enabled: !_busy,
@@ -593,9 +691,8 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
         obscureText: true,
         enableSuggestions: false,
         autocorrect: false,
-        decoration: InputDecoration(
-          labelText: '访问令牌 · 可选',
-          hintText: widget.connection?.hasBearerToken == true
+        decoration: _inputDecoration(
+          widget.connection?.hasBearerToken == true
               ? '留空保留已保存的令牌'
               : '仅在服务器需要时填写',
         ),
@@ -616,21 +713,28 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
             child: Text(_result!, style: const TextStyle(height: 1.65)),
           ),
         ),
-      const SizedBox(height: 20),
+      const SizedBox(height: 22),
       const Text(
-        '仅连接可信的服务器。测试连接不会保存；保存后，按任务确认需要访问的数据。',
-        style: TextStyle(fontSize: 12, color: marketMuted, height: 1.7),
+        '测试连接不会保存配置。',
+        style: TextStyle(fontSize: 14, color: marketMuted, height: 1.6),
       ),
+      const SizedBox(height: 28),
     ],
+    leadingAction: _actionButton(
+      _busy ? '正在处理…' : '测试连接',
+      _busy ? null : () => _submit(test: true),
+      width: 154,
+    ),
     actions: [
-      marketButton(
-        _busy ? '正在处理…' : '测试连接',
-        _busy ? null : () => _submit(test: true),
+      _actionButton(
+        '取消',
+        _busy ? null : () => Navigator.pop(context),
+        width: 112,
       ),
-      marketButton('取消', _busy ? null : () => Navigator.pop(context)),
-      marketButton(
+      _actionButton(
         widget.connection == null ? '添加' : '保存',
         _busy ? null : () => _submit(test: false),
+        width: 128,
         primary: true,
       ),
     ],
