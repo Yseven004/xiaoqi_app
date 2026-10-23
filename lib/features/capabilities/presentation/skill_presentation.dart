@@ -277,60 +277,140 @@ class SkillPresentationBody extends StatelessWidget {
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 18),
-          LayoutBuilder(
-            builder: (_, box) {
-              final width = phone ? box.maxWidth : (box.maxWidth - 18) / 2;
-              return Wrap(
-                spacing: 18,
-                runSpacing: 22,
-                children: [
-                  for (final image in images)
-                    SizedBox(
-                      width: width,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          InkWell(
-                            onTap: () => showDialog<void>(
-                              context: context,
-                              builder: (_) => Dialog(
-                                child: InteractiveViewer(
-                                  child: skillDataImage(
-                                    image['data']?.toString() ?? '',
-                                  ),
-                                ),
-                              ),
-                            ),
-                            child: AspectRatio(
-                              aspectRatio: .75,
-                              child: Container(
-                                padding: const EdgeInsets.all(12),
-                                color: marketSoft,
-                                child: skillDataImage(
-                                  image['data']?.toString() ?? '',
-                                ),
-                              ),
-                            ),
-                          ),
-                          if ((image['caption']?.toString() ?? '').isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 12),
-                              child: Text(
-                                image['caption'].toString(),
-                                style: const TextStyle(fontSize: 15),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                ],
-              );
-            },
+          SkillPresentationGallery(
+            images: images,
+            layout: presentation['image_layout']?.toString() ?? 'horizontal',
           ),
         ],
       ],
     );
   }
+}
+
+class SkillPresentationGallery extends StatefulWidget {
+  const SkillPresentationGallery({
+    required this.images,
+    required this.layout,
+    super.key,
+  });
+  final List<Map> images;
+  final String layout;
+  @override
+  State<SkillPresentationGallery> createState() =>
+      _SkillPresentationGalleryState();
+}
+
+class _SkillPresentationGalleryState extends State<SkillPresentationGallery> {
+  final Map<String, double> _ratios = {};
+  @override
+  void initState() {
+    super.initState();
+    _measure();
+  }
+
+  @override
+  void didUpdateWidget(covariant SkillPresentationGallery oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _measure();
+  }
+
+  Future<void> _measure() async {
+    for (final image in widget.images) {
+      final data = image['data']?.toString() ?? '';
+      if (_ratios.containsKey(data)) continue;
+      _ratios[data] = .75;
+      try {
+        final codec = await ui.instantiateImageCodec(
+          UriData.parse(data).contentAsBytes(),
+        );
+        try {
+          final frame = await codec.getNextFrame();
+          try {
+            _ratios[data] = frame.image.width / frame.image.height;
+          } finally {
+            frame.image.dispose();
+          }
+        } finally {
+          codec.dispose();
+        }
+      } catch (_) {
+        /* Display the existing unreadable-image placeholder. */
+      }
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) {
+      final grid = widget.layout == 'grid';
+      final columns = box.maxWidth < 320 ? 1 : 2;
+      final height = box.maxWidth < 400 ? 200.0 : 280.0;
+      Widget tile(Map image) {
+        final data = image['data']?.toString() ?? '';
+        final ratio = _ratios[data] ?? .75;
+        final width = grid
+            ? (box.maxWidth - (columns - 1) * 16) / columns
+            : height * ratio;
+        return SizedBox(
+          width: width,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              InkWell(
+                onTap: () => showDialog<void>(
+                  context: context,
+                  builder: (_) => Dialog(
+                    child: InteractiveViewer(child: skillDataImage(data)),
+                  ),
+                ),
+                child: SizedBox(
+                  height: grid ? width / ratio : height,
+                  child: skillDataImage(data),
+                ),
+              ),
+              if ((image['caption']?.toString() ?? '').isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(image['caption'].toString()),
+                ),
+            ],
+          ),
+        );
+      }
+
+      if (grid)
+        return Wrap(
+          spacing: 16,
+          runSpacing: 20,
+          children: widget.images.map(tile).toList(),
+        );
+      final captionHeight = widget.images.fold<double>(0, (largest, image) {
+        final data = image['data']?.toString() ?? '';
+        final width = height * (_ratios[data] ?? .75);
+        final painter = TextPainter(
+          text: TextSpan(
+            text: image['caption']?.toString() ?? '',
+            style: DefaultTextStyle.of(context).style,
+          ),
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout(maxWidth: width);
+        final measured = painter.height + 8;
+        painter.dispose();
+        return measured > largest ? measured : largest;
+      });
+      return SizedBox(
+        height: height + captionHeight,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          itemCount: widget.images.length,
+          separatorBuilder: (_, index) => const SizedBox(width: 16),
+          itemBuilder: (_, i) => tile(widget.images[i]),
+        ),
+      );
+    },
+  );
 }
 
 class SkillPublicationPreview extends StatefulWidget {

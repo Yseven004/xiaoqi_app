@@ -22,6 +22,32 @@ part 'extension_market_forms.dart';
 
 enum ExtensionKind { skill, plugin, mcp }
 
+Future<void> showExtensionCreation(
+  BuildContext context, {
+  CapabilityDraft? draft,
+  CapabilityRecord? record,
+  CapabilityKind kind = CapabilityKind.skill,
+}) {
+  final type = draft?.kind ?? record?.kind ?? kind;
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    barrierColor: marketBarrier,
+    builder: (_) => MarketSkillEditor(
+      draft: draft,
+      record: record,
+      kind: type,
+      contentBuilder: (ctx, onDraft, onBusy) => _PackageImportDialog(
+        skill: type == CapabilityKind.skill,
+        upload: true,
+        forEditor: true,
+        onDraft: onDraft,
+        onBusy: onBusy,
+      ),
+    ),
+  );
+}
+
 Future<CapabilityDraft?> showSkillContentImport(
   BuildContext context, {
   CapabilityKind kind = CapabilityKind.skill,
@@ -582,28 +608,18 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     if (mounted) await _reload();
   }
 
-  Future<void> _edit({
-    CapabilityDraft? draft,
-    CapabilityRecord? record,
-    bool openImport = false,
-  }) async {
+  Future<void> _edit({CapabilityDraft? draft, CapabilityRecord? record}) async {
     final kind =
         draft?.kind ??
         record?.kind ??
         (_kind == ExtensionKind.skill
             ? CapabilityKind.skill
             : CapabilityKind.plugin);
-    await Navigator.push<void>(
+    await showExtensionCreation(
       context,
-      MaterialPageRoute(
-        builder: (_) => MarketSkillEditor(
-          draft: draft,
-          record: record,
-          kind: kind,
-          openImportOnStart: openImport,
-          onImport: (ctx) => showSkillContentImport(ctx, kind: kind),
-        ),
-      ),
+      draft: draft,
+      record: record,
+      kind: kind,
     );
     if (mounted) await _reload();
     if (mounted) await _reloadSkills();
@@ -844,6 +860,14 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           Text(entry.description, style: const TextStyle(height: 1.65)),
           const SizedBox(height: 18),
           Text('版本 ${entry.version} · ${record.enabled ? '已启用' : '已停用'}'),
+          for (final component
+              in (record.compatibility['components'] as List? ?? [])
+                  .whereType<Map>())
+            if (component['type'] == 'mcp' && component['url'] is String)
+              marketDialogButton('连接设置：${component['name']}', () {
+                Navigator.pop(ctx);
+                unawaited(_connectPluginDependency(component));
+              }, icon: 'plugs'),
           if (record.isServerInstallation)
             marketDialogButton('检查更新', () {
               Navigator.pop(ctx);
@@ -876,6 +900,33 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     );
   }
 
+  Future<void> _connectPluginDependency(Map component) async {
+    try {
+      final url = component['url'].toString();
+      final connections = await _cloud.listMcpConnections();
+      if (!mounted) return;
+      final existing = connections
+          .where((c) => c.url == url && c.catalogId == null)
+          .firstOrNull;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        barrierColor: marketBarrier,
+        builder: (_) => Theme(
+          data: marketTheme(context),
+          child: _McpConnectionDialog(
+            connection: existing,
+            initialUrl: url,
+            initialName: component['name']?.toString(),
+          ),
+        ),
+      );
+      if (mounted) await _reloadMcp();
+    } catch (error) {
+      if (mounted) AppToast.show(context, '连接设置未完成：$error');
+    }
+  }
+
   PopupMenuItem<String> _menuItem(String value, String label, String icon) =>
       PopupMenuItem(
         value: value,
@@ -896,7 +947,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     ),
     child: _kind != ExtensionKind.skill
         ? TextButton(
-            onPressed: () => unawaited(_edit(openImport: true)),
+            onPressed: () => unawaited(_edit()),
             style: TextButton.styleFrom(
               padding: EdgeInsets.zero,
               shape: RoundedRectangleBorder(
@@ -919,7 +970,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                 case 'chat':
                   _chat(null);
                 case 'editor':
-                  unawaited(_edit(openImport: true));
+                  unawaited(_edit());
               }
             },
             itemBuilder: (_) => [
@@ -1097,6 +1148,18 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       )
       .toList();
 
+  Future<void> _deleteDraft(CapabilityDraft draft) async {
+    if (!await _confirm('删除草稿？', '仅删除这份未发布的编辑内容，公开作品和已安装插件会保留。', '删除草稿'))
+      return;
+    try {
+      await CapabilityStore.instance.deleteAuthoringDraft(draft);
+      await _reload();
+      if (mounted) AppToast.show(context, '草稿已删除');
+    } catch (error) {
+      if (mounted) AppToast.show(context, '删除未完成：$error');
+    }
+  }
+
   Widget _draftList() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
@@ -1114,7 +1177,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                 .toString(),
           ),
           subtitle: const Text('草稿 · 点击继续编辑'),
-          trailing: marketIcon('caret-right', size: 18),
+          trailing: marketIconButton(
+            'trash-danger',
+            '删除草稿',
+            () => _deleteDraft(draft),
+          ),
           onTap: () => _edit(draft: draft),
         ),
     ],
@@ -1133,7 +1200,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       // The existing error banners above include the matching retry action.
       return const SizedBox.shrink();
     }
-    if (_kind == ExtensionKind.skill && _matchingDrafts.isNotEmpty) {
+    if (_matchingDrafts.isNotEmpty) {
       return Column(
         children: [if (entries.isNotEmpty) _grid(entries), _draftList()],
       );
@@ -1519,7 +1586,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           if (_listTitle != null) ...[
             const SizedBox(height: 24),
             if (_listTitle == '连接管理') ...[
-              marketButton('添加连接', () => _mcpForm(), icon: 'plus'),
+              marketButton('添加连接', () => _edit(), icon: 'plus'),
               if (_loadingMcp)
                 marketSkeleton()
               else
@@ -1586,7 +1653,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                 marketEmpty('暂无个人$_label', '你导入或创建的$_label将在这里展示。')
               else
                 _grid(_personalEntries),
-              if (_kind == ExtensionKind.skill) _draftList(),
+              _draftList(),
             ] else ...[
               _publicContent(),
             ],

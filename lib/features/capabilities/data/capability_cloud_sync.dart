@@ -639,6 +639,7 @@ class CapabilityCloudSync {
       final id = raw['id']?.toString();
       if (id == null || id.isEmpty) continue;
       if (raw['authoring_version'] == 1 && raw['deleted_at'] == null) {
+        if (await store.isDraftDeleted(id)) continue;
         final remote = CapabilityDraft.fromJson(
           raw,
         ).copyWith(cloudOwnerEmail: accountEmail);

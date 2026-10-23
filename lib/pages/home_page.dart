@@ -38,7 +38,6 @@ import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../features/capabilities/data/skill_creator_adapter.dart';
 import '../features/capabilities/presentation/capability_tag_text_controller.dart';
 import '../features/capabilities/presentation/skills_plugins_composer_controls.dart';
-import '../features/capabilities/presentation/market_skill_editor.dart';
 import '../models/book_library_item.dart';
 import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
@@ -4063,13 +4062,7 @@ $text''';
       return;
     }
     if (_composerExpanded) _setComposerExpanded(false);
-    await Navigator.push<void>(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            MarketSkillEditor(draft: draft, onImport: showSkillContentImport),
-      ),
-    );
+    await showExtensionCreation(context, draft: draft);
   }
 
   void _dismissSkillDraftReview() {

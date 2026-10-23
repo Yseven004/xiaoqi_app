@@ -414,6 +414,7 @@ class MarketDialog extends StatefulWidget {
     this.contentPadding = const EdgeInsets.all(24),
     this.actionsDivider = false,
     this.fixedActions = false,
+    this.embedded = false,
     super.key,
   });
   final String title;
@@ -424,6 +425,7 @@ class MarketDialog extends StatefulWidget {
   final double maxWidth, cornerRadius;
   final EdgeInsetsGeometry contentPadding;
   final bool actionsDivider, fixedActions;
+  final bool embedded;
   @override
   State<MarketDialog> createState() => _MarketDialogState();
 }
@@ -474,6 +476,19 @@ class _MarketDialogState extends State<MarketDialog> {
   Widget build(BuildContext context) => LayoutBuilder(
     key: _layoutKey,
     builder: (context, constraints) {
+      if (widget.embedded) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ...widget.children,
+            if (_hasActions) ...[
+              const SizedBox(height: 16),
+              _actionArea(context),
+            ],
+          ],
+        );
+      }
       final keyboard = MediaQuery.viewInsetsOf(context).bottom;
       if (keyboard == 0) {
         _keyboardHeight = 0;

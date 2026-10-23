@@ -191,6 +191,93 @@ void main() {
   );
 
   test(
+    'pure MCP plugin publishes and installs without sharing account connections',
+    () async {
+      final plugin = pluginRecord();
+      final version = plugin['versions'][0] as Map;
+      final files = version['files'] as Map;
+      files.remove('skills/paper-reader/SKILL.md');
+      files['.mcp.json'] = base64Encode(
+        utf8.encode(
+          jsonEncode({
+            'mcpServers': {
+              'remote': {'type': 'http', 'url': 'https://example.com/mcp'},
+            },
+          }),
+        ),
+      );
+      version.remove('content_hash');
+      plugin['presentation']['image_layout'] = 'grid';
+      final saved = await call(
+        'POST',
+        '/v1/capabilities/sync',
+        body: {'record': plugin, 'expected_revision': 0},
+      );
+      expect(saved.$1, 200, reason: '${saved.$2}');
+      final published = await call(
+        'POST',
+        '/v1/skill-market/plugin-a/publish',
+        body: {'expected_revision': 1, 'published_revision': 0},
+      );
+      expect(published.$1, 200, reason: '${published.$2}');
+      final publicId = published.$2['publication']['id'];
+      final installed = await call(
+        'POST',
+        '/v1/skill-market/$publicId/install',
+        tenant: 'bob',
+        body: {'publication_revision': 1},
+      );
+      expect(installed.$1, 200, reason: '${installed.$2}');
+      expect(installed.$2['record']['presentation']['image_layout'], 'grid');
+      expect(
+        installed.$2['record']['versions'][0]['components'][0]['type'],
+        'mcp',
+      );
+      expect(store.list('mcp/bob/'), isEmpty);
+    },
+  );
+
+  for (final url in [
+    'https://example.com/mcp?token=private',
+    'https://user:private@example.com/mcp',
+  ]) {
+    test(
+      'publication refuses credentials inside MCP URL: ${url.contains('?') ? 'query' : 'user-info'}',
+      () async {
+        final plugin = pluginRecord();
+        final version = plugin['versions'][0] as Map;
+        (version['files'] as Map)['.mcp.json'] = base64Encode(
+          utf8.encode(
+            jsonEncode({
+              'mcpServers': {
+                'remote': {'url': url},
+              },
+            }),
+          ),
+        );
+        version.remove('content_hash');
+        expect(
+          (await call(
+            'POST',
+            '/v1/capabilities/sync',
+            body: {'record': plugin, 'expected_revision': 0},
+          )).$1,
+          200,
+        );
+        expect(
+          (await call(
+            'POST',
+            '/v1/skill-market/plugin-a/publish',
+            body: {'expected_revision': 1, 'published_revision': 0},
+          )).$1,
+          400,
+        );
+        expect(store.list('skill-market/'), isEmpty);
+      },
+    );
+  }
+
+  test(
     'checked plugin imports return the complete selected package as a draft only',
     () {
       final value = pluginRecord();

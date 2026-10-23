@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'capability_models.dart';
 
@@ -172,6 +173,53 @@ class CapabilityStore {
           jsonEncode(drafts.map((id, value) => MapEntry(id, value.toJson()))),
         );
       });
+
+  Future<void> deleteAuthoringDraft(CapabilityDraft draft) async {
+    final owner = draft.cloudOwnerEmail;
+    if (owner != null && owner.isNotEmpty) {
+      await queueDraftDeletion(
+        id: draft.id,
+        cloudRevision: draft.cloudRevision,
+        accountEmail: owner,
+      );
+    }
+    await _removeAuthoringDraft(draft);
+    await clearDraftMcpToken(draft);
+    _skillPreviews.remove(draft.id);
+  }
+
+  String _draftTokenKey(CapabilityDraft draft) =>
+      'xiaoqi.draft-mcp.${sha256.convert(utf8.encode('${draft.cloudOwnerEmail ?? ""}/${draft.id}'))}';
+
+  Future<String?> draftMcpToken(
+    CapabilityDraft draft, {
+    required String url,
+  }) async {
+    final raw = await const FlutterSecureStorage().read(
+      key: _draftTokenKey(draft),
+    );
+    if (raw == null) return null;
+    try {
+      final value = jsonDecode(raw);
+      return value is Map && value['url'] == url
+          ? value['token']?.toString()
+          : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  Future<void> saveDraftMcpToken(
+    CapabilityDraft draft,
+    String token, {
+    required String url,
+  }) => const FlutterSecureStorage().write(
+    key: _draftTokenKey(draft),
+    value: jsonEncode({'url': url, 'token': token}),
+  );
+
+  Future<void> clearDraftMcpToken(CapabilityDraft draft) =>
+      const FlutterSecureStorage().delete(key: _draftTokenKey(draft));
 
   Future<void> _discardLegacyDraft(String id) async {
     final prefs = await SharedPreferences.getInstance();

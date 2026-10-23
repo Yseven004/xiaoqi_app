@@ -2,35 +2,48 @@ import 'dart:convert';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xiaoqi_app/pages/extension_market_page.dart';
 import 'package:xiaoqi_app/features/capabilities/presentation/market_skill_editor.dart';
 
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
-
-  test('checked skill package keeps its actual name, content and binary attachment', () {
-    const document =
-        '---\nname: test-skill\ndescription: test description\n---\n\nActual instructions';
-    final package = Archive()
-      ..addFile(ArchiveFile.bytes('bundle/SKILL.md', utf8.encode(document)))
-      ..addFile(ArchiveFile.bytes('bundle/assets/data.bin', [0, 255, 7]));
-    final draft = skillDraftFromUpload(
-      fileName: 'skill.zip',
-      bytes: ZipEncoder().encode(package),
-      root: 'bundle',
-      policy: {
-        'max_files': 128,
-        'max_file_bytes': 2097152,
-        'max_expanded_bytes': 10485760,
-      },
-    );
-    expect(draft.name, 'test-skill');
-    expect(draft.content, document);
-    expect(base64Decode(draft.files['assets/data.bin']!), [0, 255, 7]);
-    expect(draft.files.containsKey('SKILL.md'), isFalse);
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('com.llfbandit.app_links/events'),
+          (_) async => null,
+        );
   });
+
+  test(
+    'checked skill package keeps its actual name, content and binary attachment',
+    () {
+      const document =
+          '---\nname: test-skill\ndescription: test description\n---\n\nActual instructions';
+      final package = Archive()
+        ..addFile(ArchiveFile.bytes('bundle/SKILL.md', utf8.encode(document)))
+        ..addFile(ArchiveFile.bytes('bundle/assets/data.bin', [0, 255, 7]));
+      final draft = skillDraftFromUpload(
+        fileName: 'skill.zip',
+        bytes: ZipEncoder().encode(package),
+        root: 'bundle',
+        policy: {
+          'max_files': 128,
+          'max_file_bytes': 2097152,
+          'max_expanded_bytes': 10485760,
+        },
+      );
+      expect(draft.name, 'test-skill');
+      expect(draft.content, document);
+      expect(base64Decode(draft.files['assets/data.bin']!), [0, 255, 7]);
+      expect(draft.files.containsKey('SKILL.md'), isFalse);
+    },
+  );
 
   test('checked skill reader refuses traversal before creating a draft', () {
     final package = Archive()
@@ -62,10 +75,15 @@ void main() {
       expect(find.text('Scientific Agent Skills'), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsNothing);
       await tester.tap(find.text('技能'));
+      await tester.tap(find.text('个人'));
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
       await tester.pump();
       await tester.enterText(find.byType(TextField), 'not-found');
-      await tester.pump();
-      expect(find.text('没有找到相关内容'), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.textContaining('请先登录'), findsWidgets);
       expect(find.text('文献综述'), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsNothing);
     },
@@ -111,17 +129,27 @@ void main() {
   testWidgets('invalid GitHub URL stays in the dialog and can be cancelled', (
     tester,
   ) async {
-    await tester.pumpWidget(const MaterialApp(home: ExtensionMarketPage()));
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: ExtensionMarketPage(initialKind: ExtensionKind.skill),
+      ),
+    );
     await tester.pump();
     await tester.tap(find.text('添加'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('从 GitHub 导入'));
+    await tester.tap(find.text('使用编辑器创建'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('开始检查'));
+    await tester.enterText(
+      find.widgetWithText(TextField, 'GitHub 链接'),
+      'invalid',
+    );
+    await tester.pump();
+    await tester.ensureVisible(find.text('读取内容'));
+    await tester.tap(find.text('读取内容'));
     await tester.pumpAndSettle();
     expect(find.textContaining('填写公开 GitHub'), findsOneWidget);
-    await tester.tap(find.text('取消'));
+    await tester.tap(find.byTooltip('关闭创建'));
     await tester.pumpAndSettle();
-    expect(find.text('开始检查'), findsNothing);
+    expect(find.text('读取内容'), findsNothing);
   });
 }

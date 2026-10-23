@@ -8,6 +8,8 @@ class _PackageImportDialog extends StatefulWidget {
     this.update,
     this.forEditor = false,
     this.onMcp,
+    this.onDraft,
+    this.onBusy,
     super.key,
   });
   final String? url;
@@ -15,6 +17,8 @@ class _PackageImportDialog extends StatefulWidget {
   final CapabilityRecord? update;
   final bool forEditor;
   final VoidCallback? onMcp;
+  final ValueChanged<CapabilityDraft>? onDraft;
+  final ValueChanged<bool>? onBusy;
   @override
   State<_PackageImportDialog> createState() => _PackageImportDialogState();
 }
@@ -80,6 +84,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
       if (size == null || size <= 0 || size > limit)
         throw FormatException('文件为空或超过 ${_size(limit)} 限制');
       setState(() {
+        _upload = true;
         _file = file;
         _fileSize = size;
         _inspection = null;
@@ -102,6 +107,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
         return;
       }
     }
+    widget.onBusy?.call(true);
     setState(() {
       _busy = true;
       _error = null;
@@ -142,6 +148,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
       if (mounted) setState(() => _error = error.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
+      widget.onBusy?.call(false);
     }
   }
 
@@ -150,6 +157,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
   }
 
   Future<void> _install(Map candidate) async {
+    widget.onBusy?.call(true);
     setState(() {
       _busy = true;
       _jobId = null;
@@ -162,7 +170,13 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
           _inspection!['id'].toString(),
           candidate['id'].toString(),
         );
-        if (mounted) Navigator.pop(context, draft);
+        if (mounted) {
+          if (widget.onDraft != null) {
+            widget.onDraft!(draft);
+          } else {
+            Navigator.pop(context, draft);
+          }
+        }
         return;
       }
       if (_upload &&
@@ -195,6 +209,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
       if (mounted) setState(() => _error = error.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
+      widget.onBusy?.call(false);
     }
   }
 
@@ -215,6 +230,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
   String _size(int bytes) => '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
   @override
   Widget build(BuildContext context) => MarketDialog(
+    embedded: widget.onDraft != null,
     title: _upload
         ? widget.skill
               ? '上传技能'
@@ -223,14 +239,14 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
         ? '从 GitHub 导入'
         : '检查并更新',
     canClose: !_busy,
-    leadingAction: _upload && !widget.skill
+    leadingAction: widget.onDraft == null && _upload && !widget.skill
         ? marketDialogButton(
             '添加自定义 MCP 服务器',
             _busy ? null : widget.onMcp ?? () => Navigator.pop(context, 'mcp'),
           )
         : null,
     children: [
-      if (_upload) ...[
+      if (_upload || widget.onDraft != null) ...[
         Stack(
           children: [
             Positioned.fill(
@@ -311,17 +327,33 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
           ],
         ),
         const SizedBox(height: 14),
-        marketLink(
-          '从公开 GitHub 链接导入',
-          _busy
-              ? null
-              : () => setState(() {
-                  _upload = false;
-                  _inspection = null;
-                  _error = null;
-                }),
-        ),
-      ] else ...[
+        if (widget.onDraft == null)
+          marketLink(
+            '从公开 GitHub 链接导入',
+            _busy
+                ? null
+                : () => setState(() {
+                    _upload = false;
+                    _inspection = null;
+                    _error = null;
+                  }),
+          ),
+      ],
+      if (!_upload || widget.onDraft != null) ...[
+        if (widget.onDraft != null) ...[
+          Row(
+            children: [
+              SvgPicture.asset(
+                'assets/icons/extensions/github_mark.svg',
+                width: 22,
+                height: 22,
+              ),
+              const SizedBox(width: 10),
+              const Text('从GitHub上导入'),
+            ],
+          ),
+          const SizedBox(height: 12),
+        ],
         const Text(
           '粘贴公开仓库或子目录链接，先检查，再添加。',
           style: TextStyle(color: marketMuted, height: 1.65),
@@ -332,6 +364,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
           enabled: !_busy,
           keyboardType: TextInputType.url,
           onChanged: (_) => setState(() {
+            _upload = false;
             _inspection = null;
             _error = null;
           }),
@@ -423,14 +456,15 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
       ],
     ],
     actions: [
-      marketDialogButton('取消', _busy && _jobId == null ? null : _cancel),
+      if (widget.onDraft == null || _busy)
+        marketDialogButton('取消', _busy && _jobId == null ? null : _cancel),
       marketDialogButton(
         _busy
             ? '正在处理…'
             : _inspection == null
-            ? '开始检查'
+            ? '读取内容'
             : '重新检查',
-        _busy || _loadingPolicy || _upload && _file == null ? null : _inspect,
+        _busy || _upload && (_loadingPolicy || _file == null) ? null : _inspect,
         primary: true,
       ),
     ],
@@ -440,10 +474,13 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
 class _McpConnectionDialog extends StatefulWidget {
   const _McpConnectionDialog({
     this.connection,
+    this.initialUrl,
+    this.initialName,
     this.forEditor = false,
     super.key,
   });
   final McpConnectionRecord? connection;
+  final String? initialUrl, initialName;
   final bool forEditor;
   @override
   State<_McpConnectionDialog> createState() => _McpConnectionDialogState();
@@ -459,8 +496,8 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
   @override
   void initState() {
     super.initState();
-    _name.text = widget.connection?.name ?? '';
-    _url.text = widget.connection?.url ?? '';
+    _name.text = widget.connection?.name ?? widget.initialName ?? '';
+    _url.text = widget.connection?.url ?? widget.initialUrl ?? '';
     _icon = Map<String, dynamic>.from(widget.connection?.icon ?? _icon);
   }
 
@@ -607,7 +644,9 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
 
   @override
   Widget build(BuildContext context) => MarketDialog(
-    title: widget.connection == null ? '添加自定义 MCP 服务器' : '连接设置',
+    title: widget.connection == null && widget.initialUrl == null
+        ? '添加自定义 MCP 服务器'
+        : '连接设置',
     moveWithKeyboard: true,
     canClose: !_busy,
     maxWidth: 520,

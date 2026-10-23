@@ -647,6 +647,7 @@ class CapabilityImportService {
             'name': entry.key,
             'description': '插件声明的 MCP 连接器',
             'mcp_server_name': entry.key,
+            if (remote) 'url': config['url'],
             'status': remote ? 'partial' : 'unsupported',
             'issues': [remote ? '需要绑定当前账号的远程连接' : '需要尚未支持的本地宿主或连接类型'],
             'has_dependencies': false,

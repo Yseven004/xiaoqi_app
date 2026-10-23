@@ -2,16 +2,19 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:yaml/yaml.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../data/capability_cloud_sync.dart';
 import '../data/capability_models.dart';
 import '../data/capability_store.dart';
 import '../../../widgets/app_toast.dart';
+import '../../../services/ai_service.dart';
 import 'market_ui.dart';
 import 'skill_presentation.dart';
 
@@ -93,6 +96,8 @@ class MarketSkillEditor extends StatefulWidget {
     this.onImport,
     this.openImportOnStart = false,
     this.kind = CapabilityKind.skill,
+    this.contentBuilder,
+    this.cloud,
     super.key,
   });
   final CapabilityKind kind;
@@ -100,11 +105,34 @@ class MarketSkillEditor extends StatefulWidget {
   final CapabilityRecord? record;
   final Future<CapabilityDraft?> Function(BuildContext)? onImport;
   final bool openImportOnStart;
+  final CapabilityCloudSync? cloud;
+  final Widget Function(
+    BuildContext,
+    ValueChanged<CapabilityDraft>,
+    ValueChanged<bool>,
+  )?
+  contentBuilder;
   @override
   State<MarketSkillEditor> createState() => _MarketSkillEditorState();
 }
 
 class _MarketSkillEditorState extends State<MarketSkillEditor> {
+  int _step = 0;
+  bool _importBusy = false;
+  bool get _locked => _busy || _testingMcp || _importBusy || _assisting;
+  String? _focus;
+  bool _descriptionExpanded = false, _imagesExpanded = false;
+  String _imageLayout = 'horizontal';
+  final _mcpUrl = TextEditingController(), _mcpToken = TextEditingController();
+  bool _mcpExpanded = false, _testingMcp = false;
+  String? _mcpResult, _mcpError, _privateConnectionId;
+  final Map<String, double> _imageRatios = {};
+  final _aiRequest = TextEditingController();
+  final List<Map<String, String>> _aiHistory = [];
+  Map<String, dynamic>? _aiProposal;
+  String? _aiQuestion;
+  bool _assisting = false;
+  int _aiGeneration = 0;
   final _name = TextEditingController(),
       _description = TextEditingController(),
       _body = TextEditingController();
@@ -113,11 +141,10 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   final List<Map<String, dynamic>> _images = [];
   Map<String, dynamic> _icon = {'icon_asset': 'research', 'icon_data': ''};
   CapabilityRecord? _record;
-  bool _contentsExpanded = false;
   bool _draftConflict = false;
   CapabilityDraft? _remoteDraft;
   final _store = CapabilityStore.instance;
-  final _cloud = CapabilityCloudSync.instance;
+  late final _cloud = widget.cloud ?? CapabilityCloudSync.instance;
   final _scaffold = GlobalKey<ScaffoldState>();
   late CapabilityDraft _base;
   bool _importDialogOpen = false;
@@ -131,9 +158,6 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           '.claude-plugin/plugin.json',
           '.codex-plugin/plugin.json',
         ].firstWhere(_files.containsKey, orElse: () => 'plugin.json');
-  String get _contentSummary => _isPlugin
-      ? '${_files.keys.where((p) => p.endsWith('/SKILL.md')).length} 个技能 · ${_files.length} 个文件'
-      : 'SKILL.md · ${_files.length - 1} 个附件';
   final Map<String, String> _files = {};
   Map<String, dynamic> _metadata = {};
   String _active = 'SKILL.md';
@@ -177,7 +201,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     ])
       controller.addListener(_changed);
     unawaited(_restoreDraft());
-    if (widget.openImportOnStart) {
+    if (widget.openImportOnStart && widget.contentBuilder == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         final animation = ModalRoute.of(context)?.animation;
@@ -218,6 +242,12 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           (e) => Map<String, dynamic>.from(e),
         ),
       );
+    _imageLayout = _base.presentation['image_layout'] == 'grid'
+        ? 'grid'
+        : 'horizontal';
+    for (final image in _images) {
+      unawaited(_measureImage(image['data']?.toString() ?? ''));
+    }
     _files.clear();
     _metadata = {};
     _sourceError = null;
@@ -234,6 +264,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
             });
       _files[_mainFile] = base64Encode(utf8.encode(text));
       _body.text = text;
+      _restoreMcpFields();
       _ready = true;
       return;
     }
@@ -276,6 +307,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     setState(
       () => _applyDraft((saved ?? _base).copyWith(cloudOwnerEmail: owner)),
     );
+    final token = await _store.draftMcpToken(_base, url: _mcpUrl.text.trim());
+    if (mounted && !_dirty && token != null) _mcpToken.text = token;
   }
 
   String get _identifier =>
@@ -289,6 +322,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     'title': _title.text.trim(),
     'introduction': _introduction.text.trim(),
     'images': _images.map((e) => Map<String, dynamic>.from(e)).toList(),
+    'image_layout': _imageLayout,
   };
 
   void _changed() {
@@ -297,6 +331,10 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
 
   @override
   void dispose() {
+    _aiRequest.dispose();
+    _mcpUrl.dispose();
+    _mcpToken.clear();
+    _mcpToken.dispose();
     _entryAnimation?.removeStatusListener(_onEntryStatus);
     for (final controller in [
       _name,
@@ -363,6 +401,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   CapabilityDraft _snapshot() {
     if (_sourceError != null) throw FormatException(_sourceError!);
     _flush();
+    _writeMcpDeclaration();
     _checkIncoming({});
     if (_isPlugin) {
       var content = utf8.decode(base64Decode(_files[_mainFile]!));
@@ -420,14 +459,52 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     });
     try {
       _base = _snapshot().copyWith(cloudOwnerEmail: await _cloud.signedInEmail);
+      if (_mcpToken.text.trim().isNotEmpty) {
+        await _store.saveDraftMcpToken(
+          _base,
+          _mcpToken.text.trim(),
+          url: _mcpUrl.text.trim(),
+        );
+      }
       await _store.saveAuthoringDraft(_base);
       if (!mounted) return true;
       setState(() => _dirty = false);
       if (sync && await _cloud.hasEmailSession) {
         try {
+          if (_isPlugin && _mcpUrl.text.trim().isNotEmpty) {
+            final connections = await _cloud.listMcpConnections();
+            final existing = connections
+                .where(
+                  (c) => c.url == _mcpUrl.text.trim() && c.catalogId == null,
+                )
+                .firstOrNull;
+            _privateConnectionId = existing?.id;
+            if (existing == null || _mcpToken.text.trim().isNotEmpty) {
+              final connection = await _cloud.saveMcpConnection(
+                id: _privateConnectionId,
+                name: _title.text.trim().isEmpty
+                    ? Uri.parse(_mcpUrl.text.trim()).host
+                    : _title.text.trim(),
+                url: _mcpUrl.text.trim(),
+                bearerToken: _mcpToken.text.trim().isEmpty
+                    ? null
+                    : _mcpToken.text.trim(),
+                icon: _icon,
+              );
+              _privateConnectionId = connection.id;
+            }
+            _mcpToken.clear();
+            await _store.clearDraftMcpToken(_base);
+          }
           final sent = _base;
           final remote = await _cloud.syncAuthoringDraft(sent);
           _base = await _store.applySyncedAuthoringDraft(sent, remote);
+          if (mounted)
+            setState(() {
+              _syncFailed = false;
+              _draftConflict = false;
+              _remoteDraft = null;
+            });
         } catch (error) {
           if (mounted)
             setState(() {
@@ -449,52 +526,6 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     }
   }
 
-  Future<void> _preview() async {
-    final validation = _validation;
-    if (validation != null) {
-      setState(() => _error = validation);
-      return;
-    }
-    if (!await _persistDraft() || !mounted) return;
-    final snapshot = _base;
-    final published = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => SkillPublicationPreview(
-          presentation: snapshot.presentation,
-          name: snapshot.name,
-          description: snapshot.description,
-          kindLabel: _kindLabel,
-          published: (_record?.publishedRevision ?? 0) > 0,
-          onPublish: () async {
-            final local = await _store.commitDraft(
-              snapshot,
-              existingId: snapshot.targetCapabilityId,
-            );
-            final remote = await _cloud.syncAuthoredSkill(local);
-            _record = await _cloud.publishSkill(remote);
-            _base = snapshot.copyWith(targetCapabilityId: _record!.id);
-            try {
-              await _store.saveAuthoringDraft(_base);
-              final sent = _base;
-              final synced = await _cloud.syncAuthoringDraft(sent);
-              _base = await _store.applySyncedAuthoringDraft(sent, synced);
-            } catch (error) {
-              if (mounted)
-                AppToast.show(context, '${_kindLabel}已发布，草稿状态同步待重试：$error');
-            }
-          },
-        ),
-      ),
-    );
-    if (!mounted) return;
-    if (published == true) {
-      AppToast.show(context, '${_kindLabel}已发布');
-      setState(() => _allowPop = true);
-      Navigator.pop(context);
-    }
-  }
-
   Future<void> _importContent() async {
     if (_busy || _importDialogOpen || widget.onImport == null) return;
     if (mounted) setState(() => _importDialogOpen = true);
@@ -504,15 +535,19 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     } finally {
       if (mounted) setState(() => _importDialogOpen = false);
     }
+    if (incoming != null) await _applyIncoming(incoming);
+  }
+
+  Future<void> _applyIncoming(CapabilityDraft incoming) async {
     final imported = incoming;
-    if (imported == null || !mounted) return;
+    if (!mounted) return;
     if (imported.kind != _base.kind) {
       AppToast.show(context, '请选择${_kindLabel}文件，当前草稿已保留');
       return;
     }
     if (_base.content.trim().isNotEmpty ||
         _title.text.trim().isNotEmpty ||
-        _dirty) {
+        (_dirty && _body.text.trim().isNotEmpty)) {
       final replace = await showDialog<bool>(
         context: context,
         builder: (ctx) => MarketDialog(
@@ -555,6 +590,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
         ),
       );
       _dirty = true;
+      _error = null;
     });
   }
 
@@ -578,6 +614,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     }
     try {
       final data = await pickSkillPresentationImage();
+      if (data != null) await _measureImage(data);
       if (data != null && mounted)
         setState(() {
           _images.add({'data': data, 'caption': ''});
@@ -612,8 +649,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   }
 
   Future<void> _leave() async {
-    if (_busy) return;
-    if (_dirty && !await _persistDraft()) return;
+    if (_locked) return;
+    if (_dirty && !await _persistDraft(sync: _mcpToken.text.trim().isNotEmpty))
+      return;
     if (!mounted) return;
     setState(() => _allowPop = true);
     Navigator.pop(context);
@@ -1004,6 +1042,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
               style: const TextStyle(fontSize: 12, color: marketMuted),
             ),
           ),
+          marketIconButton('download', '导出主文件', _busy ? null : _download),
           if (_dirty)
             const Text(
               '尚未保存',
@@ -1083,227 +1122,746 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     ],
   );
 
-  Widget _authoringWorkspace(bool phone) => ListView(
-    padding: EdgeInsets.fromLTRB(phone ? 20 : 30, 26, phone ? 20 : 30, 28),
+  void _restoreMcpFields() {
+    _mcpUrl.clear();
+    _mcpToken.clear();
+    _privateConnectionId = null;
+    _mcpResult = _mcpError = null;
+    for (final path in ['.mcp.json', 'mcp.json', _mainFile]) {
+      try {
+        final encoded = _files[path];
+        if (encoded == null) continue;
+        final config = jsonDecode(utf8.decode(base64Decode(encoded)));
+        final servers = config is Map
+            ? config['mcpServers'] ?? config['servers']
+            : null;
+        if (servers is! Map) continue;
+        for (final value in servers.values) {
+          if (value is Map && value['url'] is String) {
+            _mcpUrl.text = value['url'] as String;
+            _mcpExpanded = true;
+            unawaited(_findPrivateConnection(_mcpUrl.text));
+            return;
+          }
+        }
+      } catch (_) {
+        // Invalid imported files remain editable; publication validates the package.
+      }
+    }
+  }
+
+  Future<void> _findPrivateConnection(String url) async {
+    try {
+      final connections = await _cloud.listMcpConnections();
+      if (!mounted || _mcpUrl.text != url) return;
+      final connection = connections
+          .where((c) => c.url == url && c.catalogId == null)
+          .firstOrNull;
+      if (connection != null)
+        setState(() => _privateConnectionId = connection.id);
+    } catch (_) {
+      // The draft remains available offline; saving retries the account request.
+    }
+  }
+
+  void _writeMcpDeclaration() {
+    if (!_isPlugin || _mcpUrl.text.trim().isEmpty) return;
+    // Preserve imported declarations and only update the connection shown here.
+    for (final path in ['.mcp.json', 'mcp.json', _mainFile]) {
+      final encoded = _files[path];
+      if (encoded == null) continue;
+      Object? config;
+      try {
+        config = jsonDecode(utf8.decode(base64Decode(encoded)));
+      } on FormatException {
+        continue;
+      }
+      if (config is! Map) continue;
+      final servers = config['mcpServers'] ?? config['servers'];
+      if (servers is! Map) continue;
+      final key = servers.keys
+          .where((k) => servers[k] is Map && servers[k]['url'] is String)
+          .firstOrNull;
+      if (key == null) continue;
+      servers[key]['url'] = _mcpUrl.text.trim();
+      _files[path] = base64Encode(
+        utf8.encode(const JsonEncoder.withIndent('  ').convert(config)),
+      );
+      if (path == _active) {
+        _ready = false;
+        _body.text = utf8.decode(base64Decode(_files[path]!));
+        _ready = true;
+      }
+      return;
+    }
+    _files['.mcp.json'] = base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'mcpServers': {
+            'remote': {'type': 'http', 'url': _mcpUrl.text.trim()},
+          },
+        }),
+      ),
+    );
+  }
+
+  void _mcpChanged(String _) => setState(() {
+    _mcpToken.clear();
+    _mcpResult = _mcpError = null;
+    _dirty = true;
+    _privateConnectionId = null;
+  });
+
+  Future<void> _testMcp() async {
+    if (_testingMcp || _busy) return;
+    setState(() {
+      _testingMcp = true;
+      _mcpResult = _mcpError = null;
+    });
+    try {
+      await _cloud.testMcpConnectionDraft(
+        id: _privateConnectionId,
+        name: _title.text.trim().isEmpty ? 'MCP' : _title.text.trim(),
+        url: _mcpUrl.text.trim(),
+        bearerToken: _mcpToken.text.trim().isEmpty
+            ? null
+            : _mcpToken.text.trim(),
+      );
+      if (mounted) setState(() => _mcpResult = '连接成功');
+    } catch (error) {
+      if (mounted) setState(() => _mcpError = '连接失败，请检查地址、访问权限后重试：$error');
+    } finally {
+      if (mounted) setState(() => _testingMcp = false);
+    }
+  }
+
+  Future<void> _measureImage(String data) async {
+    if (_imageRatios.containsKey(data)) return;
+    try {
+      final codec = await ui.instantiateImageCodec(
+        UriData.parse(data).contentAsBytes(),
+      );
+      try {
+        final frame = await codec.getNextFrame();
+        try {
+          _imageRatios[data] = frame.image.width / frame.image.height;
+        } finally {
+          frame.image.dispose();
+        }
+      } finally {
+        codec.dispose();
+      }
+      if (mounted) setState(() {});
+    } catch (_) {
+      // Keep a visible placeholder for an unreadable legacy image.
+    }
+  }
+
+  double _ratio(Map<String, dynamic> image) =>
+      _imageRatios[image['data']?.toString() ?? ''] ?? .75;
+
+  void _back() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (_focus != null) {
+      setState(() => _focus = null);
+    } else if (_step > 0) {
+      setState(() => _step--);
+    } else {
+      unawaited(_leave());
+    }
+  }
+
+  Future<void> _next() async {
+    if (_locked) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (_step == 0) {
+      if (_isPlugin && _mcpUrl.text.trim().isNotEmpty) {
+        final uri = Uri.tryParse(_mcpUrl.text.trim());
+        if (uri == null ||
+            uri.scheme != 'https' ||
+            uri.host.isEmpty ||
+            uri.userInfo.isNotEmpty ||
+            uri.hasQuery ||
+            uri.hasFragment) {
+          setState(() => _error = '请填写有效的 HTTPS 服务器地址，凭据填写在私有令牌栏。');
+          return;
+        }
+      } else if ((!_isPlugin && _body.text.trim().isEmpty) ||
+          (_isPlugin && _files.length <= 1 && _base.content.isEmpty)) {
+        setState(() => _error = '先读取内容，或编写${_kindLabel}内容。');
+        return;
+      }
+    } else {
+      final validation = _validation;
+      if (validation != null) {
+        setState(() => _error = validation);
+        return;
+      }
+      if (!await _persistDraft() || !mounted) return;
+    }
+    setState(() {
+      _error = null;
+      _step++;
+    });
+  }
+
+  Future<void> _publishInPlace() async {
+    if (_busy || _testingMcp) return;
+    final validation = _validation;
+    if (validation != null) {
+      setState(() => _error = validation);
+      return;
+    }
+    if (!await _persistDraft(sync: true) || !mounted) return;
+    if (_syncFailed || _draftConflict) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final snapshot = _base;
+      final local = await _store.commitDraft(
+        snapshot,
+        existingId: snapshot.targetCapabilityId,
+      );
+      final remote = await _cloud.syncAuthoredSkill(local);
+      _record = await _cloud.publishSkill(remote);
+      _base = snapshot.copyWith(targetCapabilityId: _record!.id);
+      await _store.saveAuthoringDraft(_base);
+      if (!mounted) return;
+      AppToast.show(context, '${_kindLabel}已发布');
+      setState(() => _allowPop = true);
+      Navigator.pop(context);
+    } catch (error) {
+      if (mounted) setState(() => _error = '发布未完成，草稿已保留，可重试：$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _assist() async {
+    if (_assisting || _aiRequest.text.trim().isEmpty) return;
+    final generation = ++_aiGeneration;
+    final request = _aiRequest.text.trim();
+    setState(() {
+      _assisting = true;
+      _aiProposal = null;
+      _error = null;
+    });
+    try {
+      final proposal = await AiService().assistExtension(
+        request: request,
+        kind: _kindLabel,
+        title: _title.text,
+        description: _description.text,
+        // Account connections and imported MCP credentials never enter a prompt.
+        content: _isPlugin ? '插件文件：${_files.keys.join(', ')}' : _body.text,
+        history: _aiHistory,
+      );
+      if (!mounted || generation != _aiGeneration) return;
+      setState(() {
+        _aiHistory.addAll([
+          {'role': 'user', 'content': request},
+          {'role': 'assistant', 'content': jsonEncode(proposal)},
+        ]);
+        _aiQuestion = proposal['question']?.toString();
+        _aiProposal = _aiQuestion == null ? proposal : null;
+        _aiRequest.clear();
+      });
+    } catch (error) {
+      if (mounted && generation == _aiGeneration)
+        setState(() => _error = 'AI编写未完成，当前草稿未改动：$error');
+    } finally {
+      if (mounted && generation == _aiGeneration)
+        setState(() => _assisting = false);
+    }
+  }
+
+  Widget _aiAssistance() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      const Divider(color: marketLine),
+      if (_aiQuestion != null) SelectableText(_aiQuestion!),
+      TextField(
+        controller: _aiRequest,
+        enabled: !_assisting && !_busy,
+        minLines: 1,
+        maxLines: 4,
+        decoration: const InputDecoration(labelText: '告诉 AI 你想创建或修改什么'),
+      ),
+      Wrap(
+        spacing: 12,
         children: [
-          SizedBox(
-            width: phone ? 78 : 110,
-            child: Column(
-              children: [
-                SkillPresentationIcon(_icon, size: phone ? 76 : 108),
-                const SizedBox(height: 10),
-                marketButton(
-                  '更换图标',
-                  _busy ? null : _changeIcon,
-                  outlined: false,
-                  fontSize: phone ? 12 : 14,
-                  radius: 10,
-                ),
-              ],
-            ),
+          marketButton(
+            _assisting ? 'AI编写中…' : 'AI辅助编写',
+            _assisting || _busy ? null : _assist,
           ),
-          SizedBox(width: phone ? 16 : 24),
-          Expanded(
-            child: Column(
-              children: [
-                _field('名称', _title),
-                const SizedBox(height: 20),
-                _field('一句话简介', _description, lines: 2),
-              ],
+          if (_assisting)
+            marketButton(
+              '取消编写',
+              () => setState(() {
+                _aiGeneration++;
+                _assisting = false;
+              }),
             ),
-          ),
         ],
       ),
-      const SizedBox(height: 22),
-      const Divider(height: 1, color: marketLine),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: marketIcon('file-text'),
-        title: Text(
-          '${_kindLabel}内容',
-          style: TextStyle(fontWeight: FontWeight.w600),
+      if (_aiProposal != null) ...[
+        const Text('AI建议 · 应用后替换名称、简介和主文件，其他附件保留'),
+        SelectableText(
+          '${_aiProposal!['title']}\n${_aiProposal!['description']}\n\n${_aiProposal!['content']}',
         ),
-        subtitle: phone ? Text(_contentSummary) : null,
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
+        Wrap(
+          spacing: 12,
           children: [
-            if (!phone)
-              Text(_contentSummary, style: const TextStyle(color: marketMuted)),
-            const SizedBox(width: 16),
-            Text(
-              _contentsExpanded ? '收起' : '展开',
-              style: const TextStyle(color: marketMuted),
+            marketButton(
+              '应用到当前草稿',
+              () => setState(() {
+                _flush();
+                _title.text = _aiProposal!['title'].toString();
+                _description.text = _aiProposal!['description'].toString();
+                _active = _mainFile;
+                _body.text = _aiProposal!['content'].toString();
+                _files[_mainFile] = base64Encode(utf8.encode(_body.text));
+                _aiProposal = null;
+                _dirty = true;
+              }),
+              primary: true,
             ),
-            const SizedBox(width: 8),
-            marketIcon(_contentsExpanded ? 'caret-up' : 'caret-down', size: 18),
+            marketButton('放弃建议', () => setState(() => _aiProposal = null)),
           ],
         ),
-        onTap: _busy
-            ? null
-            : () => setState(() => _contentsExpanded = !_contentsExpanded),
+      ],
+    ],
+  );
+
+  Widget _mcpFields() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('MCP连接配置（创建MCP连接器时须填写）'),
+        trailing: marketIcon(_mcpExpanded ? 'caret-up' : 'caret-down'),
+        onTap: () => setState(() => _mcpExpanded = !_mcpExpanded),
       ),
-      if (_contentsExpanded)
-        SizedBox(
-          height: phone ? 520 : 600,
+      if (_mcpExpanded) ...[
+        TextField(
+          controller: _mcpUrl,
+          enabled: !_testingMcp && !_busy,
+          keyboardType: TextInputType.url,
+          onChanged: _mcpChanged,
+          decoration: const InputDecoration(
+            labelText: '服务器地址',
+            hintText: 'https://',
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _mcpToken,
+          enabled: !_testingMcp && !_busy,
+          obscureText: true,
+          autocorrect: false,
+          enableSuggestions: false,
+          onChanged: (value) {
+            setState(() {
+              _mcpResult = _mcpError = null;
+              _dirty = true;
+            });
+          },
+          decoration: const InputDecoration(
+            labelText: '访问令牌 · 仅本人可见',
+            hintText: '仅在服务器需要时填写；留空保留已有令牌',
+          ),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: marketButton(
+            _testingMcp ? '测试中…' : '测试连接',
+            _testingMcp || _busy ? null : _testMcp,
+          ),
+        ),
+        if (_mcpResult != null || _mcpError != null)
+          Semantics(
+            liveRegion: true,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Text(
+                _mcpError ?? _mcpResult!,
+                style: TextStyle(
+                  color: _mcpError == null
+                      ? marketInk
+                      : const Color(0xFFB3261E),
+                ),
+              ),
+            ),
+          ),
+      ],
+    ],
+  );
+
+  Widget _information() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Row(
+        children: [
+          InkWell(
+            onTap: _busy ? null : _changeIcon,
+            child: Semantics(
+              label: '更换图标',
+              button: true,
+              child: Stack(
+                children: [
+                  SkillPresentationIcon(_icon, size: 76),
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: marketIcon('pencil', size: 18),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 20),
+          Expanded(child: _field('名称', _title)),
+        ],
+      ),
+      const SizedBox(height: 24),
+      _field('一句话简介', _description, lines: 2),
+      const SizedBox(height: 24),
+      const Divider(color: marketLine),
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('详细介绍（可选）'),
+        trailing: marketIcon(_descriptionExpanded ? 'caret-up' : 'caret-down'),
+        onTap: () =>
+            setState(() => _descriptionExpanded = !_descriptionExpanded),
+      ),
+      if (_descriptionExpanded) ...[
+        SelectableText(
+          _introduction.text.isEmpty ? '尚未填写详细介绍' : _introduction.text,
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: marketButton(
+            '编辑详细介绍',
+            () => setState(() => _focus = 'description'),
+            icon: 'pencil',
+          ),
+        ),
+      ],
+      const Divider(color: marketLine),
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('介绍图片（可选）'),
+        trailing: marketIcon(_imagesExpanded ? 'caret-up' : 'caret-down'),
+        onTap: () => setState(() => _imagesExpanded = !_imagesExpanded),
+      ),
+      if (_imagesExpanded) ...[
+        if (_images.isEmpty)
+          const Text('尚未添加介绍图片', style: TextStyle(color: marketMuted))
+        else
+          SkillPresentationGallery(images: _images, layout: _imageLayout),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: marketButton(
+            '编辑／上传图片',
+            () => setState(() => _focus = 'images'),
+            icon: 'pencil',
+          ),
+        ),
+      ],
+    ],
+  );
+
+  Widget _gallery({required bool editing}) => LayoutBuilder(
+    builder: (context, box) {
+      final grid = _imageLayout == 'grid';
+      final height = box.maxWidth < 400 ? 200.0 : 280.0;
+      final columns = box.maxWidth < 320 ? 1 : 2;
+      final width = grid ? (box.maxWidth - (columns - 1) * 16) / columns : null;
+      Widget tile(int index) {
+        final add = index == _images.length;
+        final ratio = _images.isEmpty
+            ? .75
+            : _ratio(_images[add ? index - 1 : index]);
+        final imageWidth = width ?? height * ratio;
+        final imageHeight = width == null ? height : imageWidth / ratio;
+        final picture = SizedBox(
+          width: imageWidth,
+          height: imageHeight,
+          child: add
+              ? InkWell(
+                  onTap: _busy ? null : _addImage,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Positioned.fill(
+                        child: SvgPicture.asset(
+                          '${marketAssets}detail/upload-border.svg',
+                          fit: BoxFit.fill,
+                        ),
+                      ),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          marketIcon('plus', size: 28),
+                          const SizedBox(height: 8),
+                          const Text('添加图片'),
+                        ],
+                      ),
+                    ],
+                  ),
+                )
+              : skillDataImage(_images[index]['data']?.toString() ?? ''),
+        );
+        return SizedBox(
+          width: imageWidth,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              picture,
+              if (editing && !add) ...[
+                Row(
+                  children: [
+                    if (!grid)
+                      ReorderableDragStartListener(
+                        index: index,
+                        enabled: !_busy,
+                        child: Semantics(
+                          label: '拖动第 ${index + 1} 张图片排序',
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: marketIcon('dots'),
+                          ),
+                        ),
+                      ),
+                    if (grid) ...[
+                      marketIconButton(
+                        'back',
+                        '前移第 ${index + 1} 张图片',
+                        index == 0 || _busy
+                            ? null
+                            : () => _reorderImage(index, index - 1),
+                      ),
+                      marketIconButton(
+                        'arrow-right',
+                        '后移第 ${index + 1} 张图片',
+                        index == _images.length - 1 || _busy
+                            ? null
+                            : () => _reorderImage(index, index + 1),
+                      ),
+                    ],
+                    const Spacer(),
+                    marketIconButton(
+                      'trash-danger',
+                      '删除第 ${index + 1} 张图片',
+                      _busy
+                          ? null
+                          : () => setState(() {
+                              _images.removeAt(index);
+                              _dirty = true;
+                            }),
+                    ),
+                  ],
+                ),
+                TextFormField(
+                  key: ObjectKey(_images[index]),
+                  initialValue: _images[index]['caption']?.toString() ?? '',
+                  maxLength: 200,
+                  enabled: !_busy,
+                  decoration: const InputDecoration(
+                    hintText: '添加图片说明',
+                    counterText: '',
+                  ),
+                  onChanged: (value) {
+                    _images[index]['caption'] = value;
+                    _dirty = true;
+                  },
+                ),
+              ] else if (!add &&
+                  (_images[index]['caption']?.toString() ?? '').isNotEmpty)
+                Text(_images[index]['caption'].toString()),
+            ],
+          ),
+        );
+      }
+
+      final count = _images.length + (editing && _images.length < 6 ? 1 : 0);
+      if (grid) {
+        return Wrap(
+          spacing: 16,
+          runSpacing: 20,
+          children: List.generate(count, (i) {
+            if (!editing || i == _images.length) return tile(i);
+            return LongPressDraggable<int>(
+              data: i,
+              maxSimultaneousDrags: _busy ? 0 : 1,
+              feedback: Material(
+                color: Colors.white,
+                child: SizedBox(
+                  width: 100,
+                  height: 134,
+                  child: skillDataImage(_images[i]['data']?.toString() ?? ''),
+                ),
+              ),
+              child: DragTarget<int>(
+                onWillAcceptWithDetails: (details) =>
+                    !_busy && details.data != i,
+                onAcceptWithDetails: (details) =>
+                    _reorderImage(details.data, i),
+                builder: (_, candidates, rejected) => tile(i),
+              ),
+            );
+          }),
+        );
+      }
+      if (!editing) {
+        return SizedBox(
+          height: height + 60,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: count,
+            separatorBuilder: (_, index) => const SizedBox(width: 16),
+            itemBuilder: (_, i) => tile(i),
+          ),
+        );
+      }
+      return SizedBox(
+        height: height + 116,
+        child: ReorderableListView(
+          scrollDirection: Axis.horizontal,
+          buildDefaultDragHandles: false,
+          onReorder: (from, to) {
+            if (_busy) return;
+            if (to > from) to--;
+            _reorderImage(from, to);
+          },
+          footer: _images.length < 6 ? tile(_images.length) : null,
+          children: [
+            for (var i = 0; i < _images.length; i++)
+              Padding(
+                key: ObjectKey(_images[i]),
+                padding: const EdgeInsets.only(right: 16),
+                child: tile(i),
+              ),
+          ],
+        ),
+      );
+    },
+  );
+
+  void _reorderImage(int from, int to) => setState(() {
+    _images.insert(to, _images.removeAt(from));
+    _dirty = true;
+  });
+
+  Widget _layoutMenu() => PopupMenuButton<String>(
+    tooltip: '图片布局',
+    enabled: !_busy,
+    icon: SvgPicture.asset(
+      'assets/icons/extensions/gallery-$_imageLayout.svg',
+      width: 22,
+      height: 22,
+    ),
+    initialValue: _imageLayout,
+    onSelected: (value) => setState(() {
+      _imageLayout = value;
+      _dirty = true;
+    }),
+    itemBuilder: (_) => [
+      for (final value in ['horizontal', 'grid'])
+        CheckedPopupMenuItem(
+          value: value,
+          checked: value == _imageLayout,
           child: Row(
             children: [
-              if (!phone) SizedBox(width: 220, child: _filePanel()),
-              Expanded(child: _fileWorkspace(phone)),
+              SvgPicture.asset(
+                'assets/icons/extensions/gallery-$value.svg',
+                width: 22,
+                height: 22,
+              ),
+              const SizedBox(width: 12),
+              Text(value == 'horizontal' ? '横向滚动' : '网格布局'),
             ],
           ),
         ),
-      const Divider(height: 1, color: marketLine),
-      const SizedBox(height: 26),
-      _field('详细介绍', _introduction, lines: 3),
-      const SizedBox(height: 28),
-      const Divider(height: 1, color: marketLine),
-      const SizedBox(height: 26),
-      const Wrap(
-        spacing: 12,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          Text(
-            '介绍图片',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-          ),
-          Text(
-            '（可选）拖动调整顺序',
-            style: TextStyle(fontSize: 13, color: marketMuted),
-          ),
-        ],
-      ),
-      const SizedBox(height: 18),
-      SizedBox(
-        height: phone ? 250 : 330,
-        child: Row(
-          children: [
-            if (_images.isNotEmpty)
-              Expanded(
-                child: ReorderableListView(
-                  scrollDirection: Axis.horizontal,
-                  buildDefaultDragHandles: false,
-                  onReorder: (oldIndex, newIndex) {
-                    if (_busy) return;
-                    setState(() {
-                      if (newIndex > oldIndex) newIndex--;
-                      _images.insert(newIndex, _images.removeAt(oldIndex));
-                      _dirty = true;
-                    });
-                  },
-                  children: [
-                    for (var i = 0; i < _images.length; i++)
-                      Container(
-                        key: ObjectKey(_images[i]),
-                        width: phone ? 160 : 220,
-                        margin: const EdgeInsets.only(right: 14),
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: marketSoft,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Column(
-                          children: [
-                            Row(
-                              children: [
-                                ReorderableDragStartListener(
-                                  index: i,
-                                  child: Semantics(
-                                    label: '拖动第 ${i + 1} 张图片调整顺序',
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(8),
-                                      child: marketIcon('dots', size: 20),
-                                    ),
-                                  ),
-                                ),
-                                const Spacer(),
-                                marketIconButton(
-                                  'trash-danger',
-                                  '删除第 ${i + 1} 张图片',
-                                  _busy
-                                      ? null
-                                      : () => setState(() {
-                                          _images.removeAt(i);
-                                          _dirty = true;
-                                        }),
-                                ),
-                              ],
-                            ),
-                            Expanded(
-                              child: skillDataImage(
-                                _images[i]['data']?.toString() ?? '',
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            TextFormField(
-                              key: ObjectKey(_images[i]),
-                              initialValue:
-                                  _images[i]['caption']?.toString() ?? '',
-                              enabled: !_busy,
-                              maxLength: 200,
-                              decoration: const InputDecoration(
-                                hintText: '添加图片说明',
-                                counterText: '',
-                                isDense: true,
-                                filled: true,
-                                fillColor: Colors.white,
-                              ),
-                              onChanged: (value) {
-                                _images[i]['caption'] = value;
-                                _dirty = true;
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            if (_images.length < 6)
-              SizedBox(
-                width: phone ? 110 : 180,
-                child: InkWell(
-                  onTap: _busy ? null : _addImage,
-                  borderRadius: BorderRadius.circular(12),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      border: Border.all(color: marketLine),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          marketIcon('plus', size: 30),
-                          const SizedBox(height: 16),
-                          const Text(
-                            '添加图片',
-                            style: TextStyle(color: marketMuted),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-      if (_error != null)
-        Padding(
-          padding: const EdgeInsets.only(top: 20),
-          child: Text(
-            _error!,
-            style: const TextStyle(color: Color(0xFFA52B25), height: 1.6),
-          ),
-        ),
-      if (_syncFailed) marketButton('重试同步', _busy ? null : _retrySync),
-      if (_draftConflict)
-        marketButton('将本机修改另存为新草稿', _busy ? null : _saveConflictCopy),
     ],
   );
+
+  Widget _creationContent(bool phone) {
+    if (_focus == 'description') {
+      return TextField(
+        controller: _introduction,
+        enabled: !_busy,
+        expands: true,
+        minLines: null,
+        maxLines: null,
+        textAlignVertical: TextAlignVertical.top,
+        decoration: const InputDecoration(
+          hintText: '填写详细介绍',
+          border: InputBorder.none,
+        ),
+      );
+    }
+    if (_focus == 'images') {
+      return SingleChildScrollView(child: _gallery(editing: true));
+    }
+    if (_focus == 'content') {
+      return Row(
+        children: [
+          if (!phone) SizedBox(width: 180, child: _filePanel()),
+          Expanded(child: _fileWorkspace(phone)),
+        ],
+      );
+    }
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_step == 0) ...[
+            if (widget.contentBuilder != null)
+              widget.contentBuilder!(
+                context,
+                (draft) => unawaited(_applyIncoming(draft)),
+                (busy) {
+                  if (mounted) setState(() => _importBusy = busy);
+                },
+              )
+            else
+              marketButton(
+                '导入内容',
+                _busy ? null : _importContent,
+                icon: 'upload',
+              ),
+            const SizedBox(height: 16),
+            marketButton(
+              '编辑${_kindLabel}内容',
+              () => setState(() => _focus = 'content'),
+              icon: 'edit',
+            ),
+            if (_isPlugin) _mcpFields(),
+            _aiAssistance(),
+          ],
+          if (_step == 1) _information(),
+          if (_step == 2) ...[
+            Text(
+              (_record?.publishedRevision ?? 0) > 0 ? '修改尚未发布' : '尚未发布',
+              style: const TextStyle(color: marketMuted),
+            ),
+            const SizedBox(height: 20),
+            SkillPresentationBody(
+              presentation: _presentation,
+              name: _title.text,
+              description: _description.text,
+              kindLabel: _kindLabel,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => Theme(
@@ -1311,102 +1869,190 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     child: PopScope(
       canPop: _allowPop,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) unawaited(_leave());
+        if (!didPop && !_locked) _back();
       },
       child: LayoutBuilder(
-        builder: (_, constraints) {
+        builder: (context, constraints) {
           final phone = constraints.maxWidth <= 600;
-          return Scaffold(
-            key: _scaffold,
-            // Keep the editor's bottom actions anchored while the keyboard is
-            // open. This editor is shared by both plugins and skills.
-            resizeToAvoidBottomInset: false,
-            drawer: phone
-                ? Drawer(
+          final height = (constraints.maxHeight - 48).clamp(0.0, 850.0);
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 24),
+              child: SizedBox(
+                width: 670,
+                height: height,
+                child: Material(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  clipBehavior: Clip.antiAlias,
+                  child: Scaffold(
+                    key: _scaffold,
                     backgroundColor: Colors.white,
-                    child: SafeArea(child: _filePanel(drawer: true)),
-                  )
-                : null,
-            body: SafeArea(
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 12,
-                    ),
-                    child: Stack(
-                      alignment: Alignment.center,
+                    resizeToAvoidBottomInset: false,
+                    drawer: phone
+                        ? Drawer(
+                            child: SafeArea(child: _filePanel(drawer: true)),
+                          )
+                        : null,
+                    body: Column(
                       children: [
-                        Text(
-                          '编辑资料',
-                          style: TextStyle(
-                            fontSize: phone ? 20 : 24,
-                            fontWeight: FontWeight.w700,
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(24, 16, 12, 12),
+                          child: Row(
+                            children: [
+                              if (_focus != null)
+                                marketIconButton(
+                                  'back',
+                                  '返回资料',
+                                  _busy ? null : _back,
+                                ),
+                              Expanded(
+                                child: Text(
+                                  _focus == 'description'
+                                      ? '详细介绍'
+                                      : _focus == 'images'
+                                      ? '介绍图片'
+                                      : _focus == 'content'
+                                      ? '${_kindLabel}内容'
+                                      : '创建$_kindLabel',
+                                  style: const TextStyle(
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              if (_focus == 'images') _layoutMenu(),
+                              if (_focus != null)
+                                marketButton(
+                                  '完成',
+                                  _busy ? null : _back,
+                                  outlined: false,
+                                )
+                              else
+                                marketIconButton(
+                                  'close',
+                                  '关闭创建',
+                                  _locked ? null : _leave,
+                                ),
+                            ],
                           ),
                         ),
-                        Row(
-                          children: [
-                            marketIconButton(
-                              'back',
-                              '返回',
-                              _busy ? null : _leave,
+                        if (_focus == null)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Text(
+                                  const [
+                                    '上传文件或从 GitHub 导入内容',
+                                    '确认名称与简介，其他资料按需补充',
+                                    '确认内容后发布',
+                                  ][_step],
+                                  style: const TextStyle(color: marketMuted),
+                                ),
+                                const SizedBox(height: 24),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: LinearProgressIndicator(
+                                    value: (_step + 1) / 3,
+                                    minHeight: 5,
+                                    color: marketInk,
+                                    backgroundColor: marketLine,
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                Row(
+                                  children: [
+                                    for (var i = 0; i < 3; i++)
+                                      Expanded(
+                                        child: Text(
+                                          const ['添加内容', '补充资料', '确认'][i],
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            color: i == _step
+                                                ? marketInk
+                                                : marketMuted,
+                                            fontWeight: i == _step
+                                                ? FontWeight.w600
+                                                : FontWeight.normal,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ],
                             ),
-                            const Spacer(),
-                            marketButton(
-                              '导入内容',
-                              _busy || widget.onImport == null
-                                  ? null
-                                  : _importContent,
-                              icon: 'upload',
-                              primary: true,
-                              radius: 12,
-                              fontSize: phone ? 13 : 15,
+                          ),
+                        Expanded(
+                          child: Padding(
+                            padding: EdgeInsets.fromLTRB(
+                              24,
+                              8,
+                              24,
+                              MediaQuery.viewInsetsOf(
+                                context,
+                              ).bottom.clamp(0, height * .65).toDouble(),
                             ),
-                          ],
+                            child: _creationContent(phone),
+                          ),
                         ),
+                        if (_error != null)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
+                            child: Semantics(
+                              liveRegion: true,
+                              child: Text(
+                                _error!,
+                                style: const TextStyle(
+                                  color: Color(0xFFB3261E),
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (_syncFailed)
+                          marketButton('重试同步', _busy ? null : _retrySync),
+                        if (_draftConflict)
+                          marketButton(
+                            '将本机修改另存为新草稿',
+                            _busy ? null : _saveConflictCopy,
+                          ),
+                        if (_focus == null) ...[
+                          const Divider(height: 1, color: marketLine),
+                          Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Wrap(
+                              alignment: WrapAlignment.end,
+                              spacing: 12,
+                              runSpacing: 8,
+                              children: [
+                                marketButton(
+                                  '上一步',
+                                  _step == 0 || _locked ? null : _back,
+                                ),
+                                if (_step == 2)
+                                  marketButton('保存草稿', _busy ? null : _save),
+                                marketButton(
+                                  _busy
+                                      ? '正在处理…'
+                                      : _step == 2
+                                      ? '确认发布'
+                                      : '下一步',
+                                  _locked
+                                      ? null
+                                      : _step == 2
+                                      ? _publishInPlace
+                                      : _next,
+                                  primary: true,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 20),
-                    child: Text(
-                      (_record?.publishedRevision ?? 0) > 0
-                          ? '我创建的 · $_kindLabel · 修改尚未发布'
-                          : '我创建的 · $_kindLabel · 未发布',
-                      style: const TextStyle(color: marketMuted, fontSize: 14),
-                    ),
-                  ),
-                  const Divider(height: 1, color: marketLine),
-                  Expanded(child: _authoringWorkspace(phone)),
-                  const Divider(height: 1, color: marketLine),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 16, 24, 20),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: marketButton(
-                            _busy ? '正在保存…' : '保存草稿',
-                            _busy ? null : _save,
-                            outlined: false,
-                            radius: 12,
-                            height: 52,
-                          ),
-                        ),
-                        const SizedBox(width: 20),
-                        Expanded(
-                          child: marketButton(
-                            '预览',
-                            _busy ? null : _preview,
-                            primary: true,
-                            radius: 12,
-                            height: 52,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           );

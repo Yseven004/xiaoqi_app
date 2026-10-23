@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 
 import 'store.dart';
 import 'plugin_dependencies.dart';
+import 'mcp_connection_service.dart';
 
 const skillIconAssets = {
   'research',
@@ -96,7 +97,11 @@ Map<String, dynamic> normalizeSkillPresentation(Object? raw) {
   final gallery = raw['images'] ?? const [];
   if (gallery is! List || gallery.length > 6)
     throw const FormatException('介绍图片最多 6 张');
+  final layout = raw['image_layout'] ?? 'horizontal';
+  if (layout != 'horizontal' && layout != 'grid')
+    throw const FormatException('介绍图片布局无效');
   return {
+    'image_layout': layout,
     'title': text('title', 128),
     'introduction': text('introduction', 20000),
     'icon_asset': asset,
@@ -162,6 +167,9 @@ class SkillMarket {
       // Connection credentials belong to each installer, never a public package.
       void check(Object? config, [String key = '']) {
         if (config is Map) {
+          if (config['url'] is String && config['command'] == null) {
+            McpConnectionService.parseRemoteUrl(config['url'] as String);
+          }
           for (final entry in config.entries) {
             check(entry.value, entry.key.toString());
           }
