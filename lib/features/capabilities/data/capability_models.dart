@@ -199,6 +199,7 @@ class CapabilityRecord {
     this.source = const {},
     this.compatibility = const {},
     this.keywords,
+    this.keywordsEdited = false,
   });
 
   final String id;
@@ -218,6 +219,7 @@ class CapabilityRecord {
   final Map<String, dynamic> source;
   final Map<String, dynamic> compatibility;
   final List<String>? keywords;
+  final bool keywordsEdited;
 
   bool get isDeleted => deletedAt != null;
   bool get isServerInstallation => origin == 'github' || origin == 'upload';
@@ -258,6 +260,7 @@ class CapabilityRecord {
     source: source,
     compatibility: compatibility,
     keywords: keywords,
+    keywordsEdited: keywordsEdited,
   );
 
   Map<String, Object?> toJson() => {
@@ -279,6 +282,7 @@ class CapabilityRecord {
     'source': source,
     'compatibility': compatibility,
     if (keywords != null) 'keywords': keywords,
+    if (keywordsEdited) 'keywords_edited': true,
   };
 
   factory CapabilityRecord.fromJson(Object? raw) {
@@ -322,6 +326,7 @@ class CapabilityRecord {
       keywords: raw['keywords'] is List
           ? (raw['keywords'] as List).whereType<String>().toList()
           : null,
+      keywordsEdited: raw['keywords_edited'] == true,
     );
   }
 }

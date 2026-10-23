@@ -156,19 +156,21 @@ class _MarketEntry {
             if (component[field]?.toString().trim().isNotEmpty == true)
               component[field].toString(),
       ],
-      keywords: marketSearchTerms([
-        ...marketSearchTerms(
-          record.keywords ??
-              (metadata.containsKey('keywords')
-                  ? metadata['keywords']
-                  : extra is Map && extra.containsKey('keywords')
-                  ? extra['keywords']
-                  : record.source['keywords']),
-        ),
-        ...marketSearchTerms(metadata['tags']),
-        if (extra is Map) ...marketSearchTerms(extra['tags']),
-        ...marketSearchTerms(record.source['tags']),
-      ]),
+      keywords: record.keywordsEdited
+          ? const []
+          : marketSearchTerms([
+              ...marketSearchTerms(
+                record.keywords ??
+                    (metadata.containsKey('keywords')
+                        ? metadata['keywords']
+                        : extra is Map && extra.containsKey('keywords')
+                        ? extra['keywords']
+                        : record.source['keywords']),
+              ),
+              ...marketSearchTerms(metadata['tags']),
+              if (extra is Map) ...marketSearchTerms(extra['tags']),
+              ...marketSearchTerms(record.source['tags']),
+            ]),
       examples:
           (metadata['examples'] is List
                   ? metadata['examples'] as List

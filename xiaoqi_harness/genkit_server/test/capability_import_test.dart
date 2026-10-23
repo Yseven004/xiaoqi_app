@@ -149,7 +149,7 @@ void main() {
   );
 
   test(
-    'plugin imports preserve package search terms and replace them on update',
+    'plugin imports instructions that mention MCP but flags its MCP manifest',
     () async {
       final importer = service({
         '.claude-plugin/plugin.json':
@@ -180,6 +180,12 @@ void main() {
       expect(selected.entries.length, 2);
       expect(candidate['keywords'], ['论文总结', '文献阅读']);
       expect(saved.value['keywords'], ['论文总结', '文献阅读']);
+      final key = 'cap/alice/${saved.value['id']}';
+      final edited = store.put(key, {
+        ...saved.value,
+        'keywords': <String>[],
+        'keywords_edited': true,
+      }, saved.revision);
       final newer = service({
         '.claude-plugin/plugin.json': '{"name":"mixed","keywords":["新关键词"]}',
         'skills/good/SKILL.md': skill('same-name'),
@@ -193,10 +199,10 @@ void main() {
         update['id'],
         (update['candidates'] as List).single['id'],
         updateId: saved.value['id'],
-        expectedRevision: saved.revision,
+        expectedRevision: edited.revision,
       );
-      expect(updated.value['keywords'], ['新关键词']);
-      expect(updated.value.containsKey('keywords_edited'), isFalse);
+      expect(updated.value['keywords'], isEmpty);
+      expect(updated.value['keywords_edited'], isTrue);
       expect(
         selected.entries.values.every(
           (entry) => selected.files(entry).containsKey('SKILL.md'),

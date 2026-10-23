@@ -1017,7 +1017,12 @@ class CapabilityImportService {
         'name': candidate['name'],
         'description': candidate['description'],
         if (candidate['kind'] == 'plugin')
-          'keywords': candidate['keywords'] ?? <String>[],
+          'keywords': current?.value['keywords_edited'] == true
+              ? current!.value['keywords']
+              : candidate['keywords'] ??
+                    current?.value['keywords'] ??
+                    <String>[],
+        if (current?.value['keywords_edited'] == true) 'keywords_edited': true,
         'versions': versions,
         'current_version_id': versionId,
         'created_at': current?.value['created_at'] ?? now,
