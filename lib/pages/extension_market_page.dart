@@ -48,6 +48,8 @@ class _MarketEntry {
   final McpConnectionRecord? connection;
   final List<String> examples;
   bool get installed => record != null || connection != null;
+  // Capability records currently come from manual import/creation. Market
+  // installations are catalog-backed MCP connections, not package imports.
   bool get personal =>
       record != null || (connection != null && connection!.catalogId == null);
   bool get editable =>
@@ -266,7 +268,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     }
   }
 
-  List<_MarketEntry> get _installed =>
+  List<_MarketEntry> get _entries =>
       [
             ..._records.where((r) => !r.isDeleted).map(_MarketEntry.fromRecord),
             ..._connections.map((c) => _MarketEntry.fromMcp(null, c)),
@@ -277,9 +279,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                 : e.kind != ExtensionKind.skill,
           )
           .toList();
-  // Public here means a public source the user imported, never a seeded catalog.
-  List<_MarketEntry> get _public =>
-      _installed.where((entry) => entry.record?.origin == 'github').toList();
+  List<_MarketEntry> get _installed =>
+      _entries.where((entry) => !entry.personal).toList();
+  List<_MarketEntry> get _personalEntries =>
+      _entries.where((entry) => entry.personal).toList();
   List<_MarketEntry> _matching(Iterable<_MarketEntry> entries) => entries
       .where(
         (e) => '${e.name} ${e.description} ${e.developer}'
@@ -288,6 +291,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       )
       .toList();
   void _showList(String title) => setState(() {
+    FocusManager.instance.primaryFocus?.unfocus();
     _listTitle = title;
     _search.clear();
   });
@@ -301,6 +305,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       context: context,
       requestFocus: false,
       barrierDismissible: false,
+      barrierColor: marketBarrier,
       builder: (_) => Theme(
         data: marketTheme(context),
         child: _PackageImportDialog(
@@ -372,6 +377,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       context: context,
       requestFocus: false,
       barrierDismissible: false,
+      barrierColor: marketBarrier,
       builder: (_) => Theme(
         data: marketTheme(context),
         child: _McpConnectionDialog(connection: connection),
@@ -383,6 +389,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   Future<bool> _confirm(String title, String body, String action) async =>
       await showDialog<bool>(
         context: context,
+        barrierColor: marketBarrier,
         builder: (ctx) => MarketDialog(
           title: title,
           children: [Text(body, style: const TextStyle(height: 1.65))],
@@ -497,7 +504,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             else
               await _reload();
             if (!mounted) return null;
-            return [..._installed, ..._public]
+            return _entries
                 .where(
                   (e) =>
                       e.id == entry.id ||
@@ -522,6 +529,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     final record = entry.record!;
     await showDialog<void>(
       context: context,
+      barrierColor: marketBarrier,
       builder: (ctx) => MarketDialog(
         title: '管理 ${entry.name}',
         children: [
@@ -736,6 +744,18 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       ),
     ),
   );
+
+  Widget _tab(String label, bool selected, VoidCallback onPressed) => SizedBox(
+    width: MediaQuery.textScalerOf(context).scale(17) * 2 + 42,
+    child: marketButton(
+      label,
+      onPressed,
+      selected: selected,
+      outlined: false,
+      fontSize: 17,
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => Theme(
     data: marketTheme(context),
@@ -750,68 +770,89 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       },
       child: MarketFrame(
         children: [
-          Row(
-            children: [
-              if (_listTitle == null) ...[
-                Expanded(
-                  child: Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      marketIconButton(
-                        'back',
-                        '退出扩展市场',
-                        () => Navigator.pop(context),
-                        edgeAligned: true,
-                      ),
-                      for (final kind in [
-                        ExtensionKind.plugin,
-                        ExtensionKind.skill,
-                      ])
-                        Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: marketButton(
+          if (_listTitle == '连接管理')
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 100, vertical: 10),
+                  child: Text(
+                    '连接管理',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Align(alignment: Alignment.centerRight, child: _addMenu()),
+              ],
+            )
+          else
+            Row(
+              children: [
+                if (_listTitle == null) ...[
+                  Expanded(
+                    child: Wrap(
+                      spacing: 6,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        for (final kind in [
+                          ExtensionKind.plugin,
+                          ExtensionKind.skill,
+                        ])
+                          _tab(
                             kind == ExtensionKind.plugin ? '插件' : '技能',
+                            _kind == kind,
                             () => setState(() {
                               FocusManager.instance.primaryFocus?.unfocus();
                               _kind = kind;
                               _personal = false;
                               _search.clear();
                             }),
-                            selected: _kind == kind,
-                            outlined: false,
-                            fontSize: 17,
                           ),
-                        ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              ] else ...[
-                marketButton(
-                  _label,
-                  () => setState(() {
-                    _listTitle = null;
-                    _search.clear();
-                  }),
-                ),
-                marketIcon('caret-right', size: 16),
-                Expanded(child: Text(_listTitle!)),
+                ] else ...[
+                  marketButton(
+                    _label,
+                    () => setState(() {
+                      _listTitle = null;
+                      _search.clear();
+                    }),
+                    outlined: false,
+                    fontSize: 17,
+                  ),
+                  marketIcon('caret-right', size: 16, color: marketMuted),
+                  Expanded(child: Text(_listTitle!)),
+                ],
+                if (_kind == ExtensionKind.plugin &&
+                    MediaQuery.sizeOf(context).width > 430)
+                  marketIconButton('gear', '管理连接', () => _showList('连接管理')),
+                _addMenu(),
               ],
-              if (_kind == ExtensionKind.plugin &&
-                  MediaQuery.sizeOf(context).width > 430)
-                marketIconButton('gear', '管理连接', () => _showList('连接管理')),
-              _addMenu(),
-            ],
-          ),
-          marketHeading(
-            _listTitle ?? _label,
-            subtitle: _listTitle == '已安装'
-                ? '管理你添加的$_label'
-                : _listTitle == '连接管理'
-                ? '查看和管理已连接的 MCP 服务器。'
-                : _kind == ExtensionKind.plugin
-                ? '连接你的工具，让小七与你协同工作'
-                : '用于扩展小七能力的说明与工作方法',
-          ),
+            ),
+          if (_listTitle == '连接管理')
+            const Padding(
+              padding: EdgeInsets.only(top: 30, bottom: 24),
+              child: Text(
+                '查看和管理已连接的 MCP 服务器。',
+                style: TextStyle(
+                  fontSize: 17,
+                  color: marketMuted,
+                  height: 1.55,
+                ),
+              ),
+            )
+          else
+            marketHeading(
+              _listTitle ?? _label,
+              subtitle: _listTitle == '已安装'
+                  ? '管理从市场安装的$_label'
+                  : _listTitle == '推荐'
+                  ? '精选实用且值得关注的$_label。'
+                  : _kind == ExtensionKind.plugin
+                  ? '连接你的工具，让小七与你协同工作'
+                  : '用于扩展小七能力的说明与工作方法',
+            ),
           _searchField(),
           if (_error != null) marketError(_error!, _reload),
           if (_kind == ExtensionKind.plugin && _mcpError != null)
@@ -824,32 +865,27 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                 marketSkeleton()
               else
                 _grid(
-                  _matching(
-                    _installed.where((e) => e.kind == ExtensionKind.mcp),
-                  ),
+                  _matching(_entries.where((e) => e.kind == ExtensionKind.mcp)),
                 ),
-            ] else if (_loading)
+            ] else if (_listTitle == '推荐')
+              marketEmpty('暂无推荐$_label', '推荐内容将在这里展示。')
+            else if (_loading || _kind == ExtensionKind.plugin && _loadingMcp)
               marketSkeleton()
+            else if (_installed.isEmpty)
+              marketEmpty(
+                '还没有安装$_label',
+                '从市场安装的$_label将在这里展示。',
+                action: '查看推荐',
+                onAction: () => _showList('推荐'),
+              )
             else
-              _grid(
-                _matching(
-                  _listTitle == '已安装'
-                      ? _installed
-                      : _public.where((e) => e.category == _listTitle),
-                ),
-              ),
+              _grid(_matching(_installed)),
           ] else if (_search.text.trim().isNotEmpty) ...[
             marketSection('搜索结果'),
-            _grid(
-              _matching(
-                {
-                  for (final e in [..._public, ..._installed]) e.id: e,
-                }.values,
-              ),
-            ),
+            _grid(_matching(_personal ? _personalEntries : _installed)),
           ] else ...[
             marketSection('已安装', onTap: () => _showList('已安装')),
-            if (_loading)
+            if (_loading || _kind == ExtensionKind.plugin && _loadingMcp)
               marketSkeleton()
             else if (_installed.isEmpty)
               Wrap(
@@ -860,11 +896,13 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                     style: const TextStyle(color: marketMuted),
                   ),
                   TextButton(
-                    onPressed: () => _import(upload: true),
-                    child: const Text('添加一个'),
+                    onPressed: () => _showList('推荐'),
+                    child: const Text('查看推荐'),
                   ),
                 ],
               )
+            else if (_kind == ExtensionKind.skill)
+              _grid(_installed)
             else
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
@@ -893,18 +931,12 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               Wrap(
                 spacing: 6,
                 children: [
-                  marketButton(
+                  _tab(
                     '公开',
+                    !_personal,
                     () => setState(() => _personal = false),
-                    selected: !_personal,
-                    outlined: false,
                   ),
-                  marketButton(
-                    '个人',
-                    () => setState(() => _personal = true),
-                    selected: _personal,
-                    outlined: false,
-                  ),
+                  _tab('个人', _personal, () => setState(() => _personal = true)),
                   if (_kind == ExtensionKind.plugin &&
                       MediaQuery.sizeOf(context).width <= 430)
                     marketIconButton('gear', '管理连接', () => _showList('连接管理')),
@@ -912,9 +944,14 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               ),
               if (_personal) ...[
                 marketSection('个人$_label'),
-                _grid(_installed),
+                if (_loading || _kind == ExtensionKind.plugin && _loadingMcp)
+                  marketSkeleton()
+                else if (_personalEntries.isEmpty)
+                  marketEmpty('暂无个人$_label', '你导入或创建的$_label将在这里展示。')
+                else
+                  _grid(_personalEntries),
               ] else ...[
-                marketSection('推荐'),
+                marketSection('推荐', onTap: () => _showList('推荐')),
                 marketEmpty('暂无推荐$_label', '推荐内容将在这里展示。'),
               ],
             ],

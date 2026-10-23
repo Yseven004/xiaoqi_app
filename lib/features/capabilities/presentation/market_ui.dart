@@ -5,6 +5,7 @@ const marketInk = Color(0xFF191919);
 const marketMuted = Color(0xFF6B6B6B);
 const marketLine = Color(0xFFE8E8E8);
 const marketSoft = Color(0xFFF4F4F4);
+const marketBarrier = Color(0x44000000);
 const marketAssets = 'assets/icons/extension_market/';
 const marketOfficialDeveloper = '第七世界';
 
@@ -48,7 +49,8 @@ Widget marketButton(
     minimumSize: Size(0, height),
     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
     foregroundColor: primary ? Colors.white : marketInk,
-    disabledForegroundColor: marketMuted,
+    disabledForegroundColor: primary ? Colors.white : marketMuted,
+    disabledBackgroundColor: primary ? const Color(0xFFA3A3A3) : null,
     backgroundColor: primary
         ? const Color(0xFF1D1D1D)
         : selected
@@ -117,20 +119,21 @@ Widget marketLink(
   VoidCallback? onPressed, {
   String icon = 'link',
 }) => Align(
-  alignment: Alignment.centerRight,
+  alignment: Alignment.centerLeft,
   child: TextButton(
     onPressed: onPressed,
     style: TextButton.styleFrom(
       foregroundColor: marketMuted,
       minimumSize: const Size(0, 48),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w400),
     ),
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         marketIcon(icon, size: 20, color: marketMuted),
         const SizedBox(width: 8),
-        Flexible(child: Text(label, textAlign: TextAlign.right)),
+        Flexible(child: Text(label)),
         const SizedBox(width: 8),
         marketIcon('caret-right', size: 16, color: marketMuted),
       ],
@@ -383,11 +386,15 @@ class MarketDialog extends StatefulWidget {
     required this.children,
     this.actions = const [],
     this.canClose = true,
+    this.leadingAction,
+    this.moveWithKeyboard = false,
     super.key,
   });
   final String title;
   final List<Widget> children, actions;
   final bool canClose;
+  final Widget? leadingAction;
+  final bool moveWithKeyboard;
   @override
   State<MarketDialog> createState() => _MarketDialogState();
 }
@@ -396,6 +403,8 @@ class _MarketDialogState extends State<MarketDialog> {
   final _cardKey = GlobalKey();
   final _layoutKey = GlobalKey();
   double? _restingTop;
+  double? _restingHeight;
+  double _keyboardHeight = 0;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -403,6 +412,7 @@ class _MarketDialogState extends State<MarketDialog> {
     builder: (context, constraints) {
       final keyboard = MediaQuery.viewInsetsOf(context).bottom;
       if (keyboard == 0) {
+        _keyboardHeight = 0;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           final box = _cardKey.currentContext?.findRenderObject() as RenderBox?;
@@ -410,23 +420,35 @@ class _MarketDialogState extends State<MarketDialog> {
               _layoutKey.currentContext?.findRenderObject() as RenderBox?;
           if (box?.hasSize == true && layout != null) {
             _restingTop = box!.localToGlobal(Offset.zero, ancestor: layout).dy;
+            _restingHeight = box.size.height;
           }
         });
       }
+      // Keep the largest inset until dismissal so keyboard layout changes do
+      // not move the MCP form down again while the user switches fields.
+      if (keyboard > _keyboardHeight) _keyboardHeight = keyboard;
       final pinned = keyboard > 0 && _restingTop != null;
-      final visibleHeight = (constraints.maxHeight - keyboard)
+      final visibleHeight = (constraints.maxHeight - _keyboardHeight)
           .clamp(0.0, constraints.maxHeight)
           .toDouble();
-      // Keep the resting top edge. Only shorten the scroll area if the keyboard
-      // actually covers the card; very short landscape windows can move it up.
+      final latestTop = widget.moveWithKeyboard && _restingHeight != null
+          ? visibleHeight - _restingHeight! - 18
+          : visibleHeight - 160;
       final top = pinned
           ? _restingTop!
-                .clamp(
-                  18.0,
-                  (visibleHeight - 160).clamp(18.0, constraints.maxHeight),
-                )
+                .clamp(18.0, latestTop.clamp(18.0, constraints.maxHeight))
                 .toDouble()
           : 18.0;
+      final heightLimit = pinned
+          ? (visibleHeight - top - 18)
+                .clamp(
+                  0.0,
+                  widget.moveWithKeyboard
+                      ? _restingHeight ?? constraints.maxHeight
+                      : constraints.maxHeight,
+                )
+                .toDouble()
+          : constraints.maxHeight - 36;
       return PopScope(
         canPop: widget.canClose,
         child: MediaQuery.removeViewInsets(
@@ -445,11 +467,8 @@ class _MarketDialogState extends State<MarketDialog> {
               key: _cardKey,
               constraints: BoxConstraints(
                 maxWidth: 600,
-                maxHeight: pinned
-                    ? (visibleHeight - top - 18)
-                          .clamp(0.0, constraints.maxHeight)
-                          .toDouble()
-                    : constraints.maxHeight - 36,
+                minHeight: pinned && widget.moveWithKeyboard ? heightLimit : 0,
+                maxHeight: heightLimit,
               ),
               child: Padding(
                 padding: const EdgeInsets.all(24),
@@ -485,13 +504,45 @@ class _MarketDialogState extends State<MarketDialog> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             ...widget.children,
-                            if (widget.actions.isNotEmpty) ...[
+                            if (widget.actions.isNotEmpty ||
+                                widget.leadingAction != null) ...[
                               const SizedBox(height: 20),
-                              Wrap(
-                                alignment: WrapAlignment.end,
-                                spacing: 10,
-                                runSpacing: 10,
-                                children: widget.actions,
+                              LayoutBuilder(
+                                builder: (context, constraints) {
+                                  final actions = Wrap(
+                                    alignment: WrapAlignment.end,
+                                    spacing: 10,
+                                    runSpacing: 10,
+                                    children: widget.actions,
+                                  );
+                                  if (widget.leadingAction == null)
+                                    return actions;
+                                  if (constraints.maxWidth < 500 ||
+                                      MediaQuery.textScalerOf(
+                                            context,
+                                          ).scale(15) >
+                                          18) {
+                                    return Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.stretch,
+                                      children: [
+                                        Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: widget.leadingAction!,
+                                        ),
+                                        const SizedBox(height: 16),
+                                        actions,
+                                      ],
+                                    );
+                                  }
+                                  return Row(
+                                    children: [
+                                      widget.leadingAction!,
+                                      const SizedBox(width: 16),
+                                      Expanded(child: actions),
+                                    ],
+                                  );
+                                },
                               ),
                             ],
                           ],

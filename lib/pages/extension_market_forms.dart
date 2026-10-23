@@ -210,52 +210,79 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
         ? '从 GitHub 导入'
         : '检查并更新',
     canClose: !_busy,
+    leadingAction: _upload && !widget.skill
+        ? marketButton(
+            '添加自定义 MCP 服务器',
+            _busy ? null : () => Navigator.pop(context, 'mcp'),
+          )
+        : null,
     children: [
       if (_upload) ...[
         Stack(
           children: [
             Positioned.fill(
               child: IgnorePointer(
-                child: SvgPicture.asset(
-                  '${marketAssets}detail/upload-border.svg',
-                  fit: BoxFit.fill,
-                  excludeFromSemantics: true,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFAFAFA),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: SvgPicture.asset(
+                    '${marketAssets}detail/upload-border.svg',
+                    fit: BoxFit.fill,
+                    excludeFromSemantics: true,
+                  ),
                 ),
               ),
             ),
             SizedBox(
               width: double.infinity,
+              // Match the prototype's roomy upload area without fixing text height.
               child: OutlinedButton(
                 onPressed: _busy || _policy == null ? null : _choose,
                 style: OutlinedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(
-                    vertical: 32,
+                    vertical: 36,
                     horizontal: 18,
                   ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                   ),
                   side: BorderSide.none,
+                  minimumSize: const Size(0, 205),
+                  backgroundColor: Colors.transparent,
+                  disabledBackgroundColor: Colors.transparent,
+                  foregroundColor: marketMuted,
                 ),
                 child: Column(
                   children: [
-                    marketIcon(widget.skill ? 'file-plus' : 'upload', size: 29),
-                    const SizedBox(height: 14),
+                    marketIcon(
+                      widget.skill ? 'file-plus' : 'upload',
+                      size: 29,
+                      color: marketMuted,
+                    ),
+                    const SizedBox(height: 18),
                     Text(
                       _file?.name ?? (widget.skill ? '选择技能文件' : '点击上传插件压缩包'),
                       textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                        color: Color(0xFF555555),
+                        height: 1.65,
+                      ),
                     ),
-                    const SizedBox(height: 9),
+                    const SizedBox(height: 13),
                     Text(
                       _file == null
                           ? (_loadingPolicy
                                 ? '正在读取上传限制…'
                                 : '支持 .zip / .tgz / .tar.gz${widget.skill ? ' / .skill / .md' : ''}')
                           : '${_size(_fileSize)} · 点击重新选择',
-                      style: const TextStyle(color: marketMuted, fontSize: 13),
+                      style: const TextStyle(color: marketMuted, fontSize: 14),
                     ),
                     if (_policy != null) ...[
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 13),
                       Text(
                         '压缩包最多 ${_size((_policy!['max_archive_bytes'] as num).toInt())}，${_policy!['max_files']} 个文件',
                         style: const TextStyle(
@@ -270,6 +297,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
             ),
           ],
         ),
+        const SizedBox(height: 14),
         marketLink(
           '从公开 GitHub 链接导入',
           _busy
@@ -280,12 +308,6 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
                   _error = null;
                 }),
         ),
-        if (!widget.skill)
-          marketLink(
-            '添加自定义 MCP 服务器',
-            _busy ? null : () => Navigator.pop(context, 'mcp'),
-            icon: 'plugs',
-          ),
       ] else ...[
         const Text(
           '粘贴公开仓库或子目录链接，先检查，再添加。',
@@ -478,6 +500,7 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
   @override
   Widget build(BuildContext context) => MarketDialog(
     title: widget.connection == null ? '添加自定义 MCP 服务器' : '连接设置',
+    moveWithKeyboard: true,
     canClose: !_busy,
     children: [
       const Text(

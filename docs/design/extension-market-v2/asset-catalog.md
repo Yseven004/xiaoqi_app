@@ -2,7 +2,7 @@
 
 ## Flutter 接入 · 2026-10-23
 
-- 本轮修正新增`detail/upload-border.svg`，项目内独立SVG，viewBox `0 0 600 200`，圆角16、1px灰色描边、4/4虚线，无位图。两个上传弹窗背景复用，默认/禁用共用；随容器缩放。600×200独立预览`.codex-artifacts/extension-market-refinement/upload-border.png`已核对边界与虚线。其余链接、箭头和MCP图标均复用已有资产。见[本轮交付](../../ui/extension-market-refinements-2026-10-23.md)。
+- `detail/upload-border.svg`为项目内独立SVG，viewBox `0 0 600 200`，圆角16、1px描边，无位图。第二轮按原型改为`#D6D6D6`、3/3虚线；两个上传弹窗背景复用，默认/禁用共用，随容器缩放。600×200独立预览`.codex-artifacts/extension-market-refinement/upload-border-pass2.png`已核对浅灰底上的边界与虚线；只是资产形状核对，页面视觉验收待用户完成。其余链接、箭头复用已有资产，MCP入口恢复文字胶囊按钮，不再使用连接图形。见[第二轮记录](../../ui/extension-market-pass2-2026-10-23.md)。
 
 - 正式图标目录：`assets/icons/extension_market/`（13 品牌，viewBox 0 0 24 24）与 `detail/`（35 控件，viewBox 0 0 256 256）。复用下述原型来源与许可；12 个额外控件来自原型内联使用的同版 Phosphor，导出工具 `tool/prepare_extension_market_controls.cjs`。许可保留在资产目录。
 - 三个报告的 42 组 SVG text 已按原型首选 Microsoft YaHei 的字形转为独立路径，保存在 `docs/design/extension-market-v2/flutter-vectors/`，viewBox 0 0 220 300。转换工具 `tool/prepare_extension_market_vectors.py`；没有截图追踪、位图嵌入或字体文件再分发。
