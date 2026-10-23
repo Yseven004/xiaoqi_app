@@ -25,6 +25,7 @@ class McpCatalogEntry {
     this.package,
     this.packageVersion,
     this.reason,
+    this.keywords = const [],
   });
 
   final String id;
@@ -39,6 +40,7 @@ class McpCatalogEntry {
   final String? package;
   final String? packageVersion;
   final String? reason;
+  final List<String> keywords;
 
   bool get requiresLogin => authMode == 'oauth';
 
@@ -59,6 +61,9 @@ class McpCatalogEntry {
       package: raw['package']?.toString(),
       packageVersion: raw['package_version']?.toString(),
       reason: raw['reason']?.toString(),
+      keywords: raw['keywords'] is List
+          ? (raw['keywords'] as List).whereType<String>().toList()
+          : const [],
     );
   }
 }
@@ -75,6 +80,7 @@ class McpConnectionRecord {
     this.authMode = 'none',
     this.toolCount,
     this.error,
+    this.keywords = const [],
   });
 
   final String id;
@@ -87,6 +93,7 @@ class McpConnectionRecord {
   final String authMode;
   final int? toolCount;
   final String? error;
+  final List<String> keywords;
 
   bool get isReady => status == McpInstallationState.ready;
   bool get needsLogin => status == McpInstallationState.needsLogin;
@@ -104,6 +111,9 @@ class McpConnectionRecord {
       authMode: raw['auth_mode']?.toString() ?? 'none',
       toolCount: (raw['tool_count'] as num?)?.toInt(),
       error: raw['error']?.toString(),
+      keywords: raw['keywords'] is List
+          ? (raw['keywords'] as List).whereType<String>().toList()
+          : const [],
     );
   }
 }
@@ -184,6 +194,7 @@ class CapabilityRecord {
     this.enabled = true,
     this.source = const {},
     this.compatibility = const {},
+    this.keywords,
   });
 
   final String id;
@@ -202,6 +213,7 @@ class CapabilityRecord {
   final bool enabled;
   final Map<String, dynamic> source;
   final Map<String, dynamic> compatibility;
+  final List<String>? keywords;
 
   bool get isDeleted => deletedAt != null;
   bool get isServerInstallation => origin == 'github' || origin == 'upload';
@@ -241,6 +253,7 @@ class CapabilityRecord {
     enabled: enabled ?? this.enabled,
     source: source,
     compatibility: compatibility,
+    keywords: keywords,
   );
 
   Map<String, Object?> toJson() => {
@@ -261,6 +274,7 @@ class CapabilityRecord {
     'enabled': enabled,
     'source': source,
     'compatibility': compatibility,
+    if (keywords != null) 'keywords': keywords,
   };
 
   factory CapabilityRecord.fromJson(Object? raw) {
@@ -301,6 +315,9 @@ class CapabilityRecord {
       compatibility: raw['compatibility'] is Map
           ? Map<String, dynamic>.from(raw['compatibility'] as Map)
           : const {},
+      keywords: raw['keywords'] is List
+          ? (raw['keywords'] as List).whereType<String>().toList()
+          : null,
     );
   }
 }

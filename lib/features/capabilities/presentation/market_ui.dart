@@ -9,6 +9,23 @@ const marketBarrier = Color(0x44000000);
 const marketAssets = 'assets/icons/extension_market/';
 const marketOfficialDeveloper = '第七世界';
 
+Widget marketKeywordsField(
+  TextEditingController controller, {
+  bool enabled = true,
+  ValueChanged<String>? onChanged,
+}) => TextField(
+  controller: controller,
+  enabled: enabled,
+  onChanged: onChanged,
+  minLines: 1,
+  maxLines: 3,
+  decoration: const InputDecoration(
+    labelText: '能力关键词（选填）',
+    hintText: '论文翻译，论文总结，文献阅读',
+    helperText: '建议填写3～5个用途，用逗号分隔。',
+  ),
+);
+
 Widget marketIcon(String name, {double size = 22, Color? color}) =>
     SvgPicture.asset(
       '${marketAssets}detail/$name.svg',

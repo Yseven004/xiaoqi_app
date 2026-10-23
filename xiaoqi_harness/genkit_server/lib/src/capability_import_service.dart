@@ -673,6 +673,7 @@ class CapabilityImportService {
           manifest['description']?.toString() ?? '',
           components,
           unsupported,
+          keywords: manifest['keywords'],
         ),
       );
     }
@@ -708,8 +709,9 @@ class CapabilityImportService {
     String name,
     String description,
     List<Map<String, dynamic>> components,
-    List<String> warnings,
-  ) {
+    List<String> warnings, {
+    Object? keywords,
+  }) {
     final usable = components.where((c) => c['status'] != 'unsupported').length;
     final hasPartialComponent = components.any(
       (component) => component['status'] == 'partial',
@@ -723,6 +725,13 @@ class CapabilityImportService {
       'kind': kind,
       'name': name,
       'description': description,
+      if (keywords is List)
+        'keywords': keywords
+            .whereType<String>()
+            .map((v) => v.trim())
+            .where((v) => v.isNotEmpty)
+            .toSet()
+            .toList(),
       'status': usable == 0
           ? 'unsupported'
           : usable < components.length ||
@@ -1007,6 +1016,13 @@ class CapabilityImportService {
         'kind': candidate['kind'],
         'name': candidate['name'],
         'description': candidate['description'],
+        if (candidate['kind'] == 'plugin')
+          'keywords': current?.value['keywords_edited'] == true
+              ? current!.value['keywords']
+              : candidate['keywords'] ??
+                    current?.value['keywords'] ??
+                    <String>[],
+        if (current?.value['keywords_edited'] == true) 'keywords_edited': true,
         'versions': versions,
         'current_version_id': versionId,
         'created_at': current?.value['created_at'] ?? now,

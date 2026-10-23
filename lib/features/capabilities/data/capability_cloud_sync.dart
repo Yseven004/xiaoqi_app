@@ -1231,6 +1231,7 @@ class CapabilityCloudSync {
     required String name,
     required String url,
     String? bearerToken,
+    List<String>? keywords,
   }) async {
     final token = await _requireToken();
     final value = _checked(
@@ -1243,6 +1244,7 @@ class CapabilityCloudSync {
               'name': name,
               'url': url,
               'bearer_token': bearerToken?.trim(),
+              'keywords': ?keywords,
             }),
           )
           .timeout(const Duration(seconds: 20)),
@@ -1304,6 +1306,7 @@ class CapabilityCloudSync {
     bool? enabled,
     bool? showInMenu,
     bool uninstall = false,
+    List<String>? keywords,
   }) async {
     final token = await _requireToken();
     final uri = Uri.parse(
@@ -1318,9 +1321,25 @@ class CapabilityCloudSync {
               'expected_revision': record.cloudRevision,
               'enabled': ?enabled,
               'show_in_menu': ?showInMenu,
+              'keywords': ?keywords,
             }),
           );
-    _checked(response);
+    if (keywords != null && response.statusCode == 409) {
+      final conflict = _decode(response);
+      final error = conflict['error'];
+      final current = error is Map ? error['current'] : null;
+      if (current is Map) {
+        await CapabilityStore.instance.applyRemote(CapabilityRecord.fromJson(current));
+      }
+      throw StateError('云端关键词已变化，已取得最新版本；请确认输入后重新保存。');
+    }
+    final result = _checked(response);
+    if (keywords != null && !uninstall) {
+      await CapabilityStore.instance.applyRemote(
+        CapabilityRecord.fromJson(result['record']),
+      );
+      return;
+    }
     if (uninstall) {
       await CapabilityStore.instance.applyRemote(
         record.copyWith(

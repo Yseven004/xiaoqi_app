@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
 import 'store.dart';
+import 'capability_keywords.dart';
 
 Future<List<Map<String, dynamic>>> listAllMcpTools(
   Future<Map<String, dynamic>> Function(String? cursor) readPage,
@@ -74,6 +75,7 @@ class McpCatalogEntry {
     this.package,
     this.packageVersion,
     this.reason,
+    this.keywords = const [],
   });
 
   final String id;
@@ -93,6 +95,7 @@ class McpCatalogEntry {
   final String? package;
   final String? packageVersion;
   final String? reason;
+  final List<String> keywords;
 
   bool get requiresLogin => authMode == 'oauth';
 
@@ -137,6 +140,7 @@ class McpCatalogEntry {
         package: package,
         packageVersion: raw['package_version']?.toString(),
         reason: raw['reason']?.toString(),
+        keywords: parseCapabilityKeywords(raw['keywords'] ?? const []),
       );
     } on FormatException {
       return null;
@@ -147,6 +151,7 @@ class McpCatalogEntry {
     'id': id,
     'name': name,
     'description': description,
+    'keywords': keywords,
     'version': version,
     'runtime': runtime,
     if (package != null) 'package': package,
@@ -219,6 +224,7 @@ class McpConnectionService {
       'id': id,
       'catalog_id': entry.id,
       'name': entry.name,
+      'keywords': entry.keywords,
       'url': remoteUrl.toString(),
       'version': entry.version,
       'runtime': entry.runtime,
@@ -330,14 +336,19 @@ class McpConnectionService {
         : _uuid.v4();
     final key = _key(tenantId, id);
     final previous = store.get(key);
+    final keywords = input.containsKey('keywords')
+        ? parseCapabilityKeywords(input['keywords'])
+        : previous?.value['keywords'] ?? const <String>[];
     final suppliedToken = _validatedToken(input['bearer_token']);
     final encrypted = suppliedToken == null || suppliedToken.isEmpty
         ? previous?.value['encrypted_bearer_token']
         : await _encrypt(suppliedToken);
     final now = DateTime.now().toUtc().toIso8601String();
     final value = <String, dynamic>{
+      ...?previous?.value,
       'id': id,
       'name': name,
+      'keywords': keywords,
       'url': url.toString(),
       if (encrypted != null) 'encrypted_bearer_token': encrypted,
       'created_at': previous?.value['created_at'] ?? now,
@@ -801,6 +812,7 @@ class McpConnectionService {
       'name': value['name'],
       'url': value['url'],
       'has_bearer_token': value['encrypted_bearer_token'] != null,
+      'keywords': value['keywords'] ?? const <String>[],
       if (value['catalog_id'] != null) 'catalog_id': value['catalog_id'],
       if (value['version'] != null) 'version': value['version'],
       'status': status,
