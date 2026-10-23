@@ -29,10 +29,11 @@ class MarketSearchDocument {
     required this.author,
     this.aliases = const [],
     this.keywords = const [],
+    this.capabilities = const [],
   });
 
   final String name, description, author;
-  final List<String> aliases, keywords;
+  final List<String> aliases, keywords, capabilities;
 
   /// All space-separated terms must match. No inferred synonyms or body search.
   int? score(String query) {
@@ -42,6 +43,8 @@ class MarketSearchDocument {
       (normalizeMarketSearch(name), 1000),
       for (final alias in aliases) (normalizeMarketSearch(alias), 900),
       for (final keyword in keywords) (normalizeMarketSearch(keyword), 600),
+      for (final capability in capabilities)
+        (normalizeMarketSearch(capability), 550),
       (normalizeMarketSearch(description), 200),
       (normalizeMarketSearch(author), 100),
     ];

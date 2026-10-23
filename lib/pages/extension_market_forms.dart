@@ -416,69 +416,6 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
   );
 }
 
-class _PluginKeywordsDialog extends StatefulWidget {
-  const _PluginKeywordsDialog({required this.record, required this.keywords});
-  final CapabilityRecord record;
-  final List<String> keywords;
-  @override
-  State<_PluginKeywordsDialog> createState() => _PluginKeywordsDialogState();
-}
-
-class _PluginKeywordsDialogState extends State<_PluginKeywordsDialog> {
-  late final _keywords = TextEditingController(text: widget.keywords.join('，'));
-  late CapabilityRecord _record = widget.record;
-  bool _busy = false;
-  String? _error;
-  @override
-  void dispose() {
-    _keywords.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    if (_busy) return;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await CapabilityCloudSync.instance.manageInstallation(
-        _record,
-        keywords: marketSearchTerms(_keywords.text),
-      );
-      if (mounted) Navigator.pop(context, true);
-    } catch (error) {
-      _record = await CapabilityStore.instance.find(_record.id) ?? _record;
-      if (mounted) setState(() => _error = '关键词未保存：$error');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !_busy,
-    child: MarketDialog(
-      title: '编辑能力关键词',
-      canClose: !_busy,
-      children: [
-        Text(widget.record.name, style: const TextStyle(color: marketMuted)),
-        const SizedBox(height: 18),
-        marketKeywordsField(_keywords, enabled: !_busy),
-        if (_error != null) marketError(_error!, _save),
-      ],
-      actions: [
-        marketButton('取消', _busy ? null : () => Navigator.pop(context)),
-        marketButton(
-          _busy ? '正在保存…' : '保存',
-          _busy ? null : _save,
-          primary: true,
-        ),
-      ],
-    ),
-  );
-}
-
 class _McpConnectionDialog extends StatefulWidget {
   const _McpConnectionDialog({this.connection});
   final McpConnectionRecord? connection;
@@ -489,7 +426,6 @@ class _McpConnectionDialog extends StatefulWidget {
 class _McpConnectionDialogState extends State<_McpConnectionDialog> {
   final _name = TextEditingController(),
       _url = TextEditingController(),
-      _keywords = TextEditingController(),
       _token = TextEditingController();
   String? _error, _result;
   bool _busy = false;
@@ -498,16 +434,12 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
     super.initState();
     _name.text = widget.connection?.name ?? '';
     _url.text = widget.connection?.url ?? '';
-    _keywords.text = (widget.connection?.keywords ?? const <String>[]).join(
-      '，',
-    );
   }
 
   @override
   void dispose() {
     _name.dispose();
     _url.dispose();
-    _keywords.dispose();
     _token.clear();
     _token.dispose();
     super.dispose();
@@ -551,7 +483,6 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
           );
       } else {
         await CapabilityCloudSync.instance.saveMcpConnection(
-          keywords: marketSearchTerms(_keywords.text),
           id: widget.connection?.id,
           name: _name.text.trim(),
           url: uri.toString(),
@@ -599,9 +530,6 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
           helperText: '使用 HTTPS 连接远程服务器',
         ),
       ),
-      const SizedBox(height: 20),
-      marketKeywordsField(_keywords, enabled: !_busy, onChanged: _changed),
-      const SizedBox(height: 20),
       TextField(
         controller: _token,
         enabled: !_busy,

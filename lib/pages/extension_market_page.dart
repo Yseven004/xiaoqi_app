@@ -42,6 +42,7 @@ class _MarketEntry {
     this.category = '效率工具',
     this.aliases = const [],
     this.keywords = const [],
+    this.capabilities = const [],
   });
   final String id, name, description, author, category;
   final ExtensionKind kind;
@@ -50,13 +51,14 @@ class _MarketEntry {
   final McpCatalogEntry? catalog;
   final McpConnectionRecord? connection;
   final List<String> examples;
-  final List<String> aliases, keywords;
+  final List<String> aliases, keywords, capabilities;
   MarketSearchDocument get searchDocument => MarketSearchDocument(
     name: name,
     description: description,
     author: author,
     aliases: aliases,
     keywords: keywords,
+    capabilities: capabilities,
   );
   bool get installed => record != null || connection != null;
   // Capability records currently come from manual import/creation. Market
@@ -141,6 +143,19 @@ class _MarketEntry {
         ...marketSearchTerms(metadata['aliases']),
         if (extra is Map) ...marketSearchTerms(extra['aliases']),
       ]),
+      capabilities: [
+        for (final component
+            in record.currentVersion?.components ??
+                const <Map<String, dynamic>>[])
+          for (final field in [
+            'name',
+            'description',
+            'type',
+            'mcp_server_name',
+          ])
+            if (component[field]?.toString().trim().isNotEmpty == true)
+              component[field].toString(),
+      ],
       keywords: marketSearchTerms([
         ...marketSearchTerms(
           record.keywords ??
@@ -186,9 +201,7 @@ class _MarketEntry {
               '',
     url: connection?.url ?? catalog?.repository,
     category: 'MCP 服务',
-    keywords: publicListing
-        ? catalog!.keywords
-        : connection?.keywords ?? catalog?.keywords ?? const [],
+    keywords: catalog?.keywords ?? const [],
   );
 }
 
@@ -639,16 +652,12 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
   Future<void> _manage(_MarketEntry entry) async {
     final record = entry.record!;
-    final action = await showDialog<String>(
+    await showDialog<void>(
       context: context,
       barrierColor: marketBarrier,
       builder: (ctx) => MarketDialog(
         title: '管理 ${entry.name}',
         children: [
-          if (record.kind == CapabilityKind.plugin)
-            marketButton('编辑能力关键词', () {
-              Navigator.pop(ctx, 'keywords');
-            }, icon: 'edit'),
           Text(entry.description, style: const TextStyle(height: 1.65)),
           const SizedBox(height: 18),
           Text('版本 ${entry.version} · ${record.enabled ? '已启用' : '已停用'}'),
@@ -682,7 +691,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         ],
       ),
     );
-    if (action == 'keywords' && mounted) await _editPluginKeywords(entry);
   }
 
   PopupMenuItem<String> _menuItem(String value, String label, String icon) =>
@@ -757,22 +765,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     ),
   );
   String get _label => _kind == ExtensionKind.skill ? '技能' : '插件';
-  Future<void> _editPluginKeywords(_MarketEntry entry) async {
-    final record = entry.record;
-    if (record == null || record.kind != CapabilityKind.plugin) return;
-    FocusManager.instance.primaryFocus?.unfocus();
-    await showDialog<bool>(
-      context: context,
-      requestFocus: false,
-      barrierDismissible: false,
-      builder: (_) => Theme(
-        data: marketTheme(context),
-        child: _PluginKeywordsDialog(record: record, keywords: entry.keywords),
-      ),
-    );
-    if (mounted) await _reload();
-  }
-
   Widget _row(_MarketEntry entry) => ConstrainedBox(
     constraints: const BoxConstraints(minHeight: 81),
     child: Row(
@@ -840,8 +832,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                   unawaited(_edit(record: entry.record));
                 case 'settings':
                   unawaited(_mcpForm(entry.connection));
-                case 'keywords':
-                  unawaited(_editPluginKeywords(entry));
                 case 'remove':
                   unawaited(_remove(entry));
               }
@@ -849,8 +839,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             itemBuilder: (_) => [
               _menuItem('detail', '查看详情', 'info'),
               if (entry.editable) _menuItem('edit', '编辑技能', 'edit'),
-              if (entry.record?.kind == CapabilityKind.plugin)
-                _menuItem('keywords', '编辑能力关键词', 'edit'),
               if (entry.connection != null)
                 _menuItem('settings', '连接设置', 'gear'),
               _menuItem(

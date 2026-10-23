@@ -13,7 +13,6 @@ import '../data/capability_models.dart';
 import '../data/capability_store.dart';
 import '../../../widgets/app_toast.dart';
 import 'market_ui.dart';
-import 'market_search.dart';
 
 /// Called only after the server has checked these exact bytes and archive root.
 CapabilityDraft skillDraftFromUpload({
@@ -97,7 +96,6 @@ class MarketSkillEditor extends StatefulWidget {
 class _MarketSkillEditorState extends State<MarketSkillEditor> {
   final _name = TextEditingController(),
       _description = TextEditingController(),
-      _keywords = TextEditingController(),
       _body = TextEditingController();
   final _store = CapabilityStore.instance;
   final _cloud = CapabilityCloudSync.instance;
@@ -153,13 +151,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     }
     _files['SKILL.md'] = base64Encode(utf8.encode(text));
     _body.text = text;
-    final extra = _metadata['metadata'];
-    _keywords.text = marketSearchTerms(
-      _metadata['keywords'] ??
-          (extra is Map ? extra['keywords'] : null) ??
-          widget.record?.source['keywords'],
-    ).join('，');
-    for (final controller in [_name, _description, _keywords, _body])
+    for (final controller in [_name, _description, _body])
       controller.addListener(_changed);
     _ready = true;
   }
@@ -170,7 +162,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
 
   @override
   void dispose() {
-    for (final controller in [_name, _description, _keywords, _body]) {
+    for (final controller in [_name, _description, _body]) {
       controller.removeListener(_changed);
       controller.dispose();
     }
@@ -220,7 +212,6 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       ..._metadata,
       'name': _name.text.trim(),
       'description': _description.text.trim(),
-      'keywords': marketSearchTerms(_keywords.text),
     };
     // JSON scalar/collection values are valid YAML and retain unknown metadata.
     final header = metadata.entries
@@ -628,8 +619,6 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                 hintText: '描述该技能的用途',
               ),
             ),
-            const SizedBox(height: 16),
-            marketKeywordsField(_keywords, enabled: !_busy),
           ],
         ),
       ),

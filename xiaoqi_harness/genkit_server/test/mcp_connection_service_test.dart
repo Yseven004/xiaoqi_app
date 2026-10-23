@@ -52,7 +52,6 @@ void main() {
       'name': 'One',
       'url': 'https://example.com/mcp',
       'bearer_token': 'keep-this-token',
-      'keywords': [' 论文总结 ', '论文总结', '文献阅读'],
     });
     final updated = await service.save('tenant-a', {
       'id': saved['id'],
@@ -62,14 +61,7 @@ void main() {
     });
 
     expect(updated['name'], 'Renamed');
-    expect(updated['keywords'], ['论文总结', '文献阅读']);
-    final cleared = await service.save('tenant-a', {
-      'id': saved['id'],
-      'name': 'Renamed',
-      'url': 'https://example.com/new-mcp',
-      'keywords': <String>[],
-    });
-    expect(cleared['keywords'], isEmpty);
+    expect(updated.containsKey('keywords'), isFalse);
     expect(
       (await service.selected('tenant-a', [saved['id']])).single.bearerToken,
       'keep-this-token',

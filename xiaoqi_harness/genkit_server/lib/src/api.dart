@@ -4,7 +4,6 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'capability_import_service.dart';
-import 'capability_keywords.dart';
 import 'capability_scope.dart';
 import 'artifact_context.dart';
 import 'release.dart';
@@ -1703,7 +1702,7 @@ class XiaoqiApi {
   ) async {
     try {
       final safeId = _safeId(id, '能力 ID');
-      final body = await _body(request, 16 * 1024);
+      final body = await _body(request, 1024);
       for (final field in ['enabled', 'show_in_menu']) {
         if (body.containsKey(field) && body[field] is! bool) {
           return _error('$field 必须是布尔值', 400);
@@ -1713,13 +1712,6 @@ class XiaoqiApi {
       final current = store.get(key);
       if (current == null || current.value['deleted_at'] != null)
         return _error('能力不存在', 404);
-      List<String>? keywords;
-      if (body.containsKey('keywords')) {
-        if (current.value['kind'] != 'plugin') {
-          return _error('技能关键词请在技能编辑器中修改', 400);
-        }
-        keywords = parseCapabilityKeywords(body['keywords']);
-      }
       if (_asInt(body['expected_revision']) != current.revision)
         return _json({
           'error': {
@@ -1732,8 +1724,6 @@ class XiaoqiApi {
         ...current.value,
         'show_in_menu': body['show_in_menu'] ?? current.value['show_in_menu'],
         'enabled': body['enabled'] ?? current.value['enabled'] ?? true,
-        if (keywords != null) 'keywords': keywords,
-        if (keywords != null) 'keywords_edited': true,
         'updated_at':
             body['updated_at']?.toString() ?? DateTime.now().toIso8601String(),
         'cloud_revision': current.revision + 1,
@@ -1743,10 +1733,8 @@ class XiaoqiApi {
         'record': _publicCapability(saved.value, saved.revision, false),
         'cloud_revision': saved.revision,
       });
-    } on FormatException catch (error) {
-      return _error(error.message, 400);
     } on RevisionConflict {
-      return _error('云端版本已变化，请刷新后再保存关键词', 409);
+      return _error('云端版本已变化', 409);
     } on Object {
       return _error('更新展示偏好失败', 503);
     }
@@ -2704,16 +2692,19 @@ class XiaoqiApi {
     bool includeContent,
   ) {
     final result = {...document, 'cloud_revision': revision};
+    if (document['kind'] == 'plugin') {
+      result['keywords'] = <String>[];
+      result.remove('keywords_edited');
+    }
     result['versions'] = (document['versions'] as List? ?? const [])
         .whereType<Map>()
         .map((raw) {
           final version = Map<String, dynamic>.from(raw);
           final artifactKey = version.remove('artifact_key')?.toString() ?? '';
           if (document['kind'] == 'plugin' &&
-              result['keywords'] == null &&
               version['id'] == document['current_version_id'] &&
               artifactKey.isNotEmpty) {
-            // Existing installations can derive keywords without changing their package.
+            // Search terms come from the package manifest, not user-entered tags.
             result['keywords'] = <String>[];
             try {
               final files = store.getImmutable(artifactKey);

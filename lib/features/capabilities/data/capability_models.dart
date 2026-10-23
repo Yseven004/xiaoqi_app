@@ -80,7 +80,6 @@ class McpConnectionRecord {
     this.authMode = 'none',
     this.toolCount,
     this.error,
-    this.keywords = const [],
   });
 
   final String id;
@@ -93,7 +92,6 @@ class McpConnectionRecord {
   final String authMode;
   final int? toolCount;
   final String? error;
-  final List<String> keywords;
 
   bool get isReady => status == McpInstallationState.ready;
   bool get needsLogin => status == McpInstallationState.needsLogin;
@@ -111,9 +109,6 @@ class McpConnectionRecord {
       authMode: raw['auth_mode']?.toString() ?? 'none',
       toolCount: (raw['tool_count'] as num?)?.toInt(),
       error: raw['error']?.toString(),
-      keywords: raw['keywords'] is List
-          ? (raw['keywords'] as List).whereType<String>().toList()
-          : const [],
     );
   }
 }
@@ -136,6 +131,7 @@ class CapabilityVersion {
     required this.createdAt,
     this.parentVersionId,
     this.files = const {},
+    this.components = const [],
   });
 
   final String id;
@@ -145,6 +141,7 @@ class CapabilityVersion {
   final DateTime createdAt;
   final String? parentVersionId;
   final Map<String, String> files;
+  final List<Map<String, dynamic>> components;
 
   Map<String, Object?> toJson() => {
     'id': id,
@@ -154,6 +151,7 @@ class CapabilityVersion {
     'created_at': createdAt.toIso8601String(),
     'parent_version_id': parentVersionId,
     'files': files,
+    if (components.isNotEmpty) 'components': components,
   };
 
   factory CapabilityVersion.fromJson(Object? raw) {
@@ -172,6 +170,12 @@ class CapabilityVersion {
               (key, value) => MapEntry(key.toString(), value.toString()),
             )
           : const {},
+      components: raw['components'] is List
+          ? (raw['components'] as List)
+                .whereType<Map>()
+                .map((value) => Map<String, dynamic>.from(value))
+                .toList(growable: false)
+          : const [],
     );
   }
 }

@@ -75,74 +75,6 @@ void main() {
   }
 
   test(
-    'plugin keywords save, clear, isolate tenants and reject stale revisions',
-    () async {
-      final original = store.put('cap/alice/plugin-a', {
-        'id': 'plugin-a',
-        'kind': 'plugin',
-        'name': 'Reader',
-        'origin': 'upload',
-        'versions': [],
-        'enabled': true,
-      }, null);
-      final saved = await call(
-        'PATCH',
-        '/v1/capabilities/plugin-a/visibility',
-        body: {
-          'expected_revision': original.revision,
-          'keywords': [' 文献阅读 ', '文献阅读', 'PDF提取'],
-        },
-      );
-      expect(saved.statusCode, 200);
-      final value = jsonDecode(await saved.readAsString()) as Map;
-      expect(value['record']['keywords'], ['文献阅读', 'PDF提取']);
-      expect(value['record']['keywords_edited'], isTrue);
-      expect(value['record']['enabled'], isTrue);
-      expect(
-        (await call(
-          'PATCH',
-          '/v1/capabilities/plugin-a/visibility',
-          body: {
-            'expected_revision': original.revision,
-            'keywords': ['overwritten'],
-          },
-        )).statusCode,
-        409,
-      );
-      expect(
-        (await call(
-          'PATCH',
-          '/v1/capabilities/plugin-a/visibility',
-          body: {
-            'expected_revision': value['cloud_revision'],
-            'keywords': [42],
-          },
-        )).statusCode,
-        400,
-      );
-      store.put('cap/bob/other-plugin', {
-        'kind': 'plugin',
-        'keywords': ['private'],
-      }, null);
-      expect(
-        (await call(
-          'PATCH',
-          '/v1/capabilities/other-plugin/visibility',
-          body: {'expected_revision': 1, 'keywords': []},
-        )).statusCode,
-        404,
-      );
-      final cleared = await call(
-        'PATCH',
-        '/v1/capabilities/plugin-a/visibility',
-        body: {'expected_revision': value['cloud_revision'], 'keywords': []},
-      );
-      expect(cleared.statusCode, 200);
-      expect(store.get('cap/alice/plugin-a')!.value['keywords'], isEmpty);
-    },
-  );
-
-  test(
     'existing plugin derives keywords from its immutable manifest',
     () async {
       store.putImmutable('tests/plugin-package.zip', {
@@ -154,6 +86,8 @@ void main() {
         'id': 'existing-plugin',
         'kind': 'plugin',
         'origin': 'upload',
+        'keywords': ['手动添加的词'],
+        'keywords_edited': true,
         'current_version_id': 'v1',
         'versions': [
           {'id': 'v1', 'artifact_key': 'tests/plugin-package.zip'},
@@ -164,7 +98,7 @@ void main() {
       final body = jsonDecode(await response.readAsString()) as Map;
       expect((body['items'] as List).single['keywords'], ['论文总结']);
       expect(
-        store.get('cap/alice/existing-plugin')!.value.containsKey('keywords'),
+        (body['items'] as List).single.containsKey('keywords_edited'),
         isFalse,
       );
     },
