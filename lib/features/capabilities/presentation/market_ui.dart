@@ -76,6 +76,27 @@ Widget marketButton(
   ),
 );
 
+Widget marketDialogButton(
+  String label,
+  VoidCallback? onPressed, {
+  String? icon,
+  bool primary = false,
+  bool selected = false,
+  bool outlined = true,
+  double height = 48,
+  double fontSize = 15,
+}) => marketButton(
+  label,
+  onPressed,
+  icon: icon,
+  primary: primary,
+  selected: selected,
+  outlined: outlined,
+  radius: 8,
+  height: height,
+  fontSize: fontSize,
+);
+
 ThemeData marketTheme(BuildContext context) => Theme.of(context).copyWith(
   scaffoldBackgroundColor: Colors.white,
   colorScheme:
@@ -388,7 +409,7 @@ class MarketDialog extends StatefulWidget {
     this.canClose = true,
     this.leadingAction,
     this.moveWithKeyboard = false,
-    this.maxWidth = 600,
+    this.maxWidth = 520,
     this.cornerRadius = 25,
     this.contentPadding = const EdgeInsets.all(24),
     this.actionsDivider = false,
@@ -425,7 +446,7 @@ class _MarketDialogState extends State<MarketDialog> {
       children: widget.actions,
     );
     if (widget.leadingAction == null) return actions;
-    if (constraints.maxWidth < 500 ||
+    if (constraints.maxWidth < 432 ||
         MediaQuery.textScalerOf(context).scale(15) > 18) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

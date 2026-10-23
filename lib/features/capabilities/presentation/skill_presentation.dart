@@ -173,7 +173,7 @@ Future<Map<String, dynamic>?> chooseSkillIcon(
         ],
       ),
       const SizedBox(height: 20),
-      marketButton('上传自己的图标', () async {
+      marketDialogButton('上传自己的图标', () async {
         try {
           final data = await pickSkillPresentationImage(icon: true);
           if (data != null && dialogContext.mounted)
@@ -186,7 +186,7 @@ Future<Map<String, dynamic>?> chooseSkillIcon(
         }
       }, icon: 'upload'),
       const SizedBox(height: 8),
-      marketButton(
+      marketDialogButton(
         '恢复默认',
         () => Navigator.pop(dialogContext, {
           'icon_asset': defaultAsset,
@@ -194,7 +194,7 @@ Future<Map<String, dynamic>?> chooseSkillIcon(
         }),
       ),
       const SizedBox(height: 8),
-      marketButton('取消', () => Navigator.pop(dialogContext)),
+      marketDialogButton('取消', () => Navigator.pop(dialogContext)),
     ],
   ),
 );

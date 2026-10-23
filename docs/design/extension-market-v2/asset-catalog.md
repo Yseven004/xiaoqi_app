@@ -2,6 +2,8 @@
 
 ## Flutter 接入 · 2026-10-23
 
+- **MCP 近方形弹窗定稿**：见 [最新规格](mcp-compact-confirmed-2026-10-23.md) 与 [用户确认图](approved-details/mcp-near-square-approved-2026-10-23.png)。复用既有 `capabilities/mcp_connector.svg` 与 `extension_market/detail/pencil.svg`，viewBox 均为 `0 0 256 256`；沿用下述独立预览记录。消费于 `_McpConnectionDialogState`，弹窗最大宽度520dp；图标与名称输入框同高，默认50dp，铅笔12dp／#999DA5，未包裹并位于右下角，整个图标区响应点击。扩展市场其他 `MarketDialog` 共用默认宽度由600dp调至520dp。设计确认与代码接入完成；页面与真机视觉验收待完成。
+
 - **添加按钮方圆外形**：用户后续确认沿用顶部分段选中底板的圆角，保留黑色。项目内独立重建 `assets/icons/extensions/market_add_button.svg`，viewBox `0 0 64 48`，圆角10，填充 `#1D1D1D`，显示约64×48dp并随原生文字适配；默认/选中/按下共用底形，无点击阴影，原生键盘焦点保留。消费于 `ExtensionMarketPage._addMenu`，仅承载固定底形，文字与菜单交互由Flutter实现。独立128×96预览 `.codex-artifacts/market-redesign-20261023/add-button-shape.png` 已打开核对形状、边界与填充；代码接入完成，页面视觉及真机验证未执行。
 
 - **市场分段控件最新定稿**：来源为用户于2026-10-23选择的第三张方向稿（`codex-clipboard-41af9a41-8c2a-4d6e-a8cf-40b5847f4ff1.png`）；项目内重建固定几何，无第三方素材、无位图和文字。替代此前整组选中态SVG与独立灰色筛选底形。`assets/icons/extensions/market_segment_track.svg` 的 viewBox 为 `0 0 200 48`，`market_segment_selected.svg` 为 `0 0 100 48`；消费组件 `ExtensionMarketPage._segmentedSwitch`，顶部分段180×48dp、公开/个人208×48dp，随字号适配。默认与未选中共用灰色容器；唯一白色底板按选中索引对齐左/右，底板始终只占半宽。`market_category.svg`、`market_category_selected.svg` 的 viewBox 均为 `0 0 100 40`，默认白底灰边 / 选中浅蓝底蓝边，由 `_categoryPill` 消费，图形高度40dp、宽度随原生文字，触控至少48dp。焦点/按下由原生按钮反馈，语义和文字不栅格化。独立资产预览：`.codex-artifacts/market-redesign-20261023/standalone-segments.png`；已打开核对轮廓、填充、透明边界及底板内缩。完整布局和状态见 [分段与分类规格](../../ui/extension-market-segments-2026-10-23.md)。状态：用户确认设计方向、资产形状已核对、源码接入；Flutter页面对比及真机验收未执行。

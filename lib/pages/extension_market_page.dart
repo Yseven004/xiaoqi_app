@@ -26,17 +26,53 @@ Future<CapabilityDraft?> showSkillContentImport(
   BuildContext context, {
   CapabilityKind kind = CapabilityKind.skill,
 }) async {
+  var mcp = false;
   final result = await showDialog<Object?>(
     context: context,
     requestFocus: false,
     barrierDismissible: false,
     barrierColor: marketBarrier,
-    builder: (_) => Theme(
+    builder: (dialogContext) => Theme(
       data: marketTheme(context),
-      child: _PackageImportDialog(
-        skill: kind == CapabilityKind.skill,
-        upload: true,
-        forEditor: true,
+      child: StatefulBuilder(
+        builder: (_, update) => AnimatedSwitcher(
+          duration: MediaQuery.disableAnimationsOf(dialogContext)
+              ? Duration.zero
+              : const Duration(milliseconds: 220),
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.985, end: 1).animate(animation),
+              child: child,
+            ),
+          ),
+          layoutBuilder: (current, previous) => Stack(
+            fit: StackFit.expand,
+            alignment: Alignment.center,
+            children: [
+              for (final child in previous)
+                IgnorePointer(child: ExcludeSemantics(child: child)),
+              if (current != null) current,
+            ],
+          ),
+          child: mcp
+              ? const _McpConnectionDialog(
+                  key: ValueKey('mcp'),
+                  forEditor: true,
+                )
+              : _PackageImportDialog(
+                  key: const ValueKey('package'),
+                  skill: kind == CapabilityKind.skill,
+                  upload: true,
+                  forEditor: true,
+                  onMcp: () {
+                    FocusManager.instance.primaryFocus?.unfocus();
+                    update(() => mcp = true);
+                  },
+                ),
+        ),
       ),
     ),
   );
@@ -546,7 +582,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     if (mounted) await _reload();
   }
 
-  Future<void> _edit({CapabilityDraft? draft, CapabilityRecord? record}) async {
+  Future<void> _edit({
+    CapabilityDraft? draft,
+    CapabilityRecord? record,
+    bool openImport = false,
+  }) async {
     final kind =
         draft?.kind ??
         record?.kind ??
@@ -560,6 +600,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           draft: draft,
           record: record,
           kind: kind,
+          openImportOnStart: openImport,
           onImport: (ctx) => showSkillContentImport(ctx, kind: kind),
         ),
       ),
@@ -630,8 +671,12 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           title: title,
           children: [Text(body, style: const TextStyle(height: 1.65))],
           actions: [
-            marketButton('取消', () => Navigator.pop(ctx, false)),
-            marketButton(action, () => Navigator.pop(ctx, true), primary: true),
+            marketDialogButton('取消', () => Navigator.pop(ctx, false)),
+            marketDialogButton(
+              action,
+              () => Navigator.pop(ctx, true),
+              primary: true,
+            ),
           ],
         ),
       ) ==
@@ -800,7 +845,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           const SizedBox(height: 18),
           Text('版本 ${entry.version} · ${record.enabled ? '已启用' : '已停用'}'),
           if (record.isServerInstallation)
-            marketButton('检查更新', () {
+            marketDialogButton('检查更新', () {
               Navigator.pop(ctx);
               unawaited(
                 _import(update: record, upload: record.origin == 'upload'),
@@ -808,7 +853,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             }, icon: 'link'),
         ],
         actions: [
-          marketButton(
+          marketDialogButton(
             '卸载${entry.kind == ExtensionKind.skill ? '技能' : '插件'}',
             () {
               Navigator.pop(ctx);
@@ -816,7 +861,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             },
             icon: 'trash-danger',
           ),
-          marketButton(record.enabled ? '停用' : '启用', () async {
+          marketDialogButton(record.enabled ? '停用' : '启用', () async {
             try {
               await _cloud.manageInstallation(record, enabled: !record.enabled);
               if (ctx.mounted) Navigator.pop(ctx);
@@ -825,7 +870,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               if (ctx.mounted) AppToast.show(ctx, '修改失败：$error');
             }
           }),
-          marketButton('完成', () => Navigator.pop(ctx), primary: true),
+          marketDialogButton('完成', () => Navigator.pop(ctx), primary: true),
         ],
       ),
     );
@@ -849,56 +894,61 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       splashColor: Colors.transparent,
       highlightColor: Colors.transparent,
     ),
-    child: PopupMenuButton<String>(
-      position: PopupMenuPosition.under,
-      offset: const Offset(0, 8),
-      tooltip: '添加$_label',
-      color: Colors.white,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      onSelected: (action) {
-        switch (action) {
-          case 'chat':
-            _chat(null);
-          case 'editor':
-            unawaited(_edit());
-          case 'upload':
-            unawaited(_import(upload: true));
-          case 'mcp':
-            unawaited(_mcpForm());
-        }
-      },
-      itemBuilder: (_) => _kind == ExtensionKind.skill
-          ? [
+    child: _kind != ExtensionKind.skill
+        ? TextButton(
+            onPressed: () => unawaited(_edit(openImport: true)),
+            style: TextButton.styleFrom(
+              padding: EdgeInsets.zero,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: _addButtonFace(),
+          )
+        : PopupMenuButton<String>(
+            position: PopupMenuPosition.under,
+            offset: const Offset(0, 8),
+            tooltip: '添加$_label',
+            color: Colors.white,
+            surfaceTintColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            onSelected: (action) {
+              switch (action) {
+                case 'chat':
+                  _chat(null);
+                case 'editor':
+                  unawaited(_edit(openImport: true));
+              }
+            },
+            itemBuilder: (_) => [
               _menuItem('chat', '通过聊天创建', 'chat'),
               _menuItem('editor', '使用编辑器创建', 'pencil'),
-            ]
-          : [
-              _menuItem('editor', '创建插件', 'edit'),
-              _menuItem('mcp', '添加自定义 MCP 服务器', 'paperclip'),
             ],
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 48),
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            Positioned.fill(
-              child: SvgPicture.asset(
-                'assets/icons/extensions/market_add_button.svg',
-                fit: BoxFit.fill,
-                excludeFromSemantics: true,
-              ),
-            ),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 17, vertical: 14),
-              child: Text(
-                '添加',
-                style: TextStyle(color: Colors.white, fontSize: 15),
-              ),
-            ),
-          ],
+            child: _addButtonFace(),
+          ),
+  );
+  Widget _addButtonFace() => ConstrainedBox(
+    constraints: const BoxConstraints(minHeight: 48),
+    child: Stack(
+      alignment: Alignment.center,
+      children: [
+        Positioned.fill(
+          child: SvgPicture.asset(
+            'assets/icons/extensions/market_add_button.svg',
+            fit: BoxFit.fill,
+            excludeFromSemantics: true,
+          ),
         ),
-      ),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 17, vertical: 14),
+          child: Text(
+            '添加',
+            style: TextStyle(color: Colors.white, fontSize: 15),
+          ),
+        ),
+      ],
     ),
   );
   String get _label => _kind == ExtensionKind.skill ? '技能' : '插件';

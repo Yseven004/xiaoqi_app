@@ -7,11 +7,14 @@ class _PackageImportDialog extends StatefulWidget {
     this.skill = false,
     this.update,
     this.forEditor = false,
+    this.onMcp,
+    super.key,
   });
   final String? url;
   final bool upload, skill;
   final CapabilityRecord? update;
   final bool forEditor;
+  final VoidCallback? onMcp;
   @override
   State<_PackageImportDialog> createState() => _PackageImportDialogState();
 }
@@ -221,9 +224,9 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
         : '检查并更新',
     canClose: !_busy,
     leadingAction: _upload && !widget.skill
-        ? marketButton(
+        ? marketDialogButton(
             '添加自定义 MCP 服务器',
-            _busy ? null : () => Navigator.pop(context, 'mcp'),
+            _busy ? null : widget.onMcp ?? () => Navigator.pop(context, 'mcp'),
           )
         : null,
     children: [
@@ -352,7 +355,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
           ),
         ),
       if (_upload && _policy == null && !_loadingPolicy)
-        marketButton('重新读取限制', _loadPolicy),
+        marketDialogButton('重新读取限制', _loadPolicy),
       if (_inspection != null) ...[
         const SizedBox(height: 18),
         SelectableText(
@@ -393,7 +396,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
                     style: const TextStyle(color: marketMuted, height: 1.6),
                   ),
                 const SizedBox(height: 10),
-                marketButton(
+                marketDialogButton(
                   widget.forEditor
                       ? '导入'
                       : candidate['status'] == 'partial'
@@ -420,8 +423,8 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
       ],
     ],
     actions: [
-      marketButton('取消', _busy && _jobId == null ? null : _cancel),
-      marketButton(
+      marketDialogButton('取消', _busy && _jobId == null ? null : _cancel),
+      marketDialogButton(
         _busy
             ? '正在处理…'
             : _inspection == null
@@ -435,8 +438,13 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
 }
 
 class _McpConnectionDialog extends StatefulWidget {
-  const _McpConnectionDialog({this.connection});
+  const _McpConnectionDialog({
+    this.connection,
+    this.forEditor = false,
+    super.key,
+  });
   final McpConnectionRecord? connection;
+  final bool forEditor;
   @override
   State<_McpConnectionDialog> createState() => _McpConnectionDialogState();
 }
@@ -476,7 +484,7 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
   }
 
   Widget _fieldLabel(String label, {String? suffix}) => Padding(
-    padding: const EdgeInsets.only(bottom: 8),
+    padding: const EdgeInsets.only(bottom: 4),
     child: Text.rich(
       TextSpan(
         text: label,
@@ -499,18 +507,18 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
     hintText: hint,
     hintStyle: const TextStyle(color: Color(0xFF89919C)),
     filled: true,
-    fillColor: const Color(0xFFF1F2F4),
-    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+    fillColor: marketSoft,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
     border: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(10),
       borderSide: const BorderSide(color: Color(0xFFDDE1E6)),
     ),
     enabledBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(10),
       borderSide: const BorderSide(color: Color(0xFFDDE1E6)),
     ),
     focusedBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(10),
       borderSide: const BorderSide(color: Color(0xFF888888), width: 2),
     ),
   );
@@ -522,11 +530,10 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
     bool primary = false,
   }) => SizedBox(
     width: width,
-    child: marketButton(
+    child: marketDialogButton(
       label,
       onPressed,
       primary: primary,
-      radius: 9,
       height: 58,
       fontSize: 16,
     ),
@@ -565,14 +572,31 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
                 '连接成功 · ${result['tool_count'] ?? result['tools_count'] ?? '已取得'} 个工具（尚未保存）',
           );
       } else {
-        await CapabilityCloudSync.instance.saveMcpConnection(
+        final saved = await CapabilityCloudSync.instance.saveMcpConnection(
           id: widget.connection?.id,
           name: _name.text.trim(),
           url: uri.toString(),
           bearerToken: token,
           icon: widget.connection?.catalogId == null ? _icon : null,
         );
-        if (mounted) Navigator.pop(context, true);
+        if (!mounted) return;
+        FocusManager.instance.primaryFocus?.unfocus();
+        if (widget.forEditor) {
+          Navigator.pop(
+            context,
+            CapabilityDraft(
+              id: CapabilityStore.instance.newDraftId(),
+              kind: CapabilityKind.plugin,
+              name: '',
+              description: '',
+              content: '',
+              presentation: {...saved.icon, 'title': saved.name},
+              updatedAt: DateTime.now(),
+            ),
+          );
+        } else {
+          Navigator.pop(context, true);
+        }
       }
     } catch (error) {
       if (mounted) setState(() => _error = '${test ? '测试' : '保存'}失败：$error');
@@ -586,9 +610,9 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
     title: widget.connection == null ? '添加自定义 MCP 服务器' : '连接设置',
     moveWithKeyboard: true,
     canClose: !_busy,
-    maxWidth: 760,
+    maxWidth: 520,
     cornerRadius: 18,
-    contentPadding: const EdgeInsets.fromLTRB(32, 26, 32, 28),
+    contentPadding: const EdgeInsets.fromLTRB(32, 12, 32, 16),
     actionsDivider: true,
     fixedActions: true,
     children: [
@@ -596,71 +620,66 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
         '连接你信任的 MCP 服务器，让小七使用其中的工具。',
         style: TextStyle(color: marketMuted, fontSize: 15, height: 1.65),
       ),
-      const SizedBox(height: 24),
+      const SizedBox(height: 6),
       Builder(
         builder: (context) {
-          final iconSize = MediaQuery.sizeOf(context).width < 600
-              ? 88.0
-              : 128.0;
+          final inputHeight =
+              (MediaQuery.textScalerOf(context).scale(16) * 1.5 + 26).clamp(
+                50.0,
+                double.infinity,
+              );
+          final canEditIcon = widget.connection?.catalogId == null;
           return Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              SizedBox(
-                width: iconSize,
-                height: iconSize,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    SkillPresentationIcon(_icon, size: iconSize),
-                    if (widget.connection?.catalogId == null)
-                      Positioned(
-                        right: -8,
-                        bottom: -8,
-                        child: Tooltip(
-                          message: '编辑图标',
-                          child: Material(
-                            color: Colors.white,
-                            elevation: 2,
-                            shadowColor: const Color(0x22000000),
-                            shape: const CircleBorder(
-                              side: BorderSide(color: Color(0xFFDDE1E6)),
+              Tooltip(
+                message: canEditIcon ? '编辑图标' : '服务器图标',
+                child: Semantics(
+                  button: canEditIcon,
+                  child: InkWell(
+                    onTap: canEditIcon && !_busy ? _chooseIcon : null,
+                    borderRadius: BorderRadius.circular(10),
+                    child: SizedBox(
+                      width: inputHeight,
+                      height: inputHeight,
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(10),
+                            child: SkillPresentationIcon(
+                              _icon,
+                              size: inputHeight,
                             ),
-                            child: InkWell(
-                              customBorder: const CircleBorder(),
-                              onTap: _busy ? null : _chooseIcon,
-                              child: const SizedBox(
-                                width: 48,
-                                height: 48,
-                                child: Center(
-                                  child: SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: marketIcon('pencil', size: 20),
-                                  ),
+                          ),
+                          if (canEditIcon)
+                            Positioned(
+                              right: -2,
+                              bottom: -2,
+                              child: ExcludeSemantics(
+                                child: marketIcon(
+                                  'pencil',
+                                  size: 12,
+                                  color: const Color(0xFF999DA5),
                                 ),
                               ),
                             ),
-                          ),
-                        ),
+                        ],
                       ),
-                  ],
+                    ),
+                  ),
                 ),
               ),
-              const SizedBox(width: 28),
+              const SizedBox(width: 14),
               Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _fieldLabel('名称'),
-                      TextField(
-                        controller: _name,
-                        enabled: !_busy,
-                        onChanged: _changed,
-                        decoration: _inputDecoration('例如：我的资料库'),
-                      ),
-                    ],
+                child: SizedBox(
+                  height: inputHeight,
+                  child: TextField(
+                    controller: _name,
+                    enabled: !_busy,
+                    onChanged: _changed,
+                    textAlignVertical: TextAlignVertical.center,
+                    decoration: _inputDecoration('名称'),
                   ),
                 ),
               ),
@@ -668,21 +687,16 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
           );
         },
       ),
-      const SizedBox(height: 48),
+      const SizedBox(height: 6),
       _fieldLabel('服务器地址'),
       TextField(
         controller: _url,
         enabled: !_busy,
         onChanged: _changed,
         keyboardType: TextInputType.url,
-        decoration: _inputDecoration('https://example.com/mcp'),
+        decoration: _inputDecoration('使用 HTTPS 连接远程服务器'),
       ),
-      const SizedBox(height: 8),
-      const Text(
-        '使用 HTTPS 连接远程服务器。',
-        style: TextStyle(color: marketMuted, fontSize: 14, height: 1.5),
-      ),
-      const SizedBox(height: 28),
+      const SizedBox(height: 6),
       _fieldLabel('访问令牌', suffix: '  ·  可选'),
       TextField(
         controller: _token,
@@ -713,12 +727,7 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
             child: Text(_result!, style: const TextStyle(height: 1.65)),
           ),
         ),
-      const SizedBox(height: 22),
-      const Text(
-        '测试连接不会保存配置。',
-        style: TextStyle(fontSize: 14, color: marketMuted, height: 1.6),
-      ),
-      const SizedBox(height: 28),
+      const SizedBox(height: 8),
     ],
     leadingAction: _actionButton(
       _busy ? '正在处理…' : '测试连接',

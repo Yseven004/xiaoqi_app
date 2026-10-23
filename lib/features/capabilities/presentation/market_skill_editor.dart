@@ -91,6 +91,7 @@ class MarketSkillEditor extends StatefulWidget {
     this.draft,
     this.record,
     this.onImport,
+    this.openImportOnStart = false,
     this.kind = CapabilityKind.skill,
     super.key,
   });
@@ -98,6 +99,7 @@ class MarketSkillEditor extends StatefulWidget {
   final CapabilityDraft? draft;
   final CapabilityRecord? record;
   final Future<CapabilityDraft?> Function(BuildContext)? onImport;
+  final bool openImportOnStart;
   @override
   State<MarketSkillEditor> createState() => _MarketSkillEditorState();
 }
@@ -118,6 +120,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   final _cloud = CapabilityCloudSync.instance;
   final _scaffold = GlobalKey<ScaffoldState>();
   late CapabilityDraft _base;
+  bool _importDialogOpen = false;
+  Animation<double>? _entryAnimation;
   bool get _isPlugin => _base.kind == CapabilityKind.plugin;
   String get _kindLabel => _isPlugin ? '插件' : '技能';
   String get _mainFile => !_isPlugin
@@ -173,6 +177,25 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     ])
       controller.addListener(_changed);
     unawaited(_restoreDraft());
+    if (widget.openImportOnStart) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final animation = ModalRoute.of(context)?.animation;
+        if (animation == null || animation.isCompleted) {
+          unawaited(_importContent());
+        } else {
+          _entryAnimation = animation;
+          animation.addStatusListener(_onEntryStatus);
+        }
+      });
+    }
+  }
+
+  void _onEntryStatus(AnimationStatus status) {
+    if (status != AnimationStatus.completed) return;
+    _entryAnimation?.removeStatusListener(_onEntryStatus);
+    _entryAnimation = null;
+    if (mounted) unawaited(_importContent());
   }
 
   void _applyDraft(CapabilityDraft draft) {
@@ -274,6 +297,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
 
   @override
   void dispose() {
+    _entryAnimation?.removeStatusListener(_onEntryStatus);
     for (final controller in [
       _name,
       _description,
@@ -472,24 +496,41 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   }
 
   Future<void> _importContent() async {
-    if (_busy || widget.onImport == null) return;
-    final incoming = await widget.onImport!(context);
-    if (incoming == null || !mounted) return;
-    if (incoming.kind != _base.kind) {
+    if (_busy || _importDialogOpen || widget.onImport == null) return;
+    if (mounted) setState(() => _importDialogOpen = true);
+    CapabilityDraft? incoming;
+    try {
+      incoming = await widget.onImport!(context);
+    } finally {
+      if (mounted) setState(() => _importDialogOpen = false);
+    }
+    final imported = incoming;
+    if (imported == null || !mounted) return;
+    if (imported.kind != _base.kind) {
       AppToast.show(context, '请选择${_kindLabel}文件，当前草稿已保留');
       return;
     }
-    if (_body.text.trim().isNotEmpty ||
+    if (_base.content.trim().isNotEmpty ||
         _title.text.trim().isNotEmpty ||
         _dirty) {
       final replace = await showDialog<bool>(
         context: context,
         builder: (ctx) => MarketDialog(
           title: '替换当前${_kindLabel}内容？',
-          children: [Text('导入会替换名称、简介和${_kindLabel}文件。已有图标、详细介绍和介绍图片会保留。')],
+          children: [
+            Text(
+              imported.presentation.containsKey('icon_asset')
+                  ? '导入会替换名称、图标、简介和${_kindLabel}文件。详细介绍和介绍图片会保留。'
+                  : '导入会替换名称、简介和${_kindLabel}文件。已有图标、详细介绍和介绍图片会保留。',
+            ),
+          ],
           actions: [
-            marketButton('取消', () => Navigator.pop(ctx, false)),
-            marketButton('确认替换', () => Navigator.pop(ctx, true), primary: true),
+            marketDialogButton('取消', () => Navigator.pop(ctx, false)),
+            marketDialogButton(
+              '确认替换',
+              () => Navigator.pop(ctx, true),
+              primary: true,
+            ),
           ],
         ),
       );
@@ -499,13 +540,17 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     setState(() {
       _applyDraft(
         _base.copyWith(
-          name: incoming.name,
-          description: incoming.description,
-          content: incoming.content,
-          files: incoming.files,
+          name: imported.name,
+          description: imported.description,
+          content: imported.content,
+          files: imported.files,
           presentation: {
             ...current,
-            'title': incoming.presentation['title'] ?? incoming.name,
+            if (imported.presentation.containsKey('icon_asset'))
+              'icon_asset': imported.presentation['icon_asset'],
+            if (imported.presentation.containsKey('icon_data'))
+              'icon_data': imported.presentation['icon_data'],
+            'title': imported.presentation['title'] ?? imported.name,
           },
         ),
       );
@@ -644,8 +689,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
             ),
           ],
           actions: [
-            marketButton('取消', () => Navigator.pop(ctx)),
-            marketButton('创建', () {
+            marketDialogButton('取消', () => Navigator.pop(ctx)),
+            marketDialogButton('创建', () {
               final name = controller.text.trim();
               if (!_safePath(name) ||
                   !_textFile(name) ||
@@ -715,8 +760,12 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
             title: '替换同名附件？',
             children: [Text(duplicates.join('\n'))],
             actions: [
-              marketButton('取消', () => Navigator.pop(ctx)),
-              marketButton('替换', () => Navigator.pop(ctx, true), primary: true),
+              marketDialogButton('取消', () => Navigator.pop(ctx)),
+              marketDialogButton(
+                '替换',
+                () => Navigator.pop(ctx, true),
+                primary: true,
+              ),
             ],
           ),
         );
@@ -1269,6 +1318,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           final phone = constraints.maxWidth <= 600;
           return Scaffold(
             key: _scaffold,
+            // Keep the editor's bottom actions anchored while the keyboard is
+            // open. This editor is shared by both plugins and skills.
+            resizeToAvoidBottomInset: false,
             drawer: phone
                 ? Drawer(
                     backgroundColor: Colors.white,
