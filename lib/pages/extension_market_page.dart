@@ -884,50 +884,38 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             marketSection('搜索结果'),
             _grid(_matching(_personal ? _personalEntries : _installed)),
           ] else ...[
-            marketSection('已安装', onTap: () => _showList('已安装')),
-            if (_loading || _kind == ExtensionKind.plugin && _loadingMcp)
-              marketSkeleton()
-            else if (_installed.isEmpty)
-              Wrap(
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Text(
-                    '还没有安装$_label',
-                    style: const TextStyle(color: marketMuted),
-                  ),
-                  TextButton(
-                    onPressed: () => _showList('推荐'),
-                    child: const Text('查看推荐'),
-                  ),
-                ],
-              )
-            else if (_kind == ExtensionKind.skill)
-              _grid(_installed)
-            else
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: _installed
-                      .map(
-                        (e) => Padding(
-                          padding: const EdgeInsets.only(right: 10),
-                          child: Tooltip(
-                            message: e.name,
-                            child: InkWell(
-                              onTap: () => _open(e),
-                              child: Padding(
-                                padding: const EdgeInsets.all(4),
-                                child: MarketBrand(e.asset),
+            if (_installed.isNotEmpty) ...[
+              marketSection('已安装', onTap: () => _showList('已安装')),
+              if (_loading || _kind == ExtensionKind.plugin && _loadingMcp)
+                marketSkeleton()
+              else if (_kind == ExtensionKind.skill)
+                _grid(_installed)
+              else
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: _installed
+                        .map(
+                          (e) => Padding(
+                            padding: const EdgeInsets.only(right: 10),
+                            child: Tooltip(
+                              message: e.name,
+                              child: InkWell(
+                                onTap: () => _open(e),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(4),
+                                  child: MarketBrand(e.asset),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      )
-                      .toList(),
+                        )
+                        .toList(),
+                  ),
                 ),
-              ),
+            ],
             ...[
-              const SizedBox(height: 25),
+              SizedBox(height: _installed.isEmpty ? 30 : 25),
               Wrap(
                 spacing: 6,
                 children: [
