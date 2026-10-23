@@ -76,6 +76,40 @@ void main() {
     );
   });
 
+  test(
+    'connection icons survive updates and reject executable or external content',
+    () async {
+      final saved = await service.save('icon-owner', {
+        'name': 'My server',
+        'url': 'https://example.com/mcp',
+        'bearer_token': 'test-token',
+        'icon': {'icon_asset': 'book', 'icon_data': ''},
+      });
+      final updated = await service.save('icon-owner', {
+        'id': saved['id'],
+        'name': 'Renamed',
+        'url': 'https://example.com/mcp',
+      });
+      expect(updated['icon'], {'icon_asset': 'book', 'icon_data': ''});
+      expect(updated['has_bearer_token'], isTrue);
+      for (final data in [
+        'https://example.com/icon.svg',
+        'data:image/svg+xml;base64,${base64Encode(utf8.encode('<svg><script>alert(1)</script></svg>'))}',
+      ]) {
+        await expectLater(
+          service.save('icon-owner', {
+            'id': saved['id'],
+            'name': 'Renamed',
+            'url': 'https://example.com/mcp',
+            'icon': {'icon_asset': 'mcp', 'icon_data': data},
+          }),
+          throwsFormatException,
+        );
+      }
+      expect(service.list('icon-owner').single['icon'], updated['icon']);
+    },
+  );
+
   test('accepts public HTTPS endpoints and rejects unsafe URL forms', () {
     expect(
       McpConnectionService.parseRemoteUrl(

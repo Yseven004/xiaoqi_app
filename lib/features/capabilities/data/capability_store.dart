@@ -343,7 +343,14 @@ class CapabilityStore {
       throw StateError('已安装的第三方扩展不能覆盖为作者作品');
     }
     final previousVersion = previous?.currentVersion;
-    final packageHashInput = draft.files.isEmpty
+    final packageHashInput = draft.kind == CapabilityKind.plugin
+        ? utf8.encode(
+            jsonEncode({
+              for (final path in draft.files.keys.toList()..sort())
+                path: draft.files[path],
+            }),
+          )
+        : draft.files.isEmpty
         ? utf8.encode(draft.content)
         : utf8.encode(
             jsonEncode({
@@ -380,6 +387,8 @@ class CapabilityStore {
       deletedAt: null,
       cloudRevision: previous?.cloudRevision ?? 0,
       presentation: draft.presentation,
+      keywords: previous?.keywords,
+      keywordsEdited: previous?.keywordsEdited ?? false,
       publicationId: previous?.publicationId,
       publishedRevision: previous?.publishedRevision ?? 0,
     );

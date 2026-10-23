@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xiaoqi_app/features/capabilities/data/capability_models.dart';
@@ -23,6 +26,39 @@ void main() {
       'images': [
         {'data': 'data:image/png;base64,aGVsbG8=', 'caption': '说明'},
       ],
+    },
+  );
+
+  test(
+    'plugin drafts preserve their kind and hash the real package without a synthetic SKILL.md',
+    () async {
+      final manifest = jsonEncode({'name': 'reading-bundle'});
+      final files = {'plugin.json': base64Encode(utf8.encode(manifest))};
+      final plugin = CapabilityDraft(
+        id: 'plugin-draft',
+        kind: CapabilityKind.plugin,
+        name: 'reading-bundle',
+        description: 'Reading tools',
+        content: manifest,
+        files: files,
+        updatedAt: DateTime.utc(2026, 10, 23),
+        cloudOwnerEmail: 'alice@example.com',
+        presentation: {'title': '阅读工具包'},
+      );
+      final store = CapabilityStore.instance;
+      await store.saveAuthoringDraft(plugin);
+      final restored = (await store.authoringDrafts(
+        'alice@example.com',
+      )).single;
+      expect(restored.kind, CapabilityKind.plugin);
+      final saved = await store.commitDraft(restored);
+      expect(saved.kind, CapabilityKind.plugin);
+      expect(saved.currentVersion!.files, files);
+      expect(saved.currentVersion!.files.containsKey('SKILL.md'), isFalse);
+      expect(
+        saved.currentVersion!.contentHash,
+        sha256.convert(utf8.encode(jsonEncode(files))).toString(),
+      );
     },
   );
 

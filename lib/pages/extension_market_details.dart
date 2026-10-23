@@ -103,7 +103,13 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
     itemBuilder: (_) => [
       PopupMenuItem(value: 'copy', child: _menuRow('link', '复制链接')),
       if (_entry.editable)
-        PopupMenuItem(value: 'edit', child: _menuRow('edit', '编辑技能')),
+        PopupMenuItem(
+          value: 'edit',
+          child: _menuRow(
+            'edit',
+            _entry.kind == ExtensionKind.plugin ? '编辑插件' : '编辑技能',
+          ),
+        ),
       if (_entry.installed)
         PopupMenuItem(value: 'manage', child: _menuRow('gear', '管理')),
       if (_entry.installed)
@@ -256,11 +262,14 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
         final small = constraints.maxWidth <= 540;
         final identity = Row(
           children: [
-            MarketBrand(
-              _entry.asset,
-              size: small ? 66 : 82,
-              glyphSize: small ? 44 : 54,
-            ),
+            if (_entry.presentation.isNotEmpty)
+              SkillPresentationIcon(_entry.presentation, size: small ? 66 : 82)
+            else
+              MarketBrand(
+                _entry.asset,
+                size: small ? 66 : 82,
+                glyphSize: small ? 44 : 54,
+              ),
             const SizedBox(width: 20),
             Expanded(
               child: Column(
@@ -465,11 +474,15 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
       : [
           Row(
             children: [
-              marketIconButton('back', '返回技能', () => Navigator.pop(context)),
-              const Expanded(
+              marketIconButton(
+                'back',
+                _entry.kind == ExtensionKind.plugin ? '返回插件' : '返回技能',
+                () => Navigator.pop(context),
+              ),
+              Expanded(
                 child: Center(
                   child: Text(
-                    '技能详情',
+                    _entry.kind == ExtensionKind.plugin ? '插件详情' : '技能详情',
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
                   ),
                 ),
@@ -483,6 +496,7 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
             name: _entry.name,
             description: _entry.description,
             author: _entry.developer,
+            kindLabel: _entry.kind == ExtensionKind.plugin ? '插件' : '技能',
           ),
         ];
 
@@ -598,10 +612,16 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
   Widget build(BuildContext context) => Theme(
     data: marketTheme(context),
     child: MarketFrame(
-      children: _entry.kind == ExtensionKind.skill
+      children:
+          _entry.kind == ExtensionKind.skill ||
+              _entry.kind == ExtensionKind.plugin &&
+                  _entry.presentation.isNotEmpty
           ? _skillContent()
           : _pluginContent(),
-      footer: _entry.kind == ExtensionKind.skill
+      footer:
+          _entry.kind == ExtensionKind.skill ||
+              _entry.kind == ExtensionKind.plugin &&
+                  _entry.presentation.isNotEmpty
           ? SizedBox(
               width: double.infinity,
               child: marketButton(
@@ -609,6 +629,8 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
                     ? '正在处理…'
                     : _entry.installed
                     ? '在聊天中试用'
+                    : _entry.kind == ExtensionKind.plugin
+                    ? '添加插件'
                     : '添加技能',
                 _busy ? null : _try,
                 primary: true,

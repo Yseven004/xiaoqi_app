@@ -80,6 +80,7 @@ class McpConnectionRecord {
     this.authMode = 'none',
     this.toolCount,
     this.error,
+    this.icon = const {'icon_asset': 'mcp', 'icon_data': ''},
   });
 
   final String id;
@@ -92,6 +93,7 @@ class McpConnectionRecord {
   final String authMode;
   final int? toolCount;
   final String? error;
+  final Map<String, dynamic> icon;
 
   bool get isReady => status == McpInstallationState.ready;
   bool get needsLogin => status == McpInstallationState.needsLogin;
@@ -109,6 +111,9 @@ class McpConnectionRecord {
       authMode: raw['auth_mode']?.toString() ?? 'none',
       toolCount: (raw['tool_count'] as num?)?.toInt(),
       error: raw['error']?.toString(),
+      icon: raw['icon'] is Map
+          ? Map<String, dynamic>.from(raw['icon'] as Map)
+          : const {'icon_asset': 'mcp', 'icon_data': ''},
     );
   }
 }

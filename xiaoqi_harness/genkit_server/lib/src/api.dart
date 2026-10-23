@@ -593,7 +593,7 @@ class XiaoqiApi {
         '/v1/mcp/connections',
         (request) => _authenticated(request, (device) async {
           try {
-            final body = await _body(request, 16 * 1024);
+            final body = await _body(request, 256 * 1024);
             final item = await McpConnectionService(
               store,
             ).save(device.tenant, body);
@@ -1716,6 +1716,9 @@ class XiaoqiApi {
       final key = 'cap/${device.tenant}/${record['id']}';
       final current = store.get(key);
       final expected = _asInt(body['expected_revision']);
+      if (current != null && current.value['kind'] != record['kind']) {
+        return _error('不能将已有作品改为另一种扩展类型，请创建独立草稿', 400);
+      }
       if (current == null && expected != null && expected != 0)
         return _error('云端版本已变化', 409);
       if (current != null && expected != current.revision) {
@@ -2681,6 +2684,116 @@ class XiaoqiApi {
     return action(_Device(key, record.value));
   }
 
+  Map<String, dynamic> _normalizeAuthoredPlugin(String tenant, Map raw) {
+    final id = _safeId(raw['id'], '能力 ID');
+    final name = raw['name']?.toString().trim() ?? '';
+    final description = raw['description']?.toString().trim() ?? '';
+    final versions = raw['versions'];
+    if (name.isEmpty ||
+        name.length > 128 ||
+        description.length > 2048 ||
+        versions is! List ||
+        versions.isEmpty ||
+        versions.length > 100) {
+      throw const FormatException('插件名称、描述或版本列表无效');
+    }
+    final currentId = _safeId(raw['current_version_id'], '当前版本 ID');
+    final normalized = <Map<String, dynamic>>[];
+    final artifacts = <String, Map<String, List<int>>>{};
+    Map<String, dynamic>? currentCandidate;
+    for (final version in versions) {
+      if (version is! Map || version['files'] is! Map) {
+        throw const FormatException('插件版本必须包含完整包文件');
+      }
+      final versionId = _safeId(version['id'], '版本 ID');
+      if (normalized.any((v) => v['id'] == versionId)) {
+        throw const FormatException('插件包含重复版本 ID');
+      }
+      final files = <String, List<int>>{};
+      var total = 0;
+      for (final entry in (version['files'] as Map).entries) {
+        final path = CapabilityImportService.safePath(entry.key.toString());
+        if (entry.value is! String) throw const FormatException('插件文件编码无效');
+        final bytes = base64Decode(entry.value as String);
+        total += bytes.length;
+        if (total > _maxCapabilityBytes || files.length >= 128) {
+          throw const FormatException('创作插件最多 128 个文件、总量 2 MB');
+        }
+        files[path] = bytes;
+      }
+      final main = const [
+        'plugin.json',
+        '.claude-plugin/plugin.json',
+        '.codex-plugin/plugin.json',
+      ].where(files.containsKey).firstOrNull;
+      if (main == null || utf8.decode(files[main]!) != version['content']) {
+        throw const FormatException('插件清单与包内容不一致');
+      }
+      CapabilityImportService.validateDependencies(files);
+      final candidate = CapabilityImportService.discover(
+        files,
+        '',
+      ).where((c) => c['kind'] == 'plugin' && c['root'] == '').firstOrNull;
+      if (candidate == null ||
+          candidate['status'] == 'unsupported' ||
+          versionId == currentId && candidate['name'] != name) {
+        throw const FormatException('请提供名称一致、至少包含一个受支持组件的完整插件包');
+      }
+      final digest = sha256
+          .convert(
+            utf8.encode(
+              _canonical({
+                for (final path in files.keys) path: base64Encode(files[path]!),
+              }),
+            ),
+          )
+          .toString();
+      final supplied = version['content_hash']?.toString() ?? '';
+      if (supplied.isNotEmpty && supplied != digest) {
+        throw const FormatException('插件版本校验值不匹配');
+      }
+      final artifact =
+          'tenants/$tenant/capabilities/$id/versions/$versionId-$digest.zip';
+      artifacts[artifact] = files;
+      normalized.add({
+        'id': versionId,
+        'number': _asInt(version['number']) ?? normalized.length + 1,
+        'content_hash': digest,
+        'created_at': version['created_at']?.toString() ?? '',
+        'parent_version_id': version['parent_version_id'],
+        'artifact_key': artifact,
+        'components': (candidate['components'] as List)
+            .whereType<Map>()
+            .where((c) => c['status'] != 'unsupported')
+            .toList(),
+      });
+      if (versionId == currentId) currentCandidate = candidate;
+    }
+    if (currentCandidate == null) throw const FormatException('当前插件版本不存在');
+    final presentation = normalizeSkillPresentation(raw['presentation']);
+    for (final entry in artifacts.entries) {
+      store.putImmutable(entry.key, entry.value);
+    }
+    return {
+      'schema_version': 2,
+      'id': id,
+      'kind': 'plugin',
+      'name': name,
+      'description': description,
+      'versions': normalized,
+      'current_version_id': currentId,
+      'created_at': raw['created_at']?.toString() ?? '',
+      'updated_at': raw['updated_at']?.toString() ?? '',
+      'show_in_menu': raw['show_in_menu'] != false,
+      'deleted_at': raw['deleted_at'],
+      'origin': 'local',
+      'owner_tenant': tenant,
+      'presentation': presentation,
+      'compatibility': currentCandidate,
+      'keywords': currentCandidate['keywords'] ?? const <String>[],
+    };
+  }
+
   Future<Map<String, dynamic>> _normalizeCapability(
     String tenant,
     Object? raw,
@@ -2690,6 +2803,7 @@ class XiaoqiApi {
     final kind = raw['kind'] ?? 'skill';
     if (kind != 'skill' && kind != 'plugin')
       throw const FormatException('能力类型无效');
+    if (kind == 'plugin') return _normalizeAuthoredPlugin(tenant, raw);
     final name = raw['name']?.toString().trim() ?? '';
     final description = raw['description']?.toString().trim() ?? '';
     if (name.isEmpty || name.length > 128 || description.length > 2048)
@@ -2874,10 +2988,18 @@ class XiaoqiApi {
               artifactKey.isNotEmpty &&
               !const {'github', 'upload'}.contains(document['origin'])) {
             final files = store.getImmutable(artifactKey);
-            version['content'] = utf8.decode(files['SKILL.md'] ?? const []);
+            final plugin = document['kind'] == 'plugin';
+            final main = plugin
+                ? const [
+                    'plugin.json',
+                    '.claude-plugin/plugin.json',
+                    '.codex-plugin/plugin.json',
+                  ].firstWhere(files.containsKey, orElse: () => 'plugin.json')
+                : 'SKILL.md';
+            version['content'] = utf8.decode(files[main] ?? const []);
             version['files'] = {
               for (final entry in files.entries)
-                if (entry.key != 'SKILL.md')
+                if (plugin || entry.key != 'SKILL.md')
                   entry.key: base64Encode(entry.value),
             };
           }

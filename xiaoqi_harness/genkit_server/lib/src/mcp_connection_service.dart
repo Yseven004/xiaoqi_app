@@ -1,4 +1,6 @@
 import 'dart:convert';
+
+import 'skill_market.dart' show normalizeSkillPresentation;
 import 'dart:io';
 import 'dart:math';
 
@@ -339,6 +341,16 @@ class McpConnectionService {
     final keywords = input.containsKey('keywords')
         ? parseCapabilityKeywords(input['keywords'])
         : previous?.value['keywords'] ?? const <String>[];
+    if (previous?.value['catalog_id'] != null && input.containsKey('icon')) {
+      throw const FormatException('市场连接的图标由发布者维护');
+    }
+    final rawIcon =
+        input['icon'] ?? previous?.value['icon'] ?? const {'icon_asset': 'mcp'};
+    if (rawIcon is! Map) throw const FormatException('连接图标格式无效');
+    final checkedIcon = normalizeSkillPresentation({
+      'icon_asset': rawIcon['icon_asset'] ?? 'mcp',
+      'icon_data': rawIcon['icon_data'] ?? '',
+    });
     final suppliedToken = _validatedToken(input['bearer_token']);
     final encrypted = suppliedToken == null || suppliedToken.isEmpty
         ? previous?.value['encrypted_bearer_token']
@@ -349,6 +361,10 @@ class McpConnectionService {
       'id': id,
       'name': name,
       'keywords': keywords,
+      'icon': {
+        'icon_asset': checkedIcon['icon_asset'],
+        'icon_data': checkedIcon['icon_data'],
+      },
       'url': url.toString(),
       if (encrypted != null) 'encrypted_bearer_token': encrypted,
       'created_at': previous?.value['created_at'] ?? now,
@@ -813,6 +829,7 @@ class McpConnectionService {
       'url': value['url'],
       'has_bearer_token': value['encrypted_bearer_token'] != null,
       'keywords': value['keywords'] ?? const <String>[],
+      'icon': value['icon'] ?? const {'icon_asset': 'mcp', 'icon_data': ''},
       if (value['catalog_id'] != null) 'catalog_id': value['catalog_id'],
       if (value['version'] != null) 'version': value['version'],
       'status': status,

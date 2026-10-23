@@ -884,32 +884,41 @@ class CapabilityImportService {
         .where((value) => value['id'] == candidateId)
         .firstOrNull;
     if (candidate == null ||
-        candidate['kind'] != 'skill' ||
-        candidate['status'] != 'supported') {
-      throw const FormatException('请选择检查通过的完整技能');
+        candidate['status'] == 'unsupported' ||
+        candidate['kind'] == 'skill' && candidate['status'] != 'supported') {
+      throw const FormatException('请选择检查通过的技能或插件');
     }
     final files = subtree(
       store.getImmutable(inspection['artifact_key'].toString()),
       candidate['root'].toString(),
     );
-    final main = files['SKILL.md'];
+    final plugin = candidate['kind'] == 'plugin';
+    final mainPath = plugin
+        ? const [
+            'plugin.json',
+            '.claude-plugin/plugin.json',
+            '.codex-plugin/plugin.json',
+          ].firstWhere(files.containsKey, orElse: () => 'plugin.json')
+        : 'SKILL.md';
+    final main = files[mainPath];
     if (main == null ||
         files.length > 128 ||
         files.values.fold<int>(0, (total, bytes) => total + bytes.length) >
             2 * 1024 * 1024) {
-      throw const FormatException('技能草稿必须包含 SKILL.md，最多 128 个文件、总量 2 MB');
+      throw const FormatException('草稿必须包含主文件，最多 128 个文件、总量 2 MB');
     }
     return {
       'id':
           'draft-${sha256.convert(utf8.encode('$tenant/$inspectionId/$candidateId')).toString().substring(0, 32)}',
-      'kind': 'skill',
+      'kind': candidate['kind'],
       'name': candidate['name'],
       'description': candidate['description'],
       'content': utf8.decode(main),
       'updated_at': DateTime.now().toUtc().toIso8601String(),
       'files': {
         for (final entry in files.entries)
-          if (entry.key != 'SKILL.md') entry.key: base64Encode(entry.value),
+          if (plugin || entry.key != 'SKILL.md')
+            entry.key: base64Encode(entry.value),
       },
     };
   }

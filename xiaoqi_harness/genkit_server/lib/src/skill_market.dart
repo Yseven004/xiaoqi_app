@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 
 import 'store.dart';
+import 'plugin_dependencies.dart';
 
 const skillIconAssets = {
   'research',
@@ -17,6 +18,8 @@ const skillIconAssets = {
   'plugs',
   'gear',
   'search',
+  'mcp',
+  'extension',
 };
 
 /// Presentation is data, never HTML, executable SVG or a client-supplied URL.
@@ -133,10 +136,10 @@ class SkillMarket {
     }
     if (record.revision != revision) throw const RevisionConflict('skill');
     final value = record.value;
-    if (value['kind'] != 'skill' ||
+    if (!const {'skill', 'plugin'}.contains(value['kind']) ||
         const {'github', 'upload', 'market'}.contains(value['origin']) ||
         value['owner_tenant'] != tenant) {
-      throw const FormatException('只有作者可以发布自己创建的技能');
+      throw const FormatException('只有作者可以发布自己创建的扩展');
     }
     final presentation = normalizeSkillPresentation(value['presentation']);
     if ((presentation['title']?.toString() ?? '').isEmpty ||
@@ -152,7 +155,36 @@ class SkillMarket {
       throw const FormatException('请先保存完整的技能内容');
     }
     // Verify the immutable package still exists before replacing a public snapshot.
-    store.getImmutable(versions.single['artifact_key'].toString());
+    final package = store.getImmutable(
+      versions.single['artifact_key'].toString(),
+    );
+    if (value['kind'] == 'plugin') {
+      // Connection credentials belong to each installer, never a public package.
+      void check(Object? config, [String key = '']) {
+        if (config is Map) {
+          for (final entry in config.entries) {
+            check(entry.value, entry.key.toString());
+          }
+        } else if (config is List) {
+          for (final value in config) {
+            check(value, key);
+          }
+        } else if (config is String &&
+            RegExp(
+              r'authorization|api[_-]?key|token|password|secret',
+              caseSensitive: false,
+            ).hasMatch(key)) {
+          final literal = config
+              .replaceAll(RegExp(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}'), '')
+              .replaceFirst(RegExp(r'^Bearer\s+', caseSensitive: false), '')
+              .trim();
+          if (literal.isNotEmpty)
+            throw const FormatException('发布包不能包含连接凭据，请使用环境变量占位，由安装者单独配置');
+        }
+      }
+
+      check(PluginDependencies.declarations(package));
+    }
     final publicId = publicationId(tenant, id);
     final key = 'skill-market/$publicId';
     final previous = store.get(key);
@@ -194,6 +226,7 @@ class SkillMarket {
     if (!detail) presentation.remove('images');
     return {
       'id': value['id'],
+      'kind': record['kind'],
       'name': record['name'],
       'description': record['description'],
       'author': value['author'],

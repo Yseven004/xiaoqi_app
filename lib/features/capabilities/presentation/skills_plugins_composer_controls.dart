@@ -9,6 +9,7 @@ import '../../../widgets/composer_action_capsule.dart';
 import '../data/capability_models.dart';
 import '../data/capability_cloud_sync.dart';
 import '../data/capability_store.dart';
+import 'skill_presentation.dart';
 
 /// Compact, inline capability picker anchored above the chat composer.
 class SkillsPluginsComposerControls extends StatefulWidget {
@@ -300,6 +301,7 @@ class _SkillsPluginsComposerControlsState
               });
               _closeMenu();
             },
+            leading: SkillPresentationIcon(connection.icon, size: 29),
           ),
       const Divider(height: 12),
       TextButton.icon(
@@ -399,8 +401,9 @@ class _SkillsPluginsComposerControlsState
     String icon,
     String title,
     String description,
-    VoidCallback onTap,
-  ) => Semantics(
+    VoidCallback onTap, {
+    Widget? leading,
+  }) => Semantics(
     button: true,
     label: '$title，$description',
     child: Material(
@@ -412,7 +415,10 @@ class _SkillsPluginsComposerControlsState
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
           child: Row(
             children: [
-              SizedBox(width: 34, child: Center(child: _icon(icon, size: 29))),
+              SizedBox(
+                width: 34,
+                child: Center(child: leading ?? _icon(icon, size: 29)),
+              ),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(

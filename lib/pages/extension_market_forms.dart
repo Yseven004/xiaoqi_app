@@ -151,7 +151,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
       _busy = true;
       _jobId = null;
       _error = null;
-      _progress = widget.forEditor ? '正在读取已检查的技能内容…' : '正在安装固定版本，成功前不会显示为已安装…';
+      _progress = widget.forEditor ? '正在读取已检查的扩展内容…' : '正在安装固定版本，成功前不会显示为已安装…';
     });
     try {
       if (widget.forEditor) {
@@ -406,8 +406,10 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
                   _busy ||
                           candidate['status'] == 'unsupported' ||
                           widget.forEditor &&
-                              (candidate['kind'] != 'skill' ||
-                                  candidate['status'] != 'supported')
+                              (candidate['kind'] !=
+                                      (widget.skill ? 'skill' : 'plugin') ||
+                                  widget.skill &&
+                                      candidate['status'] != 'supported')
                       ? null
                       : () => _install(candidate),
                   primary: true,
@@ -445,11 +447,13 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
       _token = TextEditingController();
   String? _error, _result;
   bool _busy = false;
+  Map<String, dynamic> _icon = {'icon_asset': 'mcp', 'icon_data': ''};
   @override
   void initState() {
     super.initState();
     _name.text = widget.connection?.name ?? '';
     _url.text = widget.connection?.url ?? '';
+    _icon = Map<String, dynamic>.from(widget.connection?.icon ?? _icon);
   }
 
   @override
@@ -503,6 +507,7 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
           name: _name.text.trim(),
           url: uri.toString(),
           bearerToken: token,
+          icon: widget.connection?.catalogId == null ? _icon : null,
         );
         if (mounted) Navigator.pop(context, true);
       }
@@ -524,15 +529,50 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
         style: TextStyle(color: marketMuted, height: 1.65),
       ),
       const SizedBox(height: 20),
-      TextField(
-        controller: _name,
-        enabled: !_busy,
-        autofocus: false,
-        onChanged: _changed,
-        decoration: const InputDecoration(
-          labelText: '名称',
-          hintText: '例如：我的资料库',
-        ),
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 96,
+            child: Column(
+              children: [
+                SkillPresentationIcon(_icon, size: 80),
+                if (widget.connection?.catalogId == null) ...[
+                  const SizedBox(height: 10),
+                  marketButton(
+                    '更换图标',
+                    _busy
+                        ? null
+                        : () async {
+                            final icon = await chooseSkillIcon(
+                              context,
+                              _icon,
+                              defaultAsset: 'mcp',
+                            );
+                            if (icon != null && mounted)
+                              setState(() => _icon = icon);
+                          },
+                    fontSize: 13,
+                    radius: 10,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 20),
+          Expanded(
+            child: TextField(
+              controller: _name,
+              enabled: !_busy,
+              autofocus: false,
+              onChanged: _changed,
+              decoration: const InputDecoration(
+                labelText: '名称',
+                hintText: '例如：我的资料库',
+              ),
+            ),
+          ),
+        ],
       ),
       const SizedBox(height: 20),
       TextField(

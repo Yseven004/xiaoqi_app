@@ -1337,6 +1337,7 @@ class CapabilityCloudSync {
     required String name,
     required String url,
     String? bearerToken,
+    Map<String, dynamic>? icon,
   }) async {
     final token = await _requireToken();
     final value = _checked(
@@ -1349,6 +1350,7 @@ class CapabilityCloudSync {
               'name': name,
               'url': url,
               'bearer_token': bearerToken?.trim(),
+              if (icon != null) 'icon': icon,
             }),
           )
           .timeout(const Duration(seconds: 20)),

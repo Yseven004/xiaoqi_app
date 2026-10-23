@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import 'market_ui.dart';
+import '../../../widgets/app_toast.dart';
 
 const skillPresentationIcons = [
   'research',
@@ -20,6 +21,8 @@ const skillPresentationIcons = [
   'plugs',
   'gear',
   'search',
+  'mcp',
+  'extension',
 ];
 
 Widget skillDataImage(String data, {BoxFit fit = BoxFit.contain}) {
@@ -58,6 +61,10 @@ class SkillPresentationIcon extends StatelessWidget {
       ),
       child: data.isNotEmpty
           ? skillDataImage(data)
+          : asset == 'mcp' || asset == 'extension'
+          ? SvgPicture.asset(
+              'assets/icons/capabilities/${asset == 'mcp' ? 'mcp_connector' : 'extension'}.svg',
+            )
           : marketIcon(
               skillPresentationIcons.contains(asset) ? asset : 'research',
               size: size * .56,
@@ -136,8 +143,9 @@ Future<String?> pickSkillPresentationImage({bool icon = false}) async {
 
 Future<Map<String, dynamic>?> chooseSkillIcon(
   BuildContext context,
-  Map<String, dynamic> current,
-) => showDialog<Map<String, dynamic>>(
+  Map<String, dynamic> current, {
+  String defaultAsset = 'research',
+}) => showDialog<Map<String, dynamic>>(
   context: context,
   builder: (dialogContext) => MarketDialog(
     title: '更换图标',
@@ -170,21 +178,18 @@ Future<Map<String, dynamic>?> chooseSkillIcon(
           final data = await pickSkillPresentationImage(icon: true);
           if (data != null && dialogContext.mounted)
             Navigator.pop(dialogContext, {
-              'icon_asset': 'research',
+              'icon_asset': defaultAsset,
               'icon_data': data,
             });
         } catch (error) {
-          if (dialogContext.mounted)
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text('$error')));
+          if (dialogContext.mounted) AppToast.show(context, '$error');
         }
       }, icon: 'upload'),
       const SizedBox(height: 8),
       marketButton(
         '恢复默认',
         () => Navigator.pop(dialogContext, {
-          'icon_asset': 'research',
+          'icon_asset': defaultAsset,
           'icon_data': '',
         }),
       ),
@@ -200,10 +205,11 @@ class SkillPresentationBody extends StatelessWidget {
     required this.name,
     required this.description,
     this.author = '我',
+    this.kindLabel = '技能',
     super.key,
   });
   final Map<String, dynamic> presentation;
-  final String name, description, author;
+  final String name, description, author, kindLabel;
   @override
   Widget build(BuildContext context) {
     final phone = MediaQuery.sizeOf(context).width <= 600;
@@ -238,7 +244,7 @@ class SkillPresentationBody extends StatelessWidget {
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    '技能 · 作者：$author',
+                    '$kindLabel · 作者：$author',
                     style: const TextStyle(color: marketMuted, fontSize: 14),
                   ),
                 ],
@@ -334,10 +340,11 @@ class SkillPublicationPreview extends StatefulWidget {
     required this.description,
     required this.onPublish,
     this.published = false,
+    this.kindLabel = '技能',
     super.key,
   });
   final Map<String, dynamic> presentation;
-  final String name, description;
+  final String name, description, kindLabel;
   final bool published;
   final Future<void> Function() onPublish;
   @override
@@ -413,6 +420,7 @@ class _SkillPublicationPreviewState extends State<SkillPublicationPreview> {
                     presentation: widget.presentation,
                     name: widget.name,
                     description: widget.description,
+                    kindLabel: widget.kindLabel,
                   ),
                 ),
               ),

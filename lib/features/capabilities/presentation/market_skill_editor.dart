@@ -87,7 +87,14 @@ CapabilityDraft skillDraftFromUpload({
 
 /// Account-scoped authoring with local drafts and checked content imports.
 class MarketSkillEditor extends StatefulWidget {
-  const MarketSkillEditor({this.draft, this.record, this.onImport, super.key});
+  const MarketSkillEditor({
+    this.draft,
+    this.record,
+    this.onImport,
+    this.kind = CapabilityKind.skill,
+    super.key,
+  });
+  final CapabilityKind kind;
   final CapabilityDraft? draft;
   final CapabilityRecord? record;
   final Future<CapabilityDraft?> Function(BuildContext)? onImport;
@@ -111,6 +118,18 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   final _cloud = CapabilityCloudSync.instance;
   final _scaffold = GlobalKey<ScaffoldState>();
   late CapabilityDraft _base;
+  bool get _isPlugin => _base.kind == CapabilityKind.plugin;
+  String get _kindLabel => _isPlugin ? '插件' : '技能';
+  String get _mainFile => !_isPlugin
+      ? 'SKILL.md'
+      : const [
+          'plugin.json',
+          '.claude-plugin/plugin.json',
+          '.codex-plugin/plugin.json',
+        ].firstWhere(_files.containsKey, orElse: () => 'plugin.json');
+  String get _contentSummary => _isPlugin
+      ? '${_files.keys.where((p) => p.endsWith('/SKILL.md')).length} 个技能 · ${_files.length} 个文件'
+      : 'SKILL.md · ${_files.length - 1} 个附件';
   final Map<String, String> _files = {};
   Map<String, dynamic> _metadata = {};
   String _active = 'SKILL.md';
@@ -135,6 +154,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
         widget.draft ??
         CapabilityDraft(
           id: _store.newDraftId(),
+          kind: record?.kind ?? widget.kind,
           name: record?.name ?? '',
           description: record?.description ?? '',
           content: record?.currentVersion?.content ?? '',
@@ -163,7 +183,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     _title.text = _base.presentation['title']?.toString() ?? _base.name;
     _introduction.text = _base.presentation['introduction']?.toString() ?? '';
     _icon = {
-      'icon_asset': _base.presentation['icon_asset'] ?? 'research',
+      'icon_asset':
+          _base.presentation['icon_asset'] ??
+          (_isPlugin ? 'extension' : 'research'),
       'icon_data': _base.presentation['icon_data'] ?? '',
     };
     _images
@@ -176,8 +198,22 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     _files.clear();
     _metadata = {};
     _sourceError = null;
-    _active = 'SKILL.md';
     _files.addAll(_base.files);
+    _active = _mainFile;
+    if (_isPlugin) {
+      final text = _base.content.isNotEmpty
+          ? _base.content
+          : const JsonEncoder.withIndent('  ').convert({
+              r'$schema':
+                  'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+              'name': _identifier,
+              'description': _base.description,
+            });
+      _files[_mainFile] = base64Encode(utf8.encode(text));
+      _body.text = text;
+      _ready = true;
+      return;
+    }
     _files.remove('SKILL.md');
     var text = _base.content;
     final match = _frontmatter.firstMatch(text);
@@ -272,7 +308,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   String? get _validation {
     if (_sourceError != null) return _sourceError;
     if (widget.record?.isServerInstallation == true)
-      return '服务端导入的技能不能在本地覆盖，请使用检查更新。';
+      return '已安装的第三方扩展不能覆盖为作者作品，请使用检查更新。';
     if (_title.text.trim().isEmpty || _title.text.length > 128)
       return '填写 1–128 字符的展示名称，可以使用中文。';
     if (_name.text.isNotEmpty &&
@@ -281,6 +317,17 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       return '技能内部标识需使用 1–64 位小写字母、数字和单个连字符。';
     if (_description.text.trim().isEmpty || _description.text.length > 500)
       return '填写 1–500 字符的描述。';
+    if (_isPlugin) {
+      try {
+        final content = _active == _mainFile
+            ? _body.text
+            : utf8.decode(base64Decode(_files[_mainFile]!));
+        if (jsonDecode(content) is! Map) return '插件清单必须是 JSON 对象。';
+      } catch (_) {
+        return '请修正插件清单的 JSON 格式，草稿内容已保留。';
+      }
+      return null;
+    }
     final content = _active == 'SKILL.md'
         ? _body.text
         : utf8.decode(base64Decode(_files['SKILL.md']!));
@@ -293,6 +340,25 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     if (_sourceError != null) throw FormatException(_sourceError!);
     _flush();
     _checkIncoming({});
+    if (_isPlugin) {
+      var content = utf8.decode(base64Decode(_files[_mainFile]!));
+      try {
+        final manifest = Map<String, dynamic>.from(jsonDecode(content) as Map);
+        manifest['name'] = _identifier;
+        manifest['description'] = _description.text.trim();
+        content = const JsonEncoder.withIndent('  ').convert(manifest);
+      } catch (_) {
+        /* Keep an unfinished manifest editable in its private draft. */
+      }
+      return _base.copyWith(
+        name: _identifier,
+        description: _description.text.trim(),
+        content: content,
+        files: {..._files, _mainFile: base64Encode(utf8.encode(content))},
+        updatedAt: DateTime.now(),
+        presentation: _presentation,
+      );
+    }
     final metadata = {
       ..._metadata,
       'name': _identifier,
@@ -374,6 +440,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           presentation: snapshot.presentation,
           name: snapshot.name,
           description: snapshot.description,
+          kindLabel: _kindLabel,
           published: (_record?.publishedRevision ?? 0) > 0,
           onPublish: () async {
             final local = await _store.commitDraft(
@@ -389,7 +456,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
               final synced = await _cloud.syncAuthoringDraft(sent);
               _base = await _store.applySyncedAuthoringDraft(sent, synced);
             } catch (error) {
-              if (mounted) AppToast.show(context, '技能已发布，草稿状态同步待重试：$error');
+              if (mounted)
+                AppToast.show(context, '${_kindLabel}已发布，草稿状态同步待重试：$error');
             }
           },
         ),
@@ -397,7 +465,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     );
     if (!mounted) return;
     if (published == true) {
-      AppToast.show(context, '技能已发布');
+      AppToast.show(context, '${_kindLabel}已发布');
       setState(() => _allowPop = true);
       Navigator.pop(context);
     }
@@ -407,14 +475,18 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     if (_busy || widget.onImport == null) return;
     final incoming = await widget.onImport!(context);
     if (incoming == null || !mounted) return;
+    if (incoming.kind != _base.kind) {
+      AppToast.show(context, '请选择${_kindLabel}文件，当前草稿已保留');
+      return;
+    }
     if (_body.text.trim().isNotEmpty ||
         _title.text.trim().isNotEmpty ||
         _dirty) {
       final replace = await showDialog<bool>(
         context: context,
         builder: (ctx) => MarketDialog(
-          title: '替换当前技能内容？',
-          children: const [Text('导入会替换名称、简介和技能文件。已有图标、详细介绍和介绍图片会保留。')],
+          title: '替换当前${_kindLabel}内容？',
+          children: [Text('导入会替换名称、简介和${_kindLabel}文件。已有图标、详细介绍和介绍图片会保留。')],
           actions: [
             marketButton('取消', () => Navigator.pop(ctx, false)),
             marketButton('确认替换', () => Navigator.pop(ctx, true), primary: true),
@@ -442,7 +514,11 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   }
 
   Future<void> _changeIcon() async {
-    final icon = await chooseSkillIcon(context, _icon);
+    final icon = await chooseSkillIcon(
+      context,
+      _icon,
+      defaultAsset: _isPlugin ? 'extension' : 'research',
+    );
     if (icon != null && mounted)
       setState(() {
         _icon = icon;
@@ -505,6 +581,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       final current = _snapshot();
       final copy = CapabilityDraft(
         id: _store.newDraftId(),
+        kind: current.kind,
         name: current.name,
         description: current.description,
         content: current.content,
@@ -627,9 +704,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
         }
       }
       if (incoming.isEmpty || !mounted) return;
-      // SKILL.md is edited in place; never overwrite it through an attachment picker.
-      if (incoming.containsKey('SKILL.md'))
-        throw const FormatException('请在正文中编辑 SKILL.md，附件上传不会覆盖主文件');
+      // The main file is edited in place; package replacement uses checked import.
+      if (incoming.containsKey(_mainFile))
+        throw FormatException('请在正文中编辑 $_mainFile，附件上传不会覆盖主文件');
       final duplicates = incoming.keys.where(_files.containsKey).toList();
       if (duplicates.isNotEmpty) {
         final overwrite = await showDialog<bool>(
@@ -683,12 +760,12 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       final draft = _snapshot();
       final bytes = utf8.encode(draft.content);
       final result = await FilePicker.saveFile(
-        dialogTitle: '下载 SKILL.md',
-        fileName: 'SKILL.md',
+        dialogTitle: '下载 $_mainFile',
+        fileName: _mainFile.split('/').last,
         bytes: Uint8List.fromList(bytes),
       );
       if (result != null && mounted)
-        AppToast.show(context, '已导出 SKILL.md（附件需单独保留）');
+        AppToast.show(context, '已导出 $_mainFile（其他文件需单独保留）');
     } catch (error) {
       if (mounted) AppToast.show(context, '导出失败：$error');
     }
@@ -778,13 +855,13 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                           ),
                         ),
                       ),
-                      if (path != 'SKILL.md')
+                      if (path != _mainFile)
                         IconButton(
                           tooltip: '删除 $path',
                           onPressed: _busy
                               ? null
                               : () {
-                                  if (_active == path) _selectFile('SKILL.md');
+                                  if (_active == path) _selectFile(_mainFile);
                                   setState(() {
                                     _files.remove(path);
                                     _dirty = true;
@@ -826,9 +903,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
               controller: _name,
               enabled: !_busy,
               maxLength: 64,
-              decoration: const InputDecoration(
-                labelText: '技能内部标识',
-                hintText: 'your-skill-name',
+              decoration: InputDecoration(
+                labelText: '${_kindLabel}内部标识',
+                hintText: _isPlugin ? 'your-plugin-name' : 'your-skill-name',
               ),
             ),
             const SizedBox(height: 16),
@@ -838,9 +915,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
               maxLength: 500,
               minLines: 2,
               maxLines: 5,
-              decoration: const InputDecoration(
-                labelText: '技能用途说明',
-                hintText: '描述该技能的用途',
+              decoration: InputDecoration(
+                labelText: '${_kindLabel}用途说明',
+                hintText: '描述该${_kindLabel}的用途',
               ),
             ),
           ],
@@ -996,19 +1073,16 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       ListTile(
         contentPadding: EdgeInsets.zero,
         leading: marketIcon('file-text'),
-        title: const Text(
-          '技能内容',
+        title: Text(
+          '${_kindLabel}内容',
           style: TextStyle(fontWeight: FontWeight.w600),
         ),
-        subtitle: phone ? Text('SKILL.md · ${_files.length - 1} 个附件') : null,
+        subtitle: phone ? Text(_contentSummary) : null,
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (!phone)
-              Text(
-                'SKILL.md · ${_files.length - 1} 个附件',
-                style: const TextStyle(color: marketMuted),
-              ),
+              Text(_contentSummary, style: const TextStyle(color: marketMuted)),
             const SizedBox(width: 16),
             Text(
               _contentsExpanded ? '收起' : '展开',
@@ -1246,8 +1320,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                     padding: const EdgeInsets.only(bottom: 20),
                     child: Text(
                       (_record?.publishedRevision ?? 0) > 0
-                          ? '我创建的 · 技能 · 修改尚未发布'
-                          : '我创建的 · 技能 · 未发布',
+                          ? '我创建的 · $_kindLabel · 修改尚未发布'
+                          : '我创建的 · $_kindLabel · 未发布',
                       style: const TextStyle(color: marketMuted, fontSize: 14),
                     ),
                   ),

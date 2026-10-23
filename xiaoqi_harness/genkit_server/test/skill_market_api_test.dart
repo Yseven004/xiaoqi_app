@@ -97,6 +97,215 @@ void main() {
     },
   };
 
+  Map<String, dynamic> pluginRecord() {
+    final manifest = jsonEncode({
+      r'$schema': 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+      'name': 'paper-bundle',
+      'version': '1.0.0',
+      'description': 'A reading plugin',
+    });
+    final files = {
+      'plugin.json': base64Encode(utf8.encode(manifest)),
+      'skills/paper-reader/SKILL.md': base64Encode(utf8.encode(content)),
+    };
+    return {
+      'id': 'plugin-a',
+      'kind': 'plugin',
+      'name': 'paper-bundle',
+      'description': 'A reading plugin',
+      'current_version_id': 'plugin-version-a',
+      'versions': [
+        {
+          'id': 'plugin-version-a',
+          'number': 1,
+          'content': manifest,
+          'files': files,
+          'content_hash': sha256
+              .convert(utf8.encode(jsonEncode(files)))
+              .toString(),
+        },
+      ],
+      'presentation': {
+        'title': '阅读工具包',
+        'icon_asset': 'extension',
+        'images': [],
+      },
+    };
+  }
+
+  test(
+    'authored plugin publishes real components and installs an isolated snapshot',
+    () async {
+      final saved = await call(
+        'POST',
+        '/v1/capabilities/sync',
+        body: {'record': pluginRecord(), 'expected_revision': 0},
+      );
+      expect(saved.$1, 200, reason: '${saved.$2}');
+      expect(saved.$2['record']['versions'][0]['components'], hasLength(1));
+      expect(
+        saved.$2['record']['versions'][0]['files'].keys,
+        contains('plugin.json'),
+      );
+      final published = await call(
+        'POST',
+        '/v1/skill-market/plugin-a/publish',
+        body: {'expected_revision': 1, 'published_revision': 0},
+      );
+      expect(published.$1, 200, reason: '${published.$2}');
+      expect(published.$2['publication']['kind'], 'plugin');
+      final publicId = published.$2['publication']['id'];
+      final installed = await call(
+        'POST',
+        '/v1/skill-market/$publicId/install',
+        tenant: 'bob',
+        body: {'publication_revision': 1},
+      );
+      expect(installed.$1, 200, reason: '${installed.$2}');
+      final record = installed.$2['record'] as Map;
+      expect(record['kind'], 'plugin');
+      expect(record['origin'], 'market');
+      expect(record['versions'][0]['components'][0]['name'], 'paper-reader');
+      expect(
+        (await call(
+          'POST',
+          '/v1/capabilities/sync',
+          tenant: 'bob',
+          body: {
+            'record': record,
+            'expected_revision': record['cloud_revision'],
+          },
+        )).$1,
+        400,
+      );
+      expect(
+        (await call(
+          'POST',
+          '/v1/skill-market/plugin-a/publish',
+          tenant: 'bob',
+          body: {'expected_revision': 1, 'published_revision': 0},
+        )).$1,
+        400,
+      );
+    },
+  );
+
+  test(
+    'checked plugin imports return the complete selected package as a draft only',
+    () {
+      final value = pluginRecord();
+      final files = (value['versions'][0]['files'] as Map).map(
+        (key, value) => MapEntry('bundle/$key', base64Decode(value.toString())),
+      );
+      store.putImmutable('inspection/plugin.zip', {
+        ...files,
+        'outside.txt': utf8.encode('private'),
+      });
+      store.put('import/alice/plugin-check', {
+        'artifact_key': 'inspection/plugin.zip',
+        'expires_at': DateTime.now()
+            .add(const Duration(hours: 1))
+            .toIso8601String(),
+        'candidates': [
+          {
+            'id': 'plugin-candidate',
+            'kind': 'plugin',
+            'status': 'supported',
+            'root': 'bundle',
+            'name': 'paper-bundle',
+            'description': 'A reading plugin',
+          },
+        ],
+      }, null);
+      final draft = CapabilityImportService(
+        store,
+      ).skillDraft('alice', 'plugin-check', 'plugin-candidate');
+      expect(draft['kind'], 'plugin');
+      expect(
+        (draft['files'] as Map).keys,
+        containsAll(['plugin.json', 'skills/paper-reader/SKILL.md']),
+      );
+      expect((draft['files'] as Map).containsKey('outside.txt'), isFalse);
+      expect(store.list('cap/alice/'), isEmpty);
+    },
+  );
+
+  test(
+    'public plugin publication refuses embedded connection credentials',
+    () async {
+      final plugin = pluginRecord();
+      final version = plugin['versions'][0] as Map;
+      (version['files'] as Map)['.mcp.json'] = base64Encode(
+        utf8.encode(
+          jsonEncode({
+            'mcpServers': {
+              'remote': {
+                'url': 'https://example.com/mcp',
+                'headers': {'Authorization': 'Bearer test-only-secret'},
+              },
+            },
+          }),
+        ),
+      );
+      version['content_hash'] = '';
+      final saved = await call(
+        'POST',
+        '/v1/capabilities/sync',
+        body: {'record': plugin, 'expected_revision': 0},
+      );
+      expect(saved.$1, 200, reason: '${saved.$2}');
+      final published = await call(
+        'POST',
+        '/v1/skill-market/plugin-a/publish',
+        body: {'expected_revision': 1, 'published_revision': 0},
+      );
+      expect(published.$1, 400);
+      expect(store.list('skill-market/'), isEmpty);
+      expect(store.get('cap/alice/plugin-a'), isNotNull);
+    },
+  );
+
+  test(
+    'MCP endpoint accepts a checked custom icon larger than the old text-only body limit',
+    () async {
+      final svg =
+          '<svg xmlns="http://www.w3.org/2000/svg"><desc>${'a' * 20000}</desc><path d="M0 0h10v10z"/></svg>';
+      final saved = await call(
+        'POST',
+        '/v1/mcp/connections',
+        body: {
+          'name': 'My MCP',
+          'url': 'https://example.com/mcp',
+          'icon': {
+            'icon_asset': 'mcp',
+            'icon_data':
+                'data:image/svg+xml;base64,${base64Encode(utf8.encode(svg))}',
+          },
+        },
+      );
+      expect(saved.$1, 201, reason: '${saved.$2}');
+      expect(saved.$2['connection']['icon']['icon_asset'], 'mcp');
+      expect(
+        saved.$2['connection']['icon']['icon_data'],
+        contains('data:image/svg+xml;base64,'),
+      );
+    },
+  );
+
+  test('malformed plugin files cannot create an authored record', () async {
+    final plugin = pluginRecord();
+    (plugin['versions'][0]['files'] as Map)['../escape.txt'] = base64Encode([
+      1,
+    ]);
+    final saved = await call(
+      'POST',
+      '/v1/capabilities/sync',
+      body: {'record': plugin, 'expected_revision': 0},
+    );
+    expect(saved.$1, 400);
+    expect(store.get('cap/alice/plugin-a'), isNull);
+  });
+
   test(
     'author publishes a snapshot; private edits stay private; installations are immutable',
     () async {
