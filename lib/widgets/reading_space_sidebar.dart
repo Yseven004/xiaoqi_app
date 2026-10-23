@@ -1660,9 +1660,6 @@ class _ReadingSpaceSearchPageState extends State<_ReadingSpaceSearchPage> {
     super.initState();
     _queryController = TextEditingController();
     _queryFocusNode = FocusNode();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _queryFocusNode.requestFocus();
-    });
   }
 
   @override
@@ -1783,7 +1780,7 @@ class _ReadingSpaceSearchPageState extends State<_ReadingSpaceSearchPage> {
                             child: TextField(
                               controller: _queryController,
                               focusNode: _queryFocusNode,
-                              autofocus: true,
+                              autofocus: false,
                               onChanged: _setQuery,
                               textInputAction: TextInputAction.search,
                               style: const TextStyle(

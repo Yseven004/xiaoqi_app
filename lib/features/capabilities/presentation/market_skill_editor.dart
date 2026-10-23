@@ -65,8 +65,9 @@ CapabilityDraft skillDraftFromUpload({
     if (main == null) throw const FormatException('所选技能没有 SKILL.md');
     content = utf8.decode(base64Decode(main));
   }
-  final match = RegExp(r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)')
-      .firstMatch(content);
+  final match = RegExp(
+    r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)',
+  ).firstMatch(content);
   if (match == null) throw const FormatException('SKILL.md 缺少 YAML 信息');
   final metadata = loadYaml(match.group(1)!);
   if (metadata is! Map ||
@@ -83,7 +84,7 @@ CapabilityDraft skillDraftFromUpload({
   );
 }
 
-/// Edits local drafts only. Imported server installations keep their provenance.
+/// Unsaved edits live only in this page. Server imports keep their provenance.
 class MarketSkillEditor extends StatefulWidget {
   const MarketSkillEditor({this.draft, this.record, super.key});
   final CapabilityDraft? draft;
@@ -231,10 +232,10 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     );
   }
 
-  Future<void> _save({bool draftOnly = false}) async {
+  Future<void> _save() async {
     if (_busy) return;
     final validation = _validation;
-    if (!draftOnly && validation != null) {
+    if (validation != null) {
       setState(() => _error = validation);
       return;
     }
@@ -244,32 +245,19 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     });
     try {
       final draft = _snapshot();
-      await _store.saveDraft(draft);
-      if (!draftOnly) {
-        final saved = await _store.commitDraft(
-          draft,
-          existingId: draft.targetCapabilityId,
-        );
-        final email = await _cloud.signedInEmail;
-        if (email == null || email.isEmpty)
-          await _store.discardDraft(draft.id);
-        else
-          await _store.queueDraftDeletion(
-            id: draft.id,
-            cloudRevision: draft.cloudRevision,
-            accountEmail: draft.cloudOwnerEmail ?? email,
-          );
-        // A retired cloud draft ID cannot be saved again after local commit.
-        _base = CapabilityDraft(
-          id: _store.newDraftId(),
-          name: draft.name,
-          description: draft.description,
-          content: draft.content,
-          files: draft.files,
-          targetCapabilityId: saved.id,
-          updatedAt: draft.updatedAt,
-        );
-      }
+      final saved = await _store.commitDraft(
+        draft,
+        existingId: draft.targetCapabilityId,
+      );
+      _base = CapabilityDraft(
+        id: _store.newDraftId(),
+        name: draft.name,
+        description: draft.description,
+        content: draft.content,
+        files: draft.files,
+        targetCapabilityId: saved.id,
+        updatedAt: draft.updatedAt,
+      );
       String? syncFailure;
       if (await _cloud.hasEmailSession) {
         try {
@@ -282,7 +270,6 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       if (syncFailure != null) {
         // The local write succeeded: retain that result, expose retry explicitly.
         setState(() {
-          if (draftOnly) _base = draft;
           _dirty = false;
           _syncFailed = true;
           _error = '已保存到本机，同步未完成：$syncFailure';
@@ -319,38 +306,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
 
   Future<void> _leave() async {
     if (_busy) return;
-    if (!_dirty) {
-      setState(() => _allowPop = true);
-      Navigator.pop(context);
-      return;
-    }
-    final action = await showDialog<String>(
-      context: context,
-      builder: (ctx) => MarketDialog(
-        title: '保留这份草稿？',
-        children: [
-          const Text(
-            '你还有未保存的修改。保留为草稿后，可以从技能页面继续编辑。',
-            style: TextStyle(height: 1.65),
-          ),
-        ],
-        actions: [
-          marketButton('不保存', () => Navigator.pop(ctx, 'discard')),
-          marketButton('继续编辑', () => Navigator.pop(ctx)),
-          marketButton(
-            '保留草稿',
-            () => Navigator.pop(ctx, 'draft'),
-            primary: true,
-          ),
-        ],
-      ),
-    );
-    if (!mounted) return;
-    if (action == 'draft') await _save(draftOnly: true);
-    if (action == 'discard') {
-      setState(() => _allowPop = true);
-      Navigator.pop(context);
-    }
+    setState(() => _allowPop = true);
+    Navigator.pop(context);
   }
 
   void _selectFile(String path, {bool drawer = false}) {
@@ -377,7 +334,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           children: [
             TextField(
               controller: controller,
-              autofocus: true,
+              autofocus: false,
               decoration: InputDecoration(
                 labelText: '文件名',
                 hintText: '例如：references/notes.md',
@@ -526,6 +483,12 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
               ),
             ),
             PopupMenuButton<String>(
+              position: PopupMenuPosition.under,
+              offset: const Offset(0, 8),
+              surfaceTintColor: Colors.transparent,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
               tooltip: '添加文件',
               enabled: !_busy,
               child: Container(

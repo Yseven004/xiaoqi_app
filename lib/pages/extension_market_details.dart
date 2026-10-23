@@ -80,12 +80,14 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
   }
 
   Widget _more() => PopupMenuButton<String>(
+    position: PopupMenuPosition.under,
+    offset: const Offset(0, 8),
     tooltip: '更多 ${_entry.name} 操作',
     enabled: !_busy,
     icon: marketIcon('dots', size: 25),
     color: Colors.white,
     surfaceTintColor: Colors.transparent,
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(19)),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
     onSelected: (action) {
       switch (action) {
         case 'copy':
@@ -455,10 +457,9 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
       if (_entry.kind != ExtensionKind.mcp) _info('隐私政策', '未提供'),
     ]),
   ];
-  String get _introduction =>
-      (_entry.record?.currentVersion?.content ?? _entry.description)
-          .replaceFirst(RegExp(r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)'), '')
-          .trim();
+  String get _introduction => (_entry.record?.currentVersion?.content ?? '')
+      .replaceFirst(RegExp(r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)'), '')
+      .trim();
   List<Widget> _skillContent() => [
     Row(
       children: [
@@ -528,33 +529,44 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
     ),
     const Divider(height: 1, color: marketLine),
     marketSection('技能介绍'),
-    SelectableText(
-      _introduction,
-      maxLines: _expanded ? null : 3,
-      style: const TextStyle(fontSize: 16, height: 1.8),
-    ),
-    Center(
-      child: Semantics(
-        expanded: _expanded,
-        child: TextButton(
-          onPressed: () => setState(() => _expanded = !_expanded),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                _expanded ? '收起' : '展开介绍',
-                style: const TextStyle(color: marketMuted),
+    if (_introduction.isEmpty)
+      const Padding(
+        padding: EdgeInsets.symmetric(vertical: 24),
+        child: Text(
+          '该技能介绍为空',
+          style: TextStyle(color: marketMuted, fontSize: 16),
+        ),
+      )
+    else ...[
+      SelectableText(
+        _introduction,
+        maxLines: _expanded ? null : 3,
+        style: const TextStyle(fontSize: 16, height: 1.8),
+      ),
+      if (_introduction.isNotEmpty)
+        Center(
+          child: Semantics(
+            expanded: _expanded,
+            child: TextButton(
+              onPressed: () => setState(() => _expanded = !_expanded),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _expanded ? '收起' : '展开介绍',
+                    style: const TextStyle(color: marketMuted),
+                  ),
+                  const SizedBox(width: 8),
+                  RotatedBox(
+                    quarterTurns: _expanded ? 0 : 2,
+                    child: marketIcon('caret-up', size: 18),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              RotatedBox(
-                quarterTurns: _expanded ? 0 : 2,
-                child: marketIcon('caret-up', size: 18),
-              ),
-            ],
+            ),
           ),
         ),
-      ),
-    ),
+    ],
   ];
   @override
   Widget build(BuildContext context) => Theme(

@@ -15,6 +15,8 @@ class CapabilityStore {
   static const _draftDeletionQueueKey = 'xiaoqi_capability_draft_deletions_v1';
   static const _deletedDraftIdsKey = 'xiaoqi_capability_deleted_draft_ids_v1';
   final Random _random = Random.secure();
+  // Generated skill previews are session memory, never persisted drafts.
+  final Map<String, CapabilityDraft> _skillPreviews = {};
 
   Future<List<CapabilityRecord>> list({bool includeDeleted = false}) async {
     final prefs = await SharedPreferences.getInstance();
@@ -37,12 +39,15 @@ class CapabilityStore {
       .where((record) => record.showInMenu)
       .toList(growable: false);
 
-  Future<List<CapabilityDraft>> drafts() async {
+  Future<List<CapabilityDraft>> skillPreviews() async {
+    return _skillPreviews.values.toList(growable: false);
+  }
+
+  Future<List<CapabilityDraft>> legacyDrafts() async {
     final prefs = await SharedPreferences.getInstance();
-    final deletedIds = await deletedDraftIds();
-    return _decodeDrafts(prefs.getString(_draftsKey)).values
-        .where((draft) => !deletedIds.contains(draft.id))
-        .toList(growable: false);
+    return _decodeDrafts(
+      prefs.getString(_draftsKey),
+    ).values.toList(growable: false);
   }
 
   String newDraftId() => _newId('draft');
@@ -54,32 +59,42 @@ class CapabilityStore {
     return null;
   }
 
-  Future<CapabilityDraft?> loadDraft(String id) async {
+  Future<CapabilityDraft?> skillPreview(String id) async {
     if (await isDraftDeleted(id)) return null;
-    final prefs = await SharedPreferences.getInstance();
-    final drafts = _decodeDrafts(prefs.getString(_draftsKey));
-    return drafts[id];
+    return _skillPreviews[id];
   }
 
-  Future<void> saveDraft(CapabilityDraft draft) async {
+  Future<void> stageSkillPreview(CapabilityDraft draft) async {
     if (await isDraftDeleted(draft.id)) return;
-    final prefs = await SharedPreferences.getInstance();
-    final drafts = _decodeDrafts(prefs.getString(_draftsKey));
-    drafts[draft.id] = draft;
-    final saved = await prefs.setString(
-      _draftsKey,
-      jsonEncode(drafts.map((key, value) => MapEntry(key, value.toJson()))),
-    );
-    if (!saved) throw StateError('草稿保存失败，请重试');
+    _skillPreviews[draft.id] = draft;
   }
 
-  Future<void> discardDraft(String id) async {
+  void discardSkillPreview(String id) => _skillPreviews.remove(id);
+
+  Future<void> _discardLegacyDraft(String id) async {
     final prefs = await SharedPreferences.getInstance();
     final drafts = _decodeDrafts(prefs.getString(_draftsKey))..remove(id);
-    await prefs.setString(
-      _draftsKey,
-      jsonEncode(drafts.map((key, value) => MapEntry(key, value.toJson()))),
-    );
+    final saved = drafts.isEmpty
+        ? await prefs.remove(_draftsKey)
+        : await prefs.setString(
+            _draftsKey,
+            jsonEncode(
+              drafts.map((key, value) => MapEntry(key, value.toJson())),
+            ),
+          );
+    if (!saved) throw StateError('未保存内容清理失败，请重试');
+  }
+
+  void clearSkillPreviews() => _skillPreviews.clear();
+
+  Future<void> retireLegacyDrafts({required String accountEmail}) async {
+    for (final draft in await legacyDrafts()) {
+      await queueDraftDeletion(
+        id: draft.id,
+        cloudRevision: draft.cloudRevision,
+        accountEmail: draft.cloudOwnerEmail ?? accountEmail,
+      );
+    }
   }
 
   Future<Set<String>> deletedDraftIds() async {
@@ -133,11 +148,18 @@ class CapabilityStore {
       'account_email': email,
       'cloud_revision': cloudRevision,
     });
-    await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
+    if (!await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue))) {
+      throw StateError('旧草稿删除请求保存失败，请重试');
+    }
     final deletedIds = await deletedDraftIds();
     deletedIds.add(id);
-    await prefs.setString(_deletedDraftIdsKey, jsonEncode(deletedIds.toList()));
-    await discardDraft(id);
+    if (!await prefs.setString(
+      _deletedDraftIdsKey,
+      jsonEncode(deletedIds.toList()),
+    )) {
+      throw StateError('旧草稿删除状态保存失败，请重试');
+    }
+    await _discardLegacyDraft(id);
   }
 
   Future<void> rememberRemoteDraftDeletion(
@@ -154,7 +176,7 @@ class CapabilityStore {
           .toList();
       await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
     }
-    await discardDraft(id);
+    await _discardLegacyDraft(id);
   }
 
   Future<void> completeDraftDeletion(String id, String accountEmail) async {
@@ -168,26 +190,6 @@ class CapabilityStore {
         )
         .toList();
     await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
-  }
-
-  Future<void> markDraftSynced(
-    String id,
-    int cloudRevision, {
-    String? accountEmail,
-  }) async {
-    if (await isDraftDeleted(id)) return;
-    final prefs = await SharedPreferences.getInstance();
-    final drafts = _decodeDrafts(prefs.getString(_draftsKey));
-    final draft = drafts[id];
-    if (draft == null) return;
-    drafts[id] = draft.copyWith(
-      cloudRevision: cloudRevision,
-      cloudOwnerEmail: accountEmail ?? draft.cloudOwnerEmail,
-    );
-    await prefs.setString(
-      _draftsKey,
-      jsonEncode(drafts.map((key, value) => MapEntry(key, value.toJson()))),
-    );
   }
 
   Future<void> markSynced(String id, int cloudRevision) async {
@@ -283,7 +285,7 @@ class CapabilityStore {
       _recordsKey,
       jsonEncode(nextRecords.map((record) => record.toJson()).toList()),
     );
-    if (!saved) throw StateError('技能保存失败，草稿已保留');
+    if (!saved) throw StateError('技能保存失败，编辑内容仍保留在当前页面');
     return next;
   }
 

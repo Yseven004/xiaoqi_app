@@ -61,7 +61,6 @@ class _SkillsPluginsComposerControlsState
   bool _open = false;
   bool _manage = false;
   List<CapabilityRecord> _records = const [];
-  List<CapabilityDraft> _drafts = const [];
   List<McpConnectionRecord> _mcpConnections = const [];
   String? _pendingDeleteId;
   bool _savingDraft = false;
@@ -84,7 +83,6 @@ class _SkillsPluginsComposerControlsState
         _open = false;
         _manage = false;
         _records = const [];
-        _drafts = const [];
         _mcpConnections = const [];
         _showingMcpMenu = false;
       }
@@ -105,11 +103,9 @@ class _SkillsPluginsComposerControlsState
   Future<void> _refresh() async {
     if (!widget.isReadingSpace) return;
     final records = await _store.list();
-    final drafts = await _store.drafts();
     if (!mounted || !widget.isReadingSpace) return;
     setState(() {
       _records = records.where((r) => r.enabled).toList();
-      _drafts = drafts;
     });
   }
 
@@ -377,38 +373,6 @@ class _SkillsPluginsComposerControlsState
     } catch (_) {}
     await _refresh();
   }
-
-  Widget _draftRow(CapabilityDraft draft) => Padding(
-    padding: const EdgeInsets.fromLTRB(10, 5, 4, 5),
-    child: Row(
-      children: [
-        _icon('sync_problem', size: 19),
-        const SizedBox(width: 9),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(draft.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-              Text(
-                draft.userSuggestion.isEmpty ? '未保存草稿' : draft.userSuggestion,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Color(0xFF777777), fontSize: 12),
-              ),
-            ],
-          ),
-        ),
-        TextButton(
-          onPressed: () => _selectAction(
-            'revise-skill',
-            '继续修改：${draft.name}',
-            targetId: draft.id,
-          ),
-          child: const Text('继续'),
-        ),
-      ],
-    ),
-  );
 
   Widget _icon(String name, {double size = 20}) => SvgPicture.asset(
     'assets/icons/capabilities/$name.svg',
@@ -784,10 +748,7 @@ class _SkillsPluginsComposerControlsState
               ),
             ),
           for (final record in _records) _recordRow(record, managing: true),
-          if (_drafts.isNotEmpty) ...[
-            const _GroupLabel('本机草稿与冲突副本'),
-            for (final draft in _drafts) _draftRow(draft),
-          ],
+
           if (_pendingDeleteId != null)
             const Padding(
               padding: EdgeInsets.fromLTRB(8, 2, 8, 8),
@@ -886,7 +847,7 @@ class _SkillsPluginsComposerControlsState
             const SizedBox(width: 9),
             const Expanded(
               child: Text(
-                '技能草稿与试用结果',
+                '技能预览与试用结果',
                 style: TextStyle(color: Color(0xFF555555), fontSize: 14),
               ),
             ),
@@ -1002,7 +963,7 @@ class _SkillsPluginsComposerControlsState
                     setState(() => _deletingDraft = true);
                     try {
                       await widget.onDeleteReviewDraft(draft);
-                      if (mounted) _showStatus('草稿已删除');
+                      if (mounted) _showStatus('未保存内容已丢弃');
                       await _refresh();
                     } catch (error) {
                       if (mounted) _showStatus('删除失败：$error');
@@ -1011,7 +972,7 @@ class _SkillsPluginsComposerControlsState
                     }
                   },
             icon: const Icon(Icons.delete_outline, size: 18),
-            label: const Text('删除草稿'),
+            label: const Text('不保存'),
             style: TextButton.styleFrom(
               foregroundColor: const Color(0xFFB3261E),
               minimumSize: const Size(100, 40),

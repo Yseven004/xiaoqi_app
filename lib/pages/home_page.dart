@@ -694,6 +694,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     unawaited(_sharedMediaSubscription?.cancel());
     if (!_savingMessageEdit) unawaited(_deleteMessageEditAttachments());
     _composerController.removeListener(_cacheCurrentDraft);
+    CapabilityStore.instance.clearSkillPreviews();
     _composerFocusNode.removeListener(_onComposerFocusChanged);
     _composerController.dispose();
     _composerFocusNode.dispose();
@@ -779,6 +780,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _restoreConversationDraft(AiConversationRecord conversation) {
+    CapabilityStore.instance.clearSkillPreviews();
     _dismissAnnotationComment?.call();
     _clearAgentClarification();
     for (final attachment in _attachments) {
@@ -3922,7 +3924,7 @@ $materialIndex
     if (type == 'action' && id == 'revise-skill') {
       final targetId = metadata['target_id']?.toString();
       if (targetId == null) return '';
-      final draft = await CapabilityStore.instance.loadDraft(targetId);
+      final draft = await CapabilityStore.instance.skillPreview(targetId);
       final record = draft == null
           ? await CapabilityStore.instance.find(targetId)
           : null;
@@ -3932,7 +3934,7 @@ $materialIndex
       return '''$guide
 
 [小栖技能修改]
-根据用户在当前消息中的建议修改下面的已生成草稿。保留原有技能意图，只调整相关部分。输出与创建流程相同的 `SKILL.md` 和代表性试用结果；再次生成后保留这份旧草稿，仍由用户决定保存。
+根据用户在当前消息中的建议修改下面的技能内容，保留原有技能意图。输出与创建流程相同的 `SKILL.md` 和代表性试用结果，由用户决定是否保存。未保存内容不作为草稿保留。
 
 旧版 SKILL.md：
 ```markdown
@@ -3970,7 +3972,7 @@ $oldContent
       )) {
         instructions.add(
           '''[book-to-skill 在小栖中的文档流程]
-将本轮附件作为书籍来源，通过 read_task_material 分段阅读；不要要求手机或服务器上的文件路径，也不要要求运行外部桌面客户端。先说明将读取的资料名称和大致篇幅；用户要求把书籍转成技能时，按章节整理可复用的框架、方法、原则与反例，输出 `## SKILL.md` 的 Markdown 代码块，并把较长章节材料以 `## references/<文件名>.md` 的代码块分开。给出一段代表性试用结果。生成内容仅作为待检查草稿，由用户确认保存。''',
+将本轮附件作为书籍来源，通过 read_task_material 分段阅读；不要要求手机或服务器上的文件路径，也不要要求运行外部桌面客户端。先说明将读取的资料名称和大致篇幅；用户要求把书籍转成技能时，按章节整理可复用的框架、方法、原则与反例，输出 `## SKILL.md` 的 Markdown 代码块，并把较长章节材料以 `## references/<文件名>.md` 的代码块分开。给出一段代表性试用结果。生成内容仅供本轮预览，由用户确认后正式保存。''',
         );
       }
     }
@@ -4030,42 +4032,17 @@ $text''';
     return type == 'action' ? '我选择了“$name”，请结合当前对话继续。' : '';
   }
 
-  Future<void> _queueCloudDraftDeletion(CapabilityDraft draft) async {
-    final store = CapabilityStore.instance;
-    final cloud = CapabilityCloudSync.instance;
-    final currentDraft = await store.loadDraft(draft.id) ?? draft;
-    final signedIn = await cloud.hasEmailSession;
-    final email = currentDraft.cloudOwnerEmail?.trim().isNotEmpty == true
-        ? currentDraft.cloudOwnerEmail!.trim().toLowerCase()
-        : signedIn
-        ? (await cloud.signedInEmail)?.trim().toLowerCase()
-        : null;
-    if ((email != null && email.isNotEmpty) || currentDraft.cloudRevision > 0) {
-      await store.queueDraftDeletion(
-        id: currentDraft.id,
-        cloudRevision: currentDraft.cloudRevision,
-        accountEmail: email ?? '',
-      );
-      if (signedIn) unawaited(cloud.syncNow().catchError((_) {}));
-    } else {
-      await store.discardDraft(draft.id);
-    }
+  Future<void> _discardSkillPreview(CapabilityDraft draft) async {
+    CapabilityStore.instance.discardSkillPreview(draft.id);
   }
 
   Future<void> _openSkillDraftReview(String draftId) async {
     final store = CapabilityStore.instance;
-    var draft = await store.loadDraft(draftId);
-    if (draft == null && !await store.isDraftDeleted(draftId)) {
-      try {
-        await CapabilityCloudSync.instance.syncNow();
-        draft = await store.loadDraft(draftId);
-      } catch (_) {
-        // The local tag remains usable when cloud sync is temporarily offline.
-      }
-    }
+    final draft = await store.skillPreview(draftId);
+
     if (!mounted) return;
     if (draft == null) {
-      _showReplyError('这个草稿已不可用');
+      _showReplyError('这份未保存内容已丢弃');
       return;
     }
     if (_composerExpanded) _setComposerExpanded(false);
@@ -4073,11 +4050,17 @@ $text''';
   }
 
   void _dismissSkillDraftReview() {
+    final preview = _pendingSkillDraftReview;
+    if (preview == null) return;
+    CapabilityStore.instance.discardSkillPreview(preview.id);
     if (mounted) setState(() => _pendingSkillDraftReview = null);
+    unawaited(_updateDraftMessageMetadata(preview.id, null).catchError((Object error) {
+      if (mounted) _showReplyError('内容已丢弃，聊天标记清理失败：$error');
+    }));
   }
 
   Future<void> _deleteSkillDraft(CapabilityDraft draft) async {
-    await _queueCloudDraftDeletion(draft);
+    await _discardSkillPreview(draft);
     await _updateDraftMessageMetadata(draft.id, null);
     if (mounted && _pendingSkillDraftReview?.id == draft.id) {
       setState(() => _pendingSkillDraftReview = null);
@@ -4138,7 +4121,7 @@ $text''';
   Future<void> _reconcileDraftTags(String conversationId) async {
     final store = CapabilityStore.instance;
     final deletedIds = await store.deletedDraftIds();
-    final drafts = await store.drafts();
+    final drafts = await store.skillPreviews();
     final records = await _historyService.list(allBooks: true);
     final current = _conversation;
     if (current != null) {
@@ -4210,7 +4193,8 @@ $text''';
                 !message.isUser &&
                 metadata?['type'] == 'draft' &&
                 existingDraftId != null &&
-                deletedIds.contains(existingDraftId);
+                (deletedIds.contains(existingDraftId) ||
+                    !drafts.any((draft) => draft.id == existingDraftId));
             if (shouldRemove) {
               changed = true;
               return message.copyWith(clearCapabilityMetadata: true);
@@ -4350,7 +4334,7 @@ $text''';
     final targetId = metadata?['target_id']?.toString();
     final previousDraft = targetId == null
         ? null
-        : await CapabilityStore.instance.loadDraft(targetId);
+        : await CapabilityStore.instance.skillPreview(targetId);
     final existingRecord = targetId == null
         ? null
         : await CapabilityStore.instance.find(targetId);
@@ -4389,8 +4373,8 @@ $text''';
       existingId: existing?.id,
       showInMenu: showInMenu,
     );
-    // Only retire the draft after the formal version is safely stored.
-    await _queueCloudDraftDeletion(draft);
+    // Discard the preview only after the formal version is safely stored.
+    await _discardSkillPreview(draft);
     await _updateDraftMessageMetadata(draft.id, {
       'type': record.kind.name,
       'id': record.id,
@@ -4404,10 +4388,7 @@ $text''';
   }
 
   Future<void> _requestSkillDraftRevision(CapabilityDraft draft) async {
-    await CapabilityStore.instance.saveDraft(draft);
-    if (await CapabilityCloudSync.instance.hasEmailSession) {
-      unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
-    }
+    await CapabilityStore.instance.stageSkillPreview(draft);
     if (!mounted) return;
     setState(() {
       _pendingSkillDraftReview = null;
@@ -4983,14 +4964,11 @@ $text''';
               skillFiles: skillFiles,
             );
       if (skillDraft != null) {
-        await CapabilityStore.instance.saveDraft(skillDraft);
-        if (await CapabilityCloudSync.instance.hasEmailSession) {
-          unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
-        }
+        await CapabilityStore.instance.stageSkillPreview(skillDraft);
       }
     } catch (_) {
-      // Keep the completed assistant reply when local draft persistence fails.
-      _showReplyError('回复已完成，但技能草稿暂未保存；请从此回复重新创建。');
+      // Keep the completed assistant reply if its skill preview cannot be read.
+      _showReplyError('回复已完成，但技能预览未能读取；请重新生成。');
       skillDraft = null;
     }
     final now = DateTime.now();
@@ -5134,9 +5112,9 @@ $text''';
       );
       if (skillDraft != null) {
         try {
-          await CapabilityStore.instance.saveDraft(skillDraft);
+          await CapabilityStore.instance.stageSkillPreview(skillDraft);
         } catch (_) {
-          _showReplyError('回复已完成，但技能草稿暂未保存；请从此回复重新创建。');
+          _showReplyError('回复已完成，但技能预览未能读取；请重新生成。');
           skillDraft = null;
         }
       }
@@ -7188,6 +7166,7 @@ $text''';
                                               if (_emailSignedIn != signedIn) {
                                                 setState(() {
                                                   _emailSignedIn = signedIn;
+                                                  if (!signedIn) _pendingSkillDraftReview = null;
                                                 });
                                               }
                                             },

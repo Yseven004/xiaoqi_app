@@ -212,52 +212,80 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
     canClose: !_busy,
     children: [
       if (_upload) ...[
-        OutlinedButton(
-          onPressed: _busy || _policy == null ? null : _choose,
-          style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 18),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            side: const BorderSide(color: marketLine),
-          ),
-          child: Column(
-            children: [
-              marketIcon(widget.skill ? 'file-plus' : 'upload', size: 29),
-              const SizedBox(height: 14),
-              Text(
-                _file?.name ?? (widget.skill ? '选择技能文件' : '点击上传插件压缩包'),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 9),
-              Text(
-                _file == null
-                    ? (_loadingPolicy
-                          ? '正在读取上传限制…'
-                          : '支持 .zip / .tgz / .tar.gz${widget.skill ? ' / .skill / .md' : ''}')
-                    : '${_size(_fileSize)} · 点击重新选择',
-                style: const TextStyle(color: marketMuted, fontSize: 13),
-              ),
-              if (_policy != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  '压缩包最多 ${_size((_policy!['max_archive_bytes'] as num).toInt())}，${_policy!['max_files']} 个文件',
-                  style: const TextStyle(color: marketMuted, fontSize: 12),
+        Stack(
+          children: [
+            Positioned.fill(
+              child: IgnorePointer(
+                child: SvgPicture.asset(
+                  '${marketAssets}detail/upload-border.svg',
+                  fit: BoxFit.fill,
+                  excludeFromSemantics: true,
                 ),
-              ],
-            ],
-          ),
+              ),
+            ),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton(
+                onPressed: _busy || _policy == null ? null : _choose,
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 32,
+                    horizontal: 18,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  side: BorderSide.none,
+                ),
+                child: Column(
+                  children: [
+                    marketIcon(widget.skill ? 'file-plus' : 'upload', size: 29),
+                    const SizedBox(height: 14),
+                    Text(
+                      _file?.name ?? (widget.skill ? '选择技能文件' : '点击上传插件压缩包'),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 9),
+                    Text(
+                      _file == null
+                          ? (_loadingPolicy
+                                ? '正在读取上传限制…'
+                                : '支持 .zip / .tgz / .tar.gz${widget.skill ? ' / .skill / .md' : ''}')
+                          : '${_size(_fileSize)} · 点击重新选择',
+                      style: const TextStyle(color: marketMuted, fontSize: 13),
+                    ),
+                    if (_policy != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        '压缩包最多 ${_size((_policy!['max_archive_bytes'] as num).toInt())}，${_policy!['max_files']} 个文件',
+                        style: const TextStyle(
+                          color: marketMuted,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
-        TextButton(
-          onPressed: _busy
+        marketLink(
+          '从公开 GitHub 链接导入',
+          _busy
               ? null
               : () => setState(() {
                   _upload = false;
                   _inspection = null;
                   _error = null;
                 }),
-          child: const Text('从公开 GitHub 链接导入'),
         ),
+        if (!widget.skill)
+          marketLink(
+            '添加自定义 MCP 服务器',
+            _busy ? null : () => Navigator.pop(context, 'mcp'),
+            icon: 'plugs',
+          ),
       ] else ...[
         const Text(
           '粘贴公开仓库或子目录链接，先检查，再添加。',
@@ -350,18 +378,8 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
             ),
           ),
       ],
-      const SizedBox(height: 16),
-      const Text(
-        '只添加可信来源的扩展。检查通过仅代表格式和兼容性；请检查说明、依赖与权限后再使用。',
-        style: TextStyle(fontSize: 12, color: marketMuted, height: 1.7),
-      ),
     ],
     actions: [
-      if (_upload && !widget.skill)
-        marketButton(
-          '添加自定义 MCP 服务器',
-          _busy ? null : () => Navigator.pop(context, 'mcp'),
-        ),
       marketButton('取消', _busy && _jobId == null ? null : _cancel),
       marketButton(
         _busy
@@ -470,7 +488,7 @@ class _McpConnectionDialogState extends State<_McpConnectionDialog> {
       TextField(
         controller: _name,
         enabled: !_busy,
-        autofocus: true,
+        autofocus: false,
         onChanged: _changed,
         decoration: const InputDecoration(
           labelText: '名称',

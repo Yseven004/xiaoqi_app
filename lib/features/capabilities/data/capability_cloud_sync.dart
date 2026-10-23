@@ -513,6 +513,7 @@ class CapabilityCloudSync {
   }
 
   Future<void> _clearLocalSession() async {
+    CapabilityStore.instance.clearSkillPreviews();
     await _secureStorage.delete(key: _tokenKey);
     await _secureStorage.delete(key: _authMethodKey);
     await _secureStorage.delete(key: _emailKey);
@@ -542,6 +543,28 @@ class CapabilityCloudSync {
     await _verifyContract();
     final store = CapabilityStore.instance;
     final accountEmail = (await signedInEmail)?.trim().toLowerCase() ?? '';
+    await store.retireLegacyDrafts(accountEmail: accountEmail);
+    // Old drafts are deleted instead of restored or uploaded.
+    final legacyResponse = await _client
+        .get(Uri.parse('$_baseUrl/drafts'), headers: _headers(token))
+        .timeout(const Duration(seconds: 20));
+    if (legacyResponse.statusCode < 200 || legacyResponse.statusCode >= 300) {
+      throw StateError(_errorMessage(_decode(legacyResponse), '旧草稿清理失败'));
+    }
+    for (final raw
+        in (_decode(legacyResponse)['items'] as List? ?? []).whereType<Map>()) {
+      final id = raw['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      if (raw['deleted_at'] != null) {
+        await store.rememberRemoteDraftDeletion(id, accountEmail: accountEmail);
+      } else {
+        await store.queueDraftDeletion(
+          id: id,
+          cloudRevision: (raw['cloud_revision'] as num?)?.toInt() ?? 0,
+          accountEmail: accountEmail,
+        );
+      }
+    }
     for (final deletion in await store.pendingDraftDeletions()) {
       final ownerEmail = deletion['account_email']?.toString() ?? '';
       if (ownerEmail.isNotEmpty && ownerEmail != accountEmail) continue;
@@ -553,8 +576,9 @@ class CapabilityCloudSync {
             headers: _headers(token),
           )
           .timeout(const Duration(seconds: 20));
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError(_errorMessage(_decode(response), '草稿删除同步失败'));
+      if (response.statusCode != 404 &&
+          (response.statusCode < 200 || response.statusCode >= 300)) {
+        throw StateError(_errorMessage(_decode(response), '旧草稿清理失败'));
       }
       await store.completeDraftDeletion(id, ownerEmail);
     }
@@ -577,10 +601,6 @@ class CapabilityCloudSync {
           .timeout(const Duration(seconds: 25));
       final decoded = _decode(response);
       if (response.statusCode == 409) {
-        final remote = decoded['error'] is Map
-            ? (decoded['error'] as Map)['current']
-            : null;
-        if (remote is Map) await _keepConflictCopies(store, record, remote);
         await store.markConflict(record.id);
         continue;
       }
@@ -595,54 +615,6 @@ class CapabilityCloudSync {
           record.id,
           (decoded['cloud_revision'] as num?)?.toInt() ??
               record.cloudRevision + 1,
-        );
-      }
-    }
-
-    for (final draft in await store.drafts()) {
-      if (draft.cloudOwnerEmail != null &&
-          draft.cloudOwnerEmail!.trim().toLowerCase() != accountEmail) {
-        continue;
-      }
-      final response = await _client
-          .put(
-            Uri.parse('$_baseUrl/drafts'),
-            headers: _headers(token),
-            body: jsonEncode({
-              'draft': draft.toJson(includeLocalMetadata: false),
-              'expected_revision': draft.cloudRevision,
-            }),
-          )
-          .timeout(const Duration(seconds: 20));
-      final decoded = _decode(response);
-      if (response.statusCode == 409) {
-        final remote = decoded['error'] is Map
-            ? (decoded['error'] as Map)['current']
-            : null;
-        if (remote is Map) {
-          if (remote['deleted_at'] != null) {
-            await store.rememberRemoteDraftDeletion(
-              draft.id,
-              accountEmail: accountEmail,
-            );
-            continue;
-          }
-          await _saveDraftConflict(store, draft, remote);
-          await store.discardDraft(draft.id);
-        }
-        continue;
-      }
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError(
-          _errorMessage(decoded, '草稿同步失败', statusCode: response.statusCode),
-        );
-      }
-      final revision = (decoded['cloud_revision'] as num?)?.toInt();
-      if (revision != null) {
-        await store.markDraftSynced(
-          draft.id,
-          revision,
-          accountEmail: accountEmail.isEmpty ? null : accountEmail,
         );
       }
     }
@@ -666,105 +638,6 @@ class CapabilityCloudSync {
         }
       }
     }
-
-    final draftResponse = await _client
-        .get(Uri.parse('$_baseUrl/drafts'), headers: _headers(token))
-        .timeout(const Duration(seconds: 20));
-    final draftDecoded = _decode(draftResponse);
-    if (draftResponse.statusCode >= 200 &&
-        draftResponse.statusCode < 300 &&
-        draftDecoded['items'] is List) {
-      final localIds = (await store.drafts()).map((draft) => draft.id).toSet();
-      for (final raw in (draftDecoded['items'] as List).whereType<Map>()) {
-        final id = raw['id']?.toString();
-        if (id == null || id.isEmpty) continue;
-        if (raw['deleted_at'] != null) {
-          await store.rememberRemoteDraftDeletion(
-            id,
-            accountEmail: accountEmail,
-          );
-          continue;
-        }
-        if (await store.isDraftDeleted(id)) continue;
-        if (localIds.contains(id)) continue;
-        await store.saveDraft(
-          CapabilityDraft.fromJson(raw).copyWith(
-            cloudOwnerEmail: accountEmail.isEmpty ? null : accountEmail,
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _keepConflictCopies(
-    CapabilityStore store,
-    CapabilityRecord local,
-    Map remoteJson,
-  ) async {
-    final localVersion = local.currentVersion;
-    if (localVersion != null) {
-      await store.saveDraft(
-        CapabilityDraft(
-          id: store.newDraftId(),
-          kind: local.kind,
-          name: '${local.name}（本机冲突副本）',
-          description: local.description,
-          content: localVersion.content,
-          files: localVersion.files,
-          updatedAt: DateTime.now(),
-          userSuggestion: '多设备修改冲突，保留本机内容供手动合并。',
-        ),
-      );
-    }
-    final remote = CapabilityRecord.fromJson(remoteJson);
-    final remoteVersion = remote.currentVersion;
-    if (remoteVersion != null) {
-      await store.saveDraft(
-        CapabilityDraft(
-          id: store.newDraftId(),
-          kind: remote.kind,
-          name: '${remote.name}（云端冲突副本）',
-          description: remote.description,
-          content: remoteVersion.content,
-          files: remoteVersion.files,
-          updatedAt: DateTime.now(),
-          userSuggestion: '多设备修改冲突，保留云端内容供手动合并。',
-        ),
-      );
-    }
-    if (remote.isDeleted) await store.applyRemote(remote);
-  }
-
-  Future<void> _saveDraftConflict(
-    CapabilityStore store,
-    CapabilityDraft local,
-    Map remoteJson,
-  ) async {
-    final remote = CapabilityDraft.fromJson(remoteJson);
-    await store.saveDraft(
-      CapabilityDraft(
-        id: store.newDraftId(),
-        kind: local.kind,
-        name: '${local.name}（本机草稿冲突副本）',
-        description: local.description,
-        content: local.content,
-        files: local.files,
-        updatedAt: DateTime.now(),
-        userSuggestion: '多设备草稿冲突，保留本机版本。',
-      ),
-    );
-    await store.saveDraft(
-      CapabilityDraft(
-        id: store.newDraftId(),
-        kind: remote.kind,
-        name: '${remote.name}（云端草稿冲突副本）',
-        description: remote.description,
-        content: remote.content,
-        files: remote.files,
-        updatedAt: remote.updatedAt,
-        userSuggestion: '多设备草稿冲突，保留云端版本。',
-      ),
-    );
   }
 
   Future<Map<String, dynamic>> createAgentTask({

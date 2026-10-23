@@ -18,13 +18,19 @@ Widget marketIcon(String name, {double size = 22, Color? color}) =>
           : ColorFilter.mode(color, BlendMode.srcIn),
     );
 
-Widget marketIconButton(String icon, String label, VoidCallback? onPressed) =>
-    IconButton(
-      tooltip: label,
-      onPressed: onPressed,
-      constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-      icon: marketIcon(icon),
-    );
+Widget marketIconButton(
+  String icon,
+  String label,
+  VoidCallback? onPressed, {
+  bool edgeAligned = false,
+}) => IconButton(
+  tooltip: label,
+  onPressed: onPressed,
+  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+  padding: edgeAligned ? EdgeInsets.zero : null,
+  alignment: edgeAligned ? Alignment.centerLeft : Alignment.center,
+  icon: marketIcon(icon),
+);
 
 Widget marketButton(
   String label,
@@ -35,6 +41,7 @@ Widget marketButton(
   bool outlined = true,
   double radius = 99,
   double height = 48,
+  double fontSize = 15,
 }) => TextButton(
   onPressed: onPressed,
   style: TextButton.styleFrom(
@@ -53,7 +60,7 @@ Widget marketButton(
           ? BorderSide.none
           : const BorderSide(color: Color(0xFFDEDEDE)),
     ),
-    textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w400),
+    textStyle: TextStyle(fontSize: fontSize, fontWeight: FontWeight.w400),
   ),
   child: Row(
     mainAxisSize: MainAxisSize.min,
@@ -78,8 +85,15 @@ ThemeData marketTheme(BuildContext context) => Theme.of(context).copyWith(
         surface: Colors.white,
         error: const Color(0xFFA52B25),
       ),
-  textTheme: Theme.of(context).textTheme
-      .apply(bodyColor: marketInk, displayColor: marketInk),
+  textTheme: Theme.of(
+    context,
+  ).textTheme.apply(bodyColor: marketInk, displayColor: marketInk),
+  popupMenuTheme: Theme.of(context).popupMenuTheme.copyWith(
+    position: PopupMenuPosition.under,
+    color: Colors.white,
+    surfaceTintColor: Colors.transparent,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+  ),
   inputDecorationTheme: InputDecorationTheme(
     filled: false,
     contentPadding: const EdgeInsets.all(14),
@@ -94,6 +108,32 @@ ThemeData marketTheme(BuildContext context) => Theme.of(context).copyWith(
     focusedBorder: OutlineInputBorder(
       borderRadius: BorderRadius.circular(10),
       borderSide: const BorderSide(color: Color(0xFF888888), width: 2),
+    ),
+  ),
+);
+
+Widget marketLink(
+  String label,
+  VoidCallback? onPressed, {
+  String icon = 'link',
+}) => Align(
+  alignment: Alignment.centerRight,
+  child: TextButton(
+    onPressed: onPressed,
+    style: TextButton.styleFrom(
+      foregroundColor: marketMuted,
+      minimumSize: const Size(0, 48),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        marketIcon(icon, size: 20, color: marketMuted),
+        const SizedBox(width: 8),
+        Flexible(child: Text(label, textAlign: TextAlign.right)),
+        const SizedBox(width: 8),
+        marketIcon('caret-right', size: 16, color: marketMuted),
+      ],
     ),
   ),
 );
@@ -337,7 +377,7 @@ Widget marketSkeleton() => Semantics(
   ),
 );
 
-class MarketDialog extends StatelessWidget {
+class MarketDialog extends StatefulWidget {
   const MarketDialog({
     required this.title,
     required this.children,
@@ -349,62 +389,122 @@ class MarketDialog extends StatelessWidget {
   final List<Widget> children, actions;
   final bool canClose;
   @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: canClose,
-    child: Dialog(
-      backgroundColor: Colors.white,
-      surfaceTintColor: Colors.transparent,
-      insetPadding: const EdgeInsets.all(18),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 600),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w600,
+  State<MarketDialog> createState() => _MarketDialogState();
+}
+
+class _MarketDialogState extends State<MarketDialog> {
+  final _cardKey = GlobalKey();
+  final _layoutKey = GlobalKey();
+  double? _restingTop;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    key: _layoutKey,
+    builder: (context, constraints) {
+      final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+      if (keyboard == 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final box = _cardKey.currentContext?.findRenderObject() as RenderBox?;
+          final layout =
+              _layoutKey.currentContext?.findRenderObject() as RenderBox?;
+          if (box?.hasSize == true && layout != null) {
+            _restingTop = box!.localToGlobal(Offset.zero, ancestor: layout).dy;
+          }
+        });
+      }
+      final pinned = keyboard > 0 && _restingTop != null;
+      final visibleHeight = (constraints.maxHeight - keyboard)
+          .clamp(0.0, constraints.maxHeight)
+          .toDouble();
+      // Keep the resting top edge. Only shorten the scroll area if the keyboard
+      // actually covers the card; very short landscape windows can move it up.
+      final top = pinned
+          ? _restingTop!
+                .clamp(
+                  18.0,
+                  (visibleHeight - 160).clamp(18.0, constraints.maxHeight),
+                )
+                .toDouble()
+          : 18.0;
+      return PopScope(
+        canPop: widget.canClose,
+        child: MediaQuery.removeViewInsets(
+          context: context,
+          removeBottom: true,
+          child: Dialog(
+            backgroundColor: Colors.white,
+            surfaceTintColor: Colors.transparent,
+            alignment: pinned ? Alignment.topCenter : Alignment.center,
+            insetAnimationDuration: Duration.zero,
+            insetPadding: EdgeInsets.fromLTRB(18, top, 18, 18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(25),
+            ),
+            child: ConstrainedBox(
+              key: _cardKey,
+              constraints: BoxConstraints(
+                maxWidth: 600,
+                maxHeight: pinned
+                    ? (visibleHeight - top - 18)
+                          .clamp(0.0, constraints.maxHeight)
+                          .toDouble()
+                    : constraints.maxHeight - 36,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            widget.title,
+                            style: const TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: '关闭',
+                          onPressed: widget.canClose
+                              ? () => Navigator.pop(context)
+                              : null,
+                          icon: marketIcon('close', size: 21),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    Flexible(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            ...widget.children,
+                            if (widget.actions.isNotEmpty) ...[
+                              const SizedBox(height: 20),
+                              Wrap(
+                                alignment: WrapAlignment.end,
+                                spacing: 10,
+                                runSpacing: 10,
+                                children: widget.actions,
+                              ),
+                            ],
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  IconButton(
-                    tooltip: '关闭',
-                    onPressed: canClose ? () => Navigator.pop(context) : null,
-                    icon: marketIcon('close', size: 21),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              Flexible(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    mainAxisSize: MainAxisSize.min,
-                    children: children,
-                  ),
+                  ],
                 ),
               ),
-              if (actions.isNotEmpty) ...[
-                const SizedBox(height: 20),
-                Wrap(
-                  alignment: WrapAlignment.end,
-                  spacing: 10,
-                  runSpacing: 10,
-                  children: actions,
-                ),
-              ],
-            ],
+            ),
           ),
         ),
-      ),
-    ),
+      );
+    },
   );
 }

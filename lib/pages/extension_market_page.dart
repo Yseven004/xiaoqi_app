@@ -88,8 +88,9 @@ class _MarketEntry {
     final uri = Uri.tryParse(sourceUrl ?? '');
     Map metadata = const {};
     try {
-      final match = RegExp(r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)')
-          .firstMatch(record.currentVersion?.content ?? '');
+      final match = RegExp(
+        r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)',
+      ).firstMatch(record.currentVersion?.content ?? '');
       if (match != null) {
         final parsed = loadYaml(match.group(1)!);
         if (parsed is Map) metadata = parsed;
@@ -170,7 +171,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   final _search = TextEditingController();
   final _cloud = CapabilityCloudSync.instance;
   List<CapabilityRecord> _records = [];
-  List<CapabilityDraft> _drafts = [];
   List<McpConnectionRecord> _connections = [];
   final Set<String> _busyIds = {};
   late ExtensionKind _kind;
@@ -210,12 +210,13 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       });
     try {
       final store = CapabilityStore.instance;
+      await store.retireLegacyDrafts(
+        accountEmail: await _cloud.signedInEmail ?? '',
+      );
       final local = await store.list(includeDeleted: true);
-      final drafts = await CapabilityStore.instance.drafts();
       if (!mounted) return;
       setState(() {
         _records = local;
-        _drafts = drafts;
       });
       bool hasUnsyncedLocal(Iterable<CapabilityRecord> records) => records.any(
         (record) =>
@@ -227,11 +228,9 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       if (hasUnsyncedLocal(local)) {
         await _cloud.syncNow();
         final synced = await store.list(includeDeleted: true);
-        final syncedDrafts = await store.drafts();
         if (!mounted) return;
         setState(() {
           _records = synced;
-          _drafts = syncedDrafts;
         });
         if (hasUnsyncedLocal(synced)) {
           throw StateError('本机修改尚未完成同步，已保留本机记录');
@@ -297,8 +296,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     bool upload = false,
     CapabilityRecord? update,
   }) async {
+    FocusManager.instance.primaryFocus?.unfocus();
     final result = await showDialog<Object?>(
       context: context,
+      requestFocus: false,
       barrierDismissible: false,
       builder: (_) => Theme(
         data: marketTheme(context),
@@ -366,8 +367,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Future<void> _mcpForm([McpConnectionRecord? connection]) async {
+    FocusManager.instance.primaryFocus?.unfocus();
     await showDialog<bool>(
       context: context,
+      requestFocus: false,
       barrierDismissible: false,
       builder: (_) => Theme(
         data: marketTheme(context),
@@ -570,6 +573,8 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         ),
       );
   Widget _addMenu() => PopupMenuButton<String>(
+    position: PopupMenuPosition.under,
+    offset: const Offset(0, 8),
     tooltip: '添加$_label',
     color: Colors.white,
     surfaceTintColor: Colors.transparent,
@@ -582,8 +587,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           unawaited(_edit());
         case 'upload':
           unawaited(_import(upload: true));
-        case 'github':
-          unawaited(_import());
         case 'mcp':
           unawaited(_mcpForm());
       }
@@ -593,13 +596,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             _menuItem('chat', '通过聊天创建', 'chat'),
             _menuItem('editor', '使用编辑器创建', 'pencil'),
             _menuItem('upload', '从设备上传', 'file-plus'),
-            _menuItem('github', '从 GitHub 导入', 'link'),
           ]
         : [
             _menuItem('upload', '创建插件', 'edit'),
-            _menuItem('upload', '上传插件压缩包', 'file-plus'),
             _menuItem('mcp', '添加自定义 MCP 服务器', 'paperclip'),
-            _menuItem('github', '从 GitHub 导入', 'link'),
           ],
     child: Container(
       constraints: const BoxConstraints(minHeight: 48),
@@ -672,6 +672,8 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           )
         else
           PopupMenuButton<String>(
+            position: PopupMenuPosition.under,
+            offset: const Offset(0, 8),
             tooltip: '管理 ${entry.name}',
             icon: marketIcon('dots', size: 25),
             color: Colors.white,
@@ -708,6 +710,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       : MarketGrid(children: entries.map(_row).toList());
   Widget _searchField() => TextField(
     controller: _search,
+    autofocus: false,
     decoration: InputDecoration(
       hintText: '搜索$_label',
       prefixIcon: Padding(
@@ -750,26 +753,38 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           Row(
             children: [
               if (_listTitle == null) ...[
-                marketIconButton(
-                  'back',
-                  '退出扩展市场',
-                  () => Navigator.pop(context),
-                ),
-                for (final kind in [ExtensionKind.plugin, ExtensionKind.skill])
-                  Padding(
-                    padding: const EdgeInsets.only(right: 4),
-                    child: marketButton(
-                      kind == ExtensionKind.plugin ? '插件' : '技能',
-                      () => setState(() {
-                        _kind = kind;
-                        _personal = false;
-                        _search.clear();
-                      }),
-                      selected: _kind == kind,
-                      outlined: false,
-                    ),
+                Expanded(
+                  child: Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      marketIconButton(
+                        'back',
+                        '退出扩展市场',
+                        () => Navigator.pop(context),
+                        edgeAligned: true,
+                      ),
+                      for (final kind in [
+                        ExtensionKind.plugin,
+                        ExtensionKind.skill,
+                      ])
+                        Padding(
+                          padding: const EdgeInsets.only(right: 4),
+                          child: marketButton(
+                            kind == ExtensionKind.plugin ? '插件' : '技能',
+                            () => setState(() {
+                              FocusManager.instance.primaryFocus?.unfocus();
+                              _kind = kind;
+                              _personal = false;
+                              _search.clear();
+                            }),
+                            selected: _kind == kind,
+                            outlined: false,
+                            fontSize: 17,
+                          ),
+                        ),
+                    ],
                   ),
-                const Spacer(),
+                ),
               ] else ...[
                 marketButton(
                   _label,
@@ -850,7 +865,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                   ),
                 ],
               )
-            else if (_kind == ExtensionKind.plugin)
+            else
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(
@@ -872,10 +887,8 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                       )
                       .toList(),
                 ),
-              )
-            else
-              _grid(_installed),
-            if (_kind == ExtensionKind.plugin) ...[
+              ),
+            ...[
               const SizedBox(height: 25),
               Wrap(
                 spacing: 6,
@@ -892,47 +905,17 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                     selected: _personal,
                     outlined: false,
                   ),
-                  if (MediaQuery.sizeOf(context).width <= 430)
+                  if (_kind == ExtensionKind.plugin &&
+                      MediaQuery.sizeOf(context).width <= 430)
                     marketIconButton('gear', '管理连接', () => _showList('连接管理')),
                 ],
               ),
               if (_personal) ...[
-                marketSection('个人插件'),
-                _grid(_installed.where((e) => e.personal).toList()),
+                marketSection('个人$_label'),
+                _grid(_installed),
               ] else ...[
-                for (final category
-                    in _public.map((e) => e.category).toSet()) ...[
-                  marketSection(category, onTap: () => _showList(category)),
-                  _grid(
-                    _public
-                        .where((e) => e.category == category)
-                        .take(6)
-                        .toList(),
-                  ),
-                ],
-                if (_loadingMcp) marketSkeleton(),
-              ],
-            ] else ...[
-              if (_drafts.isNotEmpty) ...[
-                marketSection('草稿', count: '${_drafts.length}'),
-                MarketGrid(
-                  children: _drafts
-                      .map(
-                        (draft) => ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: const MarketBrand(
-                            '${marketAssets}detail/file-text.svg',
-                          ),
-                          title: Text(
-                            draft.name.isEmpty ? '未命名技能' : draft.name,
-                          ),
-                          subtitle: const Text('继续编辑'),
-                          trailing: marketIcon('caret-right', size: 18),
-                          onTap: () => _edit(draft: draft),
-                        ),
-                      )
-                      .toList(),
-                ),
+                marketSection('推荐'),
+                marketEmpty('暂无推荐$_label', '推荐内容将在这里展示。'),
               ],
             ],
           ],
