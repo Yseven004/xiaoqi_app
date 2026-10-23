@@ -27,6 +27,14 @@
 - 本次有服务端和API契约变化，按项目规定通过 `xiaoqi_harness/deploy/deploy_current.ps1` 自动部署；部署、健康和数据检查的最终状态以交付报告与部署日志为准，不以本地实现代替。
 - 回退使用部署脚本的单个应急恢复点；关键词为能力记录附加元数据，不修改已有插件包、技能正文、密钥或权限。
 
+### 已完成的部署
+
+- GitHub提交 `845980a` 的构建、部署脚本恢复测试、完整服务端检查、镜像导出/导入校验通过；构建运行 `39921124916` 成功。
+- `deploy_current.ps1` 部署 `20261023-155623-845980a` 成功，运行时检查、健康与数据检查通过，已恢复普通流量并完成清理。
+- 公网健康通过 Cloud Assistant 检查同一HTTPS端点，返回200；本机TLS检查未通过，因此不声称本机直连检查通过。
+- 已核对运行产品 `2026-10-23-extension-keywords-1`、contract19，服务healthy，恢复点 `latest-good` 及恢复数据均存在。部署日志：`.codex-artifacts/deploy/20261023-155623-845980a.log`。
+- server deployed and verified。随后仅修正Flutter管理弹窗等待关键词编辑完成再刷新详情的顺序；无服务端/API差异，无需再次部署。Flutter仍未执行真机验证。
+
 ## 参考
 
 2026-10-23查阅：[插件清单官方说明](https://code.claude.com/docs/en/plugins-reference)（`keywords`文字数组）、[Flutter对话框](https://api.flutter.dev/flutter/material/AlertDialog-class.html)。参考字段和交互语义，UI使用项目现有组件，未复制外部实现。

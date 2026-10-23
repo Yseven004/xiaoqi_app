@@ -639,7 +639,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
   Future<void> _manage(_MarketEntry entry) async {
     final record = entry.record!;
-    await showDialog<void>(
+    final action = await showDialog<String>(
       context: context,
       barrierColor: marketBarrier,
       builder: (ctx) => MarketDialog(
@@ -647,8 +647,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         children: [
           if (record.kind == CapabilityKind.plugin)
             marketButton('编辑能力关键词', () {
-              Navigator.pop(ctx);
-              unawaited(_editPluginKeywords(entry));
+              Navigator.pop(ctx, 'keywords');
             }, icon: 'edit'),
           Text(entry.description, style: const TextStyle(height: 1.65)),
           const SizedBox(height: 18),
@@ -683,6 +682,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         ],
       ),
     );
+    if (action == 'keywords' && mounted) await _editPluginKeywords(entry);
   }
 
   PopupMenuItem<String> _menuItem(String value, String label, String icon) =>
