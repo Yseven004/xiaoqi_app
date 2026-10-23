@@ -34,8 +34,10 @@
 - 服务端 `dart analyze lib test`：通过，无问题；完整 `dart test --reporter expanded`：191 项通过。覆盖插件包导入／发布／安装隔离、非法路径、公开包凭据拒绝、MCP 图标校验与原令牌保留。
 - 变更文件 `dart format` 与 `git diff --check`：通过；格式化只能证明语法可解析，不等于 Flutter 编译通过。
 - 独立 MCP SVG 已在 128×128 预览核对轮廓；页面同状态视觉对比尚未执行。
-- 共享版本：`2026-10-23-extension-authoring-1`，API contract `21`。正在进入 main／CI 预构建／ECS 部署，部署结果以任务交付报告及 `.codex-artifacts/deploy/` 日志为准。
-- 客户端 Flutter analyze／test／build／run 及真机验证按约定未执行，待用户本机验证。不得将资产预览或服务端测试当作客户端视觉验证。
+- 共享版本：`2026-10-23-extension-authoring-1`，API contract `21`。提交 `77a8a0d49e01f13fd50f1bb70b7b817be482b296` 已通过 [GitHub Actions 预构建](https://github.com/Yseven004/xiaoqi_app/actions/runs/39941345806)，并由现有部署脚本发布。
+- ECS 部署日志 `.codex-artifacts/deploy/20261023-184535-77a8a0d.log` 记录 `DEPLOY_OK`、公开 release 检查通过及流量恢复。部署后通过 Cloud Assistant 再次确认：`current_release=20261023-184535-77a8a0d`、`current_health=healthy`、`restore_point=latest-good`、`restore_data=present`；公开 `/health` 返回 `status=ok`、release 与 contract `21`。本机到 HTTPS 地址的请求遇到 EOF，健康复核改由服务器执行成功。
+- 服务器：已部署并验证。生产数据与健康检查已通过，保留一个 `latest-good` 紧急恢复点。
+- 客户端 Flutter analyze／test／build／run 及真机验证未执行，待用户本机验证。部署不等于客户端重建、页面视觉验收或真机验收。
 
 ## 回滚与验收
 
