@@ -8,6 +8,8 @@ import 'capability_keywords.dart';
 import 'capability_scope.dart';
 import 'artifact_context.dart';
 import 'release.dart';
+import 'skill_market.dart';
+import 'package:yaml/yaml.dart';
 
 import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental.dart'
@@ -467,6 +469,24 @@ class XiaoqiApi {
           }
         }),
       )
+      ..get(
+        '/v1/capabilities/imports/<id>/draft',
+        (Request r, String id) => _authenticated(r, (d) async {
+          try {
+            return _json({
+              'draft': imports.skillDraft(
+                d.tenant,
+                _safeId(id, '检查 ID'),
+                _safeId(r.url.queryParameters['candidate'], '候选 ID'),
+              ),
+            });
+          } on FormatException catch (error) {
+            return _error(error.message, 400);
+          } on Object {
+            return _error('技能内容读取失败，请重新检查；当前草稿已保留', 503);
+          }
+        }),
+      )
       ..post('/v1/auth/email/start', _startEmail)
       ..post('/v1/auth/email/verify', _verifyEmail)
       ..get(
@@ -661,6 +681,32 @@ class XiaoqiApi {
         '/v1/drafts',
         (request) =>
             _authenticated(request, (device) => _drafts(request, device)),
+      )
+      ..get(
+        '/v1/skill-market',
+        (request) =>
+            _authenticated(request, (device) => _skillMarket(request, device)),
+      )
+      ..get(
+        '/v1/skill-market/<id>',
+        (request, id) => _authenticated(
+          request,
+          (device) => _skillMarket(request, device, id: id),
+        ),
+      )
+      ..post(
+        '/v1/skill-market/<id>/publish',
+        (request, id) => _authenticated(
+          request,
+          (device) => _skillMarket(request, device, id: id, action: 'publish'),
+        ),
+      )
+      ..post(
+        '/v1/skill-market/<id>/install',
+        (request, id) => _authenticated(
+          request,
+          (device) => _skillMarket(request, device, id: id, action: 'install'),
+        ),
       )
       ..put(
         '/v1/drafts',
@@ -1658,8 +1704,8 @@ class XiaoqiApi {
       final body = await _body(request, _maxJsonBytes);
       final raw = body['record'];
       if (raw is Map &&
-          (const {'github', 'upload'}.contains(raw['origin']) ||
-              const {'github', 'upload'}.contains(
+          (const {'github', 'upload', 'market'}.contains(raw['origin']) ||
+              const {'github', 'upload', 'market'}.contains(
                 store
                     .get('cap/${device.tenant}/${_safeId(raw['id'], '能力 ID')}')
                     ?.value['origin'],
@@ -1805,6 +1851,73 @@ class XiaoqiApi {
     }
   }
 
+  Future<Response> _skillMarket(
+    Request request,
+    _Device device, {
+    String? id,
+    String? action,
+  }) async {
+    try {
+      final market = SkillMarket(store);
+      if (id == null) {
+        final query = (request.url.queryParameters['q'] ?? '')
+            .toLowerCase()
+            .trim();
+        return _json({
+          'items': [
+            for (final (_, doc) in store.list('skill-market/', limit: 200))
+              if (query.isEmpty ||
+                  jsonEncode({
+                    'name': (doc.value['record'] as Map)['name'],
+                    'description': (doc.value['record'] as Map)['description'],
+                    'title':
+                        ((doc.value['record'] as Map)['presentation']
+                            as Map?)?['title'],
+                  }).toLowerCase().contains(query))
+                market.listing(doc, device.tenant),
+          ],
+        });
+      }
+      final safeId = _safeId(id, '技能 ID');
+      if (action == 'publish') {
+        final body = await _body(request, 4096);
+        final saved = market.publish(
+          device.tenant,
+          safeId,
+          _asInt(body['expected_revision']) ?? -1,
+          _asInt(body['published_revision']) ?? -1,
+        );
+        final current = store.get('cap/${device.tenant}/$safeId')!;
+        return _json({
+          'publication': market.listing(saved, device.tenant, detail: true),
+          'record': _publicCapability(current.value, current.revision, true),
+        });
+      }
+      if (action == 'install') {
+        final body = await _body(request, 4096);
+        final saved = market.install(
+          device.tenant,
+          safeId,
+          _asInt(body['publication_revision']) ?? -1,
+        );
+        return _json({
+          'record': _publicCapability(saved.value, saved.revision, true),
+        });
+      }
+      final doc = store.get('skill-market/$safeId');
+      if (doc == null) return _error('技能未发布或已不可用', 404);
+      return _json({
+        'publication': market.listing(doc, device.tenant, detail: true),
+      });
+    } on RevisionConflict {
+      return _error('版本已变化，请刷新后再操作；草稿和已发布版本均已保留', 409);
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('技能市场操作失败，原有内容已保留', 503);
+    }
+  }
+
   Future<Response> _drafts(Request request, _Device device) async {
     final prefix = 'draft/${device.tenant}/';
     if (request.method == 'GET') {
@@ -1816,10 +1929,13 @@ class XiaoqiApi {
       });
     }
     try {
-      final body = await _body(request, _maxCapabilityBytes * 2);
+      final body = await _body(request, _maxJsonBytes);
       final draft = body['draft'];
       if (draft is! Map) return _error('草稿格式无效', 400);
       final draftValue = Map<String, dynamic>.from(draft);
+      draftValue['presentation'] = normalizeSkillPresentation(
+        draftValue['presentation'],
+      );
       final id = _safeId(draftValue['id'], '草稿 ID');
       final key = prefix + id;
       final current = store.get(key);
@@ -2594,13 +2710,13 @@ class XiaoqiApi {
       ).firstMatch(content);
       if (fm == null)
         throw const FormatException('SKILL.md 必须以 YAML frontmatter 开始');
-      final header = fm.group(1)!;
-      final skillName = RegExp(
-        r'(?m)^name:\s*([a-z0-9]+(?:-[a-z0-9]+)*)\s*$',
-      ).firstMatch(header)?.group(1);
-      var skillDescription = RegExp(
-        r'(?m)^description:\s*(.*?)\s*$',
-      ).firstMatch(header)?.group(1)?.trim();
+      final header = loadYaml(fm.group(1)!);
+      final skillName = header is Map && header['name'] is String
+          ? header['name'] as String
+          : null;
+      var skillDescription = header is Map && header['description'] is String
+          ? (header['description'] as String).trim()
+          : null;
       if (skillDescription != null &&
           skillDescription.length >= 2 &&
           ((skillDescription.startsWith('"') &&
@@ -2611,7 +2727,9 @@ class XiaoqiApi {
             .substring(1, skillDescription.length - 1)
             .trim();
       }
-      if (skillName == null || skillName.length > 64)
+      if (skillName == null ||
+          skillName.length > 64 ||
+          !RegExp(r'^[a-z0-9]+(?:-[a-z0-9]+)*$').hasMatch(skillName))
         throw const FormatException('技能 name 必须是 1-64 位小写字母、数字或连字符');
       if (skillDescription == null ||
           skillDescription.isEmpty ||
@@ -2695,6 +2813,9 @@ class XiaoqiApi {
       'updated_at': raw['updated_at']?.toString() ?? '',
       'show_in_menu': raw['show_in_menu'] != false,
       'deleted_at': raw['deleted_at'],
+      'origin': 'local',
+      'owner_tenant': tenant,
+      'presentation': normalizeSkillPresentation(raw['presentation']),
     };
   }
 
@@ -2704,6 +2825,16 @@ class XiaoqiApi {
     bool includeContent,
   ) {
     final result = {...document, 'cloud_revision': revision};
+    final owner = result.remove('owner_tenant')?.toString();
+    if (owner != null) {
+      final publication = store.get(
+        'skill-market/${SkillMarket.publicationId(owner, document['id'].toString())}',
+      );
+      if (publication != null) {
+        result['publication_id'] = publication.value['id'];
+        result['published_revision'] = publication.revision;
+      }
+    }
     result['versions'] = (document['versions'] as List? ?? const [])
         .whereType<Map>()
         .map((raw) {

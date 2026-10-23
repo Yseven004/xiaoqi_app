@@ -200,6 +200,9 @@ class CapabilityRecord {
     this.compatibility = const {},
     this.keywords,
     this.keywordsEdited = false,
+    this.presentation = const {},
+    this.publicationId,
+    this.publishedRevision = 0,
   });
 
   final String id;
@@ -220,9 +223,17 @@ class CapabilityRecord {
   final Map<String, dynamic> compatibility;
   final List<String>? keywords;
   final bool keywordsEdited;
+  final Map<String, dynamic> presentation;
+  final String? publicationId;
+  final int publishedRevision;
+  String get displayName =>
+      presentation['title']?.toString().trim().isNotEmpty == true
+      ? presentation['title'].toString()
+      : name;
 
   bool get isDeleted => deletedAt != null;
-  bool get isServerInstallation => origin == 'github' || origin == 'upload';
+  bool get isServerInstallation =>
+      const {'github', 'upload', 'market'}.contains(origin);
   CapabilityVersion? get currentVersion {
     for (final version in versions.reversed) {
       if (version.id == currentVersionId) return version;
@@ -242,6 +253,9 @@ class CapabilityRecord {
     bool clearDeletedAt = false,
     int? cloudRevision,
     bool? enabled,
+    Map<String, dynamic>? presentation,
+    String? publicationId,
+    int? publishedRevision,
   }) => CapabilityRecord(
     id: id,
     kind: kind,
@@ -261,6 +275,9 @@ class CapabilityRecord {
     compatibility: compatibility,
     keywords: keywords,
     keywordsEdited: keywordsEdited,
+    presentation: presentation ?? this.presentation,
+    publicationId: publicationId ?? this.publicationId,
+    publishedRevision: publishedRevision ?? this.publishedRevision,
   );
 
   Map<String, Object?> toJson() => {
@@ -283,6 +300,9 @@ class CapabilityRecord {
     'compatibility': compatibility,
     if (keywords != null) 'keywords': keywords,
     if (keywordsEdited) 'keywords_edited': true,
+    'presentation': presentation,
+    if (publicationId != null) 'publication_id': publicationId,
+    'published_revision': publishedRevision,
   };
 
   factory CapabilityRecord.fromJson(Object? raw) {
@@ -327,6 +347,11 @@ class CapabilityRecord {
           ? (raw['keywords'] as List).whereType<String>().toList()
           : null,
       keywordsEdited: raw['keywords_edited'] == true,
+      presentation: raw['presentation'] is Map
+          ? Map<String, dynamic>.from(raw['presentation'] as Map)
+          : const {},
+      publicationId: raw['publication_id']?.toString(),
+      publishedRevision: (raw['published_revision'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -345,6 +370,8 @@ class CapabilityDraft {
     this.cloudRevision = 0,
     this.cloudOwnerEmail,
     this.targetCapabilityId,
+    this.presentation = const {},
+    this.lastSyncedHash,
   });
 
   final String id;
@@ -359,6 +386,8 @@ class CapabilityDraft {
   final int cloudRevision;
   final String? cloudOwnerEmail;
   final String? targetCapabilityId;
+  final Map<String, dynamic> presentation;
+  final String? lastSyncedHash;
 
   CapabilityDraft copyWith({
     String? name,
@@ -371,6 +400,8 @@ class CapabilityDraft {
     int? cloudRevision,
     String? cloudOwnerEmail,
     String? targetCapabilityId,
+    Map<String, dynamic>? presentation,
+    String? lastSyncedHash,
   }) => CapabilityDraft(
     id: id,
     kind: kind,
@@ -384,9 +415,12 @@ class CapabilityDraft {
     cloudRevision: cloudRevision ?? this.cloudRevision,
     cloudOwnerEmail: cloudOwnerEmail ?? this.cloudOwnerEmail,
     targetCapabilityId: targetCapabilityId ?? this.targetCapabilityId,
+    presentation: presentation ?? this.presentation,
+    lastSyncedHash: lastSyncedHash ?? this.lastSyncedHash,
   );
 
   Map<String, Object?> toJson({bool includeLocalMetadata = true}) => {
+    'authoring_version': 1,
     'id': id,
     'kind': kind.name,
     'name': name,
@@ -396,10 +430,13 @@ class CapabilityDraft {
     'user_suggestion': userSuggestion,
     'updated_at': updatedAt.toIso8601String(),
     'files': files,
+    'presentation': presentation,
     'cloud_revision': cloudRevision,
     if (targetCapabilityId != null) 'target_capability_id': targetCapabilityId,
     if (includeLocalMetadata && cloudOwnerEmail != null)
       'cloud_owner_email': cloudOwnerEmail,
+    if (includeLocalMetadata && lastSyncedHash != null)
+      'last_synced_hash': lastSyncedHash,
   };
 
   factory CapabilityDraft.fromJson(Object? raw) {
@@ -425,7 +462,11 @@ class CapabilityDraft {
           : const {},
       cloudRevision: (raw['cloud_revision'] as num?)?.toInt() ?? 0,
       cloudOwnerEmail: raw['cloud_owner_email']?.toString(),
+      lastSyncedHash: raw['last_synced_hash']?.toString(),
       targetCapabilityId: raw['target_capability_id']?.toString(),
+      presentation: raw['presentation'] is Map
+          ? Map<String, dynamic>.from(raw['presentation'] as Map)
+          : const {},
     );
   }
 }

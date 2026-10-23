@@ -38,6 +38,7 @@ import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../features/capabilities/data/skill_creator_adapter.dart';
 import '../features/capabilities/presentation/capability_tag_text_controller.dart';
 import '../features/capabilities/presentation/skills_plugins_composer_controls.dart';
+import '../features/capabilities/presentation/market_skill_editor.dart';
 import '../models/book_library_item.dart';
 import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
@@ -3227,7 +3228,17 @@ $materialIndex
         metadata?['type'] == 'mcp') {
       return Map<String, Object?>.from(metadata!);
     }
-    final targetId = metadata?['target_id']?.toString();
+    final targetId =
+        metadata?['target_id']?.toString() ??
+        _messages
+            .where(
+              (message) =>
+                  !message.isUser &&
+                  message.capabilityMetadata?['type'] == 'draft',
+            )
+            .lastOrNull
+            ?.capabilityMetadata?['draft_id']
+            ?.toString();
     if (targetId == null) return null;
     final target = await CapabilityStore.instance.find(targetId);
     final version = target?.currentVersion;
@@ -3924,7 +3935,10 @@ $materialIndex
     if (type == 'action' && id == 'revise-skill') {
       final targetId = metadata['target_id']?.toString();
       if (targetId == null) return '';
-      final draft = await CapabilityStore.instance.skillPreview(targetId);
+      final draft = await CapabilityStore.instance.skillPreview(
+        targetId,
+        accountEmail: await CapabilityCloudSync.instance.signedInEmail,
+      );
       final record = draft == null
           ? await CapabilityStore.instance.find(targetId)
           : null;
@@ -3934,7 +3948,7 @@ $materialIndex
       return '''$guide
 
 [小栖技能修改]
-根据用户在当前消息中的建议修改下面的技能内容，保留原有技能意图。输出与创建流程相同的 `SKILL.md` 和代表性试用结果，由用户决定是否保存。未保存内容不作为草稿保留。
+根据用户在当前消息中的建议修改下面的技能内容，保留原有技能意图。输出与创建流程相同的 `SKILL.md` 和代表性试用结果，更新同一份草稿，保留原有图标、介绍和图片；仅在用户确认发布后对外公开。
 
 旧版 SKILL.md：
 ```markdown
@@ -4038,7 +4052,10 @@ $text''';
 
   Future<void> _openSkillDraftReview(String draftId) async {
     final store = CapabilityStore.instance;
-    final draft = await store.skillPreview(draftId);
+    final draft = await store.skillPreview(
+      draftId,
+      accountEmail: await CapabilityCloudSync.instance.signedInEmail,
+    );
 
     if (!mounted) return;
     if (draft == null) {
@@ -4046,7 +4063,13 @@ $text''';
       return;
     }
     if (_composerExpanded) _setComposerExpanded(false);
-    setState(() => _pendingSkillDraftReview = draft);
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            MarketSkillEditor(draft: draft, onImport: showSkillContentImport),
+      ),
+    );
   }
 
   void _dismissSkillDraftReview() {
@@ -4054,9 +4077,11 @@ $text''';
     if (preview == null) return;
     CapabilityStore.instance.discardSkillPreview(preview.id);
     if (mounted) setState(() => _pendingSkillDraftReview = null);
-    unawaited(_updateDraftMessageMetadata(preview.id, null).catchError((Object error) {
-      if (mounted) _showReplyError('内容已丢弃，聊天标记清理失败：$error');
-    }));
+    unawaited(
+      _updateDraftMessageMetadata(preview.id, null).catchError((Object error) {
+        if (mounted) _showReplyError('内容已丢弃，聊天标记清理失败：$error');
+      }),
+    );
   }
 
   Future<void> _deleteSkillDraft(CapabilityDraft draft) async {
@@ -4121,7 +4146,9 @@ $text''';
   Future<void> _reconcileDraftTags(String conversationId) async {
     final store = CapabilityStore.instance;
     final deletedIds = await store.deletedDraftIds();
-    final drafts = await store.skillPreviews();
+    final drafts = await store.skillPreviews(
+      accountEmail: await CapabilityCloudSync.instance.signedInEmail,
+    );
     final records = await _historyService.list(allBooks: true);
     final current = _conversation;
     if (current != null) {
@@ -4334,7 +4361,10 @@ $text''';
     final targetId = metadata?['target_id']?.toString();
     final previousDraft = targetId == null
         ? null
-        : await CapabilityStore.instance.skillPreview(targetId);
+        : await CapabilityStore.instance.skillPreview(
+            targetId,
+            accountEmail: await CapabilityCloudSync.instance.signedInEmail,
+          );
     final existingRecord = targetId == null
         ? null
         : await CapabilityStore.instance.find(targetId);
@@ -4361,6 +4391,13 @@ $text''';
       userSuggestion: parent.text,
       updatedAt: DateTime.now(),
       files: skillFiles ?? _extractSkillFiles(response),
+      cloudOwnerEmail: await CapabilityCloudSync.instance.signedInEmail,
+      cloudRevision: previousDraft?.cloudRevision ?? 0,
+      lastSyncedHash: previousDraft?.lastSyncedHash,
+      presentation:
+          previousDraft?.presentation ??
+          existingRecord?.presentation ??
+          const {},
     );
   }
 
@@ -5040,7 +5077,7 @@ $text''';
           ..clear()
           ..addAll(updated.messages);
         if (skillDraft != null) {
-          _pendingSkillDraftReview = skillDraft;
+          _pendingSkillDraftReview = null;
           _activeSkillWorkflow = null;
         }
         _clearStreamingReply();
@@ -5201,7 +5238,7 @@ $text''';
     if (answer.isIncomplete && !isIncomplete) {
       if (mounted && _conversation?.id == current.id && skillDraft != null) {
         setState(() {
-          _pendingSkillDraftReview = skillDraft;
+          _pendingSkillDraftReview = null;
           _activeSkillWorkflow = null;
         });
       }
@@ -6537,7 +6574,8 @@ $text''';
       MaterialPageRoute(builder: (_) => ExtensionMarketPage(initialKind: kind)),
     );
     if (request == null || !mounted) return;
-    if (_space != _HomeSpace.reading) setState(() => _space = _HomeSpace.reading);
+    if (_space != _HomeSpace.reading)
+      setState(() => _space = _HomeSpace.reading);
     await _startNewConversation();
     if (!mounted) return;
     _composerController.setMessage(request.prompt, request.selection);
@@ -7166,7 +7204,9 @@ $text''';
                                               if (_emailSignedIn != signedIn) {
                                                 setState(() {
                                                   _emailSignedIn = signedIn;
-                                                  if (!signedIn) _pendingSkillDraftReview = null;
+                                                  if (!signedIn)
+                                                    _pendingSkillDraftReview =
+                                                        null;
                                                 });
                                               }
                                             },

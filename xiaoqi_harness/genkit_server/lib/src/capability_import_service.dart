@@ -873,6 +873,47 @@ class CapabilityImportService {
   static Map<String, dynamic> publicInspection(Map<String, dynamic> value) =>
       {...value}..remove('artifact_key');
 
+  Map<String, dynamic> skillDraft(
+    String tenant,
+    String inspectionId,
+    String candidateId,
+  ) {
+    final inspection = getInspection(tenant, inspectionId);
+    final candidate = (inspection['candidates'] as List)
+        .whereType<Map>()
+        .where((value) => value['id'] == candidateId)
+        .firstOrNull;
+    if (candidate == null ||
+        candidate['kind'] != 'skill' ||
+        candidate['status'] != 'supported') {
+      throw const FormatException('请选择检查通过的完整技能');
+    }
+    final files = subtree(
+      store.getImmutable(inspection['artifact_key'].toString()),
+      candidate['root'].toString(),
+    );
+    final main = files['SKILL.md'];
+    if (main == null ||
+        files.length > 128 ||
+        files.values.fold<int>(0, (total, bytes) => total + bytes.length) >
+            2 * 1024 * 1024) {
+      throw const FormatException('技能草稿必须包含 SKILL.md，最多 128 个文件、总量 2 MB');
+    }
+    return {
+      'id':
+          'draft-${sha256.convert(utf8.encode('$tenant/$inspectionId/$candidateId')).toString().substring(0, 32)}',
+      'kind': 'skill',
+      'name': candidate['name'],
+      'description': candidate['description'],
+      'content': utf8.decode(main),
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+      'files': {
+        for (final entry in files.entries)
+          if (entry.key != 'SKILL.md') entry.key: base64Encode(entry.value),
+      },
+    };
+  }
+
   Future<StoredDocument> install(
     String tenant,
     String inspectionId,

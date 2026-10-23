@@ -460,7 +460,33 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
   String get _introduction => (_entry.record?.currentVersion?.content ?? '')
       .replaceFirst(RegExp(r'^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)'), '')
       .trim();
-  List<Widget> _skillContent() => [
+  List<Widget> _skillContent() => _entry.presentation.isEmpty
+      ? _legacySkillContent()
+      : [
+          Row(
+            children: [
+              marketIconButton('back', '返回技能', () => Navigator.pop(context)),
+              const Expanded(
+                child: Center(
+                  child: Text(
+                    '技能详情',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+              _more(),
+            ],
+          ),
+          const SizedBox(height: 28),
+          SkillPresentationBody(
+            presentation: _entry.presentation,
+            name: _entry.name,
+            description: _entry.description,
+            author: _entry.developer,
+          ),
+        ];
+
+  List<Widget> _legacySkillContent() => [
     Row(
       children: [
         marketIconButton('back', '返回技能', () => Navigator.pop(context)),

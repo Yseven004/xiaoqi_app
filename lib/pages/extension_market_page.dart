@@ -14,12 +14,31 @@ import '../features/capabilities/data/capability_store.dart';
 import '../features/capabilities/presentation/market_ui.dart';
 import '../features/capabilities/presentation/market_search.dart';
 import '../features/capabilities/presentation/market_skill_editor.dart';
+import '../features/capabilities/presentation/skill_presentation.dart';
 import '../widgets/app_toast.dart';
 
 part 'extension_market_details.dart';
 part 'extension_market_forms.dart';
 
 enum ExtensionKind { skill, plugin, mcp }
+
+Future<CapabilityDraft?> showSkillContentImport(BuildContext context) async {
+  final result = await showDialog<Object?>(
+    context: context,
+    requestFocus: false,
+    barrierDismissible: false,
+    barrierColor: marketBarrier,
+    builder: (_) => Theme(
+      data: marketTheme(context),
+      child: const _PackageImportDialog(
+        skill: true,
+        upload: true,
+        forEditor: true,
+      ),
+    ),
+  );
+  return result is CapabilityDraft ? result : null;
+}
 
 class ExtensionChatRequest {
   const ExtensionChatRequest(this.selection, {this.prompt = ''});
@@ -43,6 +62,7 @@ class _MarketEntry {
     this.aliases = const [],
     this.keywords = const [],
     this.capabilities = const [],
+    this.publication,
   });
   final String id, name, description, author, category;
   final ExtensionKind kind;
@@ -52,6 +72,10 @@ class _MarketEntry {
   final McpConnectionRecord? connection;
   final List<String> examples;
   final List<String> aliases, keywords, capabilities;
+  final Map<String, dynamic>? publication;
+  Map<String, dynamic> get presentation => publication?['presentation'] is Map
+      ? Map<String, dynamic>.from(publication!['presentation'] as Map)
+      : record?.presentation ?? const {};
   MarketSearchDocument get searchDocument => MarketSearchDocument(
     name: name,
     description: description,
@@ -64,7 +88,8 @@ class _MarketEntry {
   // Capability records currently come from manual import/creation. Market
   // installations are catalog-backed MCP connections, not package imports.
   bool get personal =>
-      record != null || (connection != null && connection!.catalogId == null);
+      record != null && record!.origin != 'market' ||
+      (connection != null && connection!.catalogId == null);
   bool get editable =>
       record != null &&
       !record!.isServerInstallation &&
@@ -125,7 +150,7 @@ class _MarketEntry {
             : '');
     return _MarketEntry(
       id: record.id,
-      name: record.name,
+      name: record.displayName,
       description: record.description,
       kind: record.kind == CapabilityKind.skill
           ? ExtensionKind.skill
@@ -185,6 +210,32 @@ class _MarketEntry {
           : '个人插件',
     );
   }
+  factory _MarketEntry.fromPublication(
+    Map<String, dynamic> publication,
+    List<CapabilityRecord> records,
+  ) {
+    final presentation = publication['presentation'] as Map? ?? const {};
+    final record = records
+        .where(
+          (r) =>
+              !r.isDeleted &&
+              (r.source['publication_id'] == publication['id'] ||
+                  publication['is_owner'] == true &&
+                      r.id == publication['capability_id']),
+        )
+        .firstOrNull;
+    return _MarketEntry(
+      id: publication['id'].toString(),
+      name: presentation['title']?.toString() ?? publication['name'].toString(),
+      description: publication['description']?.toString() ?? '',
+      kind: ExtensionKind.skill,
+      author: publication['author']?.toString() ?? '未提供',
+      record: record,
+      publication: publication,
+      category: '技能',
+    );
+  }
+
   factory _MarketEntry.fromMcp(
     McpCatalogEntry? catalog,
     McpConnectionRecord? connection, {
@@ -224,6 +275,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   List<CapabilityRecord> _records = [];
   List<McpConnectionRecord> _connections = [];
   List<McpCatalogEntry> _catalog = [];
+  List<Map<String, dynamic>> _publishedSkills = [];
+  List<CapabilityDraft> _authoringDrafts = [];
+  bool _loadingSkills = true;
+  String? _skillsError;
   bool _loadingCatalog = true;
   String? _catalogError;
   Timer? _searchDebounce;
@@ -247,6 +302,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     unawaited(_reload());
     unawaited(_reloadMcp());
     unawaited(_reloadCatalog());
+    unawaited(_reloadSkills());
     _links = AppLinks().uriLinkStream.listen((uri) {
       if (uri.toString().contains('mcp') && uri.toString().contains('oauth'))
         unawaited(_reloadMcp());
@@ -300,9 +356,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         accountEmail: await _cloud.signedInEmail ?? '',
       );
       final local = await store.list(includeDeleted: true);
+      final drafts = await store.authoringDrafts(await _cloud.signedInEmail);
       if (!mounted) return;
       setState(() {
         _records = local;
+        _authoringDrafts = drafts;
       });
       bool hasUnsyncedLocal(Iterable<CapabilityRecord> records) => records.any(
         (record) =>
@@ -322,10 +380,17 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           throw StateError('本机修改尚未完成同步，已保留本机记录');
         }
       }
-      await _cloud.installedCapabilities();
+      await _cloud.syncNow();
       if (!mounted) return;
       final current = await CapabilityStore.instance.list();
-      if (mounted) setState(() => _records = current);
+      final currentDrafts = await store.authoringDrafts(
+        await _cloud.signedInEmail,
+      );
+      if (mounted)
+        setState(() {
+          _records = current;
+          _authoringDrafts = currentDrafts;
+        });
     } catch (error) {
       if (mounted) setState(() => _error = '安装记录同步失败：$error');
     } finally {
@@ -389,7 +454,9 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   List<_MarketEntry> get _personalEntries =>
       _entries.where((entry) => entry.personal).toList();
   List<_MarketEntry> get _publicEntries => _kind == ExtensionKind.skill
-      ? const []
+      ? _publishedSkills
+            .map((p) => _MarketEntry.fromPublication(p, _records))
+            .toList()
       : _catalog
             .map(
               (entry) => _MarketEntry.fromMcp(
@@ -399,6 +466,22 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               ),
             )
             .toList();
+
+  Future<void> _reloadSkills() async {
+    if (mounted)
+      setState(() {
+        _loadingSkills = true;
+        _skillsError = null;
+      });
+    try {
+      final items = await _cloud.skillMarket();
+      if (mounted) setState(() => _publishedSkills = items);
+    } catch (error) {
+      if (mounted) setState(() => _skillsError = '公开技能读取失败：$error');
+    } finally {
+      if (mounted) setState(() => _loadingSkills = false);
+    }
+  }
 
   List<_MarketEntry> _matching(Iterable<_MarketEntry> entries) {
     if (_searchPending) return const [];
@@ -453,10 +536,15 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     await Navigator.push<void>(
       context,
       MaterialPageRoute(
-        builder: (_) => MarketSkillEditor(draft: draft, record: record),
+        builder: (_) => MarketSkillEditor(
+          draft: draft,
+          record: record,
+          onImport: showSkillContentImport,
+        ),
       ),
     );
     if (mounted) await _reload();
+    if (mounted) await _reloadSkills();
   }
 
   void _chat(_MarketEntry? entry, [String prompt = '']) {
@@ -538,6 +626,19 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Future<void> _installEntry(_MarketEntry entry) async {
+    if (entry.publication != null) {
+      try {
+        await _cloud.installMarketSkill(
+          entry.id,
+          (entry.publication!['publication_revision'] as num).toInt(),
+        );
+        await _reload();
+        if (mounted) AppToast.show(context, '技能已安装');
+      } catch (error) {
+        if (mounted) AppToast.show(context, '安装未完成：$error');
+      }
+      return;
+    }
     if (entry.catalog == null) {
       await _import(url: entry.url);
       return;
@@ -612,6 +713,16 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Future<void> _open(_MarketEntry entry) async {
+    if (entry.publication != null) {
+      try {
+        final detail = await _cloud.skillMarketDetail(entry.id);
+        if (!mounted) return;
+        entry = _MarketEntry.fromPublication(detail, _records);
+      } catch (error) {
+        if (mounted) AppToast.show(context, '详情读取失败：$error');
+        return;
+      }
+    }
     await Navigator.push<void>(
       context,
       MaterialPageRoute(
@@ -631,6 +742,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             else
               await _reload();
             if (!mounted) return null;
+            if (entry.publication != null) {
+              final detail = await _cloud.skillMarketDetail(entry.id);
+              return _MarketEntry.fromPublication(detail, _records);
+            }
             return [..._entries, ..._publicEntries]
                 .where(
                   (e) =>
@@ -736,7 +851,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           ? [
               _menuItem('chat', '通过聊天创建', 'chat'),
               _menuItem('editor', '使用编辑器创建', 'pencil'),
-              _menuItem('upload', '从设备上传', 'file-plus'),
             ]
           : [
               _menuItem('upload', '创建插件', 'edit'),
@@ -779,7 +893,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               padding: const EdgeInsets.symmetric(vertical: 16),
               child: Row(
                 children: [
-                  MarketBrand(entry.asset),
+                  entry.kind == ExtensionKind.skill &&
+                          entry.presentation.isNotEmpty
+                      ? SkillPresentationIcon(entry.presentation, size: 40)
+                      : MarketBrand(entry.asset),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
@@ -870,6 +987,9 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Widget _publicContent() {
+    if (_kind == ExtensionKind.skill && _loadingSkills) return marketSkeleton();
+    if (_kind == ExtensionKind.skill && _skillsError != null)
+      return marketError(_skillsError!, _reloadSkills);
     if (_kind == ExtensionKind.plugin && _loadingCatalog || _searchPending) {
       return marketSkeleton();
     }
@@ -886,6 +1006,41 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         : _grid(entries);
   }
 
+  List<CapabilityDraft> get _matchingDrafts => _kind != ExtensionKind.skill
+      ? const []
+      : _authoringDrafts
+            .where(
+              (d) =>
+                  _searchQuery.isEmpty ||
+                  '${d.presentation['title'] ?? d.name} ${d.description}'
+                      .toLowerCase()
+                      .contains(_searchQuery.toLowerCase()),
+            )
+            .toList();
+
+  Widget _draftList() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      if (_matchingDrafts.isNotEmpty) marketSection('技能草稿'),
+      for (final draft in _matchingDrafts)
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: SkillPresentationIcon(draft.presentation, size: 44),
+          title: Text(
+            (draft.presentation['title']?.toString().trim().isNotEmpty == true
+                    ? draft.presentation['title']
+                    : draft.name.isNotEmpty
+                    ? draft.name
+                    : '未命名技能')
+                .toString(),
+          ),
+          subtitle: const Text('草稿 · 点击继续编辑'),
+          trailing: marketIcon('caret-right', size: 18),
+          onTap: () => _edit(draft: draft),
+        ),
+    ],
+  );
+
   Widget _searchResults() {
     if (_searchPending) return marketSkeleton();
     if (!_personal) return _publicContent();
@@ -898,6 +1053,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             _kind == ExtensionKind.plugin && _mcpError != null)) {
       // The existing error banners above include the matching retry action.
       return const SizedBox.shrink();
+    }
+    if (_kind == ExtensionKind.skill && _matchingDrafts.isNotEmpty) {
+      return Column(
+        children: [if (entries.isNotEmpty) _grid(entries), _draftList()],
+      );
     }
     return _grid(entries);
   }
@@ -1324,7 +1484,14 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                                 onTap: () => _open(e),
                                 child: Padding(
                                   padding: const EdgeInsets.all(4),
-                                  child: MarketBrand(e.asset),
+                                  child:
+                                      e.kind == ExtensionKind.skill &&
+                                          e.presentation.isNotEmpty
+                                      ? SkillPresentationIcon(
+                                          e.presentation,
+                                          size: 40,
+                                        )
+                                      : MarketBrand(e.asset),
                                 ),
                               ),
                             ),
@@ -1342,6 +1509,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                 marketEmpty('暂无个人$_label', '你导入或创建的$_label将在这里展示。')
               else
                 _grid(_personalEntries),
+              if (_kind == ExtensionKind.skill) _draftList(),
             ] else ...[
               _publicContent(),
             ],

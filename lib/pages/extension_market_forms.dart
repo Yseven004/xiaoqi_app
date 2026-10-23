@@ -6,10 +6,12 @@ class _PackageImportDialog extends StatefulWidget {
     this.upload = false,
     this.skill = false,
     this.update,
+    this.forEditor = false,
   });
   final String? url;
   final bool upload, skill;
   final CapabilityRecord? update;
+  final bool forEditor;
   @override
   State<_PackageImportDialog> createState() => _PackageImportDialogState();
 }
@@ -149,9 +151,17 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
       _busy = true;
       _jobId = null;
       _error = null;
-      _progress = '正在安装固定版本，成功前不会显示为已安装…';
+      _progress = widget.forEditor ? '正在读取已检查的技能内容…' : '正在安装固定版本，成功前不会显示为已安装…';
     });
     try {
+      if (widget.forEditor) {
+        final draft = await _cloud.inspectedSkillDraft(
+          _inspection!['id'].toString(),
+          candidate['id'].toString(),
+        );
+        if (mounted) Navigator.pop(context, draft);
+        return;
+      }
       if (_upload &&
           widget.skill &&
           candidate['kind'] == 'skill' &&
@@ -384,14 +394,20 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
                   ),
                 const SizedBox(height: 10),
                 marketButton(
-                  candidate['status'] == 'partial'
+                  widget.forEditor
+                      ? '导入'
+                      : candidate['status'] == 'partial'
                       ? '仅安装支持的技能'
                       : widget.update == null
                       ? _upload && widget.skill && candidate['kind'] == 'skill'
                             ? '在编辑器中查看'
                             : '安装'
                       : '更新',
-                  _busy || candidate['status'] == 'unsupported'
+                  _busy ||
+                          candidate['status'] == 'unsupported' ||
+                          widget.forEditor &&
+                              (candidate['kind'] != 'skill' ||
+                                  candidate['status'] != 'supported')
                       ? null
                       : () => _install(candidate),
                   primary: true,

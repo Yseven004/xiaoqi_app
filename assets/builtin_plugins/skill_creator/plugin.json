@@ -1,0 +1,9 @@
+{
+  "id": "xiaoqi.skill-creator",
+  "name": "技能创建助手",
+  "version": "1.0.0",
+  "kind": "builtin-plugin",
+  "skills": [
+    {"id": "create-skill", "entry": "skills/create-skill/SKILL.md"}
+  ]
+}

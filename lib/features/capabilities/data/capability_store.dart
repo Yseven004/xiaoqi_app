@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -5,6 +6,24 @@ import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'capability_models.dart';
+
+String skillDraftFingerprint(CapabilityDraft draft) {
+  Object? sorted(Object? value) {
+    if (value is Map) {
+      return {
+        for (final key in value.keys.map((k) => k.toString()).toList()..sort())
+          key: sorted(value[key]),
+      };
+    }
+    if (value is List) return value.map(sorted).toList();
+    return value;
+  }
+
+  final json = draft.toJson(includeLocalMetadata: false)
+    ..remove('cloud_revision')
+    ..remove('updated_at');
+  return sha256.convert(utf8.encode(jsonEncode(sorted(json)))).toString();
+}
 
 class CapabilityStore {
   CapabilityStore._();
@@ -15,7 +34,17 @@ class CapabilityStore {
   static const _draftDeletionQueueKey = 'xiaoqi_capability_draft_deletions_v1';
   static const _deletedDraftIdsKey = 'xiaoqi_capability_deleted_draft_ids_v1';
   final Random _random = Random.secure();
-  // Generated skill previews are session memory, never persisted drafts.
+  Future<void> _authoringWrites = Future<void>.value();
+  Future<T> _writeAuthoring<T>(Future<T> Function() action) {
+    final result = _authoringWrites.then((_) => action());
+    _authoringWrites = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return result;
+  }
+
+  // Cache of account-scoped, persisted skill drafts.
   final Map<String, CapabilityDraft> _skillPreviews = {};
 
   Future<List<CapabilityRecord>> list({bool includeDeleted = false}) async {
@@ -39,8 +68,62 @@ class CapabilityStore {
       .where((record) => record.showInMenu)
       .toList(growable: false);
 
-  Future<List<CapabilityDraft>> skillPreviews() async {
-    return _skillPreviews.values.toList(growable: false);
+  String _authoringKey(String? account) =>
+      'xiaoqi_skill_authoring_${sha256.convert(utf8.encode(account ?? ""))}';
+
+  Future<List<CapabilityDraft>> authoringDrafts(String? account) async {
+    final prefs = await SharedPreferences.getInstance();
+    final deleted = await deletedDraftIds();
+    return _decodeDrafts(
+      prefs.getString(_authoringKey(account)),
+    ).values.where((draft) => !deleted.contains(draft.id)).toList();
+  }
+
+  Future<void> saveAuthoringDraft(CapabilityDraft draft) =>
+      _writeAuthoring(() => _saveAuthoringDraft(draft));
+
+  Future<CapabilityDraft> applySyncedAuthoringDraft(
+    CapabilityDraft sent,
+    CapabilityDraft remote,
+  ) => _writeAuthoring(() async {
+    final prefs = await SharedPreferences.getInstance();
+    final current = _decodeDrafts(
+      prefs.getString(_authoringKey(sent.cloudOwnerEmail)),
+    )[sent.id];
+    if (current == null || current.cloudRevision > remote.cloudRevision) {
+      return current ?? sent;
+    }
+    final merged = skillDraftFingerprint(current) == skillDraftFingerprint(sent)
+        ? remote
+        : current.copyWith(
+            cloudRevision: remote.cloudRevision,
+            lastSyncedHash: remote.lastSyncedHash,
+          );
+    await _saveAuthoringDraft(merged);
+    return merged;
+  });
+
+  Future<void> _saveAuthoringDraft(CapabilityDraft draft) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = _authoringKey(draft.cloudOwnerEmail);
+    final drafts = _decodeDrafts(prefs.getString(key));
+    drafts[draft.id] = draft;
+    if (!await prefs.setString(
+      key,
+      jsonEncode(drafts.map((id, value) => MapEntry(id, value.toJson()))),
+    )) {
+      throw StateError('草稿保存失败，当前编辑内容仍保留');
+    }
+    _skillPreviews[draft.id] = draft;
+  }
+
+  Future<List<CapabilityDraft>> skillPreviews({String? accountEmail}) async {
+    for (final draft in await authoringDrafts(accountEmail)) {
+      _skillPreviews[draft.id] = draft;
+    }
+    return _skillPreviews.values
+        .where((d) => d.cloudOwnerEmail == accountEmail)
+        .toList();
   }
 
   Future<List<CapabilityDraft>> legacyDrafts() async {
@@ -59,17 +142,36 @@ class CapabilityStore {
     return null;
   }
 
-  Future<CapabilityDraft?> skillPreview(String id) async {
+  Future<CapabilityDraft?> skillPreview(
+    String id, {
+    String? accountEmail,
+  }) async {
     if (await isDraftDeleted(id)) return null;
-    return _skillPreviews[id];
+    await skillPreviews(accountEmail: accountEmail);
+    final draft = _skillPreviews[id];
+    return draft?.cloudOwnerEmail == accountEmail ? draft : null;
   }
 
   Future<void> stageSkillPreview(CapabilityDraft draft) async {
     if (await isDraftDeleted(draft.id)) return;
-    _skillPreviews[draft.id] = draft;
+    await saveAuthoringDraft(draft);
   }
 
-  void discardSkillPreview(String id) => _skillPreviews.remove(id);
+  void discardSkillPreview(String id) {
+    final draft = _skillPreviews.remove(id);
+    if (draft != null) unawaited(_removeAuthoringDraft(draft));
+  }
+
+  Future<void> _removeAuthoringDraft(CapabilityDraft draft) =>
+      _writeAuthoring(() async {
+        final prefs = await SharedPreferences.getInstance();
+        final key = _authoringKey(draft.cloudOwnerEmail);
+        final drafts = _decodeDrafts(prefs.getString(key))..remove(draft.id);
+        await prefs.setString(
+          key,
+          jsonEncode(drafts.map((id, value) => MapEntry(id, value.toJson()))),
+        );
+      });
 
   Future<void> _discardLegacyDraft(String id) async {
     final prefs = await SharedPreferences.getInstance();
@@ -237,6 +339,9 @@ class CapabilityStore {
       (record) => record.id == (existingId ?? draft.id),
     );
     final previous = existingIndex < 0 ? null : records[existingIndex];
+    if (previous?.isServerInstallation == true) {
+      throw StateError('已安装的第三方扩展不能覆盖为作者作品');
+    }
     final previousVersion = previous?.currentVersion;
     final packageHashInput = draft.files.isEmpty
         ? utf8.encode(draft.content)
@@ -274,6 +379,9 @@ class CapabilityStore {
       syncState: CapabilitySyncState.pending,
       deletedAt: null,
       cloudRevision: previous?.cloudRevision ?? 0,
+      presentation: draft.presentation,
+      publicationId: previous?.publicationId,
+      publishedRevision: previous?.publishedRevision ?? 0,
     );
     final nextRecords = [...records];
     if (existingIndex < 0) {

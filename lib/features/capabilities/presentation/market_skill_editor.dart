@@ -13,6 +13,7 @@ import '../data/capability_models.dart';
 import '../data/capability_store.dart';
 import '../../../widgets/app_toast.dart';
 import 'market_ui.dart';
+import 'skill_presentation.dart';
 
 /// Called only after the server has checked these exact bytes and archive root.
 CapabilityDraft skillDraftFromUpload({
@@ -84,11 +85,12 @@ CapabilityDraft skillDraftFromUpload({
   );
 }
 
-/// Unsaved edits live only in this page. Server imports keep their provenance.
+/// Account-scoped authoring with local drafts and checked content imports.
 class MarketSkillEditor extends StatefulWidget {
-  const MarketSkillEditor({this.draft, this.record, super.key});
+  const MarketSkillEditor({this.draft, this.record, this.onImport, super.key});
   final CapabilityDraft? draft;
   final CapabilityRecord? record;
+  final Future<CapabilityDraft?> Function(BuildContext)? onImport;
   @override
   State<MarketSkillEditor> createState() => _MarketSkillEditorState();
 }
@@ -97,6 +99,14 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   final _name = TextEditingController(),
       _description = TextEditingController(),
       _body = TextEditingController();
+  final _title = TextEditingController(),
+      _introduction = TextEditingController();
+  final List<Map<String, dynamic>> _images = [];
+  Map<String, dynamic> _icon = {'icon_asset': 'research', 'icon_data': ''};
+  CapabilityRecord? _record;
+  bool _contentsExpanded = false;
+  bool _draftConflict = false;
+  CapabilityDraft? _remoteDraft;
   final _store = CapabilityStore.instance;
   final _cloud = CapabilityCloudSync.instance;
   final _scaffold = GlobalKey<ScaffoldState>();
@@ -112,7 +122,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   String? _error, _sourceError;
   static const _maxFiles = 128,
       _maxFileBytes = 2 * 1024 * 1024,
-      _maxTotalBytes = 10 * 1024 * 1024;
+      _maxTotalBytes = 2 * 1024 * 1024;
   static final _frontmatter = RegExp(
     r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)',
   );
@@ -120,6 +130,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   void initState() {
     super.initState();
     final record = widget.record;
+    _record = record;
     _base =
         widget.draft ??
         CapabilityDraft(
@@ -129,10 +140,43 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           content: record?.currentVersion?.content ?? '',
           files: record?.currentVersion?.files ?? {},
           targetCapabilityId: record?.id,
+          presentation: record?.presentation ?? const {},
           updatedAt: DateTime.now(),
         );
+    _applyDraft(_base);
+    for (final controller in [
+      _name,
+      _description,
+      _body,
+      _title,
+      _introduction,
+    ])
+      controller.addListener(_changed);
+    unawaited(_restoreDraft());
+  }
+
+  void _applyDraft(CapabilityDraft draft) {
+    _ready = false;
+    _base = draft;
     _name.text = _base.name;
     _description.text = _base.description;
+    _title.text = _base.presentation['title']?.toString() ?? _base.name;
+    _introduction.text = _base.presentation['introduction']?.toString() ?? '';
+    _icon = {
+      'icon_asset': _base.presentation['icon_asset'] ?? 'research',
+      'icon_data': _base.presentation['icon_data'] ?? '',
+    };
+    _images
+      ..clear()
+      ..addAll(
+        (_base.presentation['images'] as List? ?? []).whereType<Map>().map(
+          (e) => Map<String, dynamic>.from(e),
+        ),
+      );
+    _files.clear();
+    _metadata = {};
+    _sourceError = null;
+    _active = 'SKILL.md';
     _files.addAll(_base.files);
     _files.remove('SKILL.md');
     var text = _base.content;
@@ -151,10 +195,42 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     }
     _files['SKILL.md'] = base64Encode(utf8.encode(text));
     _body.text = text;
-    for (final controller in [_name, _description, _body])
-      controller.addListener(_changed);
     _ready = true;
   }
+
+  Future<void> _restoreDraft() async {
+    final owner = await _cloud.signedInEmail;
+    if (!mounted) return;
+    if (_base.cloudOwnerEmail != null && _base.cloudOwnerEmail != owner) {
+      setState(() => _sourceError = _error = '这份草稿属于其他账号，请切换到原账号');
+      return;
+    }
+    final candidates = await _store.authoringDrafts(owner);
+    if (!mounted || _dirty) return;
+    final saved = candidates
+        .where(
+          (d) => widget.record != null
+              ? d.targetCapabilityId == widget.record!.id
+              : d.id == _base.id,
+        )
+        .firstOrNull;
+    setState(
+      () => _applyDraft((saved ?? _base).copyWith(cloudOwnerEmail: owner)),
+    );
+  }
+
+  String get _identifier =>
+      RegExp(r'^[a-z0-9]+(?:-[a-z0-9]+)*$').hasMatch(_name.text) &&
+          _name.text.length <= 64
+      ? _name.text
+      : 'skill-${_base.id.replaceAll(RegExp(r'[^a-z0-9]'), '').substring(0, _base.id.replaceAll(RegExp(r'[^a-z0-9]'), '').length.clamp(0, 32).toInt())}';
+
+  Map<String, dynamic> get _presentation => {
+    ..._icon,
+    'title': _title.text.trim(),
+    'introduction': _introduction.text.trim(),
+    'images': _images.map((e) => Map<String, dynamic>.from(e)).toList(),
+  };
 
   void _changed() {
     if (_ready && mounted) setState(() => _dirty = true);
@@ -162,7 +238,13 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
 
   @override
   void dispose() {
-    for (final controller in [_name, _description, _body]) {
+    for (final controller in [
+      _name,
+      _description,
+      _body,
+      _title,
+      _introduction,
+    ]) {
       controller.removeListener(_changed);
       controller.dispose();
     }
@@ -191,9 +273,12 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     if (_sourceError != null) return _sourceError;
     if (widget.record?.isServerInstallation == true)
       return '服务端导入的技能不能在本地覆盖，请使用检查更新。';
-    if (!RegExp(r'^[a-z0-9]+(?:-[a-z0-9]+)*$').hasMatch(_name.text) ||
-        _name.text.length > 64)
-      return '名称最多 64 字符，使用小写字母、数字和单个连字符。';
+    if (_title.text.trim().isEmpty || _title.text.length > 128)
+      return '填写 1–128 字符的展示名称，可以使用中文。';
+    if (_name.text.isNotEmpty &&
+        (!RegExp(r'^[a-z0-9]+(?:-[a-z0-9]+)*$').hasMatch(_name.text) ||
+            _name.text.length > 64))
+      return '技能内部标识需使用 1–64 位小写字母、数字和单个连字符。';
     if (_description.text.trim().isEmpty || _description.text.length > 500)
       return '填写 1–500 字符的描述。';
     final content = _active == 'SKILL.md'
@@ -210,7 +295,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     _checkIncoming({});
     final metadata = {
       ..._metadata,
-      'name': _name.text.trim(),
+      'name': _identifier,
       'description': _description.text.trim(),
     };
     // JSON scalar/collection values are valid YAML and retain unknown metadata.
@@ -224,81 +309,182 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
         '---\n$header\n---\n\n${utf8.decode(base64Decode(_files['SKILL.md']!))}';
     final attachments = Map<String, String>.from(_files)..remove('SKILL.md');
     return _base.copyWith(
-      name: _name.text.trim(),
+      name: _identifier,
       description: _description.text.trim(),
       content: content,
       files: attachments,
       updatedAt: DateTime.now(),
+      presentation: _presentation,
     );
   }
 
   Future<void> _save() async {
-    if (_busy) return;
-    final validation = _validation;
-    if (validation != null) {
-      setState(() => _error = validation);
-      return;
-    }
+    await _persistDraft(sync: true);
+  }
+
+  Future<bool> _persistDraft({bool sync = false}) async {
+    if (_busy) return false;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      final draft = _snapshot();
-      final saved = await _store.commitDraft(
-        draft,
-        existingId: draft.targetCapabilityId,
-      );
-      _base = CapabilityDraft(
-        id: _store.newDraftId(),
-        name: draft.name,
-        description: draft.description,
-        content: draft.content,
-        files: draft.files,
-        targetCapabilityId: saved.id,
-        updatedAt: draft.updatedAt,
-      );
-      String? syncFailure;
-      if (await _cloud.hasEmailSession) {
+      _base = _snapshot().copyWith(cloudOwnerEmail: await _cloud.signedInEmail);
+      await _store.saveAuthoringDraft(_base);
+      if (!mounted) return true;
+      setState(() => _dirty = false);
+      if (sync && await _cloud.hasEmailSession) {
         try {
-          await _cloud.syncNow();
+          final sent = _base;
+          final remote = await _cloud.syncAuthoringDraft(sent);
+          _base = await _store.applySyncedAuthoringDraft(sent, remote);
         } catch (error) {
-          syncFailure = error.toString();
+          if (mounted)
+            setState(() {
+              _syncFailed = true;
+              _draftConflict = error is SkillDraftConflict;
+              _remoteDraft = error is SkillDraftConflict ? error.remote : null;
+              _error = '草稿已保存在本机，同步未完成：$error';
+            });
+          return true;
         }
       }
-      if (!mounted) return;
-      if (syncFailure != null) {
-        // The local write succeeded: retain that result, expose retry explicitly.
-        setState(() {
-          _dirty = false;
-          _syncFailed = true;
-          _error = '已保存到本机，同步未完成：$syncFailure';
-        });
-        return;
-      }
-      setState(() {
-        _dirty = false;
-        _allowPop = true;
-      });
-      Navigator.pop(context);
+      if (mounted && sync) AppToast.show(context, '草稿已保存');
+      return true;
     } catch (error) {
       if (mounted) setState(() => _error = '保存失败，编辑内容已保留：$error');
+      return false;
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _preview() async {
+    final validation = _validation;
+    if (validation != null) {
+      setState(() => _error = validation);
+      return;
+    }
+    if (!await _persistDraft() || !mounted) return;
+    final snapshot = _base;
+    final published = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SkillPublicationPreview(
+          presentation: snapshot.presentation,
+          name: snapshot.name,
+          description: snapshot.description,
+          published: (_record?.publishedRevision ?? 0) > 0,
+          onPublish: () async {
+            final local = await _store.commitDraft(
+              snapshot,
+              existingId: snapshot.targetCapabilityId,
+            );
+            final remote = await _cloud.syncAuthoredSkill(local);
+            _record = await _cloud.publishSkill(remote);
+            _base = snapshot.copyWith(targetCapabilityId: _record!.id);
+            try {
+              await _store.saveAuthoringDraft(_base);
+              final sent = _base;
+              final synced = await _cloud.syncAuthoringDraft(sent);
+              _base = await _store.applySyncedAuthoringDraft(sent, synced);
+            } catch (error) {
+              if (mounted) AppToast.show(context, '技能已发布，草稿状态同步待重试：$error');
+            }
+          },
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (published == true) {
+      AppToast.show(context, '技能已发布');
+      setState(() => _allowPop = true);
+      Navigator.pop(context);
+    }
+  }
+
+  Future<void> _importContent() async {
+    if (_busy || widget.onImport == null) return;
+    final incoming = await widget.onImport!(context);
+    if (incoming == null || !mounted) return;
+    if (_body.text.trim().isNotEmpty ||
+        _title.text.trim().isNotEmpty ||
+        _dirty) {
+      final replace = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => MarketDialog(
+          title: '替换当前技能内容？',
+          children: const [Text('导入会替换名称、简介和技能文件。已有图标、详细介绍和介绍图片会保留。')],
+          actions: [
+            marketButton('取消', () => Navigator.pop(ctx, false)),
+            marketButton('确认替换', () => Navigator.pop(ctx, true), primary: true),
+          ],
+        ),
+      );
+      if (replace != true || !mounted) return;
+    }
+    final current = _presentation;
+    setState(() {
+      _applyDraft(
+        _base.copyWith(
+          name: incoming.name,
+          description: incoming.description,
+          content: incoming.content,
+          files: incoming.files,
+          presentation: {
+            ...current,
+            'title': incoming.presentation['title'] ?? incoming.name,
+          },
+        ),
+      );
+      _dirty = true;
+    });
+  }
+
+  Future<void> _changeIcon() async {
+    final icon = await chooseSkillIcon(context, _icon);
+    if (icon != null && mounted)
+      setState(() {
+        _icon = icon;
+        _dirty = true;
+      });
+  }
+
+  Future<void> _addImage() async {
+    if (_images.length >= 6) {
+      AppToast.show(context, '介绍图片最多 6 张');
+      return;
+    }
+    try {
+      final data = await pickSkillPresentationImage();
+      if (data != null && mounted)
+        setState(() {
+          _images.add({'data': data, 'caption': ''});
+          _dirty = true;
+        });
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
     }
   }
 
   Future<void> _retrySync() async {
     setState(() => _busy = true);
     try {
-      await _cloud.syncNow();
+      final sent = _base;
+      final remote = await _cloud.syncAuthoringDraft(sent);
+      _base = await _store.applySyncedAuthoringDraft(sent, remote);
       if (mounted)
         setState(() {
           _error = null;
           _syncFailed = false;
         });
     } catch (error) {
-      if (mounted) setState(() => _error = '同步失败：$error');
+      if (mounted)
+        setState(() {
+          _error = '同步失败：$error';
+          _draftConflict = error is SkillDraftConflict;
+          _remoteDraft = error is SkillDraftConflict ? error.remote : null;
+        });
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -306,8 +492,46 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
 
   Future<void> _leave() async {
     if (_busy) return;
+    if (_dirty && !await _persistDraft()) return;
+    if (!mounted) return;
     setState(() => _allowPop = true);
     Navigator.pop(context);
+  }
+
+  Future<void> _saveConflictCopy() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final current = _snapshot();
+      final copy = CapabilityDraft(
+        id: _store.newDraftId(),
+        name: current.name,
+        description: current.description,
+        content: current.content,
+        files: current.files,
+        presentation: current.presentation,
+        cloudOwnerEmail: current.cloudOwnerEmail,
+        updatedAt: DateTime.now(),
+      );
+      await _store.saveAuthoringDraft(copy);
+      final remote = _remoteDraft;
+      if (remote != null) await _store.saveAuthoringDraft(remote);
+      if (!mounted) return;
+      setState(() {
+        _applyDraft(copy);
+        _record = null;
+        _dirty = false;
+        _syncFailed = false;
+        _draftConflict = false;
+        _remoteDraft = null;
+        _error = null;
+      });
+      AppToast.show(context, '本机修改已另存为新草稿，云端原版本保留');
+    } catch (error) {
+      if (mounted) setState(() => _error = '另存失败，编辑内容仍保留：$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   void _selectFile(String path, {bool drawer = false}) {
@@ -578,7 +802,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       if (drawer) marketButton('返回编辑', () => Navigator.pop(context)),
     ],
   );
-  Widget _workspace(bool phone) => ListView(
+  Widget _fileWorkspace(bool phone) => ListView(
     padding: EdgeInsets.all(phone ? 20 : 28),
     children: [
       if (phone)
@@ -603,7 +827,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
               enabled: !_busy,
               maxLength: 64,
               decoration: const InputDecoration(
-                labelText: '名称',
+                labelText: '技能内部标识',
                 hintText: 'your-skill-name',
               ),
             ),
@@ -615,7 +839,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
               minLines: 2,
               maxLines: 5,
               decoration: const InputDecoration(
-                labelText: '描述',
+                labelText: '技能用途说明',
                 hintText: '描述该技能的用途',
               ),
             ),
@@ -631,6 +855,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           ),
         ),
       if (_syncFailed) marketButton('重试同步', _busy ? null : _retrySync),
+      if (_draftConflict)
+        marketButton('将本机修改另存为新草稿', _busy ? null : _saveConflictCopy),
       if (_dirty && _validation != null)
         Padding(
           padding: const EdgeInsets.only(top: 12),
@@ -693,6 +919,269 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       ),
     ],
   );
+  Widget _field(
+    String label,
+    TextEditingController controller, {
+    int lines = 1,
+  }) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        label,
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 10),
+      TextField(
+        controller: controller,
+        enabled: !_busy,
+        minLines: lines,
+        maxLines: lines == 1 ? 1 : lines + 3,
+        style: const TextStyle(fontSize: 16, height: 1.6),
+        decoration: InputDecoration(
+          filled: true,
+          fillColor: marketSoft,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 18,
+            vertical: 14,
+          ),
+        ),
+      ),
+    ],
+  );
+
+  Widget _authoringWorkspace(bool phone) => ListView(
+    padding: EdgeInsets.fromLTRB(phone ? 20 : 30, 26, phone ? 20 : 30, 28),
+    children: [
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: phone ? 78 : 110,
+            child: Column(
+              children: [
+                SkillPresentationIcon(_icon, size: phone ? 76 : 108),
+                const SizedBox(height: 10),
+                marketButton(
+                  '更换图标',
+                  _busy ? null : _changeIcon,
+                  outlined: false,
+                  fontSize: phone ? 12 : 14,
+                  radius: 10,
+                ),
+              ],
+            ),
+          ),
+          SizedBox(width: phone ? 16 : 24),
+          Expanded(
+            child: Column(
+              children: [
+                _field('名称', _title),
+                const SizedBox(height: 20),
+                _field('一句话简介', _description, lines: 2),
+              ],
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 22),
+      const Divider(height: 1, color: marketLine),
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: marketIcon('file-text'),
+        title: const Text(
+          '技能内容',
+          style: TextStyle(fontWeight: FontWeight.w600),
+        ),
+        subtitle: phone ? Text('SKILL.md · ${_files.length - 1} 个附件') : null,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!phone)
+              Text(
+                'SKILL.md · ${_files.length - 1} 个附件',
+                style: const TextStyle(color: marketMuted),
+              ),
+            const SizedBox(width: 16),
+            Text(
+              _contentsExpanded ? '收起' : '展开',
+              style: const TextStyle(color: marketMuted),
+            ),
+            const SizedBox(width: 8),
+            marketIcon(_contentsExpanded ? 'caret-up' : 'caret-down', size: 18),
+          ],
+        ),
+        onTap: _busy
+            ? null
+            : () => setState(() => _contentsExpanded = !_contentsExpanded),
+      ),
+      if (_contentsExpanded)
+        SizedBox(
+          height: phone ? 520 : 600,
+          child: Row(
+            children: [
+              if (!phone) SizedBox(width: 220, child: _filePanel()),
+              Expanded(child: _fileWorkspace(phone)),
+            ],
+          ),
+        ),
+      const Divider(height: 1, color: marketLine),
+      const SizedBox(height: 26),
+      _field('详细介绍', _introduction, lines: 3),
+      const SizedBox(height: 28),
+      const Divider(height: 1, color: marketLine),
+      const SizedBox(height: 26),
+      const Wrap(
+        spacing: 12,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(
+            '介绍图片',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+          ),
+          Text(
+            '（可选）拖动调整顺序',
+            style: TextStyle(fontSize: 13, color: marketMuted),
+          ),
+        ],
+      ),
+      const SizedBox(height: 18),
+      SizedBox(
+        height: phone ? 250 : 330,
+        child: Row(
+          children: [
+            if (_images.isNotEmpty)
+              Expanded(
+                child: ReorderableListView(
+                  scrollDirection: Axis.horizontal,
+                  buildDefaultDragHandles: false,
+                  onReorder: (oldIndex, newIndex) {
+                    if (_busy) return;
+                    setState(() {
+                      if (newIndex > oldIndex) newIndex--;
+                      _images.insert(newIndex, _images.removeAt(oldIndex));
+                      _dirty = true;
+                    });
+                  },
+                  children: [
+                    for (var i = 0; i < _images.length; i++)
+                      Container(
+                        key: ObjectKey(_images[i]),
+                        width: phone ? 160 : 220,
+                        margin: const EdgeInsets.only(right: 14),
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: marketSoft,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          children: [
+                            Row(
+                              children: [
+                                ReorderableDragStartListener(
+                                  index: i,
+                                  child: Semantics(
+                                    label: '拖动第 ${i + 1} 张图片调整顺序',
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(8),
+                                      child: marketIcon('dots', size: 20),
+                                    ),
+                                  ),
+                                ),
+                                const Spacer(),
+                                marketIconButton(
+                                  'trash-danger',
+                                  '删除第 ${i + 1} 张图片',
+                                  _busy
+                                      ? null
+                                      : () => setState(() {
+                                          _images.removeAt(i);
+                                          _dirty = true;
+                                        }),
+                                ),
+                              ],
+                            ),
+                            Expanded(
+                              child: skillDataImage(
+                                _images[i]['data']?.toString() ?? '',
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            TextFormField(
+                              key: ObjectKey(_images[i]),
+                              initialValue:
+                                  _images[i]['caption']?.toString() ?? '',
+                              enabled: !_busy,
+                              maxLength: 200,
+                              decoration: const InputDecoration(
+                                hintText: '添加图片说明',
+                                counterText: '',
+                                isDense: true,
+                                filled: true,
+                                fillColor: Colors.white,
+                              ),
+                              onChanged: (value) {
+                                _images[i]['caption'] = value;
+                                _dirty = true;
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            if (_images.length < 6)
+              SizedBox(
+                width: phone ? 110 : 180,
+                child: InkWell(
+                  onTap: _busy ? null : _addImage,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: marketLine),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          marketIcon('plus', size: 30),
+                          const SizedBox(height: 16),
+                          const Text(
+                            '添加图片',
+                            style: TextStyle(color: marketMuted),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+      if (_error != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 20),
+          child: Text(
+            _error!,
+            style: const TextStyle(color: Color(0xFFA52B25), height: 1.6),
+          ),
+        ),
+      if (_syncFailed) marketButton('重试同步', _busy ? null : _retrySync),
+      if (_draftConflict)
+        marketButton('将本机修改另存为新草稿', _busy ? null : _saveConflictCopy),
+    ],
+  );
+
   @override
   Widget build(BuildContext context) => Theme(
     data: marketTheme(context),
@@ -720,49 +1209,74 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                       horizontal: 18,
                       vertical: 12,
                     ),
-                    child: Row(
+                    child: Stack(
+                      alignment: Alignment.center,
                       children: [
-                        marketIconButton('back', '返回', _busy ? null : _leave),
-                        const Spacer(),
-                        if (!phone)
-                          marketButton(
-                            '下载技能',
-                            _busy ? null : _download,
-                            icon: 'download',
+                        Text(
+                          '编辑资料',
+                          style: TextStyle(
+                            fontSize: phone ? 20 : 24,
+                            fontWeight: FontWeight.w700,
                           ),
-                        if (phone)
-                          marketIconButton(
-                            'download',
-                            '下载 SKILL.md',
-                            _busy ? null : _download,
-                          ),
-                        const SizedBox(width: 8),
-                        marketButton(
-                          _busy
-                              ? '正在保存…'
-                              : _base.targetCapabilityId == null
-                              ? '创建'
-                              : '保存',
-                          _busy || _validation != null ? null : () => _save(),
-                          primary: true,
+                        ),
+                        Row(
+                          children: [
+                            marketIconButton(
+                              'back',
+                              '返回',
+                              _busy ? null : _leave,
+                            ),
+                            const Spacer(),
+                            marketButton(
+                              '导入内容',
+                              _busy || widget.onImport == null
+                                  ? null
+                                  : _importContent,
+                              icon: 'upload',
+                              primary: true,
+                              radius: 12,
+                              fontSize: phone ? 13 : 15,
+                            ),
+                          ],
                         ),
                       ],
                     ),
                   ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 20),
+                    child: Text(
+                      (_record?.publishedRevision ?? 0) > 0
+                          ? '我创建的 · 技能 · 修改尚未发布'
+                          : '我创建的 · 技能 · 未发布',
+                      style: const TextStyle(color: marketMuted, fontSize: 14),
+                    ),
+                  ),
                   const Divider(height: 1, color: marketLine),
-                  Expanded(
+                  Expanded(child: _authoringWorkspace(phone)),
+                  const Divider(height: 1, color: marketLine),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 16, 24, 20),
                     child: Row(
                       children: [
-                        if (!phone)
-                          SizedBox(
-                            width: (constraints.maxWidth * .29)
-                                .clamp(220, 330)
-                                .toDouble(),
-                            child: _filePanel(),
+                        Expanded(
+                          child: marketButton(
+                            _busy ? '正在保存…' : '保存草稿',
+                            _busy ? null : _save,
+                            outlined: false,
+                            radius: 12,
+                            height: 52,
                           ),
-                        if (!phone)
-                          const VerticalDivider(width: 1, color: marketLine),
-                        Expanded(child: _workspace(phone)),
+                        ),
+                        const SizedBox(width: 20),
+                        Expanded(
+                          child: marketButton(
+                            '预览',
+                            _busy ? null : _preview,
+                            primary: true,
+                            radius: 12,
+                            height: 52,
+                          ),
+                        ),
                       ],
                     ),
                   ),

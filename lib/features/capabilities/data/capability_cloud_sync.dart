@@ -15,6 +15,13 @@ import '../../../services/task_artifact_image_cache.dart';
 import 'capability_models.dart';
 import 'capability_store.dart';
 
+class SkillDraftConflict implements Exception {
+  const SkillDraftConflict(this.remote);
+  final CapabilityDraft? remote;
+  @override
+  String toString() => '草稿已在另一设备更新，本机修改已保留，可另存为新草稿';
+}
+
 ({String code, String message, String details}) _presentTaskFailure(
   Object? value, {
   Object? fallback,
@@ -257,38 +264,53 @@ class CapabilityCloudSync {
     final file = File(path);
     final size = await file.length();
     if (size <= 0 || size > 50 * 1024 * 1024) {
-      throw const AttachmentCloudException('附件为空或超过 50 MB 限制', code: 'invalid_size');
+      throw const AttachmentCloudException(
+        '附件为空或超过 50 MB 限制',
+        code: 'invalid_size',
+      );
     }
-    final request = http.AbortableStreamedRequest(
-      'POST', Uri.parse('$_baseUrl/attachments'), abortTrigger: abortTrigger,
-    )
-      ..headers.addAll(headers)
-      ..headers['Content-Type'] = mimeType
-      ..headers['X-Xiaoqi-Filename'] = Uri.encodeComponent(name)
-      ..contentLength = size;
+    final request =
+        http.AbortableStreamedRequest(
+            'POST',
+            Uri.parse('$_baseUrl/attachments'),
+            abortTrigger: abortTrigger,
+          )
+          ..headers.addAll(headers)
+          ..headers['Content-Type'] = mimeType
+          ..headers['X-Xiaoqi-Filename'] = Uri.encodeComponent(name)
+          ..contentLength = size;
     if (contentHash != null) request.headers['X-Xiaoqi-Sha256'] = contentHash;
     var sent = 0;
     onProgress?.call(sent, size);
     final response = _client.send(request).then(http.Response.fromStream);
-    final pump = file.openRead().map((bytes) {
-      sent += bytes.length;
-      onProgress?.call(sent, size);
-      return bytes;
-    }).pipe(request.sink);
-    final results = await Future.wait<Object?>([response, pump])
-        .timeout(const Duration(minutes: 10));
+    final pump = file
+        .openRead()
+        .map((bytes) {
+          sent += bytes.length;
+          onProgress?.call(sent, size);
+          return bytes;
+        })
+        .pipe(request.sink);
+    final results = await Future.wait<Object?>([
+      response,
+      pump,
+    ]).timeout(const Duration(minutes: 10));
     return _checkedAttachment(results.first as http.Response);
   }
 
   Future<Map<String, dynamic>> getAttachment(
-    String id, {Future<void>? abortTrigger,
+    String id, {
+    Future<void>? abortTrigger,
   }) => _attachmentRequest('GET', id, abortTrigger: abortTrigger);
 
   Future<Map<String, dynamic>> submitAttachmentSegments(
-    String id, List<Map<String, Object?>> segments, {
+    String id,
+    List<Map<String, Object?>> segments, {
     Future<void>? abortTrigger,
   }) => _attachmentRequest(
-    'PUT', '$id/segments', body: {'segments': segments, 'full': true},
+    'PUT',
+    '$id/segments',
+    body: {'segments': segments, 'full': true},
     abortTrigger: abortTrigger,
   );
 
@@ -299,7 +321,8 @@ class CapabilityCloudSync {
     List<int>? pages,
     Future<void>? abortTrigger,
   }) => _attachmentRequest(
-    'POST', '$id/read',
+    'POST',
+    '$id/read',
     body: {'mode': mode, 'query': ?query, 'pages': ?pages},
     abortTrigger: abortTrigger,
   );
@@ -324,20 +347,31 @@ class CapabilityCloudSync {
     final deadline = DateTime.now().add(const Duration(hours: 2));
     while (DateTime.now().isBefore(deadline)) {
       if (isCancelled?.call() == true) {
-        throw const AttachmentCloudException('已停止读取附件', code: 'cancelled', retryable: true);
+        throw const AttachmentCloudException(
+          '已停止读取附件',
+          code: 'cancelled',
+          retryable: true,
+        );
       }
       if (snapshot != null) {
         onSnapshot?.call(snapshot);
         if (snapshot['status'] == 'failed') {
           throw AttachmentCloudException(
-            snapshot['message']?.toString() ?? snapshot['error_message']?.toString() ?? '附件解析失败',
+            snapshot['message']?.toString() ??
+                snapshot['error_message']?.toString() ??
+                '附件解析失败',
             code: snapshot['error_code']?.toString() ?? 'parse_failed',
             retryable: snapshot['retryable'] == true,
           );
         }
-        if (snapshot['ready'] == true || snapshot['status'] == 'ready') return snapshot;
+        if (snapshot['ready'] == true || snapshot['status'] == 'ready')
+          return snapshot;
         if (snapshot['status'] == 'cancelled') {
-          throw const AttachmentCloudException('已停止读取附件，可重试继续', code: 'cancelled', retryable: true);
+          throw const AttachmentCloudException(
+            '已停止读取附件，可重试继续',
+            code: 'cancelled',
+            retryable: true,
+          );
         }
         await _attachmentDelay(pollInterval, abortTrigger);
       }
@@ -345,29 +379,48 @@ class CapabilityCloudSync {
         snapshot = await getAttachment(id, abortTrigger: abortTrigger);
         consecutiveFailures = 0;
       } on Object catch (error) {
-        if (!_transientAttachmentError(error) || ++consecutiveFailures > 5) rethrow;
+        if (!_transientAttachmentError(error) || ++consecutiveFailures > 5)
+          rethrow;
         // A single 30-second poll timeout must not delete successfully read pages.
-        await _attachmentDelay(retryInterval * min(consecutiveFailures, 4), abortTrigger);
+        await _attachmentDelay(
+          retryInterval * min(consecutiveFailures, 4),
+          abortTrigger,
+        );
       }
     }
-    throw const AttachmentCloudException('附件仍在处理中，已保存进度，请重试继续', code: 'poll_timeout', retryable: true);
+    throw const AttachmentCloudException(
+      '附件仍在处理中，已保存进度，请重试继续',
+      code: 'poll_timeout',
+      retryable: true,
+    );
   }
 
   Future<void> _attachmentDelay(Duration duration, Future<void>? abort) async {
     if (abort == null) return Future<void>.delayed(duration);
     await Future.any<void>([
       Future<void>.delayed(duration),
-      abort.then<void>((_) => throw const AttachmentCloudException('已停止读取附件', code: 'cancelled', retryable: true)),
+      abort.then<void>(
+        (_) => throw const AttachmentCloudException(
+          '已停止读取附件',
+          code: 'cancelled',
+          retryable: true,
+        ),
+      ),
     ]);
   }
 
   bool _transientAttachmentError(Object error) =>
-      error is TimeoutException || error is SocketException ||
-      (error is http.ClientException && error is! http.RequestAbortedException) ||
-      (error is AttachmentCloudException && error.retryable && error.code != 'cancelled');
+      error is TimeoutException ||
+      error is SocketException ||
+      (error is http.ClientException &&
+          error is! http.RequestAbortedException) ||
+      (error is AttachmentCloudException &&
+          error.retryable &&
+          error.code != 'cancelled');
 
   Future<Map<String, dynamic>> _attachmentRequest(
-    String method, String suffix, {
+    String method,
+    String suffix, {
     Map<String, Object?>? body,
     Future<void>? abortTrigger,
   }) async {
@@ -376,32 +429,54 @@ class CapabilityCloudSync {
     final parts = suffix.split('/');
     parts[0] = Uri.encodeComponent(parts[0]);
     final request = http.AbortableRequest(
-      method, Uri.parse('$_baseUrl/attachments/${parts.join('/')}'),
+      method,
+      Uri.parse('$_baseUrl/attachments/${parts.join('/')}'),
       abortTrigger: abortTrigger,
     )..headers.addAll(headers);
     if (body != null) request.body = jsonEncode(body);
-    return _checkedAttachment(await _client.send(request)
-        .then(http.Response.fromStream).timeout(const Duration(seconds: 30)));
+    return _checkedAttachment(
+      await _client
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(const Duration(seconds: 30)),
+    );
   }
 
   Map<String, dynamic> _checkedAttachment(http.Response response) {
-    if (response.statusCode >= 200 && response.statusCode < 300) return _decode(response);
+    if (response.statusCode >= 200 && response.statusCode < 300)
+      return _decode(response);
     Map<String, dynamic> decoded;
-    try { decoded = _decode(response); } on Object { decoded = {}; }
+    try {
+      decoded = _decode(response);
+    } on Object {
+      decoded = {};
+    }
     final error = decoded['error'];
-    final code = error is Map ? error['code']?.toString() : decoded['error_code']?.toString();
+    final code = error is Map
+        ? error['code']?.toString()
+        : decoded['error_code']?.toString();
     throw AttachmentCloudException(
       _errorMessage(decoded, '附件请求失败', statusCode: response.statusCode),
       code: code ?? 'http_${response.statusCode}',
       statusCode: response.statusCode,
-      retryable: response.statusCode == 408 || response.statusCode == 429 || response.statusCode >= 500,
+      retryable:
+          response.statusCode == 408 ||
+          response.statusCode == 429 ||
+          response.statusCode >= 500,
     );
   }
 
   /// Kept as a local convenience for full-PDF consumers, using only the current
   /// attachment resource contract. Chat preparation requests overview instead.
-  Future<List<String>> recognizePdf(String path, {bool Function()? isCancelled}) async {
-    final started = await createAttachment(path: path, name: path.split(RegExp(r'[/\\]')).last, mimeType: 'application/pdf');
+  Future<List<String>> recognizePdf(
+    String path, {
+    bool Function()? isCancelled,
+  }) async {
+    final started = await createAttachment(
+      path: path,
+      name: path.split(RegExp(r'[/\\]')).last,
+      mimeType: 'application/pdf',
+    );
     final id = started['id']?.toString() ?? '';
     if (id.isEmpty) throw const FormatException('服务端没有创建附件任务');
     if (isCancelled?.call() == true) {
@@ -409,13 +484,21 @@ class CapabilityCloudSync {
       throw const FormatException('已停止识别附件');
     }
     final job = await readAttachment(id, mode: 'full');
-    final result = await waitForAttachment(id, initial: job, isCancelled: isCancelled);
+    final result = await waitForAttachment(
+      id,
+      initial: job,
+      isCancelled: isCancelled,
+    );
     final count = (result['page_count'] as num?)?.toInt() ?? 0;
     final pages = List<String>.filled(count, '');
-    for (final segment in result['segments'] is List ? result['segments'] as List : const []) {
+    for (final segment
+        in result['segments'] is List ? result['segments'] as List : const []) {
       if (segment is! Map) continue;
-      final page = (segment['page'] as num?)?.toInt() ?? ((segment['index'] as num?)?.toInt() ?? 0) + 1;
-      if (page > 0 && page <= count) pages[page - 1] += segment['text']?.toString() ?? '';
+      final page =
+          (segment['page'] as num?)?.toInt() ??
+          ((segment['index'] as num?)?.toInt() ?? 0) + 1;
+      if (page > 0 && page <= count)
+        pages[page - 1] += segment['text']?.toString() ?? '';
     }
     return pages;
   }
@@ -544,7 +627,7 @@ class CapabilityCloudSync {
     final store = CapabilityStore.instance;
     final accountEmail = (await signedInEmail)?.trim().toLowerCase() ?? '';
     await store.retireLegacyDrafts(accountEmail: accountEmail);
-    // Old drafts are deleted instead of restored or uploaded.
+    // Retire legacy drafts; current authoring drafts are restored and synced.
     final legacyResponse = await _client
         .get(Uri.parse('$_baseUrl/drafts'), headers: _headers(token))
         .timeout(const Duration(seconds: 20));
@@ -555,6 +638,24 @@ class CapabilityCloudSync {
         in (_decode(legacyResponse)['items'] as List? ?? []).whereType<Map>()) {
       final id = raw['id']?.toString();
       if (id == null || id.isEmpty) continue;
+      if (raw['authoring_version'] == 1 && raw['deleted_at'] == null) {
+        final remote = CapabilityDraft.fromJson(
+          raw,
+        ).copyWith(cloudOwnerEmail: accountEmail);
+        final local = (await store.authoringDrafts(
+          accountEmail,
+        )).where((draft) => draft.id == id).firstOrNull;
+        final synced = remote.copyWith(
+          lastSyncedHash: skillDraftFingerprint(remote),
+        );
+        if (local == null) {
+          await store.saveAuthoringDraft(synced);
+        } else if (local.lastSyncedHash == skillDraftFingerprint(local) ||
+            skillDraftFingerprint(local) == skillDraftFingerprint(remote)) {
+          await store.applySyncedAuthoringDraft(local, synced);
+        }
+        continue;
+      }
       if (raw['deleted_at'] != null) {
         await store.rememberRemoteDraftDeletion(id, accountEmail: accountEmail);
       } else {
@@ -581,6 +682,11 @@ class CapabilityCloudSync {
         throw StateError(_errorMessage(_decode(response), '旧草稿清理失败'));
       }
       await store.completeDraftDeletion(id, ownerEmail);
+    }
+
+    for (final draft in await store.authoringDrafts(accountEmail)) {
+      final synced = await syncAuthoringDraft(draft);
+      await store.applySyncedAuthoringDraft(draft, synced);
     }
 
     for (final record in await store.list(includeDeleted: true)) {
@@ -1330,6 +1436,148 @@ class CapabilityCloudSync {
       );
     }
     await installedCapabilities();
+  }
+
+  Future<List<Map<String, dynamic>>> skillMarket() async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .get(Uri.parse('$_baseUrl/skill-market'), headers: _headers(token))
+          .timeout(const Duration(seconds: 30)),
+    );
+    return (value['items'] as List? ?? [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> skillMarketDetail(String id) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .get(
+            Uri.parse('$_baseUrl/skill-market/${Uri.encodeComponent(id)}'),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 30)),
+    );
+    return Map<String, dynamic>.from(value['publication'] as Map);
+  }
+
+  Future<CapabilityRecord> publishSkill(CapabilityRecord record) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/skill-market/${Uri.encodeComponent(record.id)}/publish',
+            ),
+            headers: _headers(token),
+            body: jsonEncode({
+              'expected_revision': record.cloudRevision,
+              'published_revision': record.publishedRevision,
+            }),
+          )
+          .timeout(const Duration(seconds: 45)),
+    );
+    final saved = CapabilityRecord.fromJson(value['record']);
+    await CapabilityStore.instance.applyRemote(saved);
+    return saved;
+  }
+
+  Future<CapabilityRecord> syncAuthoredSkill(CapabilityRecord record) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse('$_baseUrl/capabilities/sync'),
+            headers: _headers(token),
+            body: jsonEncode({
+              'record': record.toJson(),
+              'expected_revision': record.cloudRevision,
+            }),
+          )
+          .timeout(const Duration(seconds: 45)),
+    );
+    final saved = CapabilityRecord.fromJson(value['record']);
+    await CapabilityStore.instance.applyRemote(saved);
+    return saved;
+  }
+
+  Future<CapabilityRecord> installMarketSkill(String id, int revision) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/skill-market/${Uri.encodeComponent(id)}/install',
+            ),
+            headers: _headers(token),
+            body: jsonEncode({'publication_revision': revision}),
+          )
+          .timeout(const Duration(seconds: 45)),
+    );
+    final saved = CapabilityRecord.fromJson(value['record']);
+    await CapabilityStore.instance.applyRemote(saved);
+    return saved;
+  }
+
+  Future<CapabilityDraft> syncAuthoringDraft(CapabilityDraft draft) async {
+    final token = await _requireToken();
+    final response = await _client
+        .put(
+          Uri.parse('$_baseUrl/drafts'),
+          headers: _headers(token),
+          body: jsonEncode({
+            'draft': draft.toJson(includeLocalMetadata: false),
+            'expected_revision': draft.cloudRevision,
+          }),
+        )
+        .timeout(const Duration(seconds: 45));
+    if (response.statusCode == 409) {
+      final error = _decode(response)['error'];
+      final current = error is Map ? error['current'] : null;
+      if (current is Map && current['deleted_at'] == null) {
+        final remote = CapabilityDraft.fromJson(
+          current,
+        ).copyWith(cloudOwnerEmail: await signedInEmail);
+        if (skillDraftFingerprint(remote) == skillDraftFingerprint(draft)) {
+          return remote.copyWith(lastSyncedHash: skillDraftFingerprint(remote));
+        }
+      }
+      throw SkillDraftConflict(
+        current is Map && current['deleted_at'] == null
+            ? CapabilityDraft.fromJson(
+                current,
+              ).copyWith(cloudOwnerEmail: await signedInEmail)
+            : null,
+      );
+    }
+    final value = _checked(response);
+    final saved = CapabilityDraft.fromJson(
+      value['draft'],
+    ).copyWith(cloudOwnerEmail: await signedInEmail);
+    return saved.copyWith(lastSyncedHash: skillDraftFingerprint(saved));
+  }
+
+  Future<CapabilityDraft> inspectedSkillDraft(
+    String inspectionId,
+    String candidateId,
+  ) async {
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .get(
+            Uri.parse(
+              '$_baseUrl/capabilities/imports/${Uri.encodeComponent(inspectionId)}/draft',
+            ).replace(queryParameters: {'candidate': candidateId}),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 30)),
+    );
+    return CapabilityDraft.fromJson(
+      value['draft'],
+    ).copyWith(cloudOwnerEmail: await signedInEmail);
   }
 
   Map<String, dynamic> _checked(http.Response response) {
