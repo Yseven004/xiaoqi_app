@@ -10,6 +10,7 @@ class _PackageImportDialog extends StatefulWidget {
     this.onMcp,
     this.onDraft,
     this.onBusy,
+    this.controller,
     super.key,
   });
   final String? url;
@@ -19,6 +20,7 @@ class _PackageImportDialog extends StatefulWidget {
   final VoidCallback? onMcp;
   final ValueChanged<CapabilityDraft>? onDraft;
   final ValueChanged<bool>? onBusy;
+  final MarketImportController? controller;
   @override
   State<_PackageImportDialog> createState() => _PackageImportDialogState();
 }
@@ -40,10 +42,12 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
     _url.text =
         widget.url ?? widget.update?.source['requested_url']?.toString() ?? '';
     if (_upload) unawaited(_loadPolicy());
+    widget.controller?.read = _inspect;
   }
 
   @override
   void dispose() {
+    widget.controller?.read = null;
     _url.dispose();
     super.dispose();
   }
@@ -90,6 +94,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
         _inspection = null;
         _error = null;
       });
+      widget.controller?.sync(ready: false);
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     }
@@ -108,6 +113,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
       }
     }
     widget.onBusy?.call(true);
+    widget.controller?.sync(ready: false, busy: true);
     setState(() {
       _busy = true;
       _error = null;
@@ -138,16 +144,29 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
           'url': _url.text.trim(),
         }, onJob: _onJob);
       }
-      if (mounted)
-        setState(
-          () => _inspection = Map<String, dynamic>.from(
-            result['inspection'] as Map,
-          ),
+      if (mounted) {
+        final inspection = Map<String, dynamic>.from(
+          result['inspection'] as Map,
         );
+        setState(() => _inspection = inspection);
+        final candidates = inspection['candidates'] as List? ?? const [];
+        widget.controller?.sync(ready: false);
+        if (widget.forEditor &&
+            candidates.length == 1 &&
+            candidates.first is Map) {
+          final candidate = candidates.first as Map;
+          final importable =
+              candidate['status'] != 'unsupported' &&
+              candidate['kind'] == (widget.skill ? 'skill' : 'plugin') &&
+              (!widget.skill || candidate['status'] == 'supported');
+          if (importable) await _install(candidate);
+        }
+      }
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
+      widget.controller?.sync(busy: false);
       widget.onBusy?.call(false);
     }
   }
@@ -173,6 +192,7 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
         if (mounted) {
           if (widget.onDraft != null) {
             widget.onDraft!(draft);
+            if (mounted) setState(() => _inspection = null);
           } else {
             Navigator.pop(context, draft);
           }
@@ -247,86 +267,123 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
         : null,
     children: [
       if (_upload || widget.onDraft != null) ...[
-        Stack(
-          children: [
-            Positioned.fill(
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFAFAFA),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: SvgPicture.asset(
-                    '${marketAssets}detail/upload-border.svg',
-                    fit: BoxFit.fill,
-                    excludeFromSemantics: true,
-                  ),
-                ),
-              ),
-            ),
-            SizedBox(
-              width: double.infinity,
-              // Match the prototype's roomy upload area without fixing text height.
-              child: OutlinedButton(
-                onPressed: _busy || _policy == null ? null : _choose,
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 36,
-                    horizontal: 18,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  side: BorderSide.none,
-                  minimumSize: const Size(0, 205),
-                  backgroundColor: Colors.transparent,
-                  disabledBackgroundColor: Colors.transparent,
-                  foregroundColor: marketMuted,
-                ),
-                child: Column(
-                  children: [
-                    marketIcon(
-                      widget.skill ? 'file-plus' : 'upload',
-                      size: 29,
-                      color: marketMuted,
-                    ),
-                    const SizedBox(height: 18),
-                    Text(
-                      _file?.name ?? (widget.skill ? '选择技能文件' : '点击上传插件压缩包'),
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
-                        color: Color(0xFF555555),
-                        height: 1.65,
+        ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 240),
+          child: AspectRatio(
+            aspectRatio: widget.skill ? 1.84 : 1.98,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFAFAFA),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: SvgPicture.asset(
+                        '${marketAssets}detail/upload-border.svg',
+                        fit: BoxFit.fill,
+                        excludeFromSemantics: true,
                       ),
                     ),
-                    const SizedBox(height: 13),
-                    Text(
-                      _file == null
-                          ? (_loadingPolicy
-                                ? '正在读取上传限制…'
-                                : '支持 .zip / .tgz / .tar.gz${widget.skill ? ' / .skill / .md' : ''}')
-                          : '${_size(_fileSize)} · 点击重新选择',
-                      style: const TextStyle(color: marketMuted, fontSize: 14),
+                  ),
+                ),
+                SizedBox(
+                  width: double.infinity,
+                  // Match the prototype's roomy upload area without fixing text height.
+                  child: OutlinedButton(
+                    onPressed: _busy || _policy == null ? null : _choose,
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 18),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      side: BorderSide.none,
+                      minimumSize: Size.zero,
+                      backgroundColor: Colors.transparent,
+                      disabledBackgroundColor: Colors.transparent,
+                      foregroundColor: marketMuted,
                     ),
-                    if (_policy != null) ...[
-                      const SizedBox(height: 13),
-                      Text(
-                        '压缩包最多 ${_size((_policy!['max_archive_bytes'] as num).toInt())}，${_policy!['max_files']} 个文件',
-                        style: const TextStyle(
-                          color: marketMuted,
-                          fontSize: 12,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        marketIcon(
+                          'upload-document',
+                          size: 48,
+                          color: marketInk,
                         ),
-                      ),
-                    ],
-                  ],
+                        const SizedBox(height: 18),
+                        Text(
+                          _file?.name ?? (widget.skill ? '拖入技能文件' : '拖入插件文件'),
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w600,
+                            color: marketInk,
+                            height: 1.65,
+                          ),
+                        ),
+                        const SizedBox(height: 13),
+                        if (_file == null)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 22,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: marketSoft,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Text(
+                              '或选择文件',
+                              style: TextStyle(
+                                color: marketInk,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          )
+                        else
+                          Text(
+                            '${_size(_fileSize)} · 点击重新选择',
+                            style: const TextStyle(
+                              color: marketMuted,
+                              fontSize: 14,
+                            ),
+                          ),
+                        const SizedBox(height: 12),
+                        Text(
+                          _loadingPolicy
+                              ? '正在读取上传限制…'
+                              : widget.skill
+                              ? '支持 SKILL.md 和技能压缩包'
+                              : '支持插件压缩包',
+                          style: const TextStyle(
+                            color: marketMuted,
+                            fontSize: 14,
+                          ),
+                        ),
+                        if (_policy != null && widget.onDraft == null) ...[
+                          const SizedBox(height: 12),
+                          Text(
+                            '压缩包最多 ${_size((_policy!['max_archive_bytes'] as num).toInt())}，${_policy!['max_files']} 个文件',
+                            style: const TextStyle(
+                              color: marketMuted,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 24),
         if (widget.onDraft == null)
           marketLink(
             '从公开 GitHub 链接导入',
@@ -343,6 +400,17 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
         if (widget.onDraft != null) ...[
           Row(
             children: [
+              const Expanded(child: Divider(color: marketLine)),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Text('或者粘贴来源链接', style: TextStyle(color: marketMuted)),
+              ),
+              const Expanded(child: Divider(color: marketLine)),
+            ],
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
               SvgPicture.asset(
                 'assets/icons/extensions/github_mark.svg',
                 width: 22,
@@ -352,25 +420,51 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
               const Text('从GitHub上导入'),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 4),
         ],
-        const Text(
-          '粘贴公开仓库或子目录链接，先检查，再添加。',
-          style: TextStyle(color: marketMuted, height: 1.65),
-        ),
-        const SizedBox(height: 18),
+        if (widget.onDraft == null) ...[
+          const Text(
+            '粘贴公开仓库或子目录链接，先检查，再添加。',
+            style: TextStyle(color: marketMuted, height: 1.65),
+          ),
+          const SizedBox(height: 18),
+        ],
         TextField(
           controller: _url,
           enabled: !_busy,
           keyboardType: TextInputType.url,
-          onChanged: (_) => setState(() {
-            _upload = false;
-            _inspection = null;
-            _error = null;
-          }),
-          decoration: const InputDecoration(
-            labelText: 'GitHub 链接',
-            hintText: 'https://github.com/owner/repository',
+          onChanged: (_) {
+            setState(() {
+              _upload = false;
+              _inspection = null;
+              _error = null;
+            });
+            widget.controller?.sync(ready: false);
+          },
+          decoration: InputDecoration(
+            hintText: 'https://github.com/...',
+            prefixIcon: Padding(
+              padding: const EdgeInsets.all(13),
+              child: marketIcon('link', size: 20, color: marketMuted),
+            ),
+            filled: true,
+            fillColor: marketSoft,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide.none,
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide.none,
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: marketInk, width: 1.5),
+            ),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 16,
+            ),
           ),
         ),
       ],
@@ -455,19 +549,26 @@ class _PackageImportDialogState extends State<_PackageImportDialog> {
           ),
       ],
     ],
-    actions: [
-      if (widget.onDraft == null || _busy)
-        marketDialogButton('取消', _busy && _jobId == null ? null : _cancel),
-      marketDialogButton(
-        _busy
-            ? '正在处理…'
-            : _inspection == null
-            ? '读取内容'
-            : '重新检查',
-        _busy || _upload && (_loadingPolicy || _file == null) ? null : _inspect,
-        primary: true,
-      ),
-    ],
+    actions: widget.onDraft != null
+        ? const []
+        : [
+            if (widget.onDraft == null || _busy)
+              marketDialogButton(
+                '取消',
+                _busy && _jobId == null ? null : _cancel,
+              ),
+            marketDialogButton(
+              _busy
+                  ? '正在处理…'
+                  : _inspection == null
+                  ? '读取内容'
+                  : '重新检查',
+              _busy || _upload && (_loadingPolicy || _file == null)
+                  ? null
+                  : _inspect,
+              primary: true,
+            ),
+          ],
   );
 }
 

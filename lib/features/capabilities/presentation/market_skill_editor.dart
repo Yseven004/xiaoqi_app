@@ -18,6 +18,24 @@ import '../../../services/ai_service.dart';
 import 'market_ui.dart';
 import 'skill_presentation.dart';
 
+/// Bridge used by the creation shell to own the embedded import action.
+/// The import form still owns validation and network work; the shell owns
+/// where the action is presented.
+class MarketImportController {
+  Future<void> Function()? read;
+  bool ready = false;
+  bool busy = false;
+  VoidCallback? onChanged;
+
+  Future<void> run() async => await read?.call();
+
+  void sync({bool? ready, bool? busy}) {
+    if (ready != null) this.ready = ready;
+    if (busy != null) this.busy = busy;
+    onChanged?.call();
+  }
+}
+
 /// Called only after the server has checked these exact bytes and archive root.
 CapabilityDraft skillDraftFromUpload({
   required String fileName,
@@ -97,6 +115,7 @@ class MarketSkillEditor extends StatefulWidget {
     this.openImportOnStart = false,
     this.kind = CapabilityKind.skill,
     this.contentBuilder,
+    this.importController,
     this.cloud,
     super.key,
   });
@@ -112,6 +131,7 @@ class MarketSkillEditor extends StatefulWidget {
     ValueChanged<bool>,
   )?
   contentBuilder;
+  final MarketImportController? importController;
   @override
   State<MarketSkillEditor> createState() => _MarketSkillEditorState();
 }
@@ -176,6 +196,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   @override
   void initState() {
     super.initState();
+    widget.importController?.onChanged = () {
+      if (mounted) setState(() {});
+    };
     final record = widget.record;
     _record = record;
     _base =
@@ -192,6 +215,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           updatedAt: DateTime.now(),
         );
     _applyDraft(_base);
+    widget.importController?.ready =
+        _base.content.trim().isNotEmpty || _base.files.isNotEmpty;
     for (final controller in [
       _name,
       _description,
@@ -307,6 +332,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     setState(
       () => _applyDraft((saved ?? _base).copyWith(cloudOwnerEmail: owner)),
     );
+    widget.importController?.sync(
+      ready: _base.content.trim().isNotEmpty || _base.files.isNotEmpty,
+    );
     final token = await _store.draftMcpToken(_base, url: _mcpUrl.text.trim());
     if (mounted && !_dirty && token != null) _mcpToken.text = token;
   }
@@ -331,6 +359,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
 
   @override
   void dispose() {
+    widget.importController?.onChanged = null;
     _aiRequest.dispose();
     _mcpUrl.dispose();
     _mcpToken.clear();
@@ -592,6 +621,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       _dirty = true;
       _error = null;
     });
+    widget.importController?.sync(ready: true);
   }
 
   Future<void> _changeIcon() async {
@@ -1440,7 +1470,21 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     children: [
       ListTile(
         contentPadding: EdgeInsets.zero,
-        title: const Text('MCP连接配置（创建MCP连接器时须填写）'),
+        title: const Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: 'MCP连接配置',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              TextSpan(
+                text: '（创建MCP连接器时须填写）',
+                style: TextStyle(color: marketMuted, fontSize: 14),
+              ),
+            ],
+          ),
+          style: TextStyle(fontSize: 16),
+        ),
         trailing: marketIcon(_mcpExpanded ? 'caret-up' : 'caret-down'),
         onTap: () => setState(() => _mcpExpanded = !_mcpExpanded),
       ),
@@ -1450,9 +1494,23 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           enabled: !_testingMcp && !_busy,
           keyboardType: TextInputType.url,
           onChanged: _mcpChanged,
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             labelText: '服务器地址',
             hintText: 'https://',
+            filled: true,
+            fillColor: marketSoft,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(12)),
+              borderSide: BorderSide.none,
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(12)),
+              borderSide: BorderSide.none,
+            ),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 18,
+              vertical: 14,
+            ),
           ),
         ),
         const SizedBox(height: 16),
@@ -1468,9 +1526,23 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
               _dirty = true;
             });
           },
-          decoration: const InputDecoration(
-            labelText: '访问令牌 · 仅本人可见',
+          decoration: InputDecoration(
+            labelText: '访问令牌 · 可选',
             hintText: '仅在服务器需要时填写；留空保留已有令牌',
+            filled: true,
+            fillColor: marketSoft,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(12)),
+              borderSide: BorderSide.none,
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(12)),
+              borderSide: BorderSide.none,
+            ),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 18,
+              vertical: 14,
+            ),
           ),
         ),
         const SizedBox(height: 12),
@@ -1577,7 +1649,10 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   Widget _gallery({required bool editing}) => LayoutBuilder(
     builder: (context, box) {
       final grid = _imageLayout == 'grid';
-      final height = box.maxWidth < 400 ? 200.0 : 280.0;
+      final defaultHeight = box.maxWidth < 400 ? 200.0 : 280.0;
+      final height = editing && box.maxHeight.isFinite && box.maxHeight > 180
+          ? (box.maxHeight - 116).clamp(180.0, 520.0).toDouble()
+          : defaultHeight;
       final columns = box.maxWidth < 320 ? 1 : 2;
       final width = grid ? (box.maxWidth - (columns - 1) * 16) / columns : null;
       Widget tile(int index) {
@@ -1613,7 +1688,38 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                     ],
                   ),
                 )
-              : skillDataImage(_images[index]['data']?.toString() ?? ''),
+              : Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    skillDataImage(_images[index]['data']?.toString() ?? ''),
+                    if (editing)
+                      Positioned(
+                        top: 8,
+                        right: 8,
+                        child: Material(
+                          color: const Color(0xFF96999F),
+                          shape: const CircleBorder(),
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            onTap: _busy
+                                ? null
+                                : () => setState(() {
+                                    _images.removeAt(index);
+                                    _dirty = true;
+                                  }),
+                            child: Padding(
+                              padding: const EdgeInsets.all(8),
+                              child: marketIcon(
+                                'close',
+                                size: 18,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
         );
         return SizedBox(
           width: imageWidth,
@@ -1636,33 +1742,15 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                           ),
                         ),
                       ),
-                    if (grid) ...[
-                      marketIconButton(
-                        'back',
-                        '前移第 ${index + 1} 张图片',
-                        index == 0 || _busy
-                            ? null
-                            : () => _reorderImage(index, index - 1),
+                    if (grid)
+                      Semantics(
+                        label: '长按拖动第 ${index + 1} 张图片排序',
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: marketIcon('dots'),
+                        ),
                       ),
-                      marketIconButton(
-                        'arrow-right',
-                        '后移第 ${index + 1} 张图片',
-                        index == _images.length - 1 || _busy
-                            ? null
-                            : () => _reorderImage(index, index + 1),
-                      ),
-                    ],
                     const Spacer(),
-                    marketIconButton(
-                      'trash-danger',
-                      '删除第 ${index + 1} 张图片',
-                      _busy
-                          ? null
-                          : () => setState(() {
-                              _images.removeAt(index);
-                              _dirty = true;
-                            }),
-                    ),
                   ],
                 ),
                 TextFormField(
@@ -1759,10 +1847,22 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   Widget _layoutMenu() => PopupMenuButton<String>(
     tooltip: '图片布局',
     enabled: !_busy,
-    icon: SvgPicture.asset(
-      'assets/icons/extensions/gallery-$_imageLayout.svg',
-      width: 22,
-      height: 22,
+    padding: EdgeInsets.zero,
+    offset: const Offset(0, 8),
+    constraints: const BoxConstraints(minWidth: 180, maxWidth: 220),
+    icon: Container(
+      width: 52,
+      height: 48,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        border: Border.all(color: const Color(0xFFDEDEDE)),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: SvgPicture.asset(
+        'assets/icons/extensions/gallery-$_imageLayout.svg',
+        width: 22,
+        height: 22,
+      ),
     ),
     initialValue: _imageLayout,
     onSelected: (value) => setState(() {
@@ -1805,7 +1905,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
       );
     }
     if (_focus == 'images') {
-      return SingleChildScrollView(child: _gallery(editing: true));
+      return _gallery(editing: true);
     }
     if (_focus == 'content') {
       return Row(
@@ -1835,22 +1935,15 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                 _busy ? null : _importContent,
                 icon: 'upload',
               ),
-            const SizedBox(height: 16),
-            marketButton(
-              '编辑${_kindLabel}内容',
-              () => setState(() => _focus = 'content'),
-              icon: 'edit',
-            ),
-            if (_isPlugin) _mcpFields(),
-            _aiAssistance(),
+            if (_isPlugin) ...[
+              const SizedBox(height: 20),
+              const Divider(height: 1, color: marketLine),
+              const SizedBox(height: 8),
+              _mcpFields(),
+            ],
           ],
           if (_step == 1) _information(),
           if (_step == 2) ...[
-            Text(
-              (_record?.publishedRevision ?? 0) > 0 ? '修改尚未发布' : '尚未发布',
-              style: const TextStyle(color: marketMuted),
-            ),
-            const SizedBox(height: 20),
             SkillPresentationBody(
               presentation: _presentation,
               name: _title.text,
@@ -1864,200 +1957,325 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   }
 
   @override
-  Widget build(BuildContext context) => Theme(
-    data: marketTheme(context),
-    child: PopScope(
-      canPop: _allowPop,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && !_locked) _back();
-      },
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final phone = constraints.maxWidth <= 600;
-          final height = (constraints.maxHeight - 48).clamp(0.0, 850.0);
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 24),
-              child: SizedBox(
-                width: 670,
-                height: height,
-                child: Material(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  clipBehavior: Clip.antiAlias,
-                  child: Scaffold(
-                    key: _scaffold,
-                    backgroundColor: Colors.white,
-                    resizeToAvoidBottomInset: false,
-                    drawer: phone
-                        ? Drawer(
-                            child: SafeArea(child: _filePanel(drawer: true)),
-                          )
-                        : null,
-                    body: Column(
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(24, 16, 12, 12),
-                          child: Row(
-                            children: [
-                              if (_focus != null)
-                                marketIconButton(
-                                  'back',
-                                  '返回资料',
-                                  _busy ? null : _back,
-                                ),
-                              Expanded(
-                                child: Text(
-                                  _focus == 'description'
-                                      ? '详细介绍'
-                                      : _focus == 'images'
-                                      ? '介绍图片'
-                                      : _focus == 'content'
-                                      ? '${_kindLabel}内容'
-                                      : '创建$_kindLabel',
-                                  style: const TextStyle(
-                                    fontSize: 24,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                              if (_focus == 'images') _layoutMenu(),
-                              if (_focus != null)
-                                marketButton(
-                                  '完成',
-                                  _busy ? null : _back,
-                                  outlined: false,
-                                )
-                              else
-                                marketIconButton(
-                                  'close',
-                                  '关闭创建',
-                                  _locked ? null : _leave,
-                                ),
-                            ],
-                          ),
-                        ),
-                        if (_focus == null)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                Text(
-                                  const [
-                                    '上传文件或从 GitHub 导入内容',
-                                    '确认名称与简介，其他资料按需补充',
-                                    '确认内容后发布',
-                                  ][_step],
-                                  style: const TextStyle(color: marketMuted),
-                                ),
-                                const SizedBox(height: 24),
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: LinearProgressIndicator(
-                                    value: (_step + 1) / 3,
-                                    minHeight: 5,
-                                    color: marketInk,
-                                    backgroundColor: marketLine,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                Row(
-                                  children: [
-                                    for (var i = 0; i < 3; i++)
-                                      Expanded(
-                                        child: Text(
-                                          const ['添加内容', '补充资料', '确认'][i],
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: i == _step
-                                                ? marketInk
-                                                : marketMuted,
-                                            fontWeight: i == _step
-                                                ? FontWeight.w600
-                                                : FontWeight.normal,
-                                          ),
-                                        ),
+  Widget build(BuildContext context) => MarketInputFocusScope(
+    child: Theme(
+      data: marketTheme(context).copyWith(
+        splashFactory: NoSplash.splashFactory,
+        splashColor: Colors.transparent,
+        highlightColor: Colors.transparent,
+        hoverColor: Colors.transparent,
+        textButtonTheme: const TextButtonThemeData(
+          style: ButtonStyle(
+            overlayColor: WidgetStatePropertyAll(Colors.transparent),
+            elevation: WidgetStatePropertyAll(0),
+          ),
+        ),
+        outlinedButtonTheme: const OutlinedButtonThemeData(
+          style: ButtonStyle(
+            overlayColor: WidgetStatePropertyAll(Colors.transparent),
+            elevation: WidgetStatePropertyAll(0),
+          ),
+        ),
+        iconButtonTheme: const IconButtonThemeData(
+          style: ButtonStyle(
+            overlayColor: WidgetStatePropertyAll(Colors.transparent),
+          ),
+        ),
+      ),
+      child: PopScope(
+        canPop: _allowPop,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop && !_locked) _back();
+        },
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final phone = constraints.maxWidth <= 600;
+            final width = (constraints.maxWidth * .8).clamp(0.0, 670.0);
+            final inset = width < 480 ? 24.0 : 40.0;
+            final bottomSafeArea = MediaQuery.viewPaddingOf(context).bottom;
+            final frameHeight = constraints.maxHeight - bottomSafeArea;
+            final height = (width * (_isPlugin ? 1.32 : 1.27)).clamp(
+              0.0,
+              frameHeight - 48,
+            );
+            final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+            final top = 24 + (frameHeight - 48 - height) * .66;
+            final visibleHeight = (constraints.maxHeight - keyboard - top)
+                .clamp(0.0, height);
+            return Align(
+              alignment: const Alignment(0, .32),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(18, 24, 18, 24 + bottomSafeArea),
+                child: SizedBox(
+                  width: width,
+                  height: height,
+                  child: Material(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(20),
+                    clipBehavior: Clip.antiAlias,
+                    child: Scaffold(
+                      key: _scaffold,
+                      backgroundColor: Colors.white,
+                      resizeToAvoidBottomInset: false,
+                      drawer: phone
+                          ? Drawer(
+                              child: SafeArea(child: _filePanel(drawer: true)),
+                            )
+                          : null,
+                      body: SizedBox(
+                        height: visibleHeight,
+                        child: Column(
+                          children: [
+                            Padding(
+                              padding: EdgeInsets.fromLTRB(inset, 28, 20, 0),
+                              child: Row(
+                                children: [
+                                  if (_focus != null)
+                                    marketIconButton(
+                                      'back',
+                                      '返回资料',
+                                      _busy ? null : _back,
+                                    ),
+                                  Expanded(
+                                    child: Text(
+                                      _focus == 'description'
+                                          ? '详细介绍'
+                                          : _focus == 'images'
+                                          ? '介绍图片'
+                                          : _focus == 'content'
+                                          ? '${_kindLabel}内容'
+                                          : '创建$_kindLabel',
+                                      style: const TextStyle(
+                                        fontSize: 28,
+                                        fontWeight: FontWeight.w600,
                                       ),
+                                    ),
+                                  ),
+                                  if (_focus == 'images') _layoutMenu(),
+                                  if (_focus != null)
+                                    marketDialogButton(
+                                      '完成',
+                                      _busy ? null : _back,
+                                      primary: true,
+                                    )
+                                  else
+                                    marketIconButton(
+                                      'close',
+                                      '关闭创建',
+                                      _locked ? null : _leave,
+                                    ),
+                                ],
+                              ),
+                            ),
+                            if (_focus == null)
+                              Padding(
+                                padding: EdgeInsets.fromLTRB(
+                                  inset,
+                                  0,
+                                  inset,
+                                  24,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    Text(
+                                      const [
+                                        '先添加内容，资料可以稍后补充',
+                                        '确认名称与简介，其他资料按需补充',
+                                        '仅自己可见 · 尚未发布',
+                                      ][_step],
+                                      style: const TextStyle(
+                                        color: marketMuted,
+                                        fontSize: 16,
+                                        height: 1.5,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 32),
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: LinearProgressIndicator(
+                                        value: (_step + 1) / 3,
+                                        minHeight: 5,
+                                        color: marketInk,
+                                        backgroundColor: marketLine,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Row(
+                                      children: [
+                                        for (var i = 0; i < 3; i++)
+                                          Expanded(
+                                            child: Text(
+                                              const ['添加内容', '补充资料', '确认'][i],
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                color: i == _step
+                                                    ? marketInk
+                                                    : marketMuted,
+                                                fontWeight: i == _step
+                                                    ? FontWeight.w600
+                                                    : FontWeight.normal,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
                                   ],
                                 ),
-                              ],
-                            ),
-                          ),
-                        Expanded(
-                          child: Padding(
-                            padding: EdgeInsets.fromLTRB(
-                              24,
-                              8,
-                              24,
-                              MediaQuery.viewInsetsOf(
-                                context,
-                              ).bottom.clamp(0, height * .65).toDouble(),
-                            ),
-                            child: _creationContent(phone),
-                          ),
-                        ),
-                        if (_error != null)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
-                            child: Semantics(
-                              liveRegion: true,
-                              child: Text(
-                                _error!,
-                                style: const TextStyle(
-                                  color: Color(0xFFB3261E),
+                              ),
+                            Expanded(
+                              child: Padding(
+                                padding: EdgeInsets.fromLTRB(
+                                  inset,
+                                  8,
+                                  inset,
+                                  0,
                                 ),
+                                child: _creationContent(phone),
                               ),
                             ),
-                          ),
-                        if (_syncFailed)
-                          marketButton('重试同步', _busy ? null : _retrySync),
-                        if (_draftConflict)
-                          marketButton(
-                            '将本机修改另存为新草稿',
-                            _busy ? null : _saveConflictCopy,
-                          ),
-                        if (_focus == null) ...[
-                          const Divider(height: 1, color: marketLine),
-                          Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: Wrap(
-                              alignment: WrapAlignment.end,
-                              spacing: 12,
-                              runSpacing: 8,
-                              children: [
-                                marketButton(
-                                  '上一步',
-                                  _step == 0 || _locked ? null : _back,
+                            if (_error != null)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  24,
+                                  8,
+                                  24,
+                                  8,
                                 ),
-                                if (_step == 2)
-                                  marketButton('保存草稿', _busy ? null : _save),
-                                marketButton(
-                                  _busy
-                                      ? '正在处理…'
-                                      : _step == 2
-                                      ? '确认发布'
-                                      : '下一步',
-                                  _locked
-                                      ? null
-                                      : _step == 2
-                                      ? _publishInPlace
-                                      : _next,
-                                  primary: true,
+                                child: Semantics(
+                                  liveRegion: true,
+                                  child: Text(
+                                    _error!,
+                                    style: const TextStyle(
+                                      color: Color(0xFFB3261E),
+                                    ),
+                                  ),
                                 ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ],
+                              ),
+                            if (_syncFailed)
+                              marketButton('重试同步', _busy ? null : _retrySync),
+                            if (_draftConflict)
+                              marketButton(
+                                '将本机修改另存为新草稿',
+                                _busy ? null : _saveConflictCopy,
+                              ),
+                            if (_focus == null && keyboard == 0) ...[
+                              const Divider(height: 1, color: marketLine),
+                              Padding(
+                                padding: EdgeInsets.fromLTRB(
+                                  inset,
+                                  28,
+                                  inset,
+                                  32,
+                                ),
+                                child: _creationFooter(),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     ),
   );
+
+  Widget _creationFooter() {
+    if (_step == 0) {
+      final controller = widget.importController;
+      final mcpReady = _isPlugin && _mcpUrl.text.trim().isNotEmpty;
+      final ready = controller?.ready == true || mcpReady;
+      final busy = controller?.busy == true || _importBusy;
+      final action = ready
+          ? _next
+          : controller?.read == null
+          ? _next
+          : controller!.run;
+      return Row(
+        children: [
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: 120,
+                child: marketDialogButton(
+                  '取消',
+                  _locked ? null : _leave,
+                  selected: true,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 2,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: SizedBox(
+                width: 240,
+                child: marketDialogButton(
+                  busy
+                      ? '正在读取…'
+                      : ready
+                      ? '下一步'
+                      : '读取内容',
+                  _locked ? null : action,
+                  primary: true,
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Row(
+      children: [
+        Expanded(
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: marketDialogButton(
+              '上一步',
+              _locked ? null : _back,
+              selected: true,
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        if (_step == 2) ...[
+          SizedBox(
+            width: 150,
+            child: marketDialogButton(
+              '保存草稿',
+              _busy ? null : _save,
+              selected: true,
+            ),
+          ),
+          const SizedBox(width: 12),
+        ],
+        SizedBox(
+          width: _step == 2 ? 190 : 180,
+          child: marketDialogButton(
+            _busy
+                ? '正在处理…'
+                : _step == 2
+                ? '确认发布'
+                : '下一步',
+            _locked
+                ? null
+                : _step == 2
+                ? _publishInPlace
+                : _next,
+            primary: true,
+          ),
+        ),
+      ],
+    );
+  }
 }

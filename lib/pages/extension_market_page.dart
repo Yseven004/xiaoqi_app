@@ -29,6 +29,7 @@ Future<void> showExtensionCreation(
   CapabilityKind kind = CapabilityKind.skill,
 }) {
   final type = draft?.kind ?? record?.kind ?? kind;
+  final importController = MarketImportController();
   return showDialog<void>(
     context: context,
     barrierDismissible: false,
@@ -37,12 +38,14 @@ Future<void> showExtensionCreation(
       draft: draft,
       record: record,
       kind: type,
+      importController: importController,
       contentBuilder: (ctx, onDraft, onBusy) => _PackageImportDialog(
         skill: type == CapabilityKind.skill,
         upload: true,
         forEditor: true,
         onDraft: onDraft,
         onBusy: onBusy,
+        controller: importController,
       ),
     ),
   );

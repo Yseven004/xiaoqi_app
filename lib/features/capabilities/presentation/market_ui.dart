@@ -9,6 +9,78 @@ const marketBarrier = Color(0x44000000);
 const marketAssets = 'assets/icons/extension_market/';
 const marketOfficialDeveloper = '第七世界';
 
+/// Applies the market form focus policy to touch, mouse and keyboard dismissal.
+class MarketInputFocusScope extends StatefulWidget {
+  const MarketInputFocusScope({required this.child, super.key});
+
+  final Widget child;
+
+  @override
+  State<MarketInputFocusScope> createState() => _MarketInputFocusScopeState();
+}
+
+class _MarketInputFocusScopeState extends State<MarketInputFocusScope>
+    with WidgetsBindingObserver {
+  bool _keyboardVisible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _keyboardVisible = View.of(context).viewInsets.bottom > 0;
+  }
+
+  @override
+  void didChangeMetrics() {
+    final visible = View.of(context).viewInsets.bottom > 0;
+    final dismissed = _keyboardVisible && !visible;
+    _keyboardVisible = visible;
+    if (!dismissed) return;
+    final focus = FocusManager.instance.primaryFocus;
+    final editable = focus?.context
+        ?.findAncestorStateOfType<EditableTextState>();
+    if (editable == null || editable.widget.controller.text.isNotEmpty) return;
+    if (editable.context
+            .findAncestorStateOfType<_MarketInputFocusScopeState>() !=
+        this) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          focus == FocusManager.instance.primaryFocus &&
+          editable.mounted &&
+          editable.widget.controller.text.isEmpty) {
+        focus?.unfocus();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Actions(
+    actions: {
+      EditableTextTapOutsideIntent:
+          CallbackAction<EditableTextTapOutsideIntent>(
+            onInvoke: (intent) {
+              intent.focusNode.unfocus();
+              return null;
+            },
+          ),
+    },
+    child: widget.child,
+  );
+}
+
 Widget marketIcon(String name, {double size = 22, Color? color}) =>
     SvgPicture.asset(
       '${marketAssets}detail/$name.svg',
@@ -473,7 +545,11 @@ class _MarketDialogState extends State<MarketDialog> {
   );
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
+  Widget build(BuildContext context) => widget.embedded
+      ? _layout(context)
+      : MarketInputFocusScope(child: _layout(context));
+
+  Widget _layout(BuildContext context) => LayoutBuilder(
     key: _layoutKey,
     builder: (context, constraints) {
       if (widget.embedded) {
