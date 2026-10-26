@@ -1875,6 +1875,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (expanded) {
         _attachmentPanelOpen = false;
         _attachmentPanelPending = false;
+        _spaceMenuOpen = false;
       }
       _composerExpanded = expanded;
       if (expanded) _showScrollToBottom = false;
@@ -7350,7 +7351,8 @@ $text''';
                         ),
                       ),
                     ],
-                    _buildTopBar(showNewConversation: _messages.isNotEmpty),
+                    if (!_composerExpanded)
+                      _buildTopBar(showNewConversation: _messages.isNotEmpty),
                   ],
                 );
               },

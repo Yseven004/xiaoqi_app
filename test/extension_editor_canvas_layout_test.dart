@@ -162,43 +162,50 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('only the introduction input expands inside the fixed modal', (tester) async {
-    await fixture.open(tester, size: const Size(992, 1586), draft: fixture.example());
-    await tester.tap(find.text('下一步'));
-    await fixture.settle(tester);
-    final entry = find.byKey(const ValueKey('supplement-description-entry'));
-    await tester.ensureVisible(entry);
-    await tester.tap(entry);
-    await fixture.settle(tester);
-    final canvas = find.byKey(const ValueKey('supplement-introduction-canvas'));
-    final text = List.generate(120, (i) => '第 $i 行介绍').join('\n');
-    await tester.enterText(canvas, text);
-    await tester.pumpAndSettle();
-    final input = tester.widget<TextField>(canvas);
-    final normal = tester.getRect(find.byType(Scaffold).last);
-    final normalCanvas = tester.getRect(canvas);
-    final normalHeader = tester.getRect(find.text('详细介绍'));
-    final normalDone = tester.getRect(find.text('完成'));
-    final selection = input.controller!.selection;
-    await tester.tap(find.byKey(const ValueKey('supplement-introduction-expand')));
-    await tester.pumpAndSettle();
-    final expanded = tester.getRect(find.byType(Scaffold).last);
-    expect(expanded, normal);
-    expect(tester.getRect(find.text('详细介绍')), normalHeader);
-    expect(tester.getRect(find.text('完成')), normalDone);
-    expect(tester.getRect(canvas).height, greaterThan(normalCanvas.height));
-    expect(tester.getRect(canvas).top, lessThan(normalCanvas.top));
-    expect(tester.widget<TextField>(canvas).controller, same(input.controller));
-    expect(input.controller!.text, text);
-    expect(input.controller!.selection, selection);
-    expect(input.scrollController!.position.maxScrollExtent, greaterThan(0));
-    await tester.tap(find.byKey(const ValueKey('supplement-introduction-expand')));
-    await tester.pumpAndSettle();
-    expect(tester.getRect(find.byType(Scaffold).last), normal);
-    expect(tester.getRect(canvas), normalCanvas);
-    expect(input.controller!.text, text);
-    expect(tester.takeException(), isNull);
-  });
+  for (final size in [const Size(992, 1586), const Size(390, 844)]) {
+    testWidgets('introduction expands to an independent near-fullscreen canvas at $size', (tester) async {
+      await fixture.open(tester, size: size, draft: fixture.example());
+      await tester.tap(find.text('下一步'));
+      await fixture.settle(tester);
+      final entry = find.byKey(const ValueKey('supplement-description-entry'));
+      await tester.ensureVisible(entry);
+      await tester.tap(entry);
+      await fixture.settle(tester);
+      final canvas = find.byKey(const ValueKey('supplement-introduction-canvas'));
+      final text = List.generate(120, (i) => '第 $i 行介绍').join('\n');
+      await tester.enterText(canvas, text);
+      await tester.pumpAndSettle();
+      final input = tester.widget<TextField>(canvas);
+      final normal = tester.getRect(find.byType(Scaffold).last);
+      final normalCanvas = tester.getRect(canvas);
+      final selection = input.controller!.selection;
+      await tester.tap(find.byKey(const ValueKey('supplement-introduction-expand')));
+      await tester.pumpAndSettle();
+      final expanded = tester.getRect(find.byType(Scaffold).last);
+      expect(expanded.width, greaterThan(normal.width));
+      expect(expanded.height, greaterThan(normal.height));
+      expect(expanded.left, closeTo(12, .01));
+      expect(size.width - expanded.right, closeTo(12, .01));
+      expect(expanded.top, closeTo(12, .01));
+      expect(size.height - expanded.bottom, closeTo(12, .01));
+      expect(expanded.contains(tester.getRect(find.text('详细介绍')).center), isTrue);
+      expect(expanded.contains(tester.getRect(find.text('完成')).center), isTrue);
+      expect(find.text('介绍内容'), findsNothing);
+      expect(find.text('返回后保留已填写内容'), findsOneWidget);
+      expect(tester.getRect(canvas).height, greaterThan(normalCanvas.height));
+      expect(tester.getRect(canvas).top, lessThan(normalCanvas.top));
+      expect(tester.widget<TextField>(canvas).controller, same(input.controller));
+      expect(input.controller!.text, text);
+      expect(input.controller!.selection, selection);
+      expect(input.scrollController!.position.maxScrollExtent, greaterThan(0));
+      await tester.tap(find.byKey(const ValueKey('supplement-introduction-expand')));
+      await tester.pumpAndSettle();
+      expect(tester.getRect(find.byType(Scaffold).last), normal);
+      expect(tester.getRect(canvas), normalCanvas);
+      expect(input.controller!.text, text);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('gallery controls adapt to enlarged phone text', (tester) async {
     final image = Uri.dataFromString(

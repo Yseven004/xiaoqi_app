@@ -2682,7 +2682,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
   Widget _supplementHeader(double width) {
     final s = _supplementScale;
     final images = _focus == 'images';
-    final inset = width * (images ? .045 : .055);
+    final inset = _introductionExpanded ? 24 * s : width * (images ? .045 : .055);
     final subtitle = images
         ? '已添加 ${_images.length} / 6 张${_images.isEmpty ? '' : '，拖动调整顺序'}'
         : '补充使用场景、操作步骤与注意事项（可选）';
@@ -2703,6 +2703,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                     style: TextStyle(fontSize: 36 * s, height: 1.4, fontWeight: FontWeight.w600),
                   ),
                 ),
+                if (_introductionExpanded) _introductionExpandButton(),
                 SizedBox(
                   width: (88 * s).clamp(72.0, 88.0),
                   child: marketButton(
@@ -2724,8 +2725,27 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     );
   }
 
+  Widget _introductionExpandButton() => IconButton(
+    key: const ValueKey('supplement-introduction-expand'),
+    tooltip: _introductionExpanded ? '收起输入画布' : '展开输入画布',
+    onPressed: _locked ? null : () {
+      FocusManager.instance.primaryFocus?.unfocus();
+      setState(() => _introductionExpanded = !_introductionExpanded);
+    },
+    constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+    icon: SvgPicture.asset(
+      'assets/images/home_composer_expand.svg',
+      width: 20,
+      height: 20,
+      excludeFromSemantics: true,
+    ),
+  );
+
   Widget _introductionCanvas(double keyboardOverlap) {
     final s = _supplementScale;
+    final textPadding = EdgeInsets.fromLTRB(
+      24 * s, _introductionExpanded ? 24 * s : 48, 24 * s, 24 * s,
+    );
     const hintColor = Color(0xFF8A8D95);
     final heading = TextStyle(fontWeight: FontWeight.w600, fontSize: 25 * s);
     final noun = widget.mcpOnly ? 'MCP 连接器' : _kindLabel;
@@ -2738,7 +2758,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
         textDirection: Directionality.of(context),
         textScaler: MediaQuery.textScalerOf(context),
       )..layout(maxWidth: box.maxWidth);
-      final footerHeight = _introductionExpanded ? 0.0 : 88 * s + 1 + note.height;
+      final footerHeight = (_introductionExpanded ? 32 * s : 88 * s + 1) + note.height;
       note.dispose();
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2770,7 +2790,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.vertical(top: Radius.circular(12 * s)),
-                    border: Border(
+                    border: _introductionExpanded ? null : Border(
                       top: BorderSide(color: _introductionFocus.hasFocus ? const Color(0xFF555B62) : const Color(0xFFDEE0E4)),
                       left: BorderSide(color: _introductionFocus.hasFocus ? const Color(0xFF555B62) : const Color(0xFFDEE0E4)),
                       right: BorderSide(color: _introductionFocus.hasFocus ? const Color(0xFF555B62) : const Color(0xFFDEE0E4)),
@@ -2802,7 +2822,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                                 enabledBorder: InputBorder.none,
                                 focusedBorder: InputBorder.none,
                                 disabledBorder: InputBorder.none,
-                                contentPadding: EdgeInsets.fromLTRB(24 * s, 48, 24 * s, 24 * s),
+                                contentPadding: textPadding,
                               ),
                             ),
                           ),
@@ -2811,7 +2831,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                           IgnorePointer(
                             child: ExcludeSemantics(
                               child: SingleChildScrollView(
-                                padding: EdgeInsets.fromLTRB(24 * s, 48, 24 * s, 24 * s),
+                                padding: textPadding,
                                 child: Text.rich(
                                   key: const ValueKey('supplement-introduction-template'),
                                   TextSpan(children: [
@@ -2827,25 +2847,12 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                               ),
                             ),
                           ),
-                        Positioned(
-                          top: 0,
-                          right: 0,
-                          child: IconButton(
-                            key: const ValueKey('supplement-introduction-expand'),
-                            tooltip: _introductionExpanded ? '收起输入画布' : '展开输入画布',
-                            onPressed: _locked ? null : () {
-                              FocusManager.instance.primaryFocus?.unfocus();
-                              setState(() => _introductionExpanded = !_introductionExpanded);
-                            },
-                            constraints: const BoxConstraints.tightFor(width: 48, height: 48),
-                            icon: SvgPicture.asset(
-                              'assets/images/home_composer_expand.svg',
-                              width: 20,
-                              height: 20,
-                              excludeFromSemantics: true,
-                            ),
+                        if (!_introductionExpanded)
+                          Positioned(
+                            top: 0,
+                            right: 0,
+                            child: _introductionExpandButton(),
                           ),
-                        ),
                       ],
                     ),
                   ),
@@ -2859,7 +2866,10 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
             curve: Curves.easeInOutCubic,
             alignment: Alignment.topCenter,
             child: _introductionExpanded
-                ? const SizedBox(width: double.infinity)
+                ? Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16 * s),
+                    child: Text('返回后保留已填写内容', style: noteStyle),
+                  )
                 : SizedBox(
                     height: footerHeight,
                     child: Padding(
@@ -2970,18 +2980,27 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           builder: (context, constraints) {
             final phone = constraints.maxWidth <= 600;
             final supplement = _focus == 'description' || _focus == 'images';
-            final width = (constraints.maxWidth * .8).clamp(0.0, 670.0);
-            final inset = supplement
+            final expandedIntroduction =
+                _focus == 'description' && _introductionExpanded;
+            final width = expandedIntroduction
+                ? (constraints.maxWidth - 24).clamp(0.0, double.infinity)
+                : (constraints.maxWidth * .8).clamp(0.0, 670.0);
+            final inset = expandedIntroduction
+                ? 24 * _supplementScale
+                : supplement
                 ? width * (_focus == 'images' ? .045 : .055)
                 : width < 480 ? 24.0 : 40.0;
             final bottomSafeArea = MediaQuery.viewPaddingOf(context).bottom;
             final frameHeight = constraints.maxHeight - bottomSafeArea;
-            final top = phone ? 24.0 : frameHeight * .235;
+            final top = expandedIntroduction
+                ? 12.0
+                : phone ? 24.0 : frameHeight * .235;
             final heightFactor = _focus == 'images' ? 1.325
                 : _focus == 'description' ? 1.20
                 : !widget.mcpOnly && _mcpDetected ? 1.48 : 1.04;
-            final height =
-                (phone
+            final height = expandedIntroduction
+                ? (frameHeight - 24).clamp(0.0, double.infinity)
+                : (phone
                         ? frameHeight - 48
                         : width * heightFactor)
                     .clamp(0.0, frameHeight - top - 24);
@@ -2991,13 +3010,18 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
             return Align(
               alignment: Alignment.topCenter,
               child: Padding(
-                padding: EdgeInsets.fromLTRB(18, top, 18, 24 + bottomSafeArea),
+                padding: EdgeInsets.fromLTRB(
+                  expandedIntroduction ? 12 : 18,
+                  top,
+                  expandedIntroduction ? 12 : 18,
+                  (expandedIntroduction ? 12 : 24) + bottomSafeArea,
+                ),
                 child: SizedBox(
                   width: width,
                   height: height,
                   child: Material(
                     color: Colors.white,
-                    borderRadius: BorderRadius.circular(20),
+                    borderRadius: BorderRadius.circular(expandedIntroduction ? 16 : 20),
                     clipBehavior: Clip.antiAlias,
                     child: Scaffold(
                       key: _scaffold,
