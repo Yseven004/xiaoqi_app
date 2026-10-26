@@ -15,3 +15,6 @@ if any(arg == "--install-missing" or arg.startswith("--install-missing=")
     raise SystemExit("小七不支持任务运行期间安装依赖。")
 sys.argv.append("--no-install-missing")
 runpy.run_path(str(Path(__file__).with_name("extract.py")), run_name="__main__")
+print("跨调用读取：本次输出会保存为私有任务产物；下一次沙箱请在 "
+      "/workspace/materials/ 中用 *-full_text.txt 和 *-metadata.json 查找，"
+      "不要读取或等待上一沙箱的 /workspace/output/book-extraction/。")
