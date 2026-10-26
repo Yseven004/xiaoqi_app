@@ -7,6 +7,7 @@ import '../domain/ai_web_source.dart';
 import '../domain/ai_chat_web_source.dart';
 import '../domain/ai_chat_process.dart';
 import '../../../models/home_chat_attachment.dart';
+import '../../../models/chat_annotation.dart';
 
 int _generatedMessageSequence = 0;
 const String _rootMessageKey = '__conversation_root__';
@@ -27,6 +28,9 @@ class AiConversationMessage {
     this.isDeletedMarker = false,
     this.isIncomplete = false,
     this.capabilityMetadata,
+    this.displayText,
+    List<ChatAnnotation> annotations = const [],
+    this.capabilityTagOrigin,
     this.capabilityScopeOperation = 'inherit',
     this.outputArtifacts = const [],
     this.agentTaskId,
@@ -39,7 +43,8 @@ class AiConversationMessage {
     this.agentProcessStatus,
     this.agentProcessExpanded = false,
     this.agentWebSources = const [],
-  }) : id = id ?? _newMessageId();
+  }) : id = id ?? _newMessageId(),
+       annotations = List<ChatAnnotation>.unmodifiable(annotations);
 
   final String id;
   final String? parentMessageId;
@@ -51,6 +56,13 @@ class AiConversationMessage {
   final bool isDeletedMarker;
   final bool isIncomplete;
   final Map<String, Object?>? capabilityMetadata;
+
+  /// Local presentation only. [text] remains the runtime/model input.
+  final String? displayText;
+  final List<ChatAnnotation> annotations;
+
+  /// null identifies older records; never sent as capability metadata.
+  final String? capabilityTagOrigin;
   final String capabilityScopeOperation;
   final List<Map<String, Object?>> outputArtifacts;
   final String? agentTaskId;
@@ -83,6 +95,9 @@ class AiConversationMessage {
     bool? isDeletedMarker,
     bool? isIncomplete,
     Map<String, Object?>? capabilityMetadata,
+    String? displayText,
+    List<ChatAnnotation>? annotations,
+    String? capabilityTagOrigin,
     bool clearCapabilityMetadata = false,
     String? capabilityScopeOperation,
     List<Map<String, Object?>>? outputArtifacts,
@@ -106,6 +121,9 @@ class AiConversationMessage {
         ? null
         : parentMessageId ?? this.parentMessageId,
     text: text ?? this.text,
+    displayText: displayText ?? this.displayText,
+    annotations: annotations ?? this.annotations,
+    capabilityTagOrigin: capabilityTagOrigin ?? this.capabilityTagOrigin,
     isUser: isUser ?? this.isUser,
     pageLabel: pageLabel ?? this.pageLabel,
     createdAt: createdAt ?? this.createdAt,
@@ -141,6 +159,11 @@ class AiConversationMessage {
     'id': id,
     'parent_message_id': parentMessageId,
     'text': text,
+    if (displayText != null) 'display_text': displayText,
+    if (annotations.isNotEmpty)
+      'annotations': annotations.map((a) => a.toJson()).toList(),
+    if (capabilityTagOrigin != null)
+      'capability_tag_origin': capabilityTagOrigin,
     'is_user': isUser,
     'page_label': pageLabel,
     'created_at': createdAt.toIso8601String(),
@@ -190,6 +213,15 @@ class AiConversationMessage {
       id: raw['id']?.toString(),
       parentMessageId: raw['parent_message_id']?.toString(),
       text: raw['text']?.toString() ?? '',
+      displayText: raw['display_text'] as String?,
+      annotations: raw['annotations'] is List
+          ? (raw['annotations'] as List)
+                .whereType<Map>()
+                .where((a) => a['id'] is String)
+                .map(ChatAnnotation.fromJson)
+                .toList()
+          : const [],
+      capabilityTagOrigin: raw['capability_tag_origin'] as String?,
       isUser: raw['is_user'] != false,
       pageLabel: raw['page_label']?.toString() ?? '',
       createdAt: createdAt ?? DateTime.fromMillisecondsSinceEpoch(0),

@@ -3,15 +3,19 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 /// A capability stored at one object-replacement character in the composer.
 class CapabilityTextTag {
-  CapabilityTextTag({required this.offset, required Map<String, Object?> data})
-    : data = Map<String, Object?>.unmodifiable(data);
+  CapabilityTextTag({
+    required this.offset,
+    required Map<String, Object?> data,
+    this.isExplicit = true,
+  }) : data = Map<String, Object?>.unmodifiable(data);
 
   /// UTF-16 offset in the controller value, including preceding tag markers.
   final int offset;
   final Map<String, Object?> data;
+  final bool isExplicit;
 
   CapabilityTextTag copyAt(int nextOffset) =>
-      CapabilityTextTag(offset: nextOffset, data: data);
+      CapabilityTextTag(offset: nextOffset, data: data, isExplicit: isExplicit);
 }
 
 /// In-memory composer draft, including the metadata hidden behind inline tags.
@@ -30,6 +34,7 @@ class CapabilityTagTextController extends TextEditingController {
   bool _settingTaggedValue = false;
 
   String get messageText => text.replaceAll(objectMarker, '');
+  bool get hasExplicitCapability => _tag?.isExplicit == true;
 
   CapabilityTextSnapshot snapshot() =>
       CapabilityTextSnapshot(value: value, tag: _tag);
@@ -136,7 +141,11 @@ class CapabilityTagTextController extends TextEditingController {
   }
 
   /// Recreates a sent message while keeping its tag at the original text offset.
-  void setMessage(String message, Map<String, Object?>? metadata) {
+  void setMessage(
+    String message,
+    Map<String, Object?>? metadata, {
+    bool isExplicit = true,
+  }) {
     final offset = metadata?['composer_text_offset'] is int
         ? (metadata!['composer_text_offset'] as int)
               .clamp(0, message.length)
@@ -154,7 +163,11 @@ class CapabilityTagTextController extends TextEditingController {
     }
     final tagData = Map<String, Object?>.from(metadata)
       ..['composer_text_offset'] = offset;
-    _tag = CapabilityTextTag(offset: offset, data: tagData);
+    _tag = CapabilityTextTag(
+      offset: offset,
+      data: tagData,
+      isExplicit: isExplicit,
+    );
     _setTaggedValue(
       TextEditingValue(
         text:

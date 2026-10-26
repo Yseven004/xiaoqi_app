@@ -4,8 +4,28 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 
 import '../models/chat_annotation.dart';
+
+/// Keep source links selectable, with an explicit blue independent of theme.
+InlineSpan chatAnnotationLinkSpan(LinkBuildDetails link) {
+  if (Uri.tryParse(link.url)?.scheme != 'xiaoqi-annotation') {
+    return link.defaultSpan();
+  }
+  return link.defaultSpan(
+    children: [
+      TextSpan(
+        text: link.label,
+        style: link.style.copyWith(
+          color: const Color(0xFF3B82F6),
+          fontWeight: FontWeight.w600,
+          decoration: TextDecoration.none,
+        ),
+      ),
+    ],
+  );
+}
 
 Widget chatAnnotationIcon(
   String name, {
@@ -317,14 +337,15 @@ class _ChatAnnotationCommentPopoverState
         12.0,
         math.max(12.0, constraints.maxWidth - fieldWidth - 12),
       );
+      final preferredTop = math.max(safeTop, anchor.dy + 8);
+      final latestTop = math.max(safeTop, bottom - _fieldHeight - 8);
+      final anchorTop = math.min(preferredTop, latestTop);
       _revealAnchor(safeTop + origin.dy, bottom + origin.dy);
       return Stack(
         children: [
           Positioned(
             left: widget.dockToKeyboard ? 12 : left.toDouble(),
-            top: widget.dockToKeyboard
-                ? null
-                : math.max(safeTop, anchor.dy + 8),
+            top: widget.dockToKeyboard ? null : anchorTop,
             bottom: widget.dockToKeyboard
                 ? math.max(media.viewInsets.bottom, media.padding.bottom) + 8
                 : null,
@@ -441,33 +462,39 @@ class ChatAnnotationTray extends StatelessWidget {
 Future<void> showChatAnnotationReview(
   BuildContext context, {
   required List<ChatAnnotation> annotations,
-  required ValueChanged<List<ChatAnnotation>> onChanged,
-  required Future<String?> Function(
-    BuildContext context,
-    ChatAnnotation annotation,
-  )
+  ValueChanged<List<ChatAnnotation>>? onChanged,
+  Future<String?> Function(BuildContext context, ChatAnnotation annotation)?
   onEditComment,
+  ValueChanged<ChatAnnotation>? onLocate,
 }) async {
   var current = List<ChatAnnotation>.of(annotations);
-  await showModalBottomSheet<void>(
+  FocusManager.instance.primaryFocus?.unfocus();
+  final editable = onChanged != null && onEditComment != null;
+  await showDialog<void>(
     context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.white,
-    showDragHandle: true,
-    builder: (sheetContext) => StatefulBuilder(
-      builder: (context, update) => SafeArea(
-        child: SizedBox(
-          height: MediaQuery.sizeOf(context).height * .6,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, update) => Dialog(
+        alignment: const Alignment(0, .35),
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(16),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: math.min(480, MediaQuery.sizeOf(context).width * .82),
+            maxHeight: MediaQuery.sizeOf(context).height * .7,
+          ),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 8, 8),
+                padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
                 child: Row(
                   children: [
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        '待发送注释',
-                        style: TextStyle(
+                        editable ? '待发送注释' : '已发送注释',
+                        style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w600,
                         ),
@@ -475,76 +502,205 @@ Future<void> showChatAnnotationReview(
                     ),
                     IconButton(
                       tooltip: '关闭',
-                      onPressed: () => Navigator.pop(sheetContext),
-                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.pop(dialogContext),
+                      icon: SvgPicture.asset(
+                        'assets/icons/chat_note_editor/x.svg',
+                        width: 20,
+                        height: 20,
+                      ),
                     ),
                   ],
                 ),
               ),
-              Expanded(
+              Flexible(
                 child: current.isEmpty
-                    ? const Center(child: Text('暂无注释'))
+                    ? const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text('暂无注释'),
+                      )
                     : ListView.separated(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
                         itemCount: current.length,
-                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        separatorBuilder: (_, _) =>
+                            const Divider(height: 25, color: Color(0xFFE0E0E0)),
                         itemBuilder: (context, index) {
                           final a = current[index];
-                          return ListTile(
-                            leading: Text(
-                              '${index + 1}',
-                              style: const TextStyle(color: Color(0xFF3B82F6)),
-                            ),
-                            title: Text(
-                              a.isImage
-                                  ? '图片点位 · ${(a.x * 100).round()}%，${(a.y * 100).round()}%'
-                                  : a.quote,
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 14),
-                            ),
-                            subtitle: Text(
-                              a.comment.isEmpty ? '添加可选评论…' : a.comment,
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            onTap: () async {
-                              final value = await onEditComment(
-                                sheetContext,
-                                a,
-                              );
-                              if (value == null || !context.mounted) return;
-                              update(
-                                () => current = current
-                                    .map(
-                                      (v) => v.id == a.id
-                                          ? v.copyWith(comment: value)
-                                          : v,
-                                    )
-                                    .toList(),
-                              );
-                              onChanged(current);
-                            },
-                            trailing: IconButton(
-                              tooltip: '移除注释',
-                              icon: SvgPicture.asset(
-                                'assets/icons/chat_note_editor/trash.svg',
-                                width: 20,
-                                height: 20,
+                          Future<void> edit() async {
+                            final value = await onEditComment!(
+                              dialogContext,
+                              a,
+                            );
+                            if (value == null || !context.mounted) return;
+                            update(
+                              () => current = current
+                                  .map(
+                                    (v) => v.id == a.id
+                                        ? v.copyWith(comment: value)
+                                        : v,
+                                  )
+                                  .toList(),
+                            );
+                            onChanged!(current);
+                          }
+
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: InkWell(
+                                      onTap: onLocate == null
+                                          ? null
+                                          : () {
+                                              Navigator.pop(dialogContext);
+                                              onLocate(a);
+                                            },
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          vertical: 12,
+                                        ),
+                                        child: Text(
+                                          '注释 ${index + 1}',
+                                          style: const TextStyle(
+                                            color: Color(0xFF3B82F6),
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  if (editable)
+                                    IconButton(
+                                      tooltip: '编辑评论',
+                                      onPressed: edit,
+                                      icon: SvgPicture.asset(
+                                        'assets/images/home_message_edit.svg',
+                                        width: 20,
+                                        height: 20,
+                                      ),
+                                    ),
+                                  if (editable)
+                                    IconButton(
+                                      tooltip: '移除注释',
+                                      icon: SvgPicture.asset(
+                                        'assets/icons/chat_note_editor/trash.svg',
+                                        width: 20,
+                                        height: 20,
+                                      ),
+                                      onPressed: () {
+                                        update(
+                                          () => current = current
+                                              .where((v) => v.id != a.id)
+                                              .toList(),
+                                        );
+                                        onChanged(current);
+                                      },
+                                    ),
+                                ],
                               ),
-                              onPressed: () {
-                                update(
-                                  () => current = current
-                                      .where((v) => v.id != a.id)
-                                      .toList(),
-                                );
-                                onChanged(current);
-                              },
-                            ),
+                              Text(
+                                a.isImage ? '所选图片：' : '所选文本：',
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  height: 1.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              Text(
+                                a.isImage
+                                    ? '图片点位 · ${(a.x * 100).round()}%，${(a.y * 100).round()}%'
+                                    : a.quote,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  height: 1.5,
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              const Text(
+                                '评论：',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  height: 1.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              InkWell(
+                                onTap: editable ? edit : null,
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 6,
+                                  ),
+                                  child: Text(
+                                    a.comment.isEmpty
+                                        ? (editable ? '添加可选评论…' : '未填写评论')
+                                        : a.comment,
+                                    style: const TextStyle(
+                                      fontSize: 15,
+                                      height: 1.5,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           );
                         },
                       ),
               ),
             ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// A sent annotation-only message is this chip, without a parent text bubble.
+class ChatAnnotationCountChip extends StatelessWidget {
+  const ChatAnnotationCountChip({
+    required this.count,
+    required this.onTap,
+    super.key,
+  });
+  final int count;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: '查看 $count 条注释',
+    child: Material(
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+        side: const BorderSide(color: Color(0xFFD5D8DE)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                chatAnnotationIcon(
+                  'comment',
+                  color: const Color(0xFF555B62),
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '$count 条注释',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    color: Color(0xFF303134),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -639,6 +795,7 @@ class ChatTextAnnotationLayer extends StatefulWidget {
     required this.annotations,
     this.annotationNumbers = const {},
     this.draft,
+    this.highlight,
     required this.onTapAnnotation,
     super.key,
   });
@@ -646,6 +803,7 @@ class ChatTextAnnotationLayer extends StatefulWidget {
   final List<ChatAnnotation> annotations;
   final Map<String, int> annotationNumbers;
   final ChatAnnotation? draft;
+  final ChatAnnotation? highlight;
   final void Function(ChatAnnotation, Offset) onTapAnnotation;
   @override
   State<ChatTextAnnotationLayer> createState() =>
@@ -670,6 +828,9 @@ class _ChatTextAnnotationLayerState extends State<ChatTextAnnotationLayer> {
       for (final a in [
         ...widget.annotations,
         if (widget.draft != null) widget.draft!,
+        if (widget.highlight != null &&
+            !widget.annotations.any((a) => a.id == widget.highlight!.id))
+          widget.highlight!,
       ]) {
         final boxes = chatTextQuoteBoxes(root, a);
         if (boxes.isNotEmpty) marks.add((annotation: a, boxes: boxes));
@@ -704,7 +865,8 @@ class _ChatTextAnnotationLayerState extends State<ChatTextAnnotationLayer> {
                   child: ColoredBox(color: Color(0x263B82F6)),
                 ),
               ),
-            if (mark.annotation.id != widget.draft?.id)
+            if (mark.annotation.id != widget.draft?.id &&
+                mark.annotation.id != widget.highlight?.id)
               Positioned(
                 left: mark.boxes.last.right - ChatAnnotationPin.textAnchor.dx,
                 top: mark.boxes.last.bottom - ChatAnnotationPin.textAnchor.dy,

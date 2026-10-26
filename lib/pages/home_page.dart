@@ -32,6 +32,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../features/ai_study_annotation/data/ai_conversation_history.dart';
 import '../features/ai_study_annotation/domain/ai_chat_web_source.dart';
 import '../features/ai_study_annotation/domain/ai_chat_process.dart';
+import '../features/ai_study_annotation/domain/chat_message_presentation.dart';
 import '../features/capabilities/data/capability_store.dart';
 import '../features/capabilities/data/capability_models.dart';
 import '../features/capabilities/data/capability_cloud_sync.dart';
@@ -47,6 +48,7 @@ import '../services/home_chat_attachment_preparer.dart';
 import '../services/home_chat_drawing_draft_store.dart';
 import '../models/chat_annotation.dart';
 import '../widgets/chat_annotation_controls.dart';
+import '../widgets/chat_annotation_navigation.dart';
 import '../widgets/chat_image_gallery.dart';
 import '../services/home_chat_model_preferences.dart';
 import '../services/speech_recognition_service.dart';
@@ -546,6 +548,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _preparingAttachments = false;
   List<HomeChatAttachment> _attachments = const [];
   List<ChatAnnotation> _annotations = const [];
+  List<ChatAnnotation>? _annotationsBeforeMessageEdit;
   Future<void> _annotationSaveQueue = Future<void>.value();
   int _annotationDraftEpoch = 0;
   VoidCallback? _dismissAnnotationComment;
@@ -791,7 +794,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (draft != null) {
       _composerController.restore(draft);
     } else {
-      _composerController.setMessage('', conversation.activeCapabilityMetadata);
+      _composerController.setMessage(
+        '',
+        conversation.activeCapabilityMetadata,
+        isExplicit: false,
+      );
     }
     _attachmentPanelOpen = false;
     _attachments = const [];
@@ -1611,8 +1618,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _reviewAnnotations() {
-    if (_editingQuestion != null) return;
     final id = _conversation?.id;
+    final editingId = _editingQuestion?.id;
     unawaited(
       showChatAnnotationReview(
         context,
@@ -1625,7 +1632,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           requireText: !annotation.isImage,
         ),
         onChanged: (values) {
-          if (mounted && _conversation?.id == id) _applyAnnotations(values);
+          if (mounted &&
+              _conversation?.id == id &&
+              _editingQuestion?.id == editingId) {
+            _applyAnnotations(values);
+          }
         },
       ),
     );
@@ -2235,16 +2246,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _messageEditAddedAttachments.clear();
     _composerValueBeforeMessageEdit = _composerController.snapshot();
     _attachmentsBeforeMessageEdit = List<HomeChatAttachment>.of(_attachments);
+    _annotationsBeforeMessageEdit = List<ChatAnnotation>.of(_annotations);
+    final presentation = presentChatMessage(_conversation!, question);
     _composerWasExpandedBeforeMessageEdit = _composerExpanded;
     _composerWasFocusedBeforeMessageEdit = _composerFocusNode.hasFocus;
     setState(() {
       _editingQuestion = question;
       _attachments = List<HomeChatAttachment>.of(question.attachments);
+      _annotations = List<ChatAnnotation>.of(presentation.annotations);
       _attachmentPanelOpen = false;
       _attachmentPanelPending = false;
       _composerController.setMessage(
-        question.text,
+        presentation.text,
         question.capabilityMetadata,
+        isExplicit: presentation.capability != null,
       );
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2291,6 +2306,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       previousValue ?? CapabilityTextSnapshot(value: TextEditingValue.empty),
     );
     _attachments = previousAttachments ?? const [];
+    _annotations = _annotationsBeforeMessageEdit ?? const [];
+    _annotationsBeforeMessageEdit = null;
     if (keepAddedAttachments) {
       _messageEditAddedAttachments.clear();
     } else if (!preserveAddedAttachments) {
@@ -2326,7 +2343,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final current = _conversation;
     if (source == null || current == null) return;
     final rawText = _composerController.messageText;
-    final text = rawText.trim();
+    final annotationsForMessage = List<ChatAnnotation>.of(_annotations);
+    final text = appendChatAnnotations(
+      rawText.trim(),
+      annotationsForMessage,
+      attachmentNames: {for (final a in _attachments) a.id: a.name},
+    );
+    final capabilityTagOrigin = _composerController.hasExplicitCapability
+        ? 'explicit'
+        : 'inherited';
     final capabilityMetadata = _composerController.messageMetadata();
     _normalizeCapabilityTextOffset(capabilityMetadata, rawText, text);
     if (text.isEmpty && _attachments.isEmpty && capabilityMetadata == null) {
@@ -2372,6 +2397,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final now = DateTime.now();
       final editedQuestion = AiConversationMessage(
         text: text,
+        displayText: rawText.trim(),
+        annotations: annotationsForMessage,
+        capabilityTagOrigin: capabilityTagOrigin,
         isUser: true,
         pageLabel: source.pageLabel,
         createdAt: now,
@@ -2394,9 +2422,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           .appendQuestionVersion(source.id, editedQuestion)
           .copyWith(
             title: updateRootTitle
-                ? (text.isEmpty
+                ? (rawText.trim().isEmpty
                       ? (capabilityMetadata?['name']?.toString() ?? '能力任务')
-                      : text)
+                      : rawText.trim())
                 : latest.title,
             titleRevision: updateRootTitle && latest.titleRevision == 1
                 ? 2
@@ -2591,6 +2619,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       attachmentNames: {for (final a in _attachments) a.id: a.name},
     );
     final selectedCapability = _composerController.messageMetadata();
+    final capabilityTagOrigin = _composerController.hasExplicitCapability
+        ? 'explicit'
+        : 'inherited';
     _normalizeCapabilityTextOffset(selectedCapability, rawText, text);
     final capabilityForMessage = selectedCapability ?? _activeSkillWorkflow;
     final capabilityScopeOperation =
@@ -2622,6 +2653,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final now = DateTime.now();
     var userMessage = AiConversationMessage(
       text: text,
+      displayText: rawText.trim(),
+      annotations: annotationsForMessage,
+      capabilityTagOrigin: capabilityTagOrigin,
       isUser: true,
       createdAt: now,
       attachments: selectedAttachments,
@@ -2680,7 +2714,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ];
       });
       if (_composerController.messageText.isEmpty) {
-        _composerController.setMessage(rawText, selectedCapability);
+        _composerController.setMessage(
+          rawText,
+          selectedCapability,
+          isExplicit: capabilityTagOrigin == 'explicit',
+        );
       }
       unawaited(_persistAnnotationDraft().catchError((Object _) {}));
       unawaited(_persistAttachments().catchError((Object _) {}));
@@ -2720,6 +2758,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       const {'skill', 'plugin', 'mcp'}.contains(selectedCapability?['type'])
           ? selectedCapability
           : null,
+      isExplicit: false,
     );
     unawaited(_persistAttachments());
     _scrollToLatest();
@@ -3077,6 +3116,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         .where((item) => item.isUser && !item.isDeletedMarker)
         .firstOrNull;
     if (latestUserMessage != null) {
+      final annotationContext = presentChatMessage(
+        _conversation ?? AiConversationRecord.empty(),
+        latestUserMessage,
+      );
+      if (annotationContext.annotations.isNotEmpty) {
+        systemInstructions.add(chatAnnotationReplyInstructions);
+      }
       final capabilityPrompt = await _capabilityPromptFor(latestUserMessage);
       if (capabilityPrompt.trim().isNotEmpty) {
         systemInstructions.add(capabilityPrompt.trim());
@@ -3312,7 +3358,13 @@ $materialIndex
     if (latestLegacyMessageIndex < 0) {
       throw const FormatException('当前回合缺少用户消息');
     }
-    final latestLegacyMessage = taskMessages[latestLegacyMessageIndex];
+    final latestLegacyMessage = chatAnnotationRequestMessage(
+      taskMessages[latestLegacyMessageIndex],
+      annotationCount: presentChatMessage(
+        _conversation ?? AiConversationRecord.empty(),
+        question,
+      ).annotations.length,
+    );
     final intentMode = question.text.trim().isEmpty
         ? capability != null && capability['id'] != 'create-image'
               ? 'capability_only'
@@ -5536,7 +5588,12 @@ $text''';
   Future<void> _copyReply(AiConversationMessage message) async {
     try {
       await Clipboard.setData(
-        ClipboardData(text: visibleChatAssistantText(message.text)),
+        ClipboardData(
+          text: chatReplyPlainText(
+            _conversation ?? AiConversationRecord.empty(),
+            message,
+          ),
+        ),
       );
       if (mounted) AppToast.show(context, '已复制回复');
     } catch (_) {
@@ -5632,7 +5689,12 @@ $text''';
   Future<void> _shareReply(AiConversationMessage message) async {
     try {
       await SharePlus.instance.share(
-        ShareParams(text: visibleChatAssistantText(message.text)),
+        ShareParams(
+          text: chatReplyPlainText(
+            _conversation ?? AiConversationRecord.empty(),
+            message,
+          ),
+        ),
       );
     } catch (_) {
       _showReplyError('分享失败');
@@ -5963,6 +6025,7 @@ $text''';
     _composerController.setMessage(
       _composerController.messageText,
       updated.activeCapabilityMetadata,
+      isExplicit: false,
     );
     unawaited(
       _historyService
@@ -5988,6 +6051,7 @@ $text''';
               _composerController.setMessage(
                 _composerController.messageText,
                 restored.activeCapabilityMetadata,
+                isExplicit: false,
               );
               _showReplyError('切换回复版本失败，已恢复上次保存的版本：$error');
             },
@@ -6028,6 +6092,7 @@ $text''';
     _composerController.setMessage(
       _composerController.messageText,
       updated.activeCapabilityMetadata,
+      isExplicit: false,
     );
     unawaited(
       _historyService
@@ -6053,6 +6118,7 @@ $text''';
               _composerController.setMessage(
                 _composerController.messageText,
                 restored.activeCapabilityMetadata,
+                isExplicit: false,
               );
               _showReplyError('切换提问版本失败，已恢复上次保存的版本：$error');
             },
@@ -7069,6 +7135,12 @@ $text''';
                                                       160
                                                 : 0,
                                             onAnnotate: _annotateText,
+                                            onAnnotationNavigation: () {
+                                              _latestScrollEpoch++;
+                                              _latestScrollAnimating = false;
+                                              _latestScrollFollowUp = false;
+                                              _followLatestMessage = false;
+                                            },
                                             onPreviewImages: _openImageGallery,
                                             record:
                                                 _conversation ??
@@ -9478,6 +9550,7 @@ class _ConversationMessages extends StatefulWidget {
     this.annotations = const [],
     this.annotationBottomPadding = 0,
     required this.onAnnotate,
+    required this.onAnnotationNavigation,
     required this.onPreviewImages,
   });
 
@@ -9520,6 +9593,7 @@ class _ConversationMessages extends StatefulWidget {
   final List<ChatAnnotation> annotations;
   final double annotationBottomPadding;
   final Future<void> Function(ChatAnnotation, Offset) onAnnotate;
+  final VoidCallback onAnnotationNavigation;
   final Future<void> Function(List<ChatImageSource>, int) onPreviewImages;
 
   @override
@@ -9527,6 +9601,118 @@ class _ConversationMessages extends StatefulWidget {
 }
 
 class _ConversationMessagesState extends State<_ConversationMessages> {
+  final Map<String, ChatMessagePresentation> _presentations = {};
+  final Map<String, double> _messageRowHeights = {};
+  ChatAnnotation? _annotationHighlight;
+  Timer? _annotationHighlightTimer;
+  int _annotationNavigationEpoch = 0;
+
+  @override
+  void dispose() {
+    _annotationNavigationEpoch++;
+    _annotationHighlightTimer?.cancel();
+    super.dispose();
+  }
+
+  ChatMessagePresentation _presentation(AiConversationMessage message) =>
+      _presentations.putIfAbsent(
+        message.id,
+        () => presentChatMessage(widget.record, message),
+      );
+
+  AiConversationMessage? _annotationQuestion(AiConversationMessage? reply) =>
+      reply == null
+      ? widget.messages.reversed.where((m) => m.isUser).firstOrNull
+      : widget.record.nodeById(reply.parentMessageId ?? '');
+
+  Future<void> _locateAnnotation(ChatAnnotation annotation) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    _clearActiveSelection();
+    widget.onAnnotationNavigation();
+    final epoch = ++_annotationNavigationEpoch;
+    final conversationId = widget.record.id;
+    bool cancelled() =>
+        !mounted ||
+        epoch != _annotationNavigationEpoch ||
+        widget.record.id != conversationId;
+    void unavailable(String message) {
+      if (!cancelled()) AppToast.show(context, message);
+    }
+
+    if (annotation.isImage) {
+      final images = widget.messages
+          .expand((m) => m.attachments)
+          .where((a) => a.isImage)
+          .map(ChatImageSource.fromAttachment)
+          .toList();
+      final index = images.indexWhere((a) => a.id == annotation.attachmentId);
+      if (index < 0) {
+        unavailable('原图片不在当前会话中，仍可查看注释详情');
+        return;
+      }
+      await widget.onPreviewImages(images, index);
+      return;
+    }
+    final source = widget.record.nodeById(annotation.messageId ?? '');
+    if (source == null || source.isDeletedMarker) {
+      unavailable('原文已删除或来源无法确认，仍可查看注释详情');
+      return;
+    }
+    if (annotation.sourceHash !=
+        sha256.convert(utf8.encode(source.text)).toString()) {
+      unavailable('原文版本已改变，无法准确定位');
+      return;
+    }
+    final revealed = await revealChatMessage(
+      messageId: source.id,
+      messageIds: _messageRows.map((r) => r.message.id).toList(),
+      anchors: _messageAnchorKeys,
+      heights: _messageRowHeights,
+      controller: widget.scrollController,
+      cancelled: cancelled,
+    );
+    if (!mounted || cancelled()) return;
+    if (!revealed) {
+      unavailable('原文不在当前分支或暂时无法定位');
+      return;
+    }
+    final root = _messageContentKeys[source.id]?.currentContext
+        ?.findRenderObject();
+    final viewport = _messageViewportKey.currentContext?.findRenderObject();
+    if (root is! RenderBox ||
+        viewport is! RenderBox ||
+        !widget.scrollController.hasClients) {
+      return;
+    }
+    final boxes = chatTextQuoteBoxes(root, annotation);
+    if (boxes.isEmpty) {
+      unavailable('未找到原文选区，仍可查看注释详情');
+      return;
+    }
+    final position = widget.scrollController.position;
+    final top =
+        root.localToGlobal(boxes.first.topLeft).dy -
+        viewport.localToGlobal(Offset.zero).dy;
+    final offset = (position.pixels + top - viewport.size.height * .25)
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      widget.scrollController.jumpTo(offset);
+    } else {
+      await widget.scrollController.animateTo(
+        offset,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+      );
+    }
+    if (cancelled()) return;
+    _annotationHighlightTimer?.cancel();
+    setState(() => _annotationHighlight = annotation);
+    _annotationHighlightTimer = Timer(const Duration(seconds: 2), () {
+      if (!cancelled()) setState(() => _annotationHighlight = null);
+    });
+  }
+
   _AgentClarification? _currentClarification(_AgentClarification? value) {
     if (value == null || value.conversationId != widget.record.id) return null;
     final latestUser = widget.messages.reversed
@@ -9541,6 +9727,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   _MessageSelectionAreaState? _activeSelectionArea;
   final Map<String, GlobalKey> _versionAnchorKeys = {};
   final Map<String, GlobalKey> _messageAnchorKeys = {};
+  final Map<String, GlobalKey> _messageContentKeys = {};
   final Set<String> _downloadingArtifactKeys = {};
   final Map<String, Future<Uint8List>> _artifactPreviewFutures = {};
   final GlobalKey _messageViewportKey = GlobalKey(
@@ -9583,6 +9770,10 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     }
     if (oldWidget.record.id != widget.record.id ||
         oldWidget.presentationRevision != widget.presentationRevision) {
+      _annotationNavigationEpoch++;
+      _annotationHighlightTimer?.cancel();
+      _annotationHighlight = null;
+      _messageRowHeights.clear();
       _clearActiveSelection();
       _versionAnchorEpoch++;
       _versionAnchorKeys.clear();
@@ -9617,6 +9808,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   }
 
   void _rebuildMessageRows() {
+    _presentations.clear();
     _messageSnapshot = List<AiConversationMessage>.of(widget.messages);
     _messageRows = [];
     for (final message in _messageSnapshot) {
@@ -10223,6 +10415,11 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
               _scheduleReplyBodyMeasurement();
               if (notification is ScrollStartNotification &&
                   notification.dragDetails != null) {
+                _annotationNavigationEpoch++;
+                _annotationHighlightTimer?.cancel();
+                if (_annotationHighlight != null) {
+                  setState(() => _annotationHighlight = null);
+                }
                 _versionAnchorEpoch++;
                 _pendingVersionAnchor = null;
               }
@@ -10413,6 +10610,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                               return _assistantStreamingText(
                                 context,
                                 '${row.message.text}$addition',
+                                question: _annotationQuestion(row.message),
                               );
                             },
                           )
@@ -10435,6 +10633,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                                     context,
                                     segments[segmentIndex],
                                     sources: row.message.agentWebSources,
+                                    question: _annotationQuestion(row.message),
                                   ),
                                 ),
                             ],
@@ -10551,6 +10750,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   }
 
   Widget _userMessage(BuildContext context, AiConversationMessage message) {
+    final presentation = _presentation(message);
     return Padding(
       padding: const EdgeInsets.only(bottom: 20),
       child: Align(
@@ -10581,9 +10781,24 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                   preparationStates: widget.attachmentPreparationStates,
                   onRetry: widget.onRetryAttachment,
                 ),
-              if (message.text.isNotEmpty ||
-                  message.capabilityMetadata != null) ...[
+              if (presentation.annotations.isNotEmpty) ...[
                 if (message.attachments.isNotEmpty) const SizedBox(height: 8),
+                ChatAnnotationCountChip(
+                  count: presentation.annotations.length,
+                  onTap: () => unawaited(
+                    showChatAnnotationReview(
+                      context,
+                      annotations: presentation.annotations,
+                      onLocate: (a) => unawaited(_locateAnnotation(a)),
+                    ),
+                  ),
+                ),
+              ],
+              if (presentation.text.isNotEmpty ||
+                  presentation.capability != null) ...[
+                if (presentation.annotations.isNotEmpty ||
+                    message.attachments.isNotEmpty)
+                  const SizedBox(height: 8),
                 DecoratedBox(
                   decoration: BoxDecoration(
                     color: const Color(0xFFF0F2FF),
@@ -10598,8 +10813,8 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                       message,
                       'user:${message.id}:${message.text.hashCode}',
                       CapabilityMessageText(
-                        message: message.text,
-                        metadata: message.capabilityMetadata,
+                        message: presentation.text,
+                        metadata: presentation.capability,
                         textStyle: const TextStyle(
                           color: Color(0xFF24272C),
                           fontSize: 16,
@@ -10675,19 +10890,30 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
         )
         .toList(),
     onAnnotate: widget.onAnnotate,
+    highlight: _annotationHighlight?.messageId == message.id
+        ? _annotationHighlight
+        : null,
     onSelectionAreaChanged: _handleSelectionAreaStateChanged,
-    child: child,
+    child: Container(
+      key: _messageContentKeys.putIfAbsent(
+        message.id,
+        () => GlobalKey(debugLabel: 'message-content:${message.id}'),
+      ),
+      child: child,
+    ),
   );
 
   Widget _assistantText(
     BuildContext context,
     String text, {
     List<AiChatWebSource> sources = const [],
+    AiConversationMessage? question,
   }) => _assistantMarkdown(
     context,
     visibleChatAssistantText(text),
     isStreaming: false,
     sources: sources,
+    question: question,
   );
 
   Widget _measureLatestReplyBody(Widget child) =>
@@ -10721,7 +10947,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
           onFeedback: (kind) => unawaited(widget.onFeedback(kind)),
           onNote: () => widget.onNote(
             message,
-            visibleChatAssistantText(message.text),
+            chatReplyPlainText(widget.record, message),
             false,
           ),
           onShare: () => unawaited(widget.onShare(message)),
@@ -10737,14 +10963,24 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     );
   }
 
-  Widget _assistantStreamingText(BuildContext context, String text) {
+  Widget _assistantStreamingText(
+    BuildContext context,
+    String text, {
+    AiConversationMessage? question,
+  }) {
+    question ??= _annotationQuestion(null);
     text = visibleChatAssistantText(text);
     if (_streamingMarkdownEndsInCodeBlock(text)) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          _assistantMarkdown(context, text, isStreaming: true),
+          _assistantMarkdown(
+            context,
+            text,
+            isStreaming: true,
+            question: question,
+          ),
           const SizedBox(height: 6),
           const _StreamingReplyDots(),
         ],
@@ -10755,6 +10991,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       text,
       isStreaming: true,
       showStreamingDots: true,
+      question: question,
     );
   }
 
@@ -10835,7 +11072,17 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     required bool isStreaming,
     bool showStreamingDots = false,
     List<AiChatWebSource> sources = const [],
+    AiConversationMessage? question,
   }) {
+    final annotations = question == null
+        ? const <ChatAnnotation>[]
+        : _presentation(question).annotations;
+    text = presentChatAnnotationReply(
+      text,
+      questionId: question?.id ?? '',
+      annotationCount: annotations.length,
+      isStreaming: isStreaming,
+    );
     final markdownText = showStreamingDots
         ? '$text\u200B$_streamingReplyDotsMarker'
         : text;
@@ -10851,6 +11098,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
             height: 1.55,
           ),
           styleSheet: _homeAssistantMarkdownStyle,
+          inlineLinkBuilder: chatAnnotationLinkSpan,
           inlinePatterns: showStreamingDots
               ? [
                   InlinePattern(
@@ -10869,7 +11117,21 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
           animation: GptMarkdownAnimation.none,
           blockAnimation: GptMarkdownBlockAnimation.none,
           isStreaming: isStreaming,
-          onLinkTap: (url, _) => unawaited(_openAgentUrl(url)),
+          onLinkTap: (url, _) {
+            final uri = Uri.tryParse(url);
+            if (uri?.scheme == 'xiaoqi-annotation') {
+              final index = int.tryParse(uri!.path);
+              if (question != null &&
+                  uri.queryParameters['question'] == question.id &&
+                  index != null &&
+                  index > 0 &&
+                  index <= annotations.length) {
+                unawaited(_locateAnnotation(annotations[index - 1]));
+              }
+              return;
+            }
+            unawaited(_openAgentUrl(url));
+          },
           onSourceTagTap: (content) =>
               _showAgentSourcesSheet(sources, selectedId: content),
           inlineSourceTagBuilder: (details) => details.defaultSpan(),
@@ -11280,6 +11542,7 @@ class _MessageSelectionArea extends StatefulWidget {
     required this.onEditMessage,
     required this.onNote,
     required this.annotations,
+    this.highlight,
     required this.annotationNumbers,
     required this.onAnnotate,
     required this.onSelectionAreaChanged,
@@ -11292,6 +11555,7 @@ class _MessageSelectionArea extends StatefulWidget {
   final ValueChanged<AiConversationMessage> onEditMessage;
   final void Function(AiConversationMessage, String, bool) onNote;
   final List<ChatAnnotation> annotations;
+  final ChatAnnotation? highlight;
   final Map<String, int> annotationNumbers;
   final Future<void> Function(ChatAnnotation, Offset) onAnnotate;
   final void Function(_MessageSelectionAreaState, bool) onSelectionAreaChanged;
@@ -11394,6 +11658,7 @@ class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
     },
     child: ChatTextAnnotationLayer(
       annotations: widget.annotations,
+      highlight: widget.highlight,
       annotationNumbers: widget.annotationNumbers,
       onTapAnnotation: (annotation, anchor) =>
           unawaited(widget.onAnnotate(annotation, anchor)),

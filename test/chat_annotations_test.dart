@@ -306,6 +306,47 @@ void main() {
     },
   );
 
+  testWidgets('an anchored comment input stays above the software keyboard', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(600, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewInsets);
+    VoidCallback? dismissPopover;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            resizeToAvoidBottomInset: false,
+            body: TextButton(
+              onPressed: () => showChatAnnotationComment(
+                context,
+                initialText: '',
+                anchor: const Offset(300, 760),
+                onDismissReady: (dismiss) => dismissPopover = dismiss,
+              ),
+              child: const Text('注释'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('注释'));
+    await tester.pumpAndSettle();
+    tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+    await tester.pumpAndSettle();
+    final input = tester.getRect(find.byType(ChatAnnotationInput));
+    final keyboardTop = tester.view.physicalSize.height - 320;
+    expect(input.bottom, lessThanOrEqualTo(keyboardTop));
+    expect(input.top, greaterThanOrEqualTo(0));
+    dismissPopover!();
+    await tester.pumpAndSettle();
+    expect(find.byType(ChatAnnotationInput), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('only explicit submission commits a nonempty comment', (
     tester,
   ) async {
