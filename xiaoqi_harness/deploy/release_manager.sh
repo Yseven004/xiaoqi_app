@@ -416,6 +416,8 @@ PY
   timeout --kill-after=30s 600 docker run --rm --name xiaoqi-release-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
     --entrypoint /app/bin/verify_capability_chain xiaoqi-genkit-server:local
   timeout --kill-after=30s 900 docker run --rm --name xiaoqi-curated-release-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
+    --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
+    --env SANDBOX_RUNNER_URL=http://sandbox-runner:8090 \
     --entrypoint /app/bin/verify_official_catalog xiaoqi-genkit-server:local
 
   phase HOLD_WRITES

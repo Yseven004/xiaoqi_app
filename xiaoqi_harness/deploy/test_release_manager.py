@@ -31,6 +31,8 @@ elif a[0] == 'run':
     if 'du' in a: print('10 /data')
     elif '/app/bin/verify_capability_chain' in a:
         if os.environ.get('FAIL_PROBE') == '1': sys.exit(8)
+    elif '/app/bin/verify_official_catalog' in a:
+        if os.environ.get('FAIL_CURATED_PROBE') == '1': sys.exit(8)
     else:
         mounts = [a[i+1] for i,x in enumerate(a) if x == '-v']
         for mount in mounts:
@@ -77,9 +79,20 @@ class ManagerTests(unittest.TestCase):
         calls = (self.root/'docker.calls').read_text().splitlines()
         self.assertFalse(any(' build ' in ' '+c+' ' for c in calls))
         self.assertTrue(all('--no-build' in c and '--pull never' in c for c in calls if ' up ' in c))
+        curated = next(c for c in calls if '/app/bin/verify_official_catalog' in c)
+        self.assertIn('--network xiaoqi-single-server_default', curated)
+        self.assertIn('--network xiaoqi-single-server_sandbox-control', curated)
+        self.assertIn('--env SANDBOX_RUNNER_URL=http://sandbox-runner:8090', curated)
 
     def test_failed_probe_preserves_running_release(self):
         result = self.deploy(FAIL_PROBE='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
+        self.assertFalse((self.root/'restore/next').exists())
+        self.assertNotIn(' stop app', (self.root/'docker.calls').read_text())
+
+    def test_failed_curated_probe_preserves_running_release(self):
+        result = self.deploy(FAIL_CURATED_PROBE='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
         self.assertFalse((self.root/'restore/next').exists())

@@ -2597,7 +2597,7 @@ class GenkitXiaoqiAgentRuntime
               ...?_resumedAuthorizedDomains(context.resumed, permission),
               if (temporaryNetwork) ...requestedDomains,
             }.toList()..sort(),
-            materials: _materials(request['materials']),
+            materials: await _scriptMaterials(tenantId, request['materials']),
             skillFiles: skillFiles,
             cancellation: cancellation,
           );
@@ -3001,7 +3001,7 @@ class GenkitXiaoqiAgentRuntime
             code: utf8.decode(scriptBytes),
             language: input['language']?.toString() ?? '',
             authorizedDomains: approvedForThisCall,
-            materials: _materials(request['materials']),
+            materials: await _scriptMaterials(tenantId, request['materials']),
             skillFiles: skillFiles,
             cancellation: cancellation,
             scriptPath: scriptPath,
@@ -3109,7 +3109,10 @@ class GenkitXiaoqiAgentRuntime
         // answer text first, then generate the supplemental image. Keeping the
         // image tool out of this model turn prevents it from running first.
         imageGenerationAvailable: imageToolAvailable && !appendImageAfterText,
-        codeExecutionAvailable: codeExecutor.isConfigured && !skillSelected,
+        codeExecutionAvailable:
+            codeExecutor.isConfigured &&
+            (!skillSelected ||
+                selectedSkills.permitsGeneratedCode(turnContract.skillIds)),
         webSearchAvailable: searchAvailable,
         capabilitySelected: skillSelected,
         skillsAvailable: skillsAvailable,
@@ -4131,6 +4134,41 @@ class GenkitXiaoqiAgentRuntime
     if (!allowed.contains(extension))
       throw const FormatException('脚本扩展名与语言不匹配');
     return normalized;
+  }
+
+  Future<List<Map<String, dynamic>>> _scriptMaterials(
+    String tenant,
+    Object? raw,
+  ) async {
+    final result = <Map<String, dynamic>>[];
+    var total = 0;
+    for (final material in _materials(raw)) {
+      final id = material['attachment_id']?.toString().trim() ?? '';
+      Map<String, dynamic> value = material;
+      if (id.isNotEmpty) {
+        try {
+          value = await _attachmentService.scriptMaterial(tenant, id);
+        } on AttachmentFailure catch (error) {
+          throw FormatException(error.message);
+        }
+      }
+      final encoded = value['base64'];
+      total += encoded is String
+          ? encoded.length * 3 ~/ 4 -
+                (encoded.endsWith('==')
+                    ? 2
+                    : encoded.endsWith('=')
+                    ? 1
+                    : 0)
+          : utf8
+                .encode((value['text'] ?? value['content'] ?? '').toString())
+                .length;
+      if (total > 20 * 1024 * 1024) {
+        throw const FormatException('脚本输入资料合计不能超过 20 MB，请分批处理');
+      }
+      result.add(value);
+    }
+    return result;
   }
 
   static List<Map<String, dynamic>> _materials(Object? raw) => raw is List

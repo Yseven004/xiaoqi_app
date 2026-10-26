@@ -111,6 +111,16 @@ class SelectedSkills {
   final unavailableIds = <String>[];
   final _packages = <String, Map<String, List<int>>>{};
 
+  /// This artifact namespace is assigned only by the deployment-owned catalog.
+  bool permitsGeneratedCode(Iterable<String> activeAliases) =>
+      activeAliases.any(
+        (alias) =>
+            entries[alias]?['artifact_key']?.startsWith(
+              'official-catalog/book-to-skill/',
+            ) ==
+            true,
+      );
+
   Map<String, dynamic> reference(String alias) {
     final entry = resolve({'skill_id': alias});
     return {

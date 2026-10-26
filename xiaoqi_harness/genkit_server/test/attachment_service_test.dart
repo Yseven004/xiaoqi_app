@@ -143,6 +143,34 @@ void main() {
   }
 
   test(
+    'script materials preserve owned source bytes and reject another tenant',
+    () async {
+      final bytes = ascii.encode('%PDF-1.4\nprivate-source');
+      final id = (await upload(bytes: bytes))['id'] as String;
+      final material = await service.scriptMaterial('owner', id);
+      expect(material['name'], 'sample.pdf');
+      expect(base64Decode(material['base64']), bytes);
+      await expectLater(
+        service.scriptMaterial('other', id),
+        throwsA(isA<AttachmentFailure>()),
+      );
+    },
+  );
+
+  test(
+    'script material size limit is checked before reading the source',
+    () async {
+      final bytes = List<int>.filled(20 * 1024 * 1024 + 1, 32);
+      bytes.setRange(0, 9, ascii.encode('%PDF-1.4\n'));
+      final id = (await upload(bytes: bytes))['id'] as String;
+      await expectLater(
+        service.scriptMaterial('owner', id),
+        throwsFormatException,
+      );
+    },
+  );
+
+  test(
     'native PDFs extract once and never OCR unselected blank pages',
     () async {
       commands.native = {1, 2, 3, 6, 11, 15, 18, 20};

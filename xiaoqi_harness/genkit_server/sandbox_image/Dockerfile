@@ -2,7 +2,7 @@ FROM node:22-bookworm-slim
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      python3 python3-pip ca-certificates \
+      python3 python3-pip ca-certificates poppler-utils \
       fontconfig fonts-noto-cjk latexmk texlive-lang-chinese texlive-xetex \
  && rm -rf /var/lib/apt/lists/* \
  && command -v xelatex >/dev/null \

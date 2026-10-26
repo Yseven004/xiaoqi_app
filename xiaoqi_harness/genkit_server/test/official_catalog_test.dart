@@ -44,6 +44,11 @@ void main() {
           },
         ]);
         final files = selected.files(selected.entries.values.single);
+        expect(
+          selected.permitsGeneratedCode(selected.entries.keys),
+          installed.value['name'] == 'book-to-skill',
+        );
+        expect(selected.permitsGeneratedCode(const []), isFalse);
         expect(files['UPSTREAM-SKILL.md'], isNotEmpty);
         expect(
           GenkitXiaoqiAgentRuntime.safeSkillResourcePath('UPSTREAM-SKILL.md'),
@@ -106,6 +111,10 @@ void main() {
     }, null);
     final market = SkillMarket(store);
     final publication = market.publish('alice', 'test', 1, 0);
+    final forged = SelectedSkills(store, 'alice', [
+      {'id': 'test', 'version_id': 'v1'},
+    ]);
+    expect(forged.permitsGeneratedCode(forged.entries.keys), isFalse);
     expect((publication.value['record'] as Map)['curated_by'], isNull);
     expect(market.listing(publication, 'bob')['curated_by'], isNull);
     final installed = market.install('bob', publication.value['id'], 1);

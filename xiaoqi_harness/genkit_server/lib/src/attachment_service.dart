@@ -422,6 +422,20 @@ class AttachmentService {
     };
   }
 
+  Future<Map<String, dynamic>> scriptMaterial(String tenant, String id) async {
+    await _initialization;
+    _ensureOpen();
+    final record = store.get(_existingKey(tenant, id))!.value;
+    final file = _source(record);
+    if (await file.length() > 20 * 1024 * 1024) {
+      throw const FormatException('脚本处理的附件不能超过 20 MB，请拆分资料后再试');
+    }
+    return {
+      'name': record['name'],
+      'base64': base64Encode(await file.readAsBytes()),
+    };
+  }
+
   Future<Map<String, dynamic>> imagePart(String tenant, String id) async {
     await _initialization;
     final record = store.get(_existingKey(tenant, id))!.value;
