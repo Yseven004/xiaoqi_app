@@ -361,7 +361,38 @@ class CapabilityRecord {
   }
 }
 
+enum DraftSyncIssue { none, network, conflict, deleted }
+
 class CapabilityDraft {
+  factory CapabilityDraft.fromRecord(
+    CapabilityRecord record, {
+    CapabilityDraft? savedDraft,
+  }) {
+    if (record.origin != 'local') {
+      throw const FormatException('只有本人创建的作品可以编辑');
+    }
+    final version = record.currentVersion;
+    if (version == null || version.content.trim().isEmpty) {
+      throw const FormatException('当前版本内容不完整，请先同步后再编辑');
+    }
+    return CapabilityDraft(
+      id: savedDraft?.id ?? record.id,
+      kind: record.kind,
+      name: record.name,
+      description: record.description,
+      content: version.content,
+      files: version.files,
+      presentation: record.presentation,
+      targetCapabilityId: record.id,
+      updatedAt: record.updatedAt,
+      cloudOwnerEmail: savedDraft?.cloudOwnerEmail,
+      cloudRevision: savedDraft?.cloudRevision ?? 0,
+      lastSyncedHash: savedDraft?.lastSyncedHash,
+      creationMode: savedDraft?.creationMode ?? 'import',
+      importSource: savedDraft?.importSource ?? const {},
+    );
+  }
+
   const CapabilityDraft({
     required this.id,
     required this.name,
@@ -377,6 +408,9 @@ class CapabilityDraft {
     this.targetCapabilityId,
     this.presentation = const {},
     this.lastSyncedHash,
+    this.creationMode = 'import',
+    this.importSource = const {},
+    this.syncIssue = DraftSyncIssue.none,
   });
 
   final String id;
@@ -394,6 +428,11 @@ class CapabilityDraft {
   final Map<String, dynamic> presentation;
   final String? lastSyncedHash;
 
+  /// Local editor identity; never part of the server authoring contract.
+  final String creationMode;
+  final Map<String, dynamic> importSource;
+  final DraftSyncIssue syncIssue;
+
   CapabilityDraft copyWith({
     String? name,
     String? description,
@@ -407,6 +446,9 @@ class CapabilityDraft {
     String? targetCapabilityId,
     Map<String, dynamic>? presentation,
     String? lastSyncedHash,
+    String? creationMode,
+    Map<String, dynamic>? importSource,
+    DraftSyncIssue? syncIssue,
   }) => CapabilityDraft(
     id: id,
     kind: kind,
@@ -422,6 +464,9 @@ class CapabilityDraft {
     targetCapabilityId: targetCapabilityId ?? this.targetCapabilityId,
     presentation: presentation ?? this.presentation,
     lastSyncedHash: lastSyncedHash ?? this.lastSyncedHash,
+    creationMode: creationMode ?? this.creationMode,
+    importSource: importSource ?? this.importSource,
+    syncIssue: syncIssue ?? this.syncIssue,
   );
 
   Map<String, Object?> toJson({bool includeLocalMetadata = true}) => {
@@ -442,6 +487,9 @@ class CapabilityDraft {
       'cloud_owner_email': cloudOwnerEmail,
     if (includeLocalMetadata && lastSyncedHash != null)
       'last_synced_hash': lastSyncedHash,
+    if (includeLocalMetadata) 'creation_mode': creationMode,
+    if (includeLocalMetadata) 'import_source': importSource,
+    if (includeLocalMetadata) 'sync_issue': syncIssue.name,
   };
 
   factory CapabilityDraft.fromJson(Object? raw) {
@@ -468,6 +516,14 @@ class CapabilityDraft {
       cloudRevision: (raw['cloud_revision'] as num?)?.toInt() ?? 0,
       cloudOwnerEmail: raw['cloud_owner_email']?.toString(),
       lastSyncedHash: raw['last_synced_hash']?.toString(),
+      creationMode: raw['creation_mode'] == 'mcp' ? 'mcp' : 'import',
+      importSource: raw['import_source'] is Map
+          ? Map<String, dynamic>.from(raw['import_source'])
+          : const {},
+      syncIssue: DraftSyncIssue.values.firstWhere(
+        (issue) => issue.name == raw['sync_issue'],
+        orElse: () => DraftSyncIssue.none,
+      ),
       targetCapabilityId: raw['target_capability_id']?.toString(),
       presentation: raw['presentation'] is Map
           ? Map<String, dynamic>.from(raw['presentation'] as Map)

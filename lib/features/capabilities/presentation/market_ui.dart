@@ -6,6 +6,8 @@ const marketMuted = Color(0xFF6B6B6B);
 const marketLine = Color(0xFFE8E8E8);
 const marketSoft = Color(0xFFF4F4F4);
 const marketBarrier = Color(0x44000000);
+const marketSuccess = Color(0xFF247344);
+const marketCreationMuted = Color(0xFF68728C);
 const marketAssets = 'assets/icons/extension_market/';
 const marketOfficialDeveloper = '第七世界';
 
@@ -83,7 +85,9 @@ class _MarketInputFocusScopeState extends State<MarketInputFocusScope>
 
 Widget marketIcon(String name, {double size = 22, Color? color}) =>
     SvgPicture.asset(
-      '${marketAssets}detail/$name.svg',
+      name == 'mcp'
+          ? 'assets/icons/capabilities/mcp_connector.svg'
+          : '${marketAssets}detail/$name.svg',
       width: size,
       height: size,
       colorFilter: color == null
@@ -115,6 +119,8 @@ Widget marketButton(
   double radius = 99,
   double height = 48,
   double fontSize = 15,
+  Color? primaryColor,
+  String? fontFamily,
 }) => TextButton(
   onPressed: onPressed,
   style: TextButton.styleFrom(
@@ -124,7 +130,7 @@ Widget marketButton(
     disabledForegroundColor: primary ? Colors.white : marketMuted,
     disabledBackgroundColor: primary ? const Color(0xFFA3A3A3) : null,
     backgroundColor: primary
-        ? const Color(0xFF1D1D1D)
+        ? primaryColor ?? const Color(0xFF1D1D1D)
         : selected
         ? const Color(0xFFF0F0F0)
         : Colors.transparent,
@@ -134,7 +140,11 @@ Widget marketButton(
           ? BorderSide.none
           : const BorderSide(color: Color(0xFFDEDEDE)),
     ),
-    textStyle: TextStyle(fontSize: fontSize, fontWeight: FontWeight.w400),
+    textStyle: TextStyle(
+      fontFamily: fontFamily,
+      fontSize: fontSize,
+      fontWeight: FontWeight.w400,
+    ),
   ),
   child: Row(
     mainAxisSize: MainAxisSize.min,
@@ -157,6 +167,7 @@ Widget marketDialogButton(
   bool outlined = true,
   double height = 48,
   double fontSize = 15,
+  Color? primaryColor,
 }) => marketButton(
   label,
   onPressed,
@@ -167,7 +178,81 @@ Widget marketDialogButton(
   radius: 8,
   height: height,
   fontSize: fontSize,
+  primaryColor: primaryColor,
+  fontFamily: 'NotoSansCJKSC',
 );
+
+List<String> marketUploadExtensions({
+  required bool skill,
+  required Map<String, dynamic>? policy,
+}) => (policy?['upload_extensions'] as List? ?? [])
+    .map((e) => e.toString().toLowerCase().replaceFirst(RegExp(r'^\.'), ''))
+    .where((extension) => extension.isNotEmpty && (skill || extension != 'md'))
+    .toSet()
+    .toList();
+
+List<String> marketAndroidPickerExtensions({
+  required bool skill,
+  required Map<String, dynamic>? policy,
+}) {
+  final extensions = marketUploadExtensions(skill: skill, policy: policy);
+  final pickerExtensions = <String>{};
+  for (final extension in extensions) {
+    pickerExtensions.addAll(switch (extension) {
+      'zip' => ['zip'],
+      // Android resolves extensions to MIME types; compound suffixes are unknown.
+      'tar.gz' || 'tgz' => ['gz', 'tgz'],
+      'skill' => ['skill', 'zip'],
+      'md' => ['md', 'markdown'],
+      _ => <String>[],
+    });
+  }
+  return pickerExtensions.toList();
+}
+
+String? validateMarketUpload({
+  required String name,
+  required int size,
+  required bool skill,
+  required Map<String, dynamic>? policy,
+}) {
+  final allowed = marketUploadExtensions(skill: skill, policy: policy);
+  final limit = (policy?['max_archive_bytes'] as num?)?.toInt();
+  if (limit == null) return '无法取得上传限制，请稍后重试。';
+  if (!allowed.any((extension) => name.toLowerCase().endsWith('.$extension'))) {
+    return '不支持此文件格式，请上传${skill ? 'SKILL.md 或技能压缩包' : '插件压缩包'}。支持：${allowed.join('、')}。';
+  }
+  if (size <= 0) return '文件为空，请重新上传。';
+  if (size > limit) {
+    return '文件大小为 ${formatMarketFileSize(size)}，超过 ${formatMarketFileSize(limit)} 上限。';
+  }
+  return null;
+}
+
+String formatMarketFileSize(int bytes) {
+  String compact(double value) =>
+      value.toStringAsFixed(1).replaceFirst(RegExp(r'\.0$'), '');
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) {
+    final value = bytes / 1024;
+    return '${compact(value)} KB';
+  }
+  final value = bytes / (1024 * 1024);
+  return '${compact(value)} MB';
+}
+
+String? validateMcpServerUrl(String value) {
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null ||
+      uri.scheme != 'https' ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasQuery ||
+      uri.hasFragment) {
+    return '请输入有效的 HTTPS 服务器地址，凭据填写在私有令牌栏。';
+  }
+  return null;
+}
 
 ThemeData marketTheme(BuildContext context) => Theme.of(context).copyWith(
   scaffoldBackgroundColor: Colors.white,
@@ -383,11 +468,14 @@ class MarketGrid extends StatelessWidget {
           ? 1
           : 2;
       final width = (constraints.maxWidth - (columns - 1) * 36) / columns;
-      return Wrap(
-        spacing: 36,
-        children: children
-            .map((child) => SizedBox(width: width, child: child))
-            .toList(),
+      return SizedBox(
+        width: constraints.maxWidth,
+        child: Wrap(
+          spacing: 36,
+          children: children
+              .map((child) => SizedBox(width: width, child: child))
+              .toList(),
+        ),
       );
     },
   );
@@ -479,6 +567,7 @@ class MarketDialog extends StatefulWidget {
     required this.children,
     this.actions = const [],
     this.canClose = true,
+    this.onClose,
     this.leadingAction,
     this.moveWithKeyboard = false,
     this.maxWidth = 520,
@@ -492,6 +581,7 @@ class MarketDialog extends StatefulWidget {
   final String title;
   final List<Widget> children, actions;
   final bool canClose;
+  final VoidCallback? onClose;
   final Widget? leadingAction;
   final bool moveWithKeyboard;
   final double maxWidth, cornerRadius;
@@ -645,7 +735,7 @@ class _MarketDialogState extends State<MarketDialog> {
                         IconButton(
                           tooltip: '关闭',
                           onPressed: widget.canClose
-                              ? () => Navigator.pop(context)
+                              ? (widget.onClose ?? () => Navigator.pop(context))
                               : null,
                           icon: marketIcon('close', size: 21),
                         ),

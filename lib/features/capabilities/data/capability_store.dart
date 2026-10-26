@@ -23,6 +23,26 @@ String skillDraftFingerprint(CapabilityDraft draft) {
   final json = draft.toJson(includeLocalMetadata: false)
     ..remove('cloud_revision')
     ..remove('updated_at');
+  // Match the server's presentation defaults before comparing content.
+  final presentation = draft.presentation;
+  json['presentation'] = {
+    'image_layout': presentation['image_layout'] ?? 'horizontal',
+    'title': presentation['title']?.toString().trim() ?? '',
+    'introduction': presentation['introduction']?.toString().trim() ?? '',
+    'icon_asset': presentation['icon_asset'] ?? 'research',
+    'icon_data': presentation['icon_data'] ?? '',
+    'images': [
+      for (final image
+          in (presentation['images'] as List? ?? []).whereType<Map>())
+        {
+          'data': image['data'] ?? '',
+          'caption': (image['caption']?.toString() ?? '').substring(
+            0,
+            (image['caption']?.toString() ?? '').length.clamp(0, 200),
+          ),
+        },
+    ],
+  };
   return sha256.convert(utf8.encode(jsonEncode(sorted(json)))).toString();
 }
 
@@ -35,18 +55,29 @@ class CapabilityStore {
   static const _draftDeletionQueueKey = 'xiaoqi_capability_draft_deletions_v1';
   static const _deletedDraftIdsKey = 'xiaoqi_capability_deleted_draft_ids_v1';
   final Random _random = Random.secure();
-  Future<void> _authoringWrites = Future<void>.value();
+  Future<void>? _authoringWrites;
   Future<T> _writeAuthoring<T>(Future<T> Function() action) {
-    final result = _authoringWrites.then((_) => action());
-    _authoringWrites = result.then<void>(
+    final active = _authoringWrites;
+    final result = active == null
+        ? Future<T>.sync(action)
+        : active.then((_) => action());
+    final tail = result.then<void>(
       (_) {},
       onError: (Object _, StackTrace __) {},
+    );
+    _authoringWrites = tail;
+    unawaited(
+      tail.then((_) {
+        if (identical(_authoringWrites, tail)) _authoringWrites = null;
+      }),
     );
     return result;
   }
 
   // Cache of account-scoped, persisted skill drafts.
   final Map<String, CapabilityDraft> _skillPreviews = {};
+  final _draftChanges = StreamController<void>.broadcast();
+  Stream<void> get draftChanges => _draftChanges.stream;
 
   Future<List<CapabilityRecord>> list({bool includeDeleted = false}) async {
     final prefs = await SharedPreferences.getInstance();
@@ -87,6 +118,11 @@ class CapabilityStore {
     CapabilityDraft sent,
     CapabilityDraft remote,
   ) => _writeAuthoring(() async {
+    if (sent.id != remote.id ||
+        sent.kind != remote.kind ||
+        sent.cloudOwnerEmail != remote.cloudOwnerEmail) {
+      throw StateError('草稿同步身份不一致，已保留本机内容');
+    }
     final prefs = await SharedPreferences.getInstance();
     final current = _decodeDrafts(
       prefs.getString(_authoringKey(sent.cloudOwnerEmail)),
@@ -94,20 +130,63 @@ class CapabilityStore {
     if (current == null || current.cloudRevision > remote.cloudRevision) {
       return current ?? sent;
     }
-    final merged = skillDraftFingerprint(current) == skillDraftFingerprint(sent)
-        ? remote
+    final currentHash = skillDraftFingerprint(current);
+    final sentHash = skillDraftFingerprint(sent);
+    final remoteHash = skillDraftFingerprint(remote);
+    if (currentHash != sentHash && remoteHash != sentHash) {
+      final conflict = current.copyWith(syncIssue: DraftSyncIssue.conflict);
+      await _saveAuthoringDraft(conflict);
+      return conflict;
+    }
+    final merged = currentHash == sentHash
+        ? remote.copyWith(
+            creationMode: current.creationMode,
+            importSource: current.importSource,
+          )
         : current.copyWith(
             cloudRevision: remote.cloudRevision,
             lastSyncedHash: remote.lastSyncedHash,
           );
-    await _saveAuthoringDraft(merged);
-    return merged;
+    final saved = merged.copyWith(syncIssue: DraftSyncIssue.none);
+    await _saveAuthoringDraft(saved);
+    return saved;
+  });
+
+  Future<void> markDraftSyncIssue(
+    CapabilityDraft draft,
+    DraftSyncIssue issue,
+  ) => _writeAuthoring(() async {
+    final current = (await authoringDrafts(
+      draft.cloudOwnerEmail,
+    )).where((item) => item.id == draft.id).firstOrNull;
+    if (current != null) {
+      await _saveAuthoringDraft(current.copyWith(syncIssue: issue));
+    }
   });
 
   Future<void> _saveAuthoringDraft(CapabilityDraft draft) async {
     final prefs = await SharedPreferences.getInstance();
     final key = _authoringKey(draft.cloudOwnerEmail);
     final drafts = _decodeDrafts(prefs.getString(key));
+    if (drafts[draft.id] != null && drafts[draft.id]!.kind != draft.kind) {
+      throw StateError('不能用其他类型覆盖此草稿，原内容已保留');
+    }
+    final current = drafts[draft.id];
+    if (current != null && current.cloudRevision > draft.cloudRevision) {
+      final unseenCloudChange =
+          current.lastSyncedHash == skillDraftFingerprint(current) &&
+          skillDraftFingerprint(draft) != skillDraftFingerprint(current) &&
+          draft.lastSyncedHash != current.lastSyncedHash;
+      draft = draft.copyWith(
+        cloudRevision: current.cloudRevision,
+        lastSyncedHash: unseenCloudChange
+            ? draft.lastSyncedHash
+            : current.lastSyncedHash,
+        syncIssue: unseenCloudChange
+            ? DraftSyncIssue.conflict
+            : draft.syncIssue,
+      );
+    }
     drafts[draft.id] = draft;
     if (!await prefs.setString(
       key,
@@ -116,6 +195,7 @@ class CapabilityStore {
       throw StateError('草稿保存失败，当前编辑内容仍保留');
     }
     _skillPreviews[draft.id] = draft;
+    _draftChanges.add(null);
   }
 
   Future<List<CapabilityDraft>> skillPreviews({String? accountEmail}) async {
@@ -123,7 +203,11 @@ class CapabilityStore {
       _skillPreviews[draft.id] = draft;
     }
     return _skillPreviews.values
-        .where((d) => d.cloudOwnerEmail == accountEmail)
+        .where(
+          (d) =>
+              d.cloudOwnerEmail == accountEmail &&
+              d.kind == CapabilityKind.skill,
+        )
         .toList();
   }
 
@@ -150,7 +234,10 @@ class CapabilityStore {
     if (await isDraftDeleted(id)) return null;
     await skillPreviews(accountEmail: accountEmail);
     final draft = _skillPreviews[id];
-    return draft?.cloudOwnerEmail == accountEmail ? draft : null;
+    return draft?.cloudOwnerEmail == accountEmail &&
+            draft?.kind == CapabilityKind.skill
+        ? draft
+        : null;
   }
 
   Future<void> stageSkillPreview(CapabilityDraft draft) async {
@@ -186,6 +273,7 @@ class CapabilityStore {
     await _removeAuthoringDraft(draft);
     await clearDraftMcpToken(draft);
     _skillPreviews.remove(draft.id);
+    _draftChanges.add(null);
   }
 
   String _draftTokenKey(CapabilityDraft draft) =>
@@ -283,7 +371,7 @@ class CapabilityStore {
     required String id,
     required int cloudRevision,
     required String accountEmail,
-  }) async {
+  }) => _writeAuthoring(() async {
     final prefs = await SharedPreferences.getInstance();
     final email = accountEmail.trim().toLowerCase();
     final queue = (await pendingDraftDeletions())
@@ -310,37 +398,39 @@ class CapabilityStore {
       throw StateError('旧草稿删除状态保存失败，请重试');
     }
     await _discardLegacyDraft(id);
-  }
+  });
 
-  Future<void> rememberRemoteDraftDeletion(
-    String id, {
-    String? accountEmail,
-  }) async {
-    final prefs = await SharedPreferences.getInstance();
-    final deletedIds = await deletedDraftIds();
-    deletedIds.add(id);
-    await prefs.setString(_deletedDraftIdsKey, jsonEncode(deletedIds.toList()));
-    if (accountEmail != null) {
-      final queue = (await pendingDraftDeletions())
-          .where((item) => item['id']?.toString() != id)
-          .toList();
-      await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
-    }
-    await _discardLegacyDraft(id);
-  }
+  Future<void> rememberRemoteDraftDeletion(String id, {String? accountEmail}) =>
+      _writeAuthoring(() async {
+        final prefs = await SharedPreferences.getInstance();
+        final deletedIds = await deletedDraftIds();
+        deletedIds.add(id);
+        await prefs.setString(
+          _deletedDraftIdsKey,
+          jsonEncode(deletedIds.toList()),
+        );
+        if (accountEmail != null) {
+          final queue = (await pendingDraftDeletions())
+              .where((item) => item['id']?.toString() != id)
+              .toList();
+          await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
+        }
+        await _discardLegacyDraft(id);
+      });
 
-  Future<void> completeDraftDeletion(String id, String accountEmail) async {
-    final prefs = await SharedPreferences.getInstance();
-    final email = accountEmail.trim().toLowerCase();
-    final queue = (await pendingDraftDeletions())
-        .where(
-          (item) =>
-              item['id']?.toString() != id ||
-              item['account_email']?.toString() != email,
-        )
-        .toList();
-    await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
-  }
+  Future<void> completeDraftDeletion(String id, String accountEmail) =>
+      _writeAuthoring(() async {
+        final prefs = await SharedPreferences.getInstance();
+        final email = accountEmail.trim().toLowerCase();
+        final queue = (await pendingDraftDeletions())
+            .where(
+              (item) =>
+                  item['id']?.toString() != id ||
+                  item['account_email']?.toString() != email,
+            )
+            .toList();
+        await prefs.setString(_draftDeletionQueueKey, jsonEncode(queue));
+      });
 
   Future<void> markSynced(String id, int cloudRevision) async {
     await _update(

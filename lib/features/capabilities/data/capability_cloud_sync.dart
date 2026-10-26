@@ -16,10 +16,11 @@ import 'capability_models.dart';
 import 'capability_store.dart';
 
 class SkillDraftConflict implements Exception {
-  const SkillDraftConflict(this.remote);
+  const SkillDraftConflict(this.remote, {this.deleted = false});
   final CapabilityDraft? remote;
+  final bool deleted;
   @override
-  String toString() => '草稿已在另一设备更新，本机修改已保留，可另存为新草稿';
+  String toString() => deleted ? '云端草稿已删除，本机内容已保留' : '云端版本有变化，本机内容已保留';
 }
 
 ({String code, String message, String details}) _presentTaskFailure(
@@ -222,7 +223,63 @@ class CapabilityCloudSync {
   final TaskArtifactImageCache _imageCache;
   genkit_client.AgentApi<Map<String, dynamic>>? _remoteAgent;
   Future<void>? _syncing;
-  bool _syncAgain = false;
+  Future<void>? _capabilitySyncing;
+  final Map<String, Future<void>> _draftUploads = {};
+  final Map<String, Object> _marketValues = {};
+  final Map<String, DateTime> _marketReadAt = {};
+  final Map<String, Future<Object>> _marketRequests = {};
+  String? _marketToken;
+
+  void invalidateMarketCache([String? collection]) {
+    if (collection == null) {
+      _marketValues.clear();
+      _marketReadAt.clear();
+      _marketRequests.clear();
+    } else {
+      _marketValues.remove(collection);
+      _marketReadAt.remove(collection);
+      _marketRequests.remove(collection);
+    }
+  }
+
+  Future<T> _marketRead<T extends Object>(
+    String collection,
+    Future<T> Function(String token) load, {
+    Duration ttl = const Duration(minutes: 5),
+  }) async {
+    final token = await _requireToken();
+    if (_marketToken != token) {
+      invalidateMarketCache();
+      _marketToken = token;
+    }
+    final value = _marketValues[collection];
+    final readAt = _marketReadAt[collection];
+    if (value != null &&
+        readAt != null &&
+        DateTime.now().difference(readAt) < ttl) {
+      return value as T;
+    }
+    final active = _marketRequests[collection];
+    if (active != null) return await active as T;
+    final operation = load(token);
+    _marketRequests[collection] = operation;
+    try {
+      final result = await operation;
+      if (await _secureStorage.read(key: _tokenKey) != token) {
+        throw StateError('账号已变化，请重新读取列表');
+      }
+      if (_marketToken == token &&
+          identical(_marketRequests[collection], operation)) {
+        _marketValues[collection] = result;
+        _marketReadAt[collection] = DateTime.now();
+      }
+      return result;
+    } finally {
+      if (identical(_marketRequests[collection], operation)) {
+        _marketRequests.remove(collection);
+      }
+    }
+  }
 
   String get _baseUrl {
     final value = ApiConfig.capabilitiesBaseUrl.trim();
@@ -596,6 +653,8 @@ class CapabilityCloudSync {
   }
 
   Future<void> _clearLocalSession() async {
+    invalidateMarketCache();
+    _marketToken = null;
     CapabilityStore.instance.clearSkillPreviews();
     await _secureStorage.delete(key: _tokenKey);
     await _secureStorage.delete(key: _authMethodKey);
@@ -604,23 +663,19 @@ class CapabilityCloudSync {
 
   Future<void> syncNow() {
     final active = _syncing;
-    if (active != null) {
-      _syncAgain = true;
-      return active;
-    }
-    final operation = _syncPendingRequests();
+    if (active != null) return active;
+    final operation = _sync();
     _syncing = operation.whenComplete(() => _syncing = null);
     return _syncing!;
   }
 
-  Future<void> _syncPendingRequests() async {
-    do {
-      _syncAgain = false;
-      await _sync();
-    } while (_syncAgain);
+  Future<void> _sync() async {
+    // A draft failure must never block the installed capabilities collection.
+    await syncCapabilityRecords();
+    await syncDrafts();
   }
 
-  Future<void> _sync() async {
+  Future<void> syncDrafts() async {
     final token = await _secureStorage.read(key: _tokenKey);
     if (token == null || token.isEmpty) throw StateError('请先登录个人账号');
     await _verifyContract();
@@ -658,7 +713,18 @@ class CapabilityCloudSync {
         continue;
       }
       if (raw['deleted_at'] != null) {
-        await store.rememberRemoteDraftDeletion(id, accountEmail: accountEmail);
+        final local = (await store.authoringDrafts(
+          accountEmail,
+        )).where((draft) => draft.id == id).firstOrNull;
+        if (local != null &&
+            local.lastSyncedHash != skillDraftFingerprint(local)) {
+          await store.markDraftSyncIssue(local, DraftSyncIssue.deleted);
+        } else {
+          await store.rememberRemoteDraftDeletion(
+            id,
+            accountEmail: accountEmail,
+          );
+        }
       } else {
         await store.queueDraftDeletion(
           id: id,
@@ -667,28 +733,56 @@ class CapabilityCloudSync {
         );
       }
     }
+    Object? firstError;
     for (final deletion in await store.pendingDraftDeletions()) {
       final ownerEmail = deletion['account_email']?.toString() ?? '';
       if (ownerEmail.isNotEmpty && ownerEmail != accountEmail) continue;
       final id = deletion['id']?.toString();
       if (id == null || id.isEmpty) continue;
-      final response = await _client
-          .delete(
-            Uri.parse('$_baseUrl/drafts/${Uri.encodeComponent(id)}'),
-            headers: _headers(token),
-          )
-          .timeout(const Duration(seconds: 20));
-      if (response.statusCode != 404 &&
-          (response.statusCode < 200 || response.statusCode >= 300)) {
-        throw StateError(_errorMessage(_decode(response), '旧草稿清理失败'));
+      try {
+        final response = await _client
+            .delete(
+              Uri.parse('$_baseUrl/drafts/${Uri.encodeComponent(id)}'),
+              headers: _headers(token),
+            )
+            .timeout(const Duration(seconds: 20));
+        if (response.statusCode != 404 &&
+            (response.statusCode < 200 || response.statusCode >= 300)) {
+          throw StateError(_errorMessage(_decode(response), '旧草稿清理失败'));
+        }
+        await store.completeDraftDeletion(id, ownerEmail);
+      } catch (error) {
+        firstError ??= error;
       }
-      await store.completeDraftDeletion(id, ownerEmail);
     }
 
     for (final draft in await store.authoringDrafts(accountEmail)) {
-      final synced = await syncAuthoringDraft(draft);
-      await store.applySyncedAuthoringDraft(draft, synced);
+      if (draft.syncIssue == DraftSyncIssue.conflict ||
+          draft.syncIssue == DraftSyncIssue.deleted)
+        continue;
+      if (draft.cloudRevision > 0 &&
+          draft.lastSyncedHash == skillDraftFingerprint(draft))
+        continue;
+      try {
+        await syncAuthoringDraft(draft);
+      } catch (error) {
+        if (error is! SkillDraftConflict) firstError ??= error;
+      }
     }
+    if (firstError != null) throw firstError;
+  }
+
+  Future<void> syncCapabilityRecords() {
+    final active = _capabilitySyncing;
+    if (active != null) return active;
+    return _capabilitySyncing = _syncCapabilityRecords().whenComplete(() {
+      _capabilitySyncing = null;
+    });
+  }
+
+  Future<void> _syncCapabilityRecords() async {
+    final token = await _requireToken();
+    final store = CapabilityStore.instance;
 
     for (final record in await store.list(includeDeleted: true)) {
       if (record.isServerInstallation) continue;
@@ -726,23 +820,30 @@ class CapabilityCloudSync {
       }
     }
 
-    final response = await _client
-        .get(Uri.parse('$_baseUrl/capabilities'), headers: _headers(token))
-        .timeout(const Duration(seconds: 25));
-    final decoded = _decode(response);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError(_errorMessage(decoded, '读取云端能力失败'));
-    }
-    final items = decoded['items'];
-    if (items is List) {
-      for (final raw in items.whereType<Map>()) {
-        final remote = CapabilityRecord.fromJson(raw);
-        final local = await store.find(remote.id);
-        if (local == null ||
-            (local.syncState == CapabilitySyncState.synced &&
-                remote.cloudRevision > local.cloudRevision)) {
-          await store.applyRemote(remote);
-        }
+    invalidateMarketCache('capabilities');
+    await refreshCapabilityRecords();
+  }
+
+  Future<void> refreshCapabilityRecords() async {
+    final store = CapabilityStore.instance;
+    final items = await _marketRead<List<CapabilityRecord>>('capabilities', (
+      token,
+    ) async {
+      final response = _checked(
+        await _client
+            .get(Uri.parse('$_baseUrl/capabilities'), headers: _headers(token))
+            .timeout(const Duration(seconds: 20)),
+      );
+      return (response['items'] as List? ?? [])
+          .map(CapabilityRecord.fromJson)
+          .toList();
+    }, ttl: const Duration(seconds: 30));
+    for (final remote in items) {
+      final local = await store.find(remote.id);
+      if (local == null ||
+          (local.syncState == CapabilitySyncState.synced &&
+              remote.cloudRevision > local.cloudRevision)) {
+        await store.applyRemote(remote);
       }
     }
   }
@@ -1264,31 +1365,35 @@ class CapabilityCloudSync {
     return records.where((r) => !r.isDeleted).toList();
   }
 
-  Future<List<McpConnectionRecord>> listMcpConnections() async {
-    final token = await _requireToken();
-    final value = _checked(
-      await _client
-          .get(Uri.parse('$_baseUrl/mcp/connections'), headers: _headers(token))
-          .timeout(const Duration(seconds: 20)),
-    );
-    return (value['items'] as List? ?? const [])
-        .map(McpConnectionRecord.fromJson)
-        .toList(growable: false);
-  }
+  Future<List<McpConnectionRecord>> listMcpConnections() =>
+      _marketRead('connections', (token) async {
+        final value = _checked(
+          await _client
+              .get(
+                Uri.parse('$_baseUrl/mcp/connections'),
+                headers: _headers(token),
+              )
+              .timeout(const Duration(seconds: 20)),
+        );
+        return (value['items'] as List? ?? const [])
+            .map(McpConnectionRecord.fromJson)
+            .toList(growable: false);
+      }, ttl: const Duration(seconds: 30));
 
-  Future<List<McpCatalogEntry>> listMcpCatalog() async {
-    final token = await _requireToken();
-    final value = _checked(
-      await _client
-          .get(Uri.parse('$_baseUrl/mcp/catalog'), headers: _headers(token))
-          .timeout(const Duration(seconds: 20)),
-    );
-    return (value['items'] as List? ?? const [])
-        .map(McpCatalogEntry.fromJson)
-        .toList(growable: false);
-  }
+  Future<List<McpCatalogEntry>> listMcpCatalog() =>
+      _marketRead('catalog', (token) async {
+        final value = _checked(
+          await _client
+              .get(Uri.parse('$_baseUrl/mcp/catalog'), headers: _headers(token))
+              .timeout(const Duration(seconds: 20)),
+        );
+        return (value['items'] as List? ?? const [])
+            .map(McpCatalogEntry.fromJson)
+            .toList(growable: false);
+      });
 
   Future<McpConnectionRecord> installMcp(String catalogId) async {
+    invalidateMarketCache('connections');
     final token = await _requireToken();
     final value = _checked(
       await _client
@@ -1299,10 +1404,12 @@ class CapabilityCloudSync {
           )
           .timeout(const Duration(seconds: 45)),
     );
+    invalidateMarketCache('connections');
     return McpConnectionRecord.fromJson(value['connection']);
   }
 
   Future<Uri?> startMcpLogin(String connectionId) async {
+    invalidateMarketCache('connections');
     final token = await _requireToken();
     final value = _checked(
       await _client
@@ -1319,6 +1426,7 @@ class CapabilityCloudSync {
   }
 
   Future<McpConnectionRecord> reconnectMcp(String connectionId) async {
+    invalidateMarketCache('connections');
     final token = await _requireToken();
     final value = _checked(
       await _client
@@ -1330,6 +1438,7 @@ class CapabilityCloudSync {
           )
           .timeout(const Duration(seconds: 45)),
     );
+    invalidateMarketCache('connections');
     return McpConnectionRecord.fromJson(value['connection']);
   }
 
@@ -1356,6 +1465,7 @@ class CapabilityCloudSync {
           )
           .timeout(const Duration(seconds: 20)),
     );
+    invalidateMarketCache('connections');
     return McpConnectionRecord.fromJson(value['connection']);
   }
 
@@ -1397,6 +1507,7 @@ class CapabilityCloudSync {
   }
 
   Future<void> deleteMcpConnection(String id) async {
+    invalidateMarketCache('connections');
     final token = await _requireToken();
     _checked(
       await _client
@@ -1406,6 +1517,7 @@ class CapabilityCloudSync {
           )
           .timeout(const Duration(seconds: 20)),
     );
+    invalidateMarketCache('connections');
   }
 
   Future<void> manageInstallation(
@@ -1414,45 +1526,58 @@ class CapabilityCloudSync {
     bool? showInMenu,
     bool uninstall = false,
   }) async {
+    invalidateMarketCache('capabilities');
     final token = await _requireToken();
     final uri = Uri.parse(
       '$_baseUrl/capabilities/${Uri.encodeComponent(record.id)}${uninstall ? '?expected_revision=${record.cloudRevision}' : '/visibility'}',
     );
     final response = uninstall
-        ? await _client.delete(uri, headers: _headers(token))
-        : await _client.patch(
-            uri,
-            headers: _headers(token),
-            body: jsonEncode({
-              'expected_revision': record.cloudRevision,
-              'enabled': ?enabled,
-              'show_in_menu': ?showInMenu,
-            }),
-          );
-    _checked(response);
+        ? await _client
+              .delete(uri, headers: _headers(token))
+              .timeout(const Duration(seconds: 20))
+        : await _client
+              .patch(
+                uri,
+                headers: _headers(token),
+                body: jsonEncode({
+                  'expected_revision': record.cloudRevision,
+                  'enabled': ?enabled,
+                  'show_in_menu': ?showInMenu,
+                }),
+              )
+              .timeout(const Duration(seconds: 20));
+    final result = _checked(response);
+    invalidateMarketCache('capabilities');
     if (uninstall) {
       await CapabilityStore.instance.applyRemote(
         record.copyWith(
           deletedAt: DateTime.now(),
-          cloudRevision: record.cloudRevision + 1,
+          cloudRevision:
+              (result['cloud_revision'] as num?)?.toInt() ??
+              record.cloudRevision + 1,
         ),
       );
+    } else if (result['record'] is Map) {
+      await CapabilityStore.instance.applyRemote(
+        CapabilityRecord.fromJson(result['record']),
+      );
     }
-    await installedCapabilities();
   }
 
-  Future<List<Map<String, dynamic>>> skillMarket() async {
-    final token = await _requireToken();
-    final value = _checked(
-      await _client
-          .get(Uri.parse('$_baseUrl/skill-market'), headers: _headers(token))
-          .timeout(const Duration(seconds: 30)),
-    );
-    return (value['items'] as List? ?? [])
-        .whereType<Map>()
-        .map((e) => Map<String, dynamic>.from(e))
-        .toList();
-  }
+  Future<List<Map<String, dynamic>>> skillMarket() => _marketRead(
+    'publications',
+    (token) async {
+      final value = _checked(
+        await _client
+            .get(Uri.parse('$_baseUrl/skill-market'), headers: _headers(token))
+            .timeout(const Duration(seconds: 30)),
+      );
+      return (value['items'] as List? ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    },
+  );
 
   Future<Map<String, dynamic>> skillMarketDetail(String id) async {
     final token = await _requireToken();
@@ -1468,6 +1593,8 @@ class CapabilityCloudSync {
   }
 
   Future<CapabilityRecord> publishSkill(CapabilityRecord record) async {
+    invalidateMarketCache('publications');
+    invalidateMarketCache('capabilities');
     final token = await _requireToken();
     final value = _checked(
       await _client
@@ -1485,10 +1612,13 @@ class CapabilityCloudSync {
     );
     final saved = CapabilityRecord.fromJson(value['record']);
     await CapabilityStore.instance.applyRemote(saved);
+    invalidateMarketCache('publications');
+    invalidateMarketCache('capabilities');
     return saved;
   }
 
   Future<CapabilityRecord> syncAuthoredSkill(CapabilityRecord record) async {
+    invalidateMarketCache('capabilities');
     final token = await _requireToken();
     final value = _checked(
       await _client
@@ -1504,10 +1634,12 @@ class CapabilityCloudSync {
     );
     final saved = CapabilityRecord.fromJson(value['record']);
     await CapabilityStore.instance.applyRemote(saved);
+    invalidateMarketCache('capabilities');
     return saved;
   }
 
   Future<CapabilityRecord> installMarketSkill(String id, int revision) async {
+    invalidateMarketCache('capabilities');
     final token = await _requireToken();
     final value = _checked(
       await _client
@@ -1522,45 +1654,168 @@ class CapabilityCloudSync {
     );
     final saved = CapabilityRecord.fromJson(value['record']);
     await CapabilityStore.instance.applyRemote(saved);
+    invalidateMarketCache('capabilities');
     return saved;
   }
 
-  Future<CapabilityDraft> syncAuthoringDraft(CapabilityDraft draft) async {
+  Future<CapabilityDraft> syncAuthoringDraft(CapabilityDraft draft) {
+    final key = '${draft.cloudOwnerEmail}/${draft.id}';
+    final previous = _draftUploads[key] ?? Future<void>.value();
+    final operation = previous.then((_) => _syncAuthoringDraft(draft));
+    final tail = operation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    _draftUploads[key] = tail;
+    unawaited(
+      tail.then((_) {
+        if (identical(_draftUploads[key], tail)) _draftUploads.remove(key);
+      }),
+    );
+    return operation;
+  }
+
+  Future<CapabilityDraft?> readAuthoringDraft(String id) async {
     final token = await _requireToken();
-    final response = await _client
-        .put(
-          Uri.parse('$_baseUrl/drafts'),
-          headers: _headers(token),
-          body: jsonEncode({
-            'draft': draft.toJson(includeLocalMetadata: false),
-            'expected_revision': draft.cloudRevision,
-          }),
-        )
-        .timeout(const Duration(seconds: 45));
-    if (response.statusCode == 409) {
-      final error = _decode(response)['error'];
-      final current = error is Map ? error['current'] : null;
-      if (current is Map && current['deleted_at'] == null) {
+    final owner = await signedInEmail;
+    final value = _checked(
+      await _client
+          .get(Uri.parse('$_baseUrl/drafts'), headers: _headers(token))
+          .timeout(const Duration(seconds: 20)),
+    );
+    if (await _secureStorage.read(key: _tokenKey) != token) {
+      throw StateError('账号已变化，请重新读取草稿');
+    }
+    for (final item in (value['items'] as List? ?? []).whereType<Map>()) {
+      if (item['id'] == id && item['deleted_at'] == null) {
         final remote = CapabilityDraft.fromJson(
-          current,
-        ).copyWith(cloudOwnerEmail: await signedInEmail);
+          item,
+        ).copyWith(cloudOwnerEmail: owner);
+        return remote.copyWith(lastSyncedHash: skillDraftFingerprint(remote));
+      }
+    }
+    return null;
+  }
+
+  Future<void> syncDraftDeletion(CapabilityDraft draft) async {
+    final token = await _requireToken();
+    if (await signedInEmail != draft.cloudOwnerEmail) {
+      throw StateError('请切换到草稿所属账号后同步');
+    }
+    final response = await _client
+        .delete(
+          Uri.parse('$_baseUrl/drafts/${Uri.encodeComponent(draft.id)}'),
+          headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 404) _checked(response);
+    await CapabilityStore.instance.completeDraftDeletion(
+      draft.id,
+      draft.cloudOwnerEmail ?? '',
+    );
+  }
+
+  Future<CapabilityDraft> _syncAuthoringDraft(CapabilityDraft requested) async {
+    final store = CapabilityStore.instance;
+    var draft = requested;
+    try {
+      final token = await _requireToken();
+      final owner = await signedInEmail;
+      if (requested.cloudOwnerEmail != owner) throw StateError('请切换到草稿所属账号后同步');
+      if (await store.isDraftDeleted(requested.id)) {
+        throw const SkillDraftConflict(null, deleted: true);
+      }
+      draft =
+          (await store.authoringDrafts(
+            owner,
+          )).where((item) => item.id == requested.id).firstOrNull ??
+          requested;
+      if (draft.kind != requested.kind) throw StateError('草稿类型已变化，已保留本机内容');
+      if (draft.syncIssue == DraftSyncIssue.conflict ||
+          draft.syncIssue == DraftSyncIssue.deleted ||
+          draft.cloudRevision > 0 &&
+              draft.lastSyncedHash == skillDraftFingerprint(draft)) {
+        final remote = await readAuthoringDraft(draft.id);
+        if (remote == null) throw const SkillDraftConflict(null, deleted: true);
         if (skillDraftFingerprint(remote) == skillDraftFingerprint(draft)) {
-          return remote.copyWith(lastSyncedHash: skillDraftFingerprint(remote));
+          return await store.applySyncedAuthoringDraft(draft, remote);
+        }
+        if (skillDraftFingerprint(remote) != draft.lastSyncedHash) {
+          throw SkillDraftConflict(remote);
+        }
+        draft = draft.copyWith(
+          cloudRevision: remote.cloudRevision,
+          syncIssue: DraftSyncIssue.none,
+        );
+      }
+      Future<http.Response> upload(CapabilityDraft value) => _client
+          .put(
+            Uri.parse('$_baseUrl/drafts'),
+            headers: _headers(token),
+            body: jsonEncode({
+              'draft': value.toJson(includeLocalMetadata: false),
+              'expected_revision': value.cloudRevision,
+            }),
+          )
+          .timeout(const Duration(seconds: 45));
+      var response = await upload(draft);
+      if (await _secureStorage.read(key: _tokenKey) != token) {
+        throw StateError('账号已变化，草稿仍保留在原账号');
+      }
+      if (response.statusCode == 409) {
+        final error = _decode(response)['error'];
+        final current = error is Map ? error['current'] : null;
+        if (current is Map && current['deleted_at'] == null) {
+          final remote = CapabilityDraft.fromJson(
+            current,
+          ).copyWith(cloudOwnerEmail: await signedInEmail);
+          if (skillDraftFingerprint(remote) == skillDraftFingerprint(draft)) {
+            return await store.applySyncedAuthoringDraft(
+              draft,
+              remote.copyWith(lastSyncedHash: skillDraftFingerprint(remote)),
+            );
+          }
+          if (draft.lastSyncedHash == skillDraftFingerprint(remote)) {
+            // Only metadata changed remotely; the user's edit can be safely rebased once.
+            draft = draft.copyWith(cloudRevision: remote.cloudRevision);
+            response = await upload(draft);
+          }
+        }
+        if (response.statusCode == 409) {
+          final latestError = _decode(response)['error'];
+          final latest = latestError is Map ? latestError['current'] : null;
+          throw SkillDraftConflict(
+            latest is Map && latest['deleted_at'] == null
+                ? CapabilityDraft.fromJson(
+                    latest,
+                  ).copyWith(cloudOwnerEmail: owner)
+                : null,
+            deleted: latest is Map && latest['deleted_at'] != null,
+          );
         }
       }
-      throw SkillDraftConflict(
-        current is Map && current['deleted_at'] == null
-            ? CapabilityDraft.fromJson(
-                current,
-              ).copyWith(cloudOwnerEmail: await signedInEmail)
-            : null,
+      final value = _checked(response);
+      if (await _secureStorage.read(key: _tokenKey) != token) {
+        throw StateError('账号已变化，草稿仍保留在原账号');
+      }
+      final saved = CapabilityDraft.fromJson(
+        value['draft'],
+      ).copyWith(cloudOwnerEmail: owner);
+      return await store.applySyncedAuthoringDraft(
+        draft,
+        saved.copyWith(lastSyncedHash: skillDraftFingerprint(saved)),
       );
+    } catch (error) {
+      await store.markDraftSyncIssue(
+        draft,
+        error is SkillDraftConflict
+            ? error.deleted
+                  ? DraftSyncIssue.deleted
+                  : DraftSyncIssue.conflict
+            : DraftSyncIssue.network,
+      );
+      rethrow;
     }
-    final value = _checked(response);
-    final saved = CapabilityDraft.fromJson(
-      value['draft'],
-    ).copyWith(cloudOwnerEmail: await signedInEmail);
-    return saved.copyWith(lastSyncedHash: skillDraftFingerprint(saved));
   }
 
   Future<CapabilityDraft> inspectedSkillDraft(

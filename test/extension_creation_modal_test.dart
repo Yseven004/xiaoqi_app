@@ -43,6 +43,7 @@ void main() {
   Future<void> open(
     WidgetTester tester, {
     bool plugin = false,
+    bool mcpOnly = false,
     CapabilityCloudSync? cloud,
   }) async {
     await tester.binding.setSurfaceSize(const Size(834, 1194));
@@ -53,6 +54,7 @@ void main() {
           body: MarketSkillEditor(
             draft: draft(plugin: plugin),
             cloud: cloud,
+            mcpOnly: mcpOnly,
           ),
         ),
       ),
@@ -61,23 +63,38 @@ void main() {
   }
 
   testWidgets(
-    'three steps preserve the frame; viewing stays inline and editing focuses',
+    'supplement entries open directly and keep draft edits until explicit save',
     (tester) async {
-      await open(tester);
+      final offlineCloud = CapabilityCloudSync.forTesting(
+        MockClient((_) async => http.Response('offline', 503)),
+      );
+      await open(tester, cloud: offlineCloud);
+      Size buttonSize(String label) => tester
+          .getRect(
+            find
+                .ancestor(
+                  of: find.text(label),
+                  matching: find.byType(TextButton),
+                )
+                .first,
+          )
+          .size;
+      final secondarySize = buttonSize('取消');
+      final primarySize = buttonSize('下一步');
       final frame = tester.getRect(find.byType(Scaffold).last);
       await tester.tap(find.text('下一步'));
       await tester.pumpAndSettle();
-      expect(tester.getRect(find.byType(Scaffold).last), frame);
-      expect(find.text('完整的介绍'), findsNothing);
-      await tester.tap(find.text('详细介绍（可选）'));
-      await tester.pumpAndSettle();
+      final informationFrame = tester.getRect(find.byType(Scaffold).last);
+      expect(informationFrame, frame);
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
       expect(find.text('完整的介绍'), findsOneWidget);
       expect(find.text('一句话简介'), findsOneWidget);
-      await tester.tap(find.text('编辑详细介绍'));
+      await tester.ensureVisible(find.byKey(const ValueKey('supplement-description-entry')));
+      await tester.tap(find.byKey(const ValueKey('supplement-description-entry')));
       await tester.pumpAndSettle();
       expect(find.text('一句话简介'), findsNothing);
       expect(find.text('下一步'), findsNothing);
-      expect(tester.getRect(find.byType(Scaffold).last), frame);
+      expect(tester.getRect(find.byType(Scaffold).last).width, informationFrame.width);
       await tester.enterText(find.byType(TextField), '修改后的介绍');
       await tester.tap(find.text('完成'));
       await tester.pumpAndSettle();
@@ -95,16 +112,93 @@ void main() {
             .map((t) => t.data)
             .join(' | '),
       );
+      expect(buttonSize('上一步'), secondarySize);
+      expect(buttonSize('保存草稿'), secondarySize);
+      expect(buttonSize('确认发布'), primarySize);
       expect(find.byType(TextField), findsNothing);
+      expect(tester.getRect(find.byType(Scaffold).last), frame);
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
       expect(find.text('修改后的介绍'), findsOneWidget);
+      expect(
+        await CapabilityStore.instance.authoringDrafts('owner@example.com'),
+        isEmpty,
+      );
+      await tester.tap(find.text('保存草稿'));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pumpAndSettle();
       final saved = (await CapabilityStore.instance.authoringDrafts(
         'owner@example.com',
       )).single;
       expect(saved.presentation['introduction'], '修改后的介绍');
       expect(saved.presentation['image_layout'], 'horizontal');
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      await tester.pumpAndSettle();
+      final previous = tester.getRect(find.text('上一步'));
+      final saveDraft = tester.getRect(find.text('保存草稿'));
+      final publish = tester.getRect(find.text('确认发布'));
+      expect(previous.top, saveDraft.top);
+      expect(publish.top, greaterThan(previous.top));
+      expect(buttonSize('上一步'), secondarySize);
+      expect(buttonSize('确认发布'), primarySize);
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('closing without saving does not create a draft', (tester) async {
+    await open(tester);
+    await tester.tap(find.text('下一步'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('下一步'));
+    await tester.pumpAndSettle();
+    expect(find.text('确认发布'), findsOneWidget);
+
+    expect(
+      await CapabilityStore.instance.authoringDrafts('owner@example.com'),
+      isEmpty,
+    );
+    await tester.tap(find.byTooltip('关闭创建'));
+    await tester.pumpAndSettle();
+    expect(
+      await CapabilityStore.instance.authoringDrafts('owner@example.com'),
+      isEmpty,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('supplement validation stays in its field and canvas', (
+    tester,
+  ) async {
+    await open(tester);
+    await tester.tap(find.text('下一步'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).first, '');
+    await tester.tap(find.text('下一步'));
+    await tester.pumpAndSettle();
+
+    const titleError = '填写 1–128 字符的展示名称，可以使用中文。';
+    expect(find.text(titleError), findsOneWidget);
+    expect(find.text('确认发布'), findsNothing);
+    expect(find.text('下一步'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is InputDecorator &&
+            widget.decoration.errorText == titleError,
+      ),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.byKey(const ValueKey('supplement-description-entry')));
+    await tester.tap(find.byKey(const ValueKey('supplement-description-entry')));
+    await tester.pumpAndSettle();
+    expect(find.text(titleError), findsNothing);
+    await tester.tap(find.text('完成'));
+    await tester.pumpAndSettle();
+    expect(find.text(titleError), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'MCP tests do not save, suppress duplicates and expire after editing',
@@ -132,11 +226,10 @@ void main() {
           throw StateError('Unexpected ${request.url}');
         }),
       );
-      await open(tester, plugin: true, cloud: cloud);
-      await tester.tap(find.text('MCP连接配置（创建MCP连接器时须填写）'));
-      await tester.pumpAndSettle();
-      final address = find.widgetWithText(TextField, '服务器地址');
+      await open(tester, plugin: true, mcpOnly: true, cloud: cloud);
+      final address = find.byKey(const ValueKey('mcp-server-url'));
       await tester.enterText(address, 'https://example.com/mcp');
+      await tester.pump();
       await tester.ensureVisible(find.text('测试连接'));
       await tester.tap(find.text('测试连接'));
       await tester.pump();
@@ -156,7 +249,7 @@ void main() {
   );
 
   testWidgets('layout SVGs render independently at 64 pixels', (tester) async {
-    for (final layout in ['horizontal', 'grid']) {
+    for (final layout in ['gallery-empty-stack', 'presentation-icon-frame', 'gallery-drag', 'supplement-progress']) {
       final key = GlobalKey();
       await tester.pumpWidget(
         MaterialApp(
@@ -167,7 +260,7 @@ void main() {
                 width: 64,
                 height: 64,
                 child: SvgPicture.asset(
-                  'assets/icons/extensions/gallery-$layout.svg',
+                  'assets/icons/extension_market/detail/$layout.svg',
                 ),
               ),
             ),

@@ -301,7 +301,7 @@ class _SkillsPluginsComposerControlsState
               });
               _closeMenu();
             },
-            leading: SkillPresentationIcon(connection.icon, size: 29),
+            leading: SkillPresentationIcon(connection.icon, size: 29, defaultAsset: 'mcp'),
           ),
       const Divider(height: 12),
       TextButton.icon(
@@ -346,7 +346,7 @@ class _SkillsPluginsComposerControlsState
     await _store.markDeleted(record.id);
     try {
       if (await CapabilityCloudSync.instance.hasEmailSession) {
-        await CapabilityCloudSync.instance.syncNow();
+        await CapabilityCloudSync.instance.syncCapabilityRecords();
       }
     } catch (_) {}
     if (!mounted) return;
@@ -370,7 +370,7 @@ class _SkillsPluginsComposerControlsState
     await _store.setMenuVisibility(record.id, !record.showInMenu);
     try {
       if (await CapabilityCloudSync.instance.hasEmailSession) {
-        await CapabilityCloudSync.instance.syncNow();
+        await CapabilityCloudSync.instance.syncCapabilityRecords();
       }
     } catch (_) {}
     await _refresh();

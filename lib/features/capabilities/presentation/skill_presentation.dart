@@ -8,23 +8,6 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'market_ui.dart';
 import '../../../widgets/app_toast.dart';
 
-const skillPresentationIcons = [
-  'research',
-  'file-text',
-  'book',
-  'code',
-  'database',
-  'presentation',
-  'table',
-  'folder',
-  'chat',
-  'plugs',
-  'gear',
-  'search',
-  'mcp',
-  'extension',
-];
-
 Widget skillDataImage(String data, {BoxFit fit = BoxFit.contain}) {
   try {
     final uri = UriData.parse(data);
@@ -44,31 +27,43 @@ Widget skillDataImage(String data, {BoxFit fit = BoxFit.contain}) {
 }
 
 class SkillPresentationIcon extends StatelessWidget {
-  const SkillPresentationIcon(this.presentation, {this.size = 82, super.key});
+  const SkillPresentationIcon(
+    this.presentation, {
+    this.size = 82,
+    this.defaultAsset = 'file-text',
+    super.key,
+  });
   final Map<String, dynamic> presentation;
   final double size;
+  final String defaultAsset;
   @override
   Widget build(BuildContext context) {
     final data = presentation['icon_data']?.toString() ?? '';
-    final asset = presentation['icon_asset']?.toString() ?? 'research';
-    return Container(
+    // The caller knows the content type; old selected glyphs do not define it.
+    final asset = switch (defaultAsset) {
+      'mcp' => 'assets/icons/capabilities/mcp_connector.svg',
+      'extension' => 'assets/icons/capabilities/extension.svg',
+      _ => '${marketAssets}detail/file-text.svg',
+    };
+    return SizedBox(
       width: size,
       height: size,
-      padding: EdgeInsets.all(size * .22),
-      decoration: BoxDecoration(
-        color: marketSoft,
-        borderRadius: BorderRadius.circular(18),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(size * .22),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            SvgPicture.asset('${marketAssets}detail/presentation-icon-frame.svg'),
+            if (data.isNotEmpty)
+              skillDataImage(data, fit: BoxFit.cover)
+            else
+              Padding(
+                padding: EdgeInsets.all(size * .22),
+                child: SvgPicture.asset(asset),
+              ),
+          ],
+        ),
       ),
-      child: data.isNotEmpty
-          ? skillDataImage(data)
-          : asset == 'mcp' || asset == 'extension'
-          ? SvgPicture.asset(
-              'assets/icons/capabilities/${asset == 'mcp' ? 'mcp_connector' : 'extension'}.svg',
-            )
-          : marketIcon(
-              skillPresentationIcons.contains(asset) ? asset : 'research',
-              size: size * .56,
-            ),
     );
   }
 }
@@ -144,60 +139,19 @@ Future<String?> pickSkillPresentationImage({bool icon = false}) async {
 Future<Map<String, dynamic>?> chooseSkillIcon(
   BuildContext context,
   Map<String, dynamic> current, {
-  String defaultAsset = 'research',
-}) => showDialog<Map<String, dynamic>>(
-  context: context,
-  builder: (dialogContext) => MarketDialog(
-    title: '更换图标',
-    children: [
-      Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          for (final icon in skillPresentationIcons)
-            Semantics(
-              label: '选择图标 $icon',
-              button: true,
-              child: InkWell(
-                onTap: () => Navigator.pop(dialogContext, {
-                  'icon_asset': icon,
-                  'icon_data': '',
-                }),
-                borderRadius: BorderRadius.circular(14),
-                child: Padding(
-                  padding: const EdgeInsets.all(5),
-                  child: SkillPresentationIcon({'icon_asset': icon}, size: 64),
-                ),
-              ),
-            ),
-        ],
-      ),
-      const SizedBox(height: 20),
-      marketDialogButton('上传自己的图标', () async {
-        try {
-          final data = await pickSkillPresentationImage(icon: true);
-          if (data != null && dialogContext.mounted)
-            Navigator.pop(dialogContext, {
-              'icon_asset': defaultAsset,
-              'icon_data': data,
-            });
-        } catch (error) {
-          if (dialogContext.mounted) AppToast.show(context, '$error');
-        }
-      }, icon: 'upload'),
-      const SizedBox(height: 8),
-      marketDialogButton(
-        '恢复默认',
-        () => Navigator.pop(dialogContext, {
-          'icon_asset': defaultAsset,
-          'icon_data': '',
-        }),
-      ),
-      const SizedBox(height: 8),
-      marketDialogButton('取消', () => Navigator.pop(dialogContext)),
-    ],
-  ),
-);
+  String defaultAsset = 'file-text',
+}) async {
+  FocusManager.instance.primaryFocus?.unfocus();
+  try {
+    final data = await pickSkillPresentationImage(icon: true);
+    return data == null
+        ? null
+        : {'icon_asset': defaultAsset, 'icon_data': data};
+  } catch (error) {
+    if (context.mounted) AppToast.show(context, '$error');
+    return null;
+  }
+}
 
 class SkillPresentationBody extends StatelessWidget {
   const SkillPresentationBody({
@@ -224,7 +178,15 @@ class SkillPresentationBody extends StatelessWidget {
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SkillPresentationIcon(presentation, size: phone ? 70 : 92),
+            SkillPresentationIcon(
+              presentation,
+              size: phone ? 70 : 92,
+              defaultAsset: kindLabel == 'MCP'
+                  ? 'mcp'
+                  : kindLabel == '插件'
+                  ? 'extension'
+                  : 'file-text',
+            ),
             SizedBox(width: phone ? 18 : 24),
             Expanded(
               child: Column(
@@ -369,11 +331,6 @@ class _SkillPresentationGalleryState extends State<SkillPresentationGallery> {
                   child: skillDataImage(data),
                 ),
               ),
-              if ((image['caption']?.toString() ?? '').isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(image['caption'].toString()),
-                ),
             ],
           ),
         );
@@ -385,23 +342,8 @@ class _SkillPresentationGalleryState extends State<SkillPresentationGallery> {
           runSpacing: 20,
           children: widget.images.map(tile).toList(),
         );
-      final captionHeight = widget.images.fold<double>(0, (largest, image) {
-        final data = image['data']?.toString() ?? '';
-        final width = height * (_ratios[data] ?? .75);
-        final painter = TextPainter(
-          text: TextSpan(
-            text: image['caption']?.toString() ?? '',
-            style: DefaultTextStyle.of(context).style,
-          ),
-          textDirection: Directionality.of(context),
-          textScaler: MediaQuery.textScalerOf(context),
-        )..layout(maxWidth: width);
-        final measured = painter.height + 8;
-        painter.dispose();
-        return measured > largest ? measured : largest;
-      });
       return SizedBox(
-        height: height + captionHeight,
+        height: height,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
           itemCount: widget.images.length,

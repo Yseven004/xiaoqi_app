@@ -42,6 +42,10 @@ android
 
 ## Evidence on Hand
 
+- `docs/plans/2026-10-24-draft-save-refresh-fix.md`：已确认底部保存状态带；修复草稿并发、冲突隔离、缓存与列表阻塞。实现及定向验证记录随任务更新，页面视觉与真机验收单独标记。
+
+- `docs/design/extension-market-v2/creation-modal-final-2026-10-24.md`：2026-10-24 三张创建定稿；导入与独立 MCP 状态隔离、双配置推进拦截、草稿类型与来源恢复。Flutter 本地实现及截图对照已完成，真机验证待用户执行。
+
 - `docs/design/chat-annotations-v1.md`：2026-10-21 已确认的聊天图片原位标注、评论、同组滑图与文字注释范围；已接入客户端，真机和页面视觉仍待用户验收。
 
 - `docs/product/2026-10-06-deepseek-project-brief.md`：产品方向、当前代码范围、维护约束和未验收边界。

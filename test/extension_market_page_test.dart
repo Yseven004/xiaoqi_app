@@ -140,7 +140,7 @@ void main() {
     await tester.tap(find.text('使用编辑器创建'));
     await tester.pumpAndSettle();
     await tester.enterText(
-      find.widgetWithText(TextField, 'GitHub 链接'),
+      find.byKey(const ValueKey('import-github-url')),
       'invalid',
     );
     await tester.pump();
@@ -148,6 +148,12 @@ void main() {
     await tester.tap(find.text('读取内容'));
     await tester.pumpAndSettle();
     expect(find.textContaining('填写公开 GitHub'), findsOneWidget);
+    expect(find.text('下一步'), findsNothing);
+    expect(find.text('重新读取'), findsOneWidget);
+    await tester.tap(find.text('重新读取'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('填写公开 GitHub'), findsOneWidget);
+    expect(find.text('下一步'), findsNothing);
     await tester.tap(find.byTooltip('关闭创建'));
     await tester.pumpAndSettle();
     expect(find.text('读取内容'), findsNothing);

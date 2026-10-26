@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:app_links/app_links.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -22,32 +23,121 @@ part 'extension_market_forms.dart';
 
 enum ExtensionKind { skill, plugin, mcp }
 
-Future<void> showExtensionCreation(
+Future<ExtensionCreationResult?> showExtensionCreation(
   BuildContext context, {
   CapabilityDraft? draft,
   CapabilityRecord? record,
   CapabilityKind kind = CapabilityKind.skill,
-}) {
+  CapabilityCloudSync? cloud,
+}) async {
+  if (record != null) {
+    try {
+      final owner = await (cloud ?? CapabilityCloudSync.instance).signedInEmail;
+      final saved = (await CapabilityStore.instance.authoringDrafts(owner))
+          .where(
+            (d) =>
+                d.kind == record.kind &&
+                (d.targetCapabilityId == record.id || d.id == record.id),
+          )
+          .firstOrNull;
+      draft = CapabilityDraft.fromRecord(record, savedDraft: saved);
+    } catch (error) {
+      if (context.mounted) {
+        AppToast.show(
+          context,
+          error is FormatException ? error.message : '编辑数据读取失败：$error',
+        );
+      }
+      return null;
+    }
+  }
+  if (!context.mounted) return null;
   final type = draft?.kind ?? record?.kind ?? kind;
-  final importController = MarketImportController();
-  return showDialog<void>(
+  return showDialog<ExtensionCreationResult>(
     context: context,
     barrierDismissible: false,
     barrierColor: marketBarrier,
-    builder: (_) => MarketSkillEditor(
+    builder: (_) => _ExtensionCreationDialog(
       draft: draft,
       record: record,
       kind: type,
-      importController: importController,
-      contentBuilder: (ctx, onDraft, onBusy) => _PackageImportDialog(
-        skill: type == CapabilityKind.skill,
-        upload: true,
-        forEditor: true,
-        onDraft: onDraft,
-        onBusy: onBusy,
-        controller: importController,
-      ),
+      cloud: cloud,
     ),
+  );
+}
+
+class _ExtensionCreationDialog extends StatefulWidget {
+  const _ExtensionCreationDialog({
+    this.draft,
+    this.record,
+    required this.kind,
+    this.cloud,
+  });
+  final CapabilityDraft? draft;
+  final CapabilityRecord? record;
+  final CapabilityKind kind;
+  final CapabilityCloudSync? cloud;
+  @override
+  State<_ExtensionCreationDialog> createState() =>
+      _ExtensionCreationDialogState();
+}
+
+class _ExtensionCreationDialogState extends State<_ExtensionCreationDialog> {
+  final _importController = MarketImportController();
+  final _importEditor = MarketSkillEditorController();
+  final _mcpEditor = MarketSkillEditorController();
+  late bool _mcp = widget.draft?.creationMode == 'mcp';
+  late bool _importConfigured =
+      !_mcp && (widget.draft != null || widget.record != null);
+  late bool _mcpConfigured = _mcp;
+  bool _canAdvance() => !(_importConfigured && _mcpConfigured);
+  @override
+  Widget build(BuildContext context) => IndexedStack(
+    index: _mcp ? 1 : 0,
+    children: [
+      MarketSkillEditor(
+        key: const ValueKey('import-editor'),
+        controller: _importEditor,
+        otherEditor: _mcpEditor,
+        active: !_mcp,
+        cloud: widget.cloud,
+        canAdvance: _canAdvance,
+        onConfigurationChanged: (value) => _importConfigured = value,
+        draft: widget.draft?.creationMode == 'mcp' ? null : widget.draft,
+        record: widget.draft?.creationMode == 'mcp' ? null : widget.record,
+        kind: widget.kind,
+        importKind: widget.kind,
+        onSelectSource: (mcp) => setState(() => _mcp = mcp),
+        importController: _importController,
+        contentBuilder: (ctx, onDraft, onBusy) => _PackageImportDialog(
+          skill: widget.kind == CapabilityKind.skill,
+          upload: true,
+          forEditor: true,
+          onDraft: onDraft,
+          onBusy: onBusy,
+          controller: _importController,
+          cloud: widget.cloud,
+          initialDraft: widget.draft?.creationMode == 'mcp'
+              ? null
+              : widget.draft,
+        ),
+      ),
+      MarketSkillEditor(
+        key: const ValueKey('mcp-editor'),
+        controller: _mcpEditor,
+        otherEditor: _importEditor,
+        active: _mcp,
+        cloud: widget.cloud,
+        canAdvance: _canAdvance,
+        onConfigurationChanged: (value) => _mcpConfigured = value,
+        mcpOnly: true,
+        record: widget.draft?.creationMode == 'mcp' ? widget.record : null,
+        draft: widget.draft?.creationMode == 'mcp' ? widget.draft : null,
+        kind: CapabilityKind.plugin,
+        importKind: widget.kind,
+        onSelectSource: (mcp) => setState(() => _mcp = mcp),
+      ),
+    ],
   );
 }
 
@@ -141,6 +231,11 @@ class _MarketEntry {
   final List<String> examples;
   final List<String> aliases, keywords, capabilities;
   final Map<String, dynamic>? publication;
+  String get defaultIcon => switch (kind) {
+    ExtensionKind.skill => 'file-text',
+    ExtensionKind.plugin => 'extension',
+    ExtensionKind.mcp => 'mcp',
+  };
   Map<String, dynamic> get presentation => kind == ExtensionKind.mcp
       ? connection?.icon ?? const {'icon_asset': 'mcp', 'icon_data': ''}
       : publication?['presentation'] is Map
@@ -160,7 +255,7 @@ class _MarketEntry {
   bool get personal =>
       record != null && record!.origin != 'market' ||
       (connection != null && connection!.catalogId == null);
-  bool get editable => record != null && !record!.isServerInstallation;
+  bool get editable => publication == null && record?.origin == 'local';
   String get developer => author.isEmpty ? '未提供' : author;
   String get version =>
       record?.currentVersion?.number.toString() ??
@@ -332,9 +427,11 @@ class _MarketEntry {
 class ExtensionMarketPage extends StatefulWidget {
   const ExtensionMarketPage({
     this.initialKind = ExtensionKind.plugin,
+    this.cloud,
     super.key,
   });
   final ExtensionKind initialKind;
+  final CapabilityCloudSync? cloud;
   @override
   State<ExtensionMarketPage> createState() => _ExtensionMarketPageState();
 }
@@ -342,7 +439,7 @@ class ExtensionMarketPage extends StatefulWidget {
 class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   final _search = TextEditingController();
   final _searchFocus = FocusNode(debugLabel: 'extension market search');
-  final _cloud = CapabilityCloudSync.instance;
+  late final _cloud = widget.cloud ?? CapabilityCloudSync.instance;
   List<CapabilityRecord> _records = [];
   List<McpConnectionRecord> _connections = [];
   List<McpCatalogEntry> _catalog = [];
@@ -361,7 +458,16 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   static const _categories = ['推荐'];
   String _category = '推荐';
   String? _error, _mcpError, _listTitle;
+  int _recordsRequest = 0,
+      _mcpRequest = 0,
+      _catalogRequest = 0,
+      _skillsRequest = 0;
+  bool _recordsLoaded = false,
+      _mcpLoaded = false,
+      _catalogLoaded = false,
+      _skillsLoaded = false;
   StreamSubscription<Uri>? _links;
+  StreamSubscription<void>? _draftChanges;
   @override
   void initState() {
     super.initState();
@@ -370,13 +476,20 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         : ExtensionKind.plugin;
     if (widget.initialKind == ExtensionKind.mcp) _listTitle = '连接管理';
     _search.addListener(_searchChanged);
+    _draftChanges = CapabilityStore.instance.draftChanges.listen((_) {
+      unawaited(_reloadDrafts());
+    });
     unawaited(_reload());
-    unawaited(_reloadMcp());
-    unawaited(_reloadCatalog());
+    if (_kind == ExtensionKind.plugin) {
+      unawaited(_reloadMcp());
+      unawaited(_reloadCatalog());
+    }
     unawaited(_reloadSkills());
     _links = AppLinks().uriLinkStream.listen((uri) {
-      if (uri.toString().contains('mcp') && uri.toString().contains('oauth'))
+      if (uri.toString().contains('mcp') && uri.toString().contains('oauth')) {
+        _cloud.invalidateMarketCache('connections');
         unawaited(_reloadMcp());
+      }
     }, onError: (_) {});
   }
 
@@ -407,6 +520,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               !_search.value.composing.isCollapsed);
   @override
   void dispose() {
+    _draftChanges?.cancel();
     _links?.cancel();
     _searchDebounce?.cancel();
     _search.removeListener(_searchChanged);
@@ -415,10 +529,20 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     super.dispose();
   }
 
-  Future<void> _reload() async {
+  Future<void> _reloadDrafts() async {
+    final owner = await _cloud.signedInEmail;
+    final drafts = await CapabilityStore.instance.authoringDrafts(owner);
+    final currentOwner = await _cloud.signedInEmail;
+    if (mounted && owner == currentOwner) {
+      setState(() => _authoringDrafts = drafts);
+    }
+  }
+
+  Future<void> _reload({bool localOnly = false}) async {
+    final request = ++_recordsRequest;
     if (mounted)
       setState(() {
-        _loading = true;
+        _loading = !_recordsLoaded && _records.isEmpty;
         _error = null;
       });
     try {
@@ -426,81 +550,83 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       await store.retireLegacyDrafts(
         accountEmail: await _cloud.signedInEmail ?? '',
       );
-      final local = await store.list(includeDeleted: true);
+      final local = await store.list();
       final drafts = await store.authoringDrafts(await _cloud.signedInEmail);
-      if (!mounted) return;
+      if (!mounted || request != _recordsRequest) return;
       setState(() {
         _records = local;
         _authoringDrafts = drafts;
+        if (local.isNotEmpty || localOnly) _loading = false;
       });
-      bool hasUnsyncedLocal(Iterable<CapabilityRecord> records) => records.any(
-        (record) =>
-            !record.isServerInstallation &&
-            record.syncState != CapabilitySyncState.synced,
-      );
-      // Push local edits and deletion markers before a remote list can replace
-      // them. Failed or conflicting sync must leave the local copy intact.
-      if (hasUnsyncedLocal(local)) {
-        await _cloud.syncNow();
-        final synced = await store.list(includeDeleted: true);
-        if (!mounted) return;
-        setState(() {
-          _records = synced;
-        });
-        if (hasUnsyncedLocal(synced)) {
-          throw StateError('本机修改尚未完成同步，已保留本机记录');
-        }
-      }
-      await _cloud.syncNow();
-      if (!mounted) return;
+      if (localOnly) return;
+      await _cloud.refreshCapabilityRecords();
+      if (!mounted || request != _recordsRequest) return;
       final current = await CapabilityStore.instance.list();
       final currentDrafts = await store.authoringDrafts(
         await _cloud.signedInEmail,
       );
-      if (mounted)
+      if (mounted && request == _recordsRequest)
         setState(() {
           _records = current;
           _authoringDrafts = currentDrafts;
         });
     } catch (error) {
-      if (mounted) setState(() => _error = '安装记录同步失败：$error');
+      if (mounted && request == _recordsRequest)
+        setState(() => _error = '安装列表暂未更新：$error');
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && request == _recordsRequest)
+        setState(() {
+          _loading = false;
+          _recordsLoaded = true;
+        });
     }
   }
 
   Future<void> _reloadMcp() async {
+    final request = ++_mcpRequest;
     if (mounted)
       setState(() {
-        _loadingMcp = true;
+        _loadingMcp = !_mcpLoaded && _connections.isEmpty;
         _mcpError = null;
       });
     try {
       final connections = await _cloud.listMcpConnections();
-      if (mounted)
+      if (mounted && request == _mcpRequest)
         setState(() {
           _connections = connections;
         });
     } catch (error) {
-      if (mounted) setState(() => _mcpError = '连接列表加载失败：$error');
+      if (mounted && request == _mcpRequest)
+        setState(() => _mcpError = '连接列表暂未更新：$error');
     } finally {
-      if (mounted) setState(() => _loadingMcp = false);
+      if (mounted && request == _mcpRequest)
+        setState(() {
+          _loadingMcp = false;
+          _mcpLoaded = true;
+        });
     }
   }
 
   Future<void> _reloadCatalog() async {
+    final request = ++_catalogRequest;
     if (mounted)
       setState(() {
-        _loadingCatalog = true;
+        _loadingCatalog = !_catalogLoaded && _catalog.isEmpty;
         _catalogError = null;
       });
     try {
       final catalog = await _cloud.listMcpCatalog();
-      if (mounted) setState(() => _catalog = catalog);
+      if (mounted && request == _catalogRequest)
+        setState(() => _catalog = catalog);
     } catch (error) {
-      if (mounted) setState(() => _catalogError = '公开目录读取失败：$error');
+      if (mounted && request == _catalogRequest)
+        setState(() => _catalogError = '公开目录暂未更新：$error');
     } finally {
-      if (mounted) setState(() => _loadingCatalog = false);
+      if (mounted && request == _catalogRequest)
+        setState(() {
+          _loadingCatalog = false;
+          _catalogLoaded = true;
+        });
     }
   }
 
@@ -547,18 +673,25 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         ];
 
   Future<void> _reloadSkills() async {
+    final request = ++_skillsRequest;
     if (mounted)
       setState(() {
-        _loadingSkills = true;
+        _loadingSkills = !_skillsLoaded && _publishedSkills.isEmpty;
         _skillsError = null;
       });
     try {
       final items = await _cloud.skillMarket();
-      if (mounted) setState(() => _publishedSkills = items);
+      if (mounted && request == _skillsRequest)
+        setState(() => _publishedSkills = items);
     } catch (error) {
-      if (mounted) setState(() => _skillsError = '公开技能读取失败：$error');
+      if (mounted && request == _skillsRequest)
+        setState(() => _skillsError = '公开作品暂未更新：$error');
     } finally {
-      if (mounted) setState(() => _loadingSkills = false);
+      if (mounted && request == _skillsRequest)
+        setState(() {
+          _loadingSkills = false;
+          _skillsLoaded = true;
+        });
     }
   }
 
@@ -608,24 +741,31 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     if (!mounted) return;
     if (result is CapabilityDraft) await _edit(draft: result);
     if (result == 'mcp') await _mcpForm();
-    if (mounted) await _reload();
+    if (mounted) await _reload(localOnly: true);
   }
 
   Future<void> _edit({CapabilityDraft? draft, CapabilityRecord? record}) async {
+    if (record != null && record.origin != 'local') {
+      AppToast.show(context, '只有本人创建的作品可以编辑');
+      return;
+    }
     final kind =
         draft?.kind ??
         record?.kind ??
         (_kind == ExtensionKind.skill
             ? CapabilityKind.skill
             : CapabilityKind.plugin);
-    await showExtensionCreation(
+    final result = await showExtensionCreation(
       context,
+      cloud: _cloud,
       draft: draft,
       record: record,
       kind: kind,
     );
-    if (mounted) await _reload();
-    if (mounted) await _reloadSkills();
+    if (mounted) await _reload(localOnly: true);
+    if (mounted && result == ExtensionCreationResult.published) {
+      await _reloadSkills();
+    }
   }
 
   void _chat(_MarketEntry? entry, [String prompt = '']) {
@@ -748,6 +888,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Future<void> _remove(_MarketEntry entry) async {
+    if (_busyIds.contains(entry.id)) return;
     if (!await _confirm(
       '移除 ${entry.name}？',
       '移除后，小七将不再使用这项扩展。你可以稍后重新添加。',
@@ -755,24 +896,34 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     ))
       return;
     try {
+      if (mounted) setState(() => _busyIds.add(entry.id));
       if (entry.connection != null) {
         await _cloud.deleteMcpConnection(entry.connection!.id);
+        if (mounted)
+          setState(
+            () => _connections = _connections
+                .where((c) => c.id != entry.connection!.id)
+                .toList(),
+          );
         await _reloadMcp();
       } else if (entry.record!.isServerInstallation) {
         await _cloud.manageInstallation(entry.record!, uninstall: true);
       } else {
         await CapabilityStore.instance.markDeleted(entry.record!.id);
-        if (await _cloud.hasEmailSession) await _cloud.syncNow();
+        if (mounted) await _reload(localOnly: true);
+        if (await _cloud.hasEmailSession) await _cloud.syncCapabilityRecords();
       }
       if (mounted) {
-        await _reload();
+        await _reload(localOnly: true);
         if (mounted) AppToast.show(context, '已移除');
       }
     } catch (error) {
       if (mounted) {
-        await _reload();
+        await _reload(localOnly: true);
         if (mounted) AppToast.show(context, '移除未完成：$error');
       }
+    } finally {
+      if (mounted) setState(() => _busyIds.remove(entry.id));
     }
   }
 
@@ -815,7 +966,9 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           entry: entry,
           onInstall: _install,
           onRemove: _remove,
-          onEdit: (current) => _edit(record: current.record),
+          onEdit: entry.editable
+              ? (current) => _edit(record: current.record)
+              : null,
           onManage: (current) => current.connection != null
               ? _mcpForm(current.connection)
               : _manage(current),
@@ -870,7 +1023,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               marketDialogButton('连接设置：${component['name']}', () {
                 Navigator.pop(ctx);
                 unawaited(_connectPluginDependency(component));
-              }, icon: 'plugs'),
+              }, icon: 'mcp'),
           if (record.isServerInstallation)
             marketDialogButton('检查更新', () {
               Navigator.pop(ctx);
@@ -1018,9 +1171,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               padding: const EdgeInsets.symmetric(vertical: 16),
               child: Row(
                 children: [
-                  entry.presentation.isNotEmpty
-                      ? SkillPresentationIcon(entry.presentation, size: 40)
-                      : MarketBrand(entry.asset),
+                  SkillPresentationIcon(entry.presentation, size: 40, defaultAsset: entry.defaultIcon),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
@@ -1117,21 +1268,32 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
   Widget _publicContent() {
     if (_loadingSkills) return marketSkeleton();
-    if (_skillsError != null) return marketError(_skillsError!, _reloadSkills);
+    if (_skillsError != null && _publishedSkills.isEmpty)
+      return marketError(_skillsError!, _reloadSkills);
     if (_kind == ExtensionKind.plugin && _loadingCatalog || _searchPending) {
       return marketSkeleton();
     }
-    if (_kind == ExtensionKind.plugin && _catalogError != null) {
+    if (_kind == ExtensionKind.plugin &&
+        _catalogError != null &&
+        _catalog.isEmpty &&
+        _publishedSkills.isEmpty) {
       return marketError(_catalogError!, _reloadCatalog);
     }
     final entries = _matching(_publicEntries);
     if (_searchQuery.isNotEmpty) return _grid(entries);
-    return entries.isEmpty
-        ? Padding(
-            padding: const EdgeInsets.only(top: 100),
-            child: marketEmpty('暂无推荐$_label', '推荐内容将在这里展示。'),
-          )
-        : _grid(entries);
+    if (entries.isNotEmpty)
+      return Column(
+        children: [
+          if (_skillsError != null) marketError(_skillsError!, _reloadSkills),
+          if (_kind == ExtensionKind.plugin && _catalogError != null)
+            marketError(_catalogError!, _reloadCatalog),
+          _grid(entries),
+        ],
+      );
+    return Padding(
+      padding: const EdgeInsets.only(top: 100),
+      child: marketEmpty('暂无推荐$_label', '推荐内容将在这里展示。'),
+    );
   }
 
   List<CapabilityDraft> get _matchingDrafts => _authoringDrafts
@@ -1152,14 +1314,25 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       .toList();
 
   Future<void> _deleteDraft(CapabilityDraft draft) async {
+    if (_busyIds.contains(draft.id)) return;
     if (!await _confirm('删除草稿？', '仅删除这份未发布的编辑内容，公开作品和已安装插件会保留。', '删除草稿'))
       return;
     try {
+      if (mounted) setState(() => _busyIds.add(draft.id));
       await CapabilityStore.instance.deleteAuthoringDraft(draft);
-      await _reload();
+      await _reload(localOnly: true);
       if (mounted) AppToast.show(context, '草稿已删除');
+      if (draft.cloudOwnerEmail != null && await _cloud.hasEmailSession) {
+        try {
+          await _cloud.syncDraftDeletion(draft);
+        } catch (_) {
+          if (mounted) AppToast.show(context, '本机草稿已删除，云端删除待同步');
+        }
+      }
     } catch (error) {
       if (mounted) AppToast.show(context, '删除未完成：$error');
+    } finally {
+      if (mounted) setState(() => _busyIds.remove(draft.id));
     }
   }
 
@@ -1170,7 +1343,9 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       for (final draft in _matchingDrafts)
         ListTile(
           contentPadding: EdgeInsets.zero,
-          leading: SkillPresentationIcon(draft.presentation, size: 44),
+          leading: SkillPresentationIcon(draft.presentation, size: 44,
+            defaultAsset: draft.creationMode == 'mcp' ? 'mcp'
+                : draft.kind == CapabilityKind.plugin ? 'extension' : 'file-text'),
           title: Text(
             (draft.presentation['title']?.toString().trim().isNotEmpty == true
                     ? draft.presentation['title']
@@ -1179,7 +1354,15 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                     : '未命名$_label')
                 .toString(),
           ),
-          subtitle: const Text('草稿 · 点击继续编辑'),
+          subtitle: Text(switch (draft.syncIssue) {
+            DraftSyncIssue.conflict => '本机已保存 · 同步待处理',
+            DraftSyncIssue.deleted => '本机已保存 · 云端已删除',
+            DraftSyncIssue.network => '本机已保存 · 等待同步',
+            DraftSyncIssue.none =>
+              draft.lastSyncedHash == skillDraftFingerprint(draft)
+                  ? '草稿 · 已同步 · 点击继续编辑'
+                  : '草稿 · 本机已保存 · 点击继续编辑',
+          }),
           trailing: marketIconButton(
             'trash-danger',
             '删除草稿',
@@ -1340,6 +1523,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         _category = '推荐';
         _search.clear();
       });
+      if (kind == ExtensionKind.plugin) {
+        if (!_mcpLoaded) unawaited(_reloadMcp());
+        if (!_catalogLoaded) unawaited(_reloadCatalog());
+      }
     },
   );
 
@@ -1633,12 +1820,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                                 onTap: () => _open(e),
                                 child: Padding(
                                   padding: const EdgeInsets.all(4),
-                                  child: e.presentation.isNotEmpty
-                                      ? SkillPresentationIcon(
+                                  child: SkillPresentationIcon(
                                           e.presentation,
                                           size: 40,
-                                        )
-                                      : MarketBrand(e.asset),
+                                          defaultAsset: e.defaultIcon,
+                                        ),
                                 ),
                               ),
                             ),

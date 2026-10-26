@@ -4411,7 +4411,9 @@ $text''';
       'name': record.name,
     });
     if (await CapabilityCloudSync.instance.hasEmailSession) {
-      unawaited(CapabilityCloudSync.instance.syncNow().catchError((_) {}));
+      unawaited(
+        CapabilityCloudSync.instance.syncCapabilityRecords().catchError((_) {}),
+      );
     }
     if (!mounted) return;
     setState(() => _pendingSkillDraftReview = null);

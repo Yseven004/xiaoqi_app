@@ -103,3 +103,20 @@
 | 用户本轮技能、插件首步原型中的折角文件上传轮廓，独立矢量重建 | `assets/icons/extension_market/detail/upload-document.svg` | `0 0 48 56` | 48 dp 容器，保持比例 | `_PackageImportDialog`；深色描边，禁用由按钮控制；不以截图裁片替代 |
 
 接入前已使用 Sharp 独立渲染为 64×75 PNG 并检查折角、箭头、描边与透明边界。该预览仅用于资产核对，不代表创建弹窗通过真机视觉验收。
+
+## 2026-10-24 解析成功来源图标
+
+| 来源 | 最终资产 | viewBox | 显示尺寸 | 状态与消费组件 |
+| --- | --- | --- | --- | --- |
+| 按确认图中的压缩包卡片重建 ZIP 文件轮廓 | `assets/icons/extension_market/detail/archive.svg` | `0 0 48 48` | 50 dp，独立预览 64 px | 来源卡片；ZIP 用矢量字形，避免 SVG 文本与颜色过滤填实问题 |
+
+该 SVG 为独立矢量形状，不嵌入位图；Flutter 独立预览和来源卡片截图已核对，真机验收待用户完成。
+
+## 最终三张创建图的资产（2026-10-24）
+
+| 原始来源 | 最终路径 | viewBox／显示尺寸 | 状态、消费位置与验收 |
+| --- | --- | --- | --- |
+| 项目已有 `assets/icons/chat_note_editor/share-network.svg`（Phosphor 路径，沿用项目许可证；只旋转 90°） | `assets/icons/capabilities/mcp_connector.svg` | 0 0 256 256／24 dp | 全局 MCP 连接器、创建切换按钮、连接设置；已按用户确认的三节点形核对 64 px 和页面图 |
+| 已确认的小型圆勾状态，独立矢量整理 | `assets/icons/extension_market/detail/connection-success.svg` | 0 0 24 24／24 dp | 内嵌依赖与独立 MCP 的测试成功态；64 px／页面截图核对，无背景条 |
+
+确认记录、Layout Spec 和实际对照证据见 [最终实施与验收](creation-modal-final-2026-10-24.md)。资产形状和代码接入已核对；目标平台实际显示仍待用户验证。

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 514 290" fill="none">
+  <g transform="rotate(-14 128 129)">
+    <rect x="18" y="27" width="220" height="212" rx="11" fill="#000" opacity=".025"/>
+    <rect x="20" y="25" width="216" height="208" rx="10" fill="#FFF" stroke="#DDE0E5" stroke-width="1.6"/>
+    <rect x="33" y="39" width="190" height="180" rx="7" fill="#EFF0F2"/>
+  </g>
+  <g transform="rotate(14 386 129)">
+    <rect x="276" y="27" width="220" height="212" rx="11" fill="#000" opacity=".025"/>
+    <rect x="278" y="25" width="216" height="208" rx="10" fill="#FFF" stroke="#DDE0E5" stroke-width="1.6"/>
+    <rect x="291" y="39" width="190" height="180" rx="7" fill="#EFF0F2"/>
+  </g>
+  <rect x="132" y="65" width="252" height="216" rx="14" fill="#000" opacity=".012"/>
+  <rect x="135" y="63" width="246" height="212" rx="12" fill="#000" opacity=".025"/>
+  <rect x="137" y="60" width="242" height="210" rx="10" fill="#FFF" stroke="#DDE0E5" stroke-width="1.6"/>
+  <rect x="151" y="76" width="214" height="178" rx="8" fill="#EFF0F2"/>
+  <path d="M258 123V205M217 164H299" stroke="#5C5D60" stroke-width="8" stroke-linecap="round"/>
+</svg>

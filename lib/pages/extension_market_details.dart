@@ -102,7 +102,7 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
     },
     itemBuilder: (_) => [
       PopupMenuItem(value: 'copy', child: _menuRow('link', '复制链接')),
-      if (_entry.editable)
+      if (_entry.editable && widget.onEdit != null)
         PopupMenuItem(
           value: 'edit',
           child: _menuRow(
@@ -262,14 +262,8 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
         final small = constraints.maxWidth <= 540;
         final identity = Row(
           children: [
-            if (_entry.presentation.isNotEmpty)
-              SkillPresentationIcon(_entry.presentation, size: small ? 66 : 82)
-            else
-              MarketBrand(
-                _entry.asset,
-                size: small ? 66 : 82,
-                glyphSize: small ? 44 : 54,
-              ),
+            SkillPresentationIcon(_entry.presentation,
+              size: small ? 66 : 82, defaultAsset: _entry.defaultIcon),
             const SizedBox(width: 20),
             Expanded(
               child: Column(
@@ -522,11 +516,10 @@ class _MarketDetailPageState extends State<_MarketDetailPage>
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              MarketBrand(
-                '${marketAssets}detail/research.svg',
+              SkillPresentationIcon(
+                _entry.presentation,
                 size: small ? 70 : 104,
-                glyphSize: small ? 42 : 58,
-                soft: true,
+                defaultAsset: 'file-text',
               ),
               SizedBox(width: small ? 16 : 24),
               Expanded(
