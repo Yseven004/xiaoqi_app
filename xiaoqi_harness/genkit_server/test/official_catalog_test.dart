@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/official_catalog.dart';
@@ -23,12 +24,19 @@ void main() {
   test(
     'curated packages install, resolve all runtime resources and seed once',
     () {
-      seedOfficialCatalog(store);
+      final changes = seedOfficialCatalog(store);
+      expect(changes['documents'], hasLength(2));
+      expect(changes['object_keys'], hasLength(2));
       final market = SkillMarket(store);
       final publications = store.list('skill-market/');
       expect(publications, hasLength(2));
       for (final (_, publication) in publications) {
         final listing = market.listing(publication, 'alice', detail: true);
+        final key = 'skill-market/${listing['id']}';
+        expect(
+          (changes['document_hashes'] as Map)[key],
+          sha256.convert(utf8.encode(jsonEncode(publication.value))).toString(),
+        );
         expect(listing['curated_by'], '第七世界');
         expect(listing['author'], isNot('第七世界'));
         expect((listing['provenance'] as Map)['license'], 'MIT');

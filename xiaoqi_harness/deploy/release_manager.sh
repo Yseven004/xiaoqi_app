@@ -125,6 +125,8 @@ write_store_manifest() {
 
 compare_store_manifest() {
   local expected_dir="$1"
+  local catalog_options=()
+  [[ "${2:-}" != with-catalog ]] || catalog_options=(--catalog-changes /backup/catalog-changes.json)
   local verifier=/deploy/verify_store.py
   [[ ! -f "$expected_dir/verify_store.py" ]] || verifier=/backup/verify_store.py
   docker run --rm \
@@ -132,7 +134,7 @@ compare_store_manifest() {
     -v "$CURRENT/deploy:/deploy:ro" \
     -v "$expected_dir:/backup:ro" \
     python:3.12-slim \
-    python "$verifier" --root /data --compare /backup/store.json >/dev/null
+    python "$verifier" --root /data --compare /backup/store.json "${catalog_options[@]}" >/dev/null
 }
 
 backup_data() {
@@ -432,6 +434,11 @@ PY
   DEPLOY_DATA_SAVED="yes"
   touch "$NEXT/data-saved"
 
+  phase SEED_OFFICIAL_CATALOG
+  docker run --rm --network none -v "$VOLUME:/var/lib/xiaoqi" \
+    --entrypoint /app/bin/server xiaoqi-genkit-server:local \
+    --seed-official-catalog >"$NEXT/catalog-changes.json"
+
   phase ACTIVATE
   install_source "$stage/source"
   cp "$stage/manifest.json" "$CURRENT/.xiaoqi-artifact.json"
@@ -439,7 +446,7 @@ PY
   compose --profile https up -d --no-build --pull never --remove-orphans app sandbox-runner caddy
   phase VERIFY_HEALTH_AND_DATA
   wait_healthy
-  compare_store_manifest "$NEXT"
+  compare_store_manifest "$NEXT" with-catalog
   verify_public_release "$product" "$contract"
 
   remove_tree "$LATEST"

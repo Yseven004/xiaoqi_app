@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:shelf/shelf_io.dart' as shelf_io;
@@ -10,8 +11,22 @@ import '../lib/src/mcp_server.dart';
 import '../lib/src/official_catalog.dart';
 import '../lib/src/store.dart';
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
+  if (args.isNotEmpty &&
+      (args.length != 1 || args.single != '--seed-official-catalog')) {
+    throw ArgumentError('Unsupported server arguments');
+  }
   final store = CloudStore();
+  if (args.isNotEmpty) {
+    try {
+      final changes = seedOfficialCatalog(store);
+      if (!store.checkpointWal()) throw StateError('Catalog checkpoint failed');
+      stdout.writeln(jsonEncode(changes));
+    } finally {
+      store.close();
+    }
+    return;
+  }
   seedOfficialCatalog(store);
   store.removeOrphanedTempFiles();
   final imageService = ImageService(store);

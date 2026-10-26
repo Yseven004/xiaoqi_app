@@ -33,6 +33,9 @@ elif a[0] == 'run':
         if os.environ.get('FAIL_PROBE') == '1': sys.exit(8)
     elif '/app/bin/verify_official_catalog' in a:
         if os.environ.get('FAIL_CURATED_PROBE') == '1': sys.exit(8)
+    elif '--seed-official-catalog' in a:
+        if os.environ.get('FAIL_CATALOG_SEED') == '1': sys.exit(8)
+        print('{}')
     else:
         mounts = [a[i+1] for i,x in enumerate(a) if x == '-v']
         for mount in mounts:
@@ -83,6 +86,9 @@ class ManagerTests(unittest.TestCase):
         self.assertIn('--network xiaoqi-single-server_default', curated)
         self.assertIn('--network xiaoqi-single-server_sandbox-control', curated)
         self.assertIn('--env SANDBOX_RUNNER_URL=http://sandbox-runner:8090', curated)
+        seed = next(i for i, c in enumerate(calls) if '--seed-official-catalog' in c)
+        compare = next(i for i, c in enumerate(calls) if '--catalog-changes /backup/catalog-changes.json' in c)
+        self.assertLess(seed, compare)
 
     def test_failed_probe_preserves_running_release(self):
         result = self.deploy(FAIL_PROBE='1')
@@ -97,6 +103,14 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
         self.assertFalse((self.root/'restore/next').exists())
         self.assertNotIn(' stop app', (self.root/'docker.calls').read_text())
+
+    def test_failed_catalog_seed_restores_source_version_and_data(self):
+        result = self.deploy(FAIL_CATALOG_SEED='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
+        calls = (self.root/'docker.calls').read_text().splitlines()
+        last_compare = [c for c in calls if '--compare /backup/store.json' in c][-1]
+        self.assertNotIn('--catalog-changes', last_compare)
 
     def test_failed_activation_restores_source_version_and_data(self):
         result = self.deploy(FAIL_ACTIVATE='1')

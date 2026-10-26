@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import 'capability_import_service.dart';
@@ -8,7 +9,10 @@ import 'skill_market.dart';
 import 'store.dart';
 
 /// Only deployment-owned files may create curated publications; no HTTP writer.
-void seedOfficialCatalog(CloudStore store, {Directory? directory}) {
+Map<String, dynamic> seedOfficialCatalog(
+  CloudStore store, {
+  Directory? directory,
+}) {
   final root = directory ?? Directory('official_catalog');
   const titles = {
     'study-notes-studio': 'Study Notes Studio · 学霸笔记图',
@@ -102,4 +106,29 @@ void seedOfficialCatalog(CloudStore store, {Directory? directory}) {
       },
     }, previous?.revision);
   }
+  final documents = <List<Object>>[];
+  final documentHashes = <String, String>{};
+  final objectHashes = <String, String>{};
+  for (final id in titles.keys) {
+    final key =
+        'skill-market/${SkillMarket.publicationId('_official-curated', id)}';
+    final document = store.get(key)!;
+    documents.add([key, document.revision]);
+    documentHashes[key] = sha256
+        .convert(utf8.encode(jsonEncode(document.value)))
+        .toString();
+    final record = document.value['record'] as Map;
+    final artifact =
+        ((record['versions'] as List).single as Map)['artifact_key'] as String;
+    objectHashes[artifact] = sha256
+        .convert(store.getObject(artifact))
+        .toString();
+  }
+  return {
+    'schema': 1,
+    'documents': documents,
+    'document_hashes': documentHashes,
+    'object_keys': objectHashes.keys.toList(),
+    'object_file_hashes': objectHashes,
+  };
 }
