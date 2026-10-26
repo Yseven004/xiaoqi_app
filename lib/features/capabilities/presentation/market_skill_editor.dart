@@ -2749,17 +2749,8 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
     const hintColor = Color(0xFF8A8D95);
     final heading = TextStyle(fontWeight: FontWeight.w600, fontSize: 25 * s);
     final noun = widget.mcpOnly ? 'MCP 连接器' : _kindLabel;
-    final noteStyle = DefaultTextStyle.of(context).style.copyWith(
-      fontSize: 20 * s, color: marketMuted, height: 1.4,
-    );
     return LayoutBuilder(builder: (context, box) {
-      final note = TextPainter(
-        text: TextSpan(text: '返回后保留已填写内容', style: noteStyle),
-        textDirection: Directionality.of(context),
-        textScaler: MediaQuery.textScalerOf(context),
-      )..layout(maxWidth: box.maxWidth);
-      final footerHeight = (_introductionExpanded ? 32 * s : 88 * s + 1) + note.height;
-      note.dispose();
+      final footerHeight = _introductionExpanded ? 0.0 : 24 * s;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -2865,25 +2856,7 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                 ? Duration.zero : const Duration(milliseconds: 220),
             curve: Curves.easeInOutCubic,
             alignment: Alignment.topCenter,
-            child: _introductionExpanded
-                ? Padding(
-                    padding: EdgeInsets.symmetric(vertical: 16 * s),
-                    child: Text('返回后保留已填写内容', style: noteStyle),
-                  )
-                : SizedBox(
-                    height: footerHeight,
-                    child: Padding(
-                      padding: EdgeInsets.only(top: 30 * s, bottom: 34 * s),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const Divider(height: 1, color: marketLine),
-                          SizedBox(height: 24 * s),
-                          Text('返回后保留已填写内容', style: noteStyle),
-                        ],
-                      ),
-                    ),
-                  ),
+            child: SizedBox(height: footerHeight),
           ),
         ],
       );
@@ -2998,12 +2971,18 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
             final heightFactor = _focus == 'images' ? 1.325
                 : _focus == 'description' ? 1.20
                 : !widget.mcpOnly && _mcpDetected ? 1.48 : 1.04;
+            // Remove the former note band from the dialog, retaining a compact bottom inset.
+            final introductionTrim = _focus == 'description' && !expandedIntroduction
+                ? 64 * _supplementScale + 1 +
+                    MediaQuery.textScalerOf(context).scale(20 * _supplementScale) * 1.4
+                : 0.0;
             final height = expandedIntroduction
                 ? (frameHeight - 24).clamp(0.0, double.infinity)
-                : (phone
+                : ((phone
                         ? frameHeight - 48
                         : width * heightFactor)
-                    .clamp(0.0, frameHeight - top - 24);
+                    .clamp(0.0, frameHeight - top - 24) - introductionTrim)
+                    .clamp(0.0, double.infinity);
             final keyboard = MediaQuery.viewInsetsOf(context).bottom;
             final visibleHeight = (constraints.maxHeight - keyboard - top)
                 .clamp(0.0, height);
@@ -3189,9 +3168,9 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
                               Padding(
                                 padding: EdgeInsets.fromLTRB(
                                   inset,
-                                  _step == 1 ? 16 * _supplementScale : 12,
+                                  12,
                                   inset,
-                                  _step == 1 ? 16 * _supplementScale : 12,
+                                  12,
                                 ),
                                 child: _creationFooter(),
                               ),
@@ -3273,29 +3252,6 @@ class _MarketSkillEditorState extends State<MarketSkillEditor> {
           ),
         ],
       );
-    }
-
-    if (_step == 1) {
-      final s = _supplementScale;
-      return LayoutBuilder(builder: (context, box) {
-        final fit = (box.maxWidth / (383 * s + 12)).clamp(0.0, 1.0);
-        final previousWidth = 175 * s * fit;
-        final nextWidth = 208 * s * fit;
-        return Row(children: [
-          SizedBox(
-            width: previousWidth,
-            child: marketButton('上一步', _locked ? null : _back,
-              radius: 12 * s, height: (60 * s).clamp(48.0, 60.0), fontSize: 24 * s),
-          ),
-          SizedBox(width: box.maxWidth - previousWidth - nextWidth),
-          SizedBox(
-            width: nextWidth,
-            child: marketButton('下一步', _locked ? null : _next,
-              primary: true, primaryColor: const Color(0xFF24272C),
-              radius: 12 * s, height: (60 * s).clamp(48.0, 60.0), fontSize: 24 * s),
-          ),
-        ]);
-      });
     }
 
     Widget footerButton(
