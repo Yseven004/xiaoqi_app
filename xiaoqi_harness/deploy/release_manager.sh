@@ -115,8 +115,10 @@ write_store_manifest() {
   local output_dir="$1"
   local deploy_dir="$2"
   cp "$deploy_dir/verify_store.py" "$output_dir/verify_store.py"
+  # SQLite mode=ro protects database contents, but WAL readers must be able to
+  # create transient shared-memory sidecars after the application has stopped.
   docker run --rm \
-    -v "$VOLUME:/data:ro" \
+    -v "$VOLUME:/data" \
     -v "$deploy_dir:/deploy:ro" \
     -v "$output_dir:/backup" \
     python:3.12-slim \
@@ -130,7 +132,7 @@ compare_store_manifest() {
   local verifier=/deploy/verify_store.py
   [[ ! -f "$expected_dir/verify_store.py" ]] || verifier=/backup/verify_store.py
   docker run --rm \
-    -v "$VOLUME:/data:ro" \
+    -v "$VOLUME:/data" \
     -v "$CURRENT/deploy:/deploy:ro" \
     -v "$expected_dir:/backup:ro" \
     python:3.12-slim \

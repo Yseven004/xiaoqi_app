@@ -89,6 +89,9 @@ class ManagerTests(unittest.TestCase):
         seed = next(i for i, c in enumerate(calls) if '--seed-official-catalog' in c)
         compare = next(i for i, c in enumerate(calls) if '--catalog-changes /backup/catalog-changes.json' in c)
         self.assertLess(seed, compare)
+        verifiers = [c for c in calls if 'verify_store.py --root /data' in c]
+        self.assertEqual(len(verifiers), 2)
+        self.assertTrue(all(':/data:ro' not in c for c in verifiers))
 
     def test_failed_probe_preserves_running_release(self):
         result = self.deploy(FAIL_PROBE='1')

@@ -22,6 +22,7 @@ def manifest(root: Path) -> dict[str, object]:
         f"file:{database.as_posix()}?mode=ro", uri=True
     )
     try:
+        connection.execute("PRAGMA query_only=ON")
         connection.execute("BEGIN")
         if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise ValueError("SQLite integrity check failed")
