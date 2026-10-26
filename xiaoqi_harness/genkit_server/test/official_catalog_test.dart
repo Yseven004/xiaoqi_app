@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:test/test.dart';
+import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/official_catalog.dart';
 import 'package:xiaoqi_genkit_server/src/selected_skills.dart';
 import 'package:xiaoqi_genkit_server/src/skill_market.dart';
@@ -44,15 +45,25 @@ void main() {
         ]);
         final files = selected.files(selected.entries.values.single);
         expect(files['UPSTREAM-SKILL.md'], isNotEmpty);
+        expect(
+          GenkitXiaoqiAgentRuntime.safeSkillResourcePath('UPSTREAM-SKILL.md'),
+          'UPSTREAM-SKILL.md',
+        );
         expect(files.keys.any((key) => key.startsWith('LICENSE')), isTrue);
         if (installed.value['name'] == 'book-to-skill') {
           expect(files['scripts/extract.py'], isNotEmpty);
           expect(files['book_to_skill/cli.py'], isNotEmpty);
           expect(
             utf8.decode(files['SKILL.md']!),
-          contains('scripts/xiaoqi_extract.py'),
+            contains('scripts/xiaoqi_extract.py'),
           );
         } else {
+          expect(
+            GenkitXiaoqiAgentRuntime.safeSkillResourcePath(
+              'handbook/coverage-audit.md',
+            ),
+            'handbook/coverage-audit.md',
+          );
           expect(files['handbook/coverage-audit.md'], isNotEmpty);
           expect(utf8.decode(files['SKILL.md']!), contains('generate_image'));
         }
@@ -100,5 +111,23 @@ void main() {
     final installed = market.install('bob', publication.value['id'], 1);
     expect((installed.value['source'] as Map)['curated_by'], isNull);
     expect((installed.value['source'] as Map)['official'], isNull);
+  });
+
+  test('documentation access still refuses traversal and root scripts', () {
+    for (final path in [
+      '../SKILL.md',
+      '/etc/passwd',
+      'handbook/../SKILL.md',
+      'scripts/extract.py',
+      'extract.py',
+      'C:\\private\\SKILL.md',
+      'handbook//rules.md',
+      './UPSTREAM-SKILL.md',
+    ]) {
+      expect(
+        () => GenkitXiaoqiAgentRuntime.safeSkillResourcePath(path),
+        throwsFormatException,
+      );
+    }
   });
 }

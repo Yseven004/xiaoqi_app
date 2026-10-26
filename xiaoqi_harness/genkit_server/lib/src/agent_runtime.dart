@@ -3048,7 +3048,7 @@ class GenkitXiaoqiAgentRuntime
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'read_skill_resource',
       description:
-          '按需读取当前账号已同步技能版本中的 references/ 或 assets/ 文本资料。'
+          '按需读取当前账号已同步技能版本中的根目录 Markdown 文档，或 references/、assets/、handbook/ 文本资料。'
           '提供精确 skill_id 和相对 path；版本由服务端绑定。'
           '不可读取脚本、任意文件路径或其他账号的数据。',
       inputSchema: _readSkillResourceSchema,
@@ -3057,7 +3057,7 @@ class GenkitXiaoqiAgentRuntime
           final reference = selectedSkills.resolve(input);
           if (!loadedSkills.contains(reference['id']))
             throw StateError('请先 use_skill 读取技能全文，再读取引用资料');
-          final path = _safeSkillResourcePath(input['path']?.toString() ?? '');
+          final path = safeSkillResourcePath(input['path']?.toString() ?? '');
           final files = selectedSkills.files(reference);
           final bytes = files[path];
           if (bytes == null) throw StateError('当前技能版本没有该资源');
@@ -3865,13 +3865,14 @@ class GenkitXiaoqiAgentRuntime
     }
   }
 
-  static String _safeSkillResourcePath(String rawPath) {
+  static String safeSkillResourcePath(String rawPath) {
     final path = rawPath.replaceAll('\\', '/');
     final segments = path.split('/');
     if (path.startsWith('/') ||
         segments.any((part) => part.isEmpty || part == '.' || part == '..') ||
         !RegExp(r'^[A-Za-z0-9._/-]{1,240}$').hasMatch(path) ||
-        !const {'references', 'assets'}.contains(segments.first)) {
+        !(const {'references', 'assets', 'handbook'}.contains(segments.first) ||
+            segments.length == 1 && path.endsWith('.md'))) {
       throw const FormatException('技能资源路径无效');
     }
     return path;
