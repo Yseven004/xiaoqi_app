@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1260" viewBox="0 0 900 1260">
+<rect width="900" height="1260" fill="#fffef9"/>
+<style>.body{font:26px SimSun,serif;fill:#252421}.pen{font:25px KaiTi,STKaiti,serif;fill:#a92a3e}.stroke{fill:none;stroke:#a92a3e;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}.yellow{fill:none;stroke:#f5df63;stroke-width:25;stroke-linecap:round;opacity:.53}</style>
+<text class="pen" x="40" y="43" transform="rotate(-1 40 43)" style="font-size:30px">抓住细节：一把旧椅子，藏着不说出口的牵挂。</text>
+<text x="55" y="106" style="font:40px SimSun,serif;fill:#20201e">窗边的旧椅子</text>
+<text class="pen" x="380" y="101" transform="rotate(1 380 101)">题目：线索物件，贯穿全文</text>
+<path class="stroke" d="M54 118 Q196 124 334 118 M385 112q98 8 214 0"/>
+<text class="pen" x="53" y="156" style="font-size:23px">读一读：爷爷的“等候”，是怎样被写出来的？</text>
+<path d="M641 188V1162" stroke="#d1cec4" stroke-width="1"/>
+<g class="yellow"><path d="M266 300H575"/><path d="M59 444H341"/><path d="M240 540H579"/><path d="M86 828H394"/><path d="M162 1020H576"/></g>
+<text class="body" x="56" y="210">
+<tspan x="56">　　放学回家时，雨还没有停。巷口的灯</tspan>
+<tspan x="56" dy="48">亮了，屋檐滴下来的水，一声接着一声。</tspan>
+<tspan x="56" dy="48">爷爷坐在窗边，手里捏着一块旧抹布。</tspan>
+<tspan x="56" dy="48">　　“今天回来得晚。”他说。我低头换</tspan>
+<tspan x="56" dy="48">鞋，含糊地应了一声，眼睛却盯着手机。</tspan>
+<tspan x="56" dy="48">他没有再问，只把一碗热汤推到我面前。</tspan>
+<tspan x="56" dy="48">　　窗边有一把旧椅子，扶手被磨得发亮。</tspan>
+<tspan x="56" dy="48">我小时候，总站在上面，等放学的姐姐。</tspan>
+<tspan x="56" dy="48">如今，我已经长高，椅子却仍在原来的地方。</tspan>
+<tspan x="56" dy="48">　　周末，我想把它搬进储藏室。爷爷</tspan>
+<tspan x="56" dy="48">伸手拦了一下，又慢慢放下：“先留着吧。”</tspan>
+<tspan x="56" dy="48">他的声音很轻，像怕惊动窗外的一滴雨。</tspan>
+<tspan x="56" dy="48">　　那天晚上，我回来得比平时早。隔着</tspan>
+<tspan x="56" dy="48">玻璃，看见爷爷把椅子向窗边挪了挪，坐下，</tspan>
+<tspan x="56" dy="48">又站起来。他抬头看钟，再望向巷子的尽头。</tspan>
+<tspan x="56" dy="48">灯光落在他肩上，把影子拖得很长。</tspan>
+<tspan x="56" dy="48">　　我停在门口，忽然明白，那把椅子</tspan>
+<tspan x="56" dy="48">不是没有用处，只是坐着一个等我的人。</tspan>
+<tspan x="56" dy="48">　　我推开门，放下手机：“爷爷，今天</tspan>
+<tspan x="56" dy="48">的事，我想慢慢讲给您听。”</tspan></text>
+<g class="stroke">
+<path d="M265 312q148 6 313 -1 M58 456q136 5 287 0 M239 552q161 7 343 -1"/>
+<ellipse cx="420" cy="393" rx="31" ry="20" transform="rotate(-3 420 393)"/>
+<ellipse cx="316" cy="681" rx="57" ry="21" transform="rotate(2 316 681)"/>
+<path d="M57 744q15 -7 29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0t29 0"/>
+<path d="M87 840q147 7 310 0 M163 1032q198 7 417 -1 M57 1125q144 8 291 -1"/>
+<path d="M652 271q17 0 17 19v39q0 20 17 20 M652 464q17 0 17 19v50q0 20 17 20 M652 766q17 0 17 19v88q0 20 17 20 M652 962q17 0 17 19v73q0 20 17 20"/>
+<path d="M450 425l7 -9 7 9 -14 0 M476 425l7 -9 7 9 -14 0 M503 425l7 -9 7 9 -14 0"/>
+<path d="M391 816l7 -9 7 9 -14 0 M418 816l7 -9 7 9 -14 0 M445 816l7 -9 7 9 -14 0"/>
+</g>
+<g class="pen">
+<text x="687" y="252" transform="rotate(1 687 252)"><tspan x="687">环境描写：</tspan><tspan x="687" dy="30">雨声、灯光</tspan><tspan x="687" dy="30">营造安静的</tspan><tspan x="687" dy="30">等候氛围。</tspan></text>
+<text x="681" y="390" transform="rotate(-2 681 390)"><tspan x="681">“盯着”写出</tspan><tspan x="681" dy="30">“我”的疏忽。</tspan><tspan x="681" dy="30">一“推”见关爱。</tspan></text>
+<text x="688" y="490"><tspan x="688">旧椅子连接</tspan><tspan x="688" dy="30">过去与现在，</tspan><tspan x="688" dy="30">为下文铺垫。</tspan></text>
+<text x="679" y="625" transform="rotate(-1 679 625)"><tspan x="679">动作＋语言：</tspan><tspan x="679" dy="30">想挽留，却又</tspan><tspan x="679" dy="30">不愿多说。</tspan><tspan x="679" dy="30">感情含蓄。</tspan></text>
+<text x="687" y="785" transform="rotate(1 687 785)"><tspan x="687">挪、坐、站、</tspan><tspan x="687" dy="30">看、望——</tspan><tspan x="687" dy="30">连续动作，</tspan><tspan x="687" dy="30">把牵挂写具体。</tspan></text>
+<text x="685" y="976"><tspan x="685">“我”由疏忽</tspan><tspan x="685" dy="30">到理解，点明</tspan><tspan x="685" dy="30">椅子的意义。</tspan><tspan x="685" dy="30">物件→亲情</tspan></text>
+<text x="55" y="1180" transform="rotate(-1 55 1180)" style="font-size:27px">结尾照应“手机”：放下屏幕，回应身边人的等待。</text>
+<text x="55" y="1222" style="font-size:23px">主题：爱不总在话里，也藏在日常的小动作中。</text>
+</g>
+<text x="782" y="1227" style="font:18px sans-serif;fill:#888">原创示例</text>
+</svg>

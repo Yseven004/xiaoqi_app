@@ -207,6 +207,10 @@ class SkillMarket {
       }
       throw RevisionConflict(key);
     }
+    final publicRecord = Map<String, dynamic>.from(value)
+      ..remove('official')
+      ..remove('curated_by')
+      ..remove('provenance');
     return store.put(key, {
       'id': publicId,
       'owner_tenant': tenant,
@@ -214,7 +218,7 @@ class SkillMarket {
       'author': '小七用户',
       'published_at': DateTime.now().toUtc().toIso8601String(),
       'record': {
-        ...value,
+        ...publicRecord,
         'versions': [Map<String, dynamic>.from(versions.single)],
         'presentation': presentation,
       },
@@ -238,6 +242,8 @@ class SkillMarket {
       'name': record['name'],
       'description': record['description'],
       'author': value['author'],
+      if (value['curated_by'] != null) 'curated_by': value['curated_by'],
+      if (value['provenance'] != null) 'provenance': value['provenance'],
       'is_owner': value['owner_tenant'] == tenant,
       'publication_revision': doc.revision,
       'presentation': presentation,
@@ -285,6 +291,8 @@ class SkillMarket {
       'source': {
         'publication_id': id,
         'author': value['author'],
+        if (value['curated_by'] != null) 'curated_by': value['curated_by'],
+        if (value['provenance'] != null) 'provenance': value['provenance'],
         'publication_revision': revision,
       },
       'enabled': true,

@@ -1,2 +1,2 @@
-const releaseId = '2026-10-24-extension-creation-1';
-const apiContractVersion = '22';
+const releaseId = '2026-10-26-official-learning-1';
+const apiContractVersion = '23';

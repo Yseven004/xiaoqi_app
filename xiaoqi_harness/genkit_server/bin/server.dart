@@ -7,10 +7,12 @@ import '../lib/src/api.dart';
 import '../lib/src/attachment_service.dart';
 import '../lib/src/image_service.dart';
 import '../lib/src/mcp_server.dart';
+import '../lib/src/official_catalog.dart';
 import '../lib/src/store.dart';
 
 Future<void> main() async {
   final store = CloudStore();
+  seedOfficialCatalog(store);
   store.removeOrphanedTempFiles();
   final imageService = ImageService(store);
   final attachments = AttachmentService(store);

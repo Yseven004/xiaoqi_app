@@ -1,0 +1,64 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>原文批注 · 精确定位样张</title>
+<style>@font-face{font-family:LongCang;src:url('./fonts/LongCang-Regular.ttf')}body{margin:0;background:#e9e8e3}svg{display:block;max-width:100%;height:auto;margin:auto;background:#fffef9}.original{font:26px SimSun,serif;fill:#252421}.pen{font:28px LongCang;fill:#a52239}.stroke{fill:none;stroke:#a52239;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}</style>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1260" viewBox="0 0 900 1260" aria-label="原创短文和精准句子锚定批注"><rect width="900" height="1260" fill="#fffef9"/><g id="highlights"/><g id="original" class="original"><text x="56" y="108" style="font-size:40px">窗边的旧椅子</text></g><g id="marks"/><g id="comments" class="pen"/></svg>
+<script>
+const ns='http://www.w3.org/2000/svg';
+const lines=[
+'　　放学回家时，雨还没有停。巷口的灯',
+'亮了，屋檐滴下来的水，一声接着一声。',
+'爷爷坐在窗边，手里捏着一块旧抹布。',
+'　　“今天回来得晚。”他说。我低头换',
+'鞋，含糊地应了一声，眼睛却盯着手机。',
+'他没有再问，只把一碗热汤推到我面前。',
+'　　窗边有一把旧椅子，扶手被磨得发亮。',
+'我小时候，总站在上面，等放学的姐姐。',
+'如今，我已经长高，椅子却仍在原来的地方。',
+'　　周末，我想把它搬进储藏室。爷爷',
+'伸手拦了一下，又慢慢放下：“先留着吧。”',
+'他的声音很轻，像怕惊动窗外的一滴雨。',
+'　　那天晚上，我回来得比平时早。隔着',
+'玻璃，看见爷爷把椅子向窗边挪了挪，坐下，',
+'又站起来。他抬头看钟，再望向巷子的尽头。',
+'灯光落在他肩上，把影子拖得很长。',
+'　　我停在门口，忽然明白，那把椅子',
+'不是没有用处，只是坐着一个等我的人。',
+'　　我推开门，放下手机：“爷爷，今天',
+'的事，我想慢慢讲给您听。”'];
+function add(group,name,attrs,text){const el=document.createElementNS(ns,name);Object.entries(attrs).forEach(([k,v])=>el.setAttribute(k,v));if(text!==undefined)el.textContent=text;document.getElementById(group).append(el);return el}
+const source=lines.map((line,i)=>add('original','text',{x:56,y:210+i*48},line));
+function locate(quote){const joined=lines.join(''),start=joined.indexOf(quote);if(start<0||joined.indexOf(quote,start+1)>=0)throw Error('引用无法唯一定位：'+quote);let cursor=0;const rects=[];source.forEach((el,i)=>{const a=Math.max(0,start-cursor),b=Math.min(lines[i].length,start+quote.length-cursor);if(a<b){let first=el.getExtentOfChar(a),last=el.getExtentOfChar(b-1);rects.push({x:first.x,y:first.y,w:last.x+last.width-first.x,h:first.height,line:i})}cursor+=lines[i].length});return rects}
+function mark(quote,type='underline') {const rects=locate(quote);rects.forEach(b=>{
+ if(type==='highlight')add('highlights','path',{d:`M${b.x+2} ${b.y+b.h*.59}h${b.w-4}`,fill:'none',stroke:'#f6df65','stroke-width':b.h*.64,'stroke-linecap':'round',opacity:.54});
+ else if(type==='circle')add('marks','ellipse',{cx:b.x+b.w/2,cy:b.y+b.h/2,rx:b.w/2+4,ry:b.h/2+2,class:'stroke',transform:`rotate(-3 ${b.x+b.w/2} ${b.y+b.h/2})`});
+ else if(type==='wave'){let d=`M${b.x} ${b.y+b.h+3}`,w=b.w,n=Math.max(1,Math.round(w/25)),step=w/n;for(let i=0;i<n;i++)d+=`q${step/4} -3 ${step/2} 0t${step/2} 0`;add('marks','path',{d,class:'stroke'});}
+ else add('marks','path',{d:`M${b.x} ${b.y+b.h+3}q${b.w*.48} 2 ${b.w} -1`,class:'stroke'});
+ });return rects}
+function writing(text,x,y,size=28,group='comments'){const el=add(group,'text',{x,y,style:`font-size:${size}px`});[...text].forEach((c,i)=>{const span=document.createElementNS(ns,'tspan');span.setAttribute('dy',String([0,.8,-.5,-.3][i%4]));span.setAttribute('rotate',String([0,-2,1,0,-1][i%5]));span.textContent=c;el.append(span)});return el}
+const checks=[];let lastBottom=180;
+function note(quote,rows,type='underline'){
+ const rs=mark(quote,type),first=rs[0],last=rs.at(-1),center=(first.y+last.y+last.h)/2;
+ const top=Math.max(center-(rows.length-1)*13,lastBottom+15),x=681;
+ rows.forEach((text,i)=>writing(text,x,top+i*28,27));lastBottom=top+(rows.length-1)*28+10;
+ // A slim leader explicitly joins the comment to its quoted sentence.
+ const endX=Math.min(640,last.x+last.w+7),endY=last.y+last.h/2;
+ add('marks','path',{d:`M${x-12} ${top+5}H656V${endY}H${endX}`,class:'stroke','stroke-width':1.4,opacity:.75});
+ checks.push({quote,rects:rs,commentTop:top});
+}
+document.fonts.ready.then(()=>{
+ writing('抓住细节：一把旧椅子，藏着不说出口的牵挂。',42,43,31);
+ writing('题目是线索，也寄托着亲情',365,105,25);
+ writing('读一读：爷爷的“等候”，是怎样被写出来的？',56,158,25);
+ note('雨还没有停。巷口的灯亮了，屋檐滴下来的水，一声接着一声。',['雨声和灯光，','烘托安静的','等候氛围。'],'wave');
+ mark('盯着','circle');mark('只把一碗热汤推到我面前','highlight');
+ note('只把一碗热汤推到我面前',['一“推”见关爱，','“我”却盯着手机。','对照中见疏忽。']);
+ note('扶手被磨得发亮',['“磨得发亮”：','侧面写椅子的旧，','留下岁月痕迹。']);
+ mark('又慢慢放下','circle');note('先留着吧',['想挽留，又不愿','多说。动作、语言','写出含蓄的牵挂。']);
+ mark('他的声音很轻，像怕惊动窗外的一滴雨','wave');
+ mark('挪了挪','circle');
+ note('又站起来。他抬头看钟，再望向巷子的尽头',['挪、坐、站、','看、望：连续动作，','把等待写具体。']);
+ mark('只是坐着一个等我的人','highlight');note('不是没有用处，只是坐着一个等我的人',['由不解到理解，','点明椅子的意义。','物件 → 亲情']);
+ mark('放下手机');writing('结尾照应“手机”：放下屏幕，回应身边人的等待。',56,1179,28);
+ writing('主题：爱藏在日常的小动作里，也需要被回应。',56,1221,27);
+ window.annotationChecks=checks;window.previewReady=true;
+});
+</script></html>

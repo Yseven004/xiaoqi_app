@@ -1,0 +1,1 @@
+{"repository":"https://github.com/virgiliojr94/book-to-skill","commit":"a24e62f4d8caf2ee433f6e48d9073800f56f906e","version":"1.4.0","license":"MIT","author":"virgiliojr94","copyright":"2025 virgiliojr94","adaptation":"小七材料与脚本工具映射、禁用运行时安装、私有 ZIP 交付；新增 xiaoqi_extract.py 将临时输出收集为任务产物；上游正文、Python 模块和扫描工具原样保留。","adaptation_version":1}
