@@ -15,7 +15,7 @@
 固定提交、版本和许可证分别记录在 `genkit_server/official_catalog/*/PROVENANCE.json`。上游原文为 `UPSTREAM-SKILL.md`；新的 `SKILL.md` 仅声明宿主工具映射和边界。精选发布由部署拥有的包生成，没有客户端可调用的官方发布接口；普通发布不信任客户端自称官方的资料。
 
 - Book to Skill：MIT，virgiliojr94，1.4.0，2026-10-12 提交。直接复用模块和提取入口；不引入 Calibre、Docling 或运行时 pip 安装。
-- Study Notes Studio：MIT，Gerson369 仓库，1.4.1，2026-07-04 提交，版权按原许可证保留。直接复用完整 handbook，仍须调用图片模型，不能偷换成代码排版。
+- Study Notes Studio：MIT，Gerson369 引入仓库，原始版权署名 yxxx6666（README 的原仓库地址与 LICENSE 均指向此作者），1.4.1，2026-07-04 提交。直接复用完整 handbook，仍须调用图片模型，不能偷换成代码排版。
 - Obsidian skills、Open Notebook：仅借鉴学习知识组织，不引入另一套笔记应用。
 - PaddleOCR：仅研究坐标方案，优先复用现有 FastOcrLine/FastOcrBlock。
 - LXGW WenKai：批注字体候选，SIL OFL 1.1，后续落地需带许可证。
@@ -28,7 +28,7 @@
 
 首批 release：`2026-10-26-official-learning-1`，接口契约 `23`（客户端与服务端同步）。精选来源字段由服务端生成；客户端需匹配版本后使用。
 
-已完成本地服务端静态分析、198 项完整测试；提取测试覆盖中文章节和跨调用可读输出。部署前新增真实模型门禁，验证实际图片和技能 ZIP，不能以包安装成功代替任务成功。部署脚本本地测试通过，8 项依赖 Linux 的 Python 检查留给 CI。
+已完成本地服务端静态分析、201 项完整测试；提取测试覆盖中文章节和跨调用可读输出。部署前新增真实模型门禁，验证实际图片和技能 ZIP，不能以包安装成功代替任务成功。部署脚本本地测试通过，9 项依赖 Linux 的 Python 检查留给 CI。
 
 批注样张 v1/v2 被用户指出定位偏离、手写感不足、符号错误，均未确认。v3 改为字框定位、重复引用拒绝猜测，并引入 Long Cang 字体；符号约定与研究在 `annotation-symbol-research.md`。当前仅为设计样张，不是已实现的插件。
 

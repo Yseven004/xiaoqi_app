@@ -92,6 +92,7 @@ void seedOfficialCatalog(CloudStore store, {Directory? directory}) {
           'introduction':
               '第七世界官方精选 · 第三方开源技能\n'
               '原作者：${provenance['author']} · ${provenance['license']}\n'
+              '版权署名：${provenance['copyright']}\n'
               '来源：${provenance['repository']}\n'
               '固定版本：${provenance['version']} (${provenance['commit']})\n\n'
               '${provenance['adaptation']}\n\n'

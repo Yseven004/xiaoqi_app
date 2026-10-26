@@ -17,4 +17,4 @@ description: 将学习资料整理为漂亮的手写风复习笔记图，支持�
 
 ## 来源
 
-官方精选第三方技能；上游 Gerson369/study-notes-studio，v1.4.1，MIT。原始版权和许可证见 `LICENSE`；固定版本和适配说明见 `PROVENANCE.json`。
+官方精选第三方技能；原始版权署名 yxxx6666，本次从用户指定的 Gerson369/study-notes-studio 仓库固定引入 v1.4.1，MIT。原始版权和许可证见 `LICENSE`；固定版本和适配说明见 `PROVENANCE.json`。
