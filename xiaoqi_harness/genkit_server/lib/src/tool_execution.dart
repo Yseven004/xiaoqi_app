@@ -33,6 +33,24 @@ class ToolExecution {
   static String digest(Object value) =>
       sha256.convert(utf8.encode(jsonEncode(value))).toString();
 
+  bool get hasUncertainNetworkExecution =>
+      (store.get(key)?.value['uncertain_network_scopes'] as Map?)?.containsKey(
+        requestIdentity,
+      ) ==
+      true;
+
+  void markUncertainNetworkExecution(String codeHash) {
+    _update(
+      (value) => {
+        ...value,
+        'uncertain_network_scopes': {
+          ...?(value['uncertain_network_scopes'] as Map?),
+          requestIdentity: {'code_hash': codeHash, 'status': 'unknown'},
+        },
+      },
+    );
+  }
+
   void bind() {
     _update((value) {
       final prior = value['turn_scope'] as Map?;
@@ -167,7 +185,7 @@ class ToolExecution {
                     : op['effect'] != 'image'),
           )
           .length;
-      if (reserved >= limit) throw StateError('已达到本轮操作数量上限');
+      if (reserved >= limit) throw ExecutionBudgetExceeded('已达到本轮操作数量上限');
       operations[operationId] = {
         'request_identity': requestIdentity,
         'effect': effect,

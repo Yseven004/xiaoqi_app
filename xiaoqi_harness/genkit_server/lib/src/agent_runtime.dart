@@ -2461,9 +2461,6 @@ class GenkitXiaoqiAgentRuntime
     );
     var imageToolCalled = false;
     var imageCalls = delivery.succeeded['generate_image'] ?? 0;
-    // shortcut: one repair retry for safe script errors; use a dedicated
-    // workflow before raising this for long-running coding tasks.
-    var executePythonFailures = 0;
     // shortcut: two distinct searches per turn; explicit research mode can
     // later opt into a larger server-side budget.
     var webSearchCalls = 0;
@@ -2525,29 +2522,28 @@ class GenkitXiaoqiAgentRuntime
           '处理文件或对资料做程序化操作时。默认断网。'
           '普通代码执行不得联网。当前技能确需访问公网时，须提供本技能 skill_id、domains 精确域名和 purpose；'
           '联网开关已打开时沿用任务域名授权。资料和产物会在当前任务的隔离工作区中按需提供；'
+          '先读 /workspace/input_manifest.json 获取当前输入的真实路径；不要复用旧沙箱绝对路径。'
+          '可写工作目录为 /workspace/work，交付文件写入 /workspace/output，创建子目录时先创建父目录。'
           '不要向用户展示隔离工作区的路径或内部参数。',
       inputSchema: _executePythonSchema,
       fn: (input, context) async {
         execution.check('workspace');
-        if (executePythonFailures >= 2) {
-          onProcessEvent({
-            'type': 'tool_skipped',
-            'tool': 'execute_python',
-            'reason': 'script_retry_budget_exhausted',
-          });
-          return ToolResult.response(
-            jsonEncode({
-              'status': 'budget_exhausted',
-              'message': '脚本纠正次数已用完。请使用已有结果完成回答，不要再次执行脚本。',
-            }),
-          );
-        }
         final networkMode = _taskNetworkMode(
           tenantId,
           taskId,
           request['network_mode'],
         );
         final requestedDomains = _normalizeDomains(input['domains']);
+        if (requestedDomains.isNotEmpty &&
+            execution.hasUncertainNetworkExecution) {
+          return ToolResult.response(
+            jsonEncode({
+              'status': 'external_result_unknown',
+              'retryable': false,
+              'message': '前一次联网代码的外部结果未知，请先核实结果并由用户明确下一步。离线文件处理仍可继续。',
+            }),
+          );
+        }
         final skillId = input['skill_id']?.toString().trim() ?? '';
         final skillReference =
             skillId.isNotEmpty || selectedSkills.explicitIds.length == 1
@@ -2651,11 +2647,7 @@ class GenkitXiaoqiAgentRuntime
             taskId: taskId,
             code: input['code']?.toString() ?? '',
             language: 'python',
-            authorizedDomains: {
-              ..._authorizedDomainsForExecution(tenantId, taskId),
-              ...?_resumedAuthorizedDomains(context.resumed, permission),
-              if (temporaryNetwork) ...requestedDomains,
-            }.toList()..sort(),
+            authorizedDomains: requestedDomains,
             materials: await _scriptMaterials(tenantId, request['materials']),
             skillFiles: skillFiles,
             artifactIds: (input['artifact_ids'] as List?)?.cast<String>(),
@@ -2669,10 +2661,18 @@ class GenkitXiaoqiAgentRuntime
           });
           return ToolResult.response(result);
         } on Object catch (error) {
+          if (requestedDomains.isNotEmpty && error is SandboxExecutionError) {
+            execution.markUncertainNetworkExecution(
+              ToolExecution.digest({
+                'code': input['code'],
+                'domains': requestedDomains,
+              }),
+            );
+          }
           if (cancellation.isCancelled) rethrow;
-          executePythonFailures++;
-          final message = _briefToolError(error);
-          final retryable = executePythonFailures == 1;
+          final message = DockerCodeExecutionService.failureDetails(error);
+          final retryable =
+              requestedDomains.isEmpty && error is! ExecutionBudgetExceeded;
           onProcessEvent({
             'type': 'tool_failed',
             'tool': 'execute_python',
@@ -2688,8 +2688,8 @@ class GenkitXiaoqiAgentRuntime
               'retryable': retryable,
               'message': message,
               'instruction': retryable
-                  ? '脚本执行失败。只修正一次后重试；不要重复相同代码。'
-                  : '脚本已失败两次。不要再次调用 execute_python，请基于已有结果完成回答或明确说明无法执行。',
+                  ? '根据完整异常修正离线代码和当前输入路径后重试；不要重复相同失败代码。仍受任务资源预算和取消约束。'
+                  : '不可自动重放外部操作或已耗尽预算的执行。保留已完成文件，如实说明阻塞并先核实外部结果。',
             }),
           );
         }
@@ -3943,11 +3943,6 @@ class GenkitXiaoqiAgentRuntime
       'off' => 'off',
       _ => 'off',
     };
-  }
-
-  List<String> _authorizedDomainsForExecution(String tenantId, String taskId) {
-    if (_taskNetworkMode(tenantId, taskId, null) == 'off') return const [];
-    return _authorizedDomains(tenantId, taskId);
   }
 
   String _stagedSkillName(

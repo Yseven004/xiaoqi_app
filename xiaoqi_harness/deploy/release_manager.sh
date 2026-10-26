@@ -318,9 +318,63 @@ cleanup_success() {
   find "$ROOT/logs" -maxdepth 1 -name '*.log' -type f -printf '%T@ %p\n' | sort -nr | tail -n +8 | cut -d' ' -f2- | xargs -r rm -f --
 }
 
+cleanup_candidate_runner() {
+  local resource
+  docker rm -f xiaoqi-curated-release-probe >/dev/null 2>&1 || true
+  if [[ -n "${DEPLOY_CANDIDATE_RUNNER:-}" ]]; then
+    docker rm -f "$DEPLOY_CANDIDATE_RUNNER" >/dev/null 2>&1 || true
+  fi
+  # This namespace belongs only to the deployment probe, never production tasks.
+  for resource in $(docker ps -aq --filter label=com.xiaoqi.release-probe-sandbox=true); do
+    [[ "$resource" =~ ^[a-f0-9]+$ ]] && docker rm -f "$resource" >/dev/null || true
+  done
+  for resource in $(docker network ls -q --filter label=com.xiaoqi.release-probe-sandbox=true); do
+    [[ "$resource" =~ ^[a-f0-9]+$ ]] && docker network rm "$resource" >/dev/null || true
+  done
+  for resource in $(docker volume ls -q --filter label=com.xiaoqi.release-probe-sandbox=true); do
+    [[ "$resource" =~ ^xq-code-[a-zA-Z0-9_-]+$ ]] && docker volume rm "$resource" >/dev/null || true
+  done
+}
+
+start_candidate_runner() {
+  local commit="$1" runner_token attempt
+  runner_token="$(python3 - "$CONFIG" <<'PY'
+import sys
+from pathlib import Path
+for line in Path(sys.argv[1]).read_text().splitlines():
+    key, sep, value = line.partition('=')
+    if sep and key.strip() == 'SANDBOX_RUNNER_TOKEN':
+        print(value.strip())
+        break
+PY
+)"
+  [[ -n "$runner_token" ]] || die "sandbox runner token missing"
+  DEPLOY_CANDIDATE_RUNNER="xiaoqi-probe-runner-$DEPLOY_RELEASE_ID"
+  SANDBOX_RUNNER_TOKEN="$runner_token" docker run --detach --rm \
+    --name "$DEPLOY_CANDIDATE_RUNNER" --memory=384m --cpus=0.2 \
+    --network xiaoqi-single-server_sandbox-control \
+    --label com.xiaoqi.release-probe-sandbox=true \
+    --volume /var/run/docker.sock:/var/run/docker.sock:ro \
+    --env SANDBOX_RUNNER_TOKEN \
+    --env XIAOQI_SANDBOX_OWNER_LABEL=com.xiaoqi.release-probe-sandbox \
+    --env "XIAOQI_SANDBOX_IMAGE=xiaoqi-code-sandbox:build-$commit" \
+    --env "XIAOQI_SANDBOX_PROXY_IMAGE=xiaoqi-sandbox-proxy:build-$commit" \
+    "xiaoqi-sandbox-runner:build-$commit" >/dev/null
+  unset runner_token
+  for attempt in {1..30}; do
+    if docker exec "$DEPLOY_CANDIDATE_RUNNER" python -c \
+      'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8090/health", timeout=2).close()' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  die "candidate sandbox runner failed health check"
+}
+
 deployment_exit() {
   local rc=$?
   trap - EXIT INT TERM
+  cleanup_candidate_runner
   docker rm -f xiaoqi-release-probe >/dev/null 2>&1 || true
   if (( rc != 0 )); then
     phase DEPLOY_FAILED
@@ -406,23 +460,21 @@ PY
   timeout --kill-after=60s 600 docker load --input "$stage/images.tar.gz"
   verify_loaded_images "$stage/manifest.json"
   local image
-  for image in "${LOCAL_IMAGES[@]}"; do
-    docker tag "${image%:local}:build-$commit" "$image"
-  done
-
-  docker run --rm --network none --entrypoint sh xiaoqi-code-sandbox:local \
+  docker run --rm --network none --entrypoint sh "xiaoqi-code-sandbox:build-$commit" \
     -ec 'command -v xelatex >/dev/null && kpsewhich xeCJK.sty >/dev/null && fc-match "Noto Sans CJK SC" | grep -qi "Noto Sans CJK SC"' \
     || die "sandbox image is missing the required Chinese LaTeX toolchain"
 
   # Exercise the new runtime with synthetic data before touching the healthy
   # service or its persistent volume. A failure uses the existing rollback trap.
   phase RUNTIME_PROBE
+  start_candidate_runner "$commit"
   timeout --kill-after=30s 600 docker run --rm --name xiaoqi-release-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
-    --entrypoint /app/bin/verify_capability_chain xiaoqi-genkit-server:local
+    --entrypoint /app/bin/verify_capability_chain "xiaoqi-genkit-server:build-$commit"
   timeout --kill-after=30s 900 docker run --rm --name xiaoqi-curated-release-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
     --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
-    --env SANDBOX_RUNNER_URL=http://sandbox-runner:8090 \
-    --entrypoint /app/bin/verify_official_catalog xiaoqi-genkit-server:local
+    --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
+    --entrypoint /app/bin/verify_official_catalog "xiaoqi-genkit-server:build-$commit"
+  cleanup_candidate_runner
 
   phase HOLD_WRITES
   DEPLOY_MAINTENANCE=yes
@@ -438,10 +490,13 @@ PY
 
   phase SEED_OFFICIAL_CATALOG
   docker run --rm --network none -v "$VOLUME:/var/lib/xiaoqi" \
-    --entrypoint /app/bin/server xiaoqi-genkit-server:local \
+    --entrypoint /app/bin/server "xiaoqi-genkit-server:build-$commit" \
     --seed-official-catalog >"$NEXT/catalog-changes.json"
 
   phase ACTIVATE
+  for image in "${LOCAL_IMAGES[@]}"; do
+    docker tag "${image%:local}:build-$commit" "$image"
+  done
   install_source "$stage/source"
   cp "$stage/manifest.json" "$CURRENT/.xiaoqi-artifact.json"
   printf '%s\n' "$release_id" > "$CURRENT/.xiaoqi-release"

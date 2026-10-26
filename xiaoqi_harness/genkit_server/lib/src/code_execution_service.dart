@@ -17,6 +17,12 @@ class NetworkPermissionRequired implements Exception {
   final String purpose;
 }
 
+/// The runner request was submitted: an external effect may already have
+/// happened even when the process/transport failed to return a usable result.
+class SandboxExecutionError extends StateError {
+  SandboxExecutionError(super.message);
+}
+
 class DockerCodeExecutionService {
   DockerCodeExecutionService(
     this.store, {
@@ -215,6 +221,7 @@ class DockerCodeExecutionService {
     }());
     unawaited(process.stderr.drain<void>());
 
+    var requestSubmitted = false;
     try {
       final request = <String, dynamic>{
         'task_id': _runnerTaskId(tenantId, taskId),
@@ -229,6 +236,7 @@ class DockerCodeExecutionService {
         if (scriptPath != null) 'script_path': scriptPath,
         if (scriptPath != null) 'arguments': arguments,
       };
+      requestSubmitted = true;
       process.stdin.writeln(jsonEncode(request));
       await process.stdin.close();
       await process.exitCode.timeout(
@@ -269,9 +277,15 @@ class DockerCodeExecutionService {
         throw StateError(output.isEmpty ? 'Docker 沙箱执行失败' : output);
       }
       return output.isEmpty ? '代码已执行，没有标准输出。' : output;
-    } on Object {
+    } on Object catch (error, stack) {
       if (activeSandboxId != null) {
         _markCleanupPending(tenantId, taskId, activeSandboxId);
+      }
+      if (requestSubmitted) {
+        Error.throwWithStackTrace(
+          SandboxExecutionError(failureDetails(error)),
+          stack,
+        );
       }
       rethrow;
     } finally {
@@ -350,10 +364,10 @@ class DockerCodeExecutionService {
       final executions = (current.value['code_execution_runs'] as num? ?? 0)
           .toInt();
       if (executions >= limits.toolOperations) {
-        throw StateError('本次任务的代码执行预算已用完');
+        throw ExecutionBudgetExceeded('本次任务的代码执行预算已用完');
       }
       if (skillScript && scripts >= limits.scriptExecutions) {
-        throw StateError('本次任务的技能脚本执行次数已用完');
+        throw ExecutionBudgetExceeded('本次任务的技能脚本执行次数已用完');
       }
       try {
         store.put(key, {

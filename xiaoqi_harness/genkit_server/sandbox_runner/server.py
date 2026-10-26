@@ -35,7 +35,9 @@ MAX_LOG_BYTES = 1024 * 1024
 MAX_RUN_SECONDS = 120
 MAX_DOMAINS = 10
 MAX_SCRIPT_ARGUMENTS = 32
-OWNER_LABEL = "com.xiaoqi.local-sandbox"
+OWNER_LABEL = os.environ.get("XIAOQI_SANDBOX_OWNER_LABEL", "com.xiaoqi.local-sandbox")
+if not re.fullmatch(r"com\.xiaoqi\.[a-z0-9.-]+", OWNER_LABEL):
+    raise ValueError("Invalid sandbox resource owner label")
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 SAFE_NAME_RE = re.compile(r"[\\/\x00-\x1f<>:\"|?*]")
 
@@ -175,6 +177,7 @@ def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], st
         arguments = []
 
     files: list[tuple[str, bytes]] = []
+    input_manifest: list[dict[str, Any]] = []
     material_total = 0
     materials = request.get("materials", [])
     if not isinstance(materials, list):
@@ -191,7 +194,23 @@ def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], st
         material_total += len(data)
         if len(data) > MAX_SINGLE_FILE_BYTES or material_total > MAX_MATERIAL_BYTES:
             raise RequestError("任务资料超过 20 MB")
-        files.append((f"materials/{index + 1}-{name}", data))
+        relative = f"materials/{index + 1}-{name}"
+        files.append((relative, data))
+        input_manifest.append({
+            "id": item.get("artifact_id") or item.get("id"),
+            "name": name,
+            "path": f"/workspace/{relative}",
+            "media_type": item.get("media_type"),
+            "size": len(data),
+        })
+
+    files.append(("input_manifest.json", json.dumps({
+        "schema_version": 1,
+        "inputs": input_manifest,
+        "work_dir": "/workspace/work",
+        "output_dir": "/workspace/output",
+        "skill_dir": "/workspace/skill",
+    }, ensure_ascii=False).encode("utf-8")))
 
     skill_files = request.get("skill_files", {})
     if not isinstance(skill_files, dict):
@@ -216,7 +235,7 @@ def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], st
 def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w") as archive:
-        directories = {"materials", "skill", "skill/scripts", "output"}
+        directories = {"materials", "skill", "skill/scripts", "output", "work", ".home", ".python"}
         for name, _ in files:
             parent = PurePosixPath(name).parent
             while parent.as_posix() not in {".", ""}:
@@ -227,7 +246,7 @@ def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
             entry.type = tarfile.DIRTYPE
             entry.uid = 10001
             entry.gid = 10001
-            entry.mode = 0o777 if name == "output" else 0o755
+            entry.mode = 0o777 if name in {"output", "work", ".home", ".python"} else 0o755
             archive.addfile(entry)
         for name, data in files:
             entry = tarfile.TarInfo(name)
@@ -429,7 +448,7 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
             image=SANDBOX_IMAGE,
             name=f"xq-code-{suffix}",
             command=_command(language, arguments, script_paths),
-            working_dir="/workspace/skill" if script_paths else "/workspace",
+            working_dir="/workspace/skill" if script_paths else "/workspace/work",
             environment=environment,
             user="10001:10001",
             network=network.name if network else "none",

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:genkit/genkit.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
+import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
@@ -63,6 +64,25 @@ Future<void> main(List<String> args) async {
   final images = FixtureImages(store);
   final scenario = args.single;
   final textOnly = scenario.startsWith('text-only');
+  DockerCodeExecutionService? codeExecutor;
+  if (scenario == 'text-only-workspace-retry') {
+    final worker = File('${directory.path}/retry_worker.py');
+    worker.writeAsStringSync('''
+import json, pathlib, sys
+json.loads(sys.stdin.readline())
+counter = pathlib.Path(__file__).with_suffix('.count')
+attempt = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(attempt))
+print(json.dumps({'type':'result', 'ok':attempt >= 3, 'stdout':'recovered' if attempt >= 3 else 'progress\\n' * 1000, 'stderr':'' if attempt >= 3 else 'FileNotFoundError: terminal-workspace-cause', 'artifacts':[], 'cleanup_pending':False}), flush=True)
+''');
+    codeExecutor = DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable:
+          Platform.environment['XIAOQI_TEST_PYTHON'] ??
+          (Platform.isWindows ? 'python' : 'python3'),
+    );
+  }
   store.putImmutable('packages/notes', {
     'SKILL.md': utf8.encode(
       textOnly
@@ -93,30 +113,35 @@ Future<void> main(List<String> args) async {
   store.put('task/personal/turn', {'artifacts': []}, null);
   final events = <Map<String, Object?>>[];
   try {
-    final result = await GenkitXiaoqiAgentRuntime(store, images).runAgentTurn(
-      tenantId: 'personal',
-      taskId: 'turn',
-      request: {
-        'model_id': 'mimo-v2.6-flash',
-        'current_turn_text': textOnly
-            ? '请用纯文字整理这段材料，不需要图片或文件。'
-            : '请整理成两页视觉学习笔记',
-        'selected_capabilities': scenario == 'implicit'
-            ? []
-            : [
-                {'id': 'notes', 'version_id': 'v1'},
-              ],
-      },
-      messages: agentMessagesFromRequest([
-        {
-          'role': 'user',
-          'content': textOnly ? '请用纯文字整理这段材料，不需要图片或文件。' : '请整理成两页视觉学习笔记',
-        },
-      ]),
-      onChunk: (_) {},
-      onProcessEvent: events.add,
-      cancellation: CancellationController().token,
-    );
+    final result =
+        await GenkitXiaoqiAgentRuntime(
+          store,
+          images,
+          codeExecutor: codeExecutor,
+        ).runAgentTurn(
+          tenantId: 'personal',
+          taskId: 'turn',
+          request: {
+            'model_id': 'mimo-v2.6-flash',
+            'current_turn_text': textOnly
+                ? '请用纯文字整理这段材料，不需要图片或文件。'
+                : '请整理成两页视觉学习笔记',
+            'selected_capabilities': scenario == 'implicit'
+                ? []
+                : [
+                    {'id': 'notes', 'version_id': 'v1'},
+                  ],
+          },
+          messages: agentMessagesFromRequest([
+            {
+              'role': 'user',
+              'content': textOnly ? '请用纯文字整理这段材料，不需要图片或文件。' : '请整理成两页视觉学习笔记',
+            },
+          ]),
+          onChunk: (_) {},
+          onProcessEvent: events.add,
+          cancellation: CancellationController().token,
+        );
     stdout.writeln(
       'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length})}',
     );

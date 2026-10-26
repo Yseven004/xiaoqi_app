@@ -102,6 +102,42 @@ void main() {
     expect(scope['steering_sequence'], 2);
     expect(() => runner.check('image'), throwsStateError);
   });
+  test(
+    'uncertain network execution survives runtime recreation and permits offline recovery',
+    () async {
+      final scope = TurnContract(mode: 'workflow', imageLimit: 0);
+      final original = ToolExecution(
+        store,
+        'personal',
+        'task-1',
+        scope,
+        requestIdentity: 'message-1',
+      )..bind();
+      original.markUncertainNetworkExecution('submitted-code');
+      final resumed = ToolExecution(
+        store,
+        'personal',
+        'task-1',
+        scope,
+        requestIdentity: 'message-1',
+      )..bind();
+      expect(resumed.hasUncertainNetworkExecution, isTrue);
+      final result = await resumed.query(
+        slot: 'offline-recovery',
+        arguments: const {},
+        invoke: (_) async => {'ok': true},
+      );
+      expect(result['ok'], isTrue);
+      final separateTask = ToolExecution(
+        store,
+        'personal',
+        'task-2',
+        scope,
+        requestIdentity: 'message-1',
+      )..bind();
+      expect(separateTask.hasUncertainNetworkExecution, isFalse);
+    },
+  );
   setUp(() {
     directory = Directory.systemTemp.createTempSync('turn-scope-');
     store = CloudStore(root: directory.path);

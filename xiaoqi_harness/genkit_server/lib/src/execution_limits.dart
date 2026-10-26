@@ -13,3 +13,7 @@ class ExecutionLimits {
   final int scriptExecutions;
   final int modelTurns;
 }
+
+class ExecutionBudgetExceeded extends StateError {
+  ExecutionBudgetExceeded(super.message);
+}

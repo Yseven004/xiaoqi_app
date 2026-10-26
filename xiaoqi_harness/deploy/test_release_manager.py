@@ -28,7 +28,10 @@ elif a[0] == 'compose':
     if 'up' in a and os.environ.get('FAIL_ACTIVATE') == '1' and not (r/'failed-once').exists():
         (r/'failed-once').touch(); sys.exit(9)
 elif a[0] == 'run':
-    if 'du' in a: print('10 /data')
+    if '--detach' in a:
+        assert os.environ.get('SANDBOX_RUNNER_TOKEN') == 'test-runner-token'
+        print('c'*64)
+    elif 'du' in a: print('10 /data')
     elif '/app/bin/verify_capability_chain' in a:
         if os.environ.get('FAIL_PROBE') == '1': sys.exit(8)
     elif '/app/bin/verify_official_catalog' in a:
@@ -61,7 +64,7 @@ class ManagerTests(unittest.TestCase):
             path.chmod(0o755)
         for name in ('config', 'restore', 'incoming', 'logs', 'current/genkit_server/lib/src', 'current/deploy'):
             (self.root / name).mkdir(parents=True, exist_ok=True)
-        (self.root / 'config/single-server.env').write_text('XIAOQI_PUBLIC_HOST=example.com\n')
+        (self.root / 'config/single-server.env').write_text('XIAOQI_PUBLIC_HOST=example.com\nSANDBOX_RUNNER_TOKEN=test-runner-token\n')
         (self.root / 'current/genkit_server/pubspec.yaml').write_text('name: old\n')
         (self.root / 'current/deploy/compose.yaml').write_text('services: {}\n')
         (self.root / 'current/deploy/Caddyfile.docker').write_text('example.com { respond 200 }\n')
@@ -85,7 +88,16 @@ class ManagerTests(unittest.TestCase):
         curated = next(c for c in calls if '/app/bin/verify_official_catalog' in c)
         self.assertIn('--network xiaoqi-single-server_default', curated)
         self.assertIn('--network xiaoqi-single-server_sandbox-control', curated)
-        self.assertIn('--env SANDBOX_RUNNER_URL=http://sandbox-runner:8090', curated)
+        self.assertIn('--env SANDBOX_RUNNER_URL=http://xiaoqi-probe-runner-new-release:8090', curated)
+        self.assertIn('xiaoqi-genkit-server:build-'+COMMIT, curated)
+        runner = next(c for c in calls if 'run --detach' in c)
+        self.assertNotIn('--env-file', runner)
+        self.assertIn('--env SANDBOX_RUNNER_TOKEN', runner)
+        self.assertIn('--env XIAOQI_SANDBOX_OWNER_LABEL=com.xiaoqi.release-probe-sandbox', runner)
+        self.assertNotIn('test-runner-token', '\n'.join(calls))
+        retag = next(i for i,c in enumerate(calls) if c.startswith('tag xiaoqi-genkit-server:build-'))
+        probe = next(i for i,c in enumerate(calls) if '/app/bin/verify_official_catalog' in c)
+        self.assertLess(probe, retag)
         seed = next(i for i, c in enumerate(calls) if '--seed-official-catalog' in c)
         compare = next(i for i, c in enumerate(calls) if '--catalog-changes /backup/catalog-changes.json' in c)
         self.assertLess(seed, compare)
@@ -99,6 +111,9 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
         self.assertFalse((self.root/'restore/next').exists())
         self.assertNotIn(' stop app', (self.root/'docker.calls').read_text())
+        calls = (self.root/'docker.calls').read_text()
+        self.assertIn('rm -f xiaoqi-probe-runner-new-release', calls)
+        self.assertNotIn('tag xiaoqi-genkit-server:build-', calls)
 
     def test_failed_curated_probe_preserves_running_release(self):
         result = self.deploy(FAIL_CURATED_PROBE='1')

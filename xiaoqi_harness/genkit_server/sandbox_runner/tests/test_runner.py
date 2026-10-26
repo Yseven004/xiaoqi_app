@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import tarfile
 import unittest
 from unittest.mock import Mock, patch
@@ -145,6 +146,31 @@ class RunnerValidationTests(unittest.TestCase):
         command = server._command(language, arguments, paths)
         self.assertEqual(command[-2:], arguments)
         self.assertIn("/workspace/skill/scripts/run.js", command)
+
+    def test_input_manifest_preserves_binary_identity_and_current_paths(self) -> None:
+        content = bytes([0, 255, 128, 80, 75, 3, 4])
+        files, _, _, _ = server._request_files({
+            "task_id": "task-manifest", "language": "python", "code": "pass",
+            "materials": [{
+                "artifact_id": "original-artifact", "name": "../source.pdf",
+                "media_type": "application/pdf",
+                "base64": base64.b64encode(content).decode("ascii"),
+            }],
+        })
+        staged = dict(files)
+        manifest = json.loads(staged["input_manifest.json"])
+        source = manifest["inputs"][0]
+        self.assertEqual(source["id"], "original-artifact")
+        self.assertEqual(source["name"], "source.pdf")
+        self.assertEqual(source["path"], "/workspace/materials/1-source.pdf")
+        self.assertEqual(staged[source["path"].removeprefix("/workspace/")], content)
+        self.assertEqual(source["size"], len(content))
+        self.assertEqual(manifest["work_dir"], "/workspace/work")
+        self.assertEqual(manifest["output_dir"], "/workspace/output")
+        archive = tarfile.open(fileobj=io.BytesIO(server._make_archive(files)))
+        for name in ("work/", "output/", ".home/", ".python/"):
+            self.assertEqual(archive.getmember(name).uid, 10001)
+            self.assertTrue(archive.getmember(name).mode & 0o222)
 
     def test_skill_script_extension_must_match_language(self) -> None:
         with self.assertRaises(server.RequestError):

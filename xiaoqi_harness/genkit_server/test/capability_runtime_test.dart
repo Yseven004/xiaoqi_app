@@ -9,6 +9,7 @@ void main() {
     'implicit',
     'script-available',
     'text-only',
+    'text-only-workspace-retry',
     'text-only-unplanned-image',
     'image-format-repair',
     'missing',
@@ -167,6 +168,8 @@ void main() {
                 'tools': [
                   if (!textOnly) {'name': 'generate_image', 'count': 2},
                   {'name': 'read_skill_resource', 'count': 1},
+                  if (scenario == 'text-only-workspace-retry')
+                    {'name': 'execute_python', 'count': 1},
                 ],
                 'artifacts': [
                   if (!textOnly)
@@ -181,6 +184,18 @@ void main() {
                 ],
               };
             } else if (textOnly) {
+              if (scenario == 'text-only-workspace-retry') {
+                final attempts = RegExp(
+                  r'"name":"execute_python"',
+                ).allMatches(serialized).length;
+                if (attempts < 3) {
+                  tool = 'execute_python';
+                  input = {
+                    'code': 'print("recovery attempt ${attempts + 1}")',
+                    'language': 'python',
+                  };
+                }
+              }
               if (scenario == 'text-only-unplanned-image' &&
                   !called('generate_image')) {
                 tool = 'generate_image';
@@ -302,7 +317,7 @@ void main() {
             expect(result['text'], contains('任务尚未完成'));
             expect(requests, hasLength(3));
           } else if (scenario.startsWith('text-only')) {
-            expect(result['missing'], isFalse);
+            expect(result['missing'], isFalse, reason: jsonEncode(result));
             expect(result['generated'], 0);
             expect(result['artifacts'], 0);
             expect(result['active'], hasLength(1));
@@ -322,6 +337,12 @@ void main() {
             );
             if (scenario == 'text-only-unplanned-image') {
               expect(jsonEncode(requests), contains('scope_denied'));
+            }
+            if (scenario == 'text-only-workspace-retry') {
+              final transcript = jsonEncode(requests);
+              expect(transcript, contains('terminal-workspace-cause'));
+              expect(transcript, contains('recovered'));
+              expect(transcript, isNot(contains('连续失败两次')));
             }
           } else {
             expect(result['missing'], isFalse);
