@@ -71,3 +71,9 @@ Genkit CLI 1.44.1 已可用；`verifyToolPermissions` 验证 flow 的 4 个 MCP 
 候选部署先用不可变 `build-$commit` 镜像启动独立 runner，仅传入 runner token，采用独立资源所有者标签，合成任务不再调用旧生产 runner。生产 `local` 标签延后到 `ACTIVATE` 才替换；验收成功和失败路径均清理候选 runner 及其独立标签资源。候选环境仍使用现有 ECS，无新服务器或设备采购。
 
 本地 `dart analyze` 通过；沙箱 Python 测试 11 项通过，任务范围/代码执行 22 项通过，真实 Genkit 工具循环 12 项通过（新增两次离线失败、第三次恢复成功场景，验证异常尾部可见），随后完整服务端回归 216 项通过。部署 Python 测试本机执行 7 项通过、10 项因 Linux 专用而跳过；Shell 语法检查通过，Linux 部署/回滚测试须由 GitHub Actions 执行。下一次真实发布门禁尚待完成，不能据此关闭 P06/P12/P13/P14。
+
+第二批提交 `df680b39ac8509c18e37891ced28d68547fcc0e6` 的 GitHub 构建 `40330868322` 成功，Linux 部署与恢复测试阶段、镜像构建测试和导出/导入校验均成功。远程作业 `20261026-212901-df680b3` 在候选 runner 健康检查处退出 1，仍未进入生产切换。检查发现控制 runner 自身错误携带子沙箱所有者标签，会被启动清理删除；已分离控制容器标签并保留退出日志直至清理，补充回归断言。
+
+Cloud Assistant 诊断调用 `t-hk0717k6j16o0sg`（退出 0）使用同一个不可变候选镜像及独立标签，获得 `status=ready`，并清理诊断容器；随后公开健康检查仍返回旧服务 `2026-10-26-official-learning-1`、contract `23`、`status=ok`。该诊断证明候选宿主启动可行，尚不证明官方技能门禁或生产发布成功。
+
+下一阶段参考样本：官方 `@modelcontextprotocol/server-filesystem@2.0.1`，npm integrity `sha512-K6n1daveB54TybQECAIzSp8DYq014Xfff159OtD1zjB48PONyMcQwyfMPw8jvhZnua/Jd+R/2HcCbTC3YVc3ag==`。2026-10-26 核对[上游变更记录](https://github.com/modelcontextprotocol/servers/blob/main/src/filesystem/CHANGELOG.md)、[路径修复公告](https://github.com/modelcontextprotocol/servers/security/advisories/GHSA-4gxg-m5jx-9j57)及[许可证](https://github.com/modelcontextprotocol/servers/blob/main/LICENSE)：2.0.1 修复路径边界，要求 Node >=24；上游处于 MIT/Apache-2.0 许可过渡，不能简写为全包 MIT。当前仅参考与隔离本地验证，未打包进产品。现有 Genkit MCP 1.0.0 的 `McpServerConfig.transport` 可接自定义 JSON 传输，无需在 API 进程启动不可信命令。本机 Node 24.15.0 下真实 stdio 初始化、14 个工具发现、写入后读取和目录越界拒绝通过；产品 stdio 适配仍未完成。

@@ -350,10 +350,10 @@ PY
 )"
   [[ -n "$runner_token" ]] || die "sandbox runner token missing"
   DEPLOY_CANDIDATE_RUNNER="xiaoqi-probe-runner-$DEPLOY_RELEASE_ID"
-  SANDBOX_RUNNER_TOKEN="$runner_token" docker run --detach --rm \
+  SANDBOX_RUNNER_TOKEN="$runner_token" docker run --detach \
     --name "$DEPLOY_CANDIDATE_RUNNER" --memory=384m --cpus=0.2 \
     --network xiaoqi-single-server_sandbox-control \
-    --label com.xiaoqi.release-probe-sandbox=true \
+    --label com.xiaoqi.release-probe-runner=true \
     --volume /var/run/docker.sock:/var/run/docker.sock:ro \
     --env SANDBOX_RUNNER_TOKEN \
     --env XIAOQI_SANDBOX_OWNER_LABEL=com.xiaoqi.release-probe-sandbox \
@@ -368,6 +368,7 @@ PY
     fi
     sleep 1
   done
+  docker logs --tail 80 "$DEPLOY_CANDIDATE_RUNNER" >&2 || true
   die "candidate sandbox runner failed health check"
 }
 

@@ -94,6 +94,11 @@ class ManagerTests(unittest.TestCase):
         self.assertNotIn('--env-file', runner)
         self.assertIn('--env SANDBOX_RUNNER_TOKEN', runner)
         self.assertIn('--env XIAOQI_SANDBOX_OWNER_LABEL=com.xiaoqi.release-probe-sandbox', runner)
+        # Startup cleanup deletes children with OWNER_LABEL. The runner itself
+        # must carry a separate label or it will delete its own container.
+        self.assertIn('--label com.xiaoqi.release-probe-runner=true', runner)
+        self.assertNotIn('--label com.xiaoqi.release-probe-sandbox=true', runner)
+        self.assertNotIn('--detach --rm', runner)
         self.assertNotIn('test-runner-token', '\n'.join(calls))
         retag = next(i for i,c in enumerate(calls) if c.startswith('tag xiaoqi-genkit-server:build-'))
         probe = next(i for i,c in enumerate(calls) if '/app/bin/verify_official_catalog' in c)
