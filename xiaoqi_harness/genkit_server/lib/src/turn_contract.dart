@@ -37,6 +37,8 @@ class TurnContract {
       const {'create', 'revise', 'workflow', 'continue'}.contains(mode);
   bool get readsImage => mode == 'inspect';
   bool get permitsImages => imageLimit > 0 && executesWorkflow;
+  // Routing recommends a workflow; it does not revoke safe task-local tools.
+  bool get permitsWorkspace => !const {'cancel', 'clarify'}.contains(mode);
 
   Map<String, dynamic> toJson() => {
     'mode': mode,
@@ -125,7 +127,7 @@ class TurnContract {
       mode: mode,
       imageLimit: workflow ? value['image_count'] as int : 0,
       answerRequired: value['answer_required'] as bool,
-      skillIds: workflow ? allowed('skill_ids', skills) : const [],
+      skillIds: allowed('skill_ids', skills),
       connectionIds: allowed('connection_ids', connections),
       targetArtifactId: value['target_artifact_id'] as String?,
       clarification: value['clarification'] as String?,
@@ -157,7 +159,7 @@ class TurnContract {
         : (budget is num && budget.toInt() < imageLimit
               ? budget.toInt().clamp(0, 12).toInt()
               : imageLimit),
-    skillIds: isInspection(text) ? const [] : skillIds,
+    skillIds: skillIds,
     connectionIds: connectionIds,
     targetArtifactId: targetArtifactId,
     clarification: clarification,
@@ -169,18 +171,10 @@ class TurnContract {
         .where((a) => a['media_type']?.toString().startsWith('image/') == true)
         .fold<int>(0, (sum, a) => sum + (a['count'] as num).toInt());
     if (images > imageLimit) return '图片交付超出本轮用户要求，不能通过计划扩大范围';
-    if (!executesWorkflow) {
-      final tools = (plan['tools'] as List? ?? const []).whereType<Map>();
-      if (tools.any(
-        (t) => const {
-          'generate_image',
-          'execute_skill_script',
-        }.contains(t['name']),
-      ))
-        return '本轮只需回答或读取结果，不执行旧工作流';
-      if ((plan['artifacts'] as List? ?? const []).isNotEmpty) {
-        return '本轮没有要求创建新的交付文件';
-      }
+    if (!permitsWorkspace &&
+        ((plan['tools'] as List? ?? const []).isNotEmpty ||
+            (plan['artifacts'] as List? ?? const []).isNotEmpty)) {
+      return '任务已停止或等待用户澄清，不能执行操作';
     }
     return null;
   }

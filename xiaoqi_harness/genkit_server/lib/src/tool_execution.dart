@@ -1,7 +1,9 @@
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
+import 'package:uuid/uuid.dart';
 
+import 'execution_limits.dart';
 import 'store.dart';
 import 'turn_contract.dart';
 
@@ -15,6 +17,7 @@ class ToolExecution {
     required this.requestIdentity,
     this.steeringSequence = 0,
     this.requestText,
+    this.limits = const ExecutionLimits(),
   });
 
   final CloudStore store;
@@ -24,6 +27,7 @@ class ToolExecution {
   final String requestIdentity;
   final int steeringSequence;
   final String? requestText;
+  final ExecutionLimits limits;
   String get key => 'task/$tenantId/$taskId';
 
   static String digest(Object value) =>
@@ -63,6 +67,9 @@ class ToolExecution {
         .any((i) => (i['sequence'] as num? ?? 0) > steeringSequence)) {
       throw StateError('有新的用户指令，请先更新任务范围');
     }
+    if (!contract.permitsWorkspace) {
+      throw StateError('任务已停止或等待用户澄清，不能执行操作');
+    }
     if (effect == 'image' && !contract.permitsImages) {
       throw StateError('本轮没有要求生成图片');
     }
@@ -92,7 +99,35 @@ class ToolExecution {
     effect: 'workflow',
     slot: slot,
     arguments: arguments,
-    limit: 24,
+    limit: limits.toolOperations,
+    invoke: invoke,
+  );
+
+  /// Read attempts are fresh (polling must not reuse a stale successful read).
+  /// They still share the task's operation budget and cancellation checks.
+  Future<Map<String, dynamic>> query({
+    required String slot,
+    required Map<String, dynamic> arguments,
+    required Future<Map<String, dynamic>> Function(String id) invoke,
+  }) => _operation(
+    effect: 'read',
+    slot: '$slot:${const Uuid().v4()}',
+    arguments: arguments,
+    limit: limits.toolOperations,
+    invoke: invoke,
+  );
+
+  /// Caller must validate a grant for these exact external operation arguments.
+  /// Intent routing alone neither grants nor revokes an explicit user approval.
+  Future<Map<String, dynamic>> authorizedExternal({
+    required String slot,
+    required Map<String, dynamic> arguments,
+    required Future<Map<String, dynamic>> Function(String id) invoke,
+  }) => _operation(
+    effect: 'external',
+    slot: slot,
+    arguments: arguments,
+    limit: limits.toolOperations,
     invoke: invoke,
   );
 
@@ -127,7 +162,9 @@ class ToolExecution {
           .where(
             (op) =>
                 op['request_identity'] == requestIdentity &&
-                op['effect'] == effect,
+                (effect == 'image'
+                    ? op['effect'] == 'image'
+                    : op['effect'] != 'image'),
           )
           .length;
       if (reserved >= limit) throw StateError('已达到本轮操作数量上限');

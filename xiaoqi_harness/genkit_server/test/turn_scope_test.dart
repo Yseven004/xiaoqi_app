@@ -160,21 +160,36 @@ void main() {
     },
   );
 
-  test('a model plan cannot authorize an image or an old skill script', () {
-    final contract = TurnContract(mode: 'answer', imageLimit: 0);
-    expect(
-      contract.validatePlan({
-        'tools': [
-          {'name': 'execute_skill_script'},
-        ],
-        'artifacts': [
-          {'media_type': 'image/png', 'count': 1},
-        ],
-      }),
-      isNotNull,
-    );
-    expect(() => execution(contract).check('workflow'), throwsStateError);
-  });
+  test(
+    'workspace planning does not authorize images or external workflows',
+    () {
+      final contract = TurnContract(mode: 'answer', imageLimit: 0);
+      expect(
+        contract.validatePlan({
+          'tools': [
+            {'name': 'execute_skill_script'},
+          ],
+          'artifacts': [
+            {'media_type': 'image/png', 'count': 1},
+          ],
+        }),
+        isNotNull,
+      );
+      expect(() => execution(contract).check('workflow'), throwsStateError);
+      expect(() => execution(contract).check('workspace'), returnsNormally);
+      expect(
+        contract.validatePlan({
+          'tools': [
+            {'name': 'execute_skill_script', 'count': 1},
+          ],
+          'artifacts': [
+            {'media_type': 'application/pdf', 'count': 1},
+          ],
+        }),
+        isNull,
+      );
+    },
+  );
 
   test(
     'a completed operation is reused and parameter drift is rejected',

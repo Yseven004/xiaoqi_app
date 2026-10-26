@@ -12,21 +12,26 @@ import 'package:uuid/uuid.dart';
 
 import 'store.dart';
 import 'capability_keywords.dart';
+import 'tool_access_policy.dart';
 
 Future<List<Map<String, dynamic>>> listAllMcpTools(
   Future<Map<String, dynamic>> Function(String? cursor) readPage,
 ) async {
   final tools = <Map<String, dynamic>>[];
   final seen = <String>{};
+  var catalogBytes = 0;
   String? cursor;
   for (var pageNumber = 0; pageNumber < 100; pageNumber++) {
     final page = await readPage(cursor).timeout(const Duration(seconds: 20));
-    tools.addAll(
-      (page['tools'] as List? ?? const []).whereType<Map>().map(
-        (tool) => Map<String, dynamic>.from(tool),
-      ),
-    );
-    if (tools.length > 100) throw StateError('MCP 工具数量超过 100 个，当前暂不支持');
+    final pageTools = (page['tools'] as List? ?? const [])
+        .whereType<Map>()
+        .map((tool) => Map<String, dynamic>.from(tool))
+        .toList();
+    catalogBytes += utf8.encode(jsonEncode(pageTools)).length;
+    if (catalogBytes > 16 * 1024 * 1024) {
+      throw StateError('MCP 工具目录超过服务端 16 MB 资源预算');
+    }
+    tools.addAll(pageTools);
     cursor = page['nextCursor']?.toString();
     if (cursor == null || cursor.isEmpty) return tools;
     if (!seen.add(cursor)) throw StateError('MCP 工具目录返回重复分页标记');
@@ -78,6 +83,7 @@ class McpCatalogEntry {
     this.packageVersion,
     this.reason,
     this.keywords = const [],
+    this.toolEffects = const {},
   });
 
   final String id;
@@ -98,6 +104,7 @@ class McpCatalogEntry {
   final String? packageVersion;
   final String? reason;
   final List<String> keywords;
+  final Map<String, ToolEffect> toolEffects;
 
   bool get requiresLogin => authMode == 'oauth';
 
@@ -143,6 +150,14 @@ class McpCatalogEntry {
         packageVersion: raw['package_version']?.toString(),
         reason: raw['reason']?.toString(),
         keywords: parseCapabilityKeywords(raw['keywords'] ?? const []),
+        toolEffects: {
+          for (final entry
+              in (raw['tool_effects'] is Map
+                      ? raw['tool_effects'] as Map
+                      : const {})
+                  .entries)
+            entry.key.toString(): ToolEffect.parse(entry.value),
+        },
       );
     } on FormatException {
       return null;
@@ -178,6 +193,20 @@ class McpConnectionService {
   discoverTools;
   static const _uuid = Uuid();
   static final _cipher = AesGcm.with256bits();
+
+  ToolEffect effectFor(McpConnectionCredentials connection, String tool) {
+    final entry = catalog()
+        .where(
+          (entry) =>
+              entry.id == connection.catalogId &&
+              entry.status == 'verified' &&
+              entry.url == connection.url,
+        )
+        .firstOrNull;
+    final effect = entry?.toolEffects[tool] ?? ToolEffect.unknown;
+    // A remote server cannot claim our isolated task workspace as its own.
+    return effect == ToolEffect.workspace ? ToolEffect.unknown : effect;
+  }
 
   List<McpCatalogEntry> catalog() {
     final raw = Platform.environment['XIAOQI_MCP_CATALOG_JSON'] ?? '[]';

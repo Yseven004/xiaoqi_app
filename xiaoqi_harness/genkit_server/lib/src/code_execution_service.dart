@@ -7,6 +7,7 @@ import 'package:archive/archive.dart';
 import 'package:genkit/genkit.dart';
 import 'package:uuid/uuid.dart';
 
+import 'execution_limits.dart';
 import 'store.dart';
 
 class NetworkPermissionRequired implements Exception {
@@ -21,10 +22,12 @@ class DockerCodeExecutionService {
     this.store, {
     String? pythonExecutable,
     String? workerPath,
+    this.limits = const ExecutionLimits(),
   }) : _pythonExecutable = pythonExecutable,
        _workerPath = workerPath;
 
   final CloudStore store;
+  final ExecutionLimits limits;
   final String? _pythonExecutable;
   final String? _workerPath;
   final _uuid = const Uuid();
@@ -132,6 +135,7 @@ class DockerCodeExecutionService {
     required CancellationToken cancellation,
     String? scriptPath,
     List<String> arguments = const [],
+    List<String>? artifactIds,
   }) async {
     cancellation.throwIfCancelled();
     if (code.trim().isEmpty || utf8.encode(code).length > 64 * 1024) {
@@ -140,12 +144,13 @@ class DockerCodeExecutionService {
     if (!const {'python', 'javascript', 'typescript'}.contains(language)) {
       throw const FormatException('不支持的代码语言');
     }
-    if (scriptPath != null) _claimSkillScript(tenantId, taskId);
     final executionMaterials = _materialsForNextExecution(
       tenantId: tenantId,
       taskId: taskId,
       materials: materials,
+      artifactIds: artifactIds,
     );
+    _claimExecution(tenantId, taskId, skillScript: scriptPath != null);
 
     final executable =
         _pythonExecutable ??
@@ -328,18 +333,33 @@ class DockerCodeExecutionService {
     }
   }
 
-  void _claimSkillScript(String tenantId, String taskId) {
+  void _claimExecution(
+    String tenantId,
+    String taskId, {
+    required bool skillScript,
+  }) {
     final key = 'task/$tenantId/$taskId';
     for (var attempt = 0; attempt < 8; attempt++) {
       final current = store.get(key);
       if (current == null) throw StateError('任务不存在');
-      if ((current.value['skill_script_runs'] as num? ?? 0).toInt() >= 12) {
+      if (current.value['cancel_requested'] == true ||
+          const {'cancelled', 'stopped'}.contains(current.value['status'])) {
+        throw StateError('任务已停止，不能继续执行操作');
+      }
+      final scripts = (current.value['skill_script_runs'] as num? ?? 0).toInt();
+      final executions = (current.value['code_execution_runs'] as num? ?? 0)
+          .toInt();
+      if (executions >= limits.toolOperations) {
+        throw StateError('本次任务的代码执行预算已用完');
+      }
+      if (skillScript && scripts >= limits.scriptExecutions) {
         throw StateError('本次任务的技能脚本执行次数已用完');
       }
       try {
         store.put(key, {
           ...current.value,
-          'skill_script_runs': 1,
+          'code_execution_runs': executions + 1,
+          if (skillScript) 'skill_script_runs': scripts + 1,
           'updated_at': _now(),
         }, current.revision);
         return;
@@ -347,83 +367,66 @@ class DockerCodeExecutionService {
         continue;
       }
     }
-    throw StateError('无法锁定技能脚本执行次数');
+    throw StateError('无法锁定代码执行预算');
   }
 
   List<Map<String, dynamic>> _materialsForNextExecution({
     required String tenantId,
     required String taskId,
     required List<Map<String, dynamic>> materials,
+    List<String>? artifactIds,
   }) {
     const maxMaterialBytes = 20 * 1024 * 1024;
-    const reusableExtensions = {
-      '.adoc',
-      '.cjs',
-      '.csv',
-      '.css',
-      '.html',
-      '.htm',
-      '.js',
-      '.json',
-      '.markdown',
-      '.md',
-      '.mjs',
-      '.mts',
-      '.py',
-      '.rst',
-      '.rtf',
-      '.sh',
-      '.tex',
-      '.toml',
-      '.tsv',
-      '.ts',
-      '.txt',
-      '.xml',
-      '.yaml',
-      '.yml',
-    };
     final result = materials
         .map((material) => Map<String, dynamic>.from(material))
         .toList();
     var totalBytes = result.fold<int>(0, (total, material) {
-      final value = material['text'] ?? material['content'] ?? '';
+      if (material['base64'] is String) {
+        return total + base64Decode(material['base64'] as String).length;
+      }
+      final value = material['content'] ?? material['text'] ?? '';
       return total + utf8.encode(value.toString()).length;
     });
-    if (totalBytes >= maxMaterialBytes) return result;
+    if (totalBytes > maxMaterialBytes) {
+      throw const FormatException('任务资料超过 20 MB');
+    }
 
     final task = store.get('task/$tenantId/$taskId')?.value;
     final artifacts = (task?['artifacts'] as List? ?? const [])
         .whereType<Map>()
         .toList()
         .reversed;
-    var reused = 0;
+    final requestedIds = artifactIds?.toSet();
+    final foundIds = <String>{};
+    final reusedNames = <String>{};
     for (final artifact in artifacts) {
-      if (reused >= 10 || totalBytes >= maxMaterialBytes) break;
+      final id = artifact['id']?.toString() ?? '';
+      if (requestedIds != null && !requestedIds.contains(id)) continue;
       final name = artifact['name']?.toString() ?? '';
-      final extension = name.lastIndexOf('.') < 0
-          ? ''
-          : name.substring(name.lastIndexOf('.')).toLowerCase();
-      if (!reusableExtensions.contains(extension)) continue;
-      final mediaType = artifact['media_type']?.toString() ?? '';
-      if (!mediaType.startsWith('text/') &&
-          mediaType != 'application/json' &&
-          mediaType != 'application/xml' &&
-          mediaType != 'application/rtf' &&
-          mediaType != 'application/x-tex') {
-        continue;
-      }
+      if (requestedIds == null && reusedNames.contains(name)) continue;
       final objectKey = artifact['object_key']?.toString() ?? '';
       if (!objectKey.startsWith('tenants/$tenantId/tasks/$taskId/artifacts/')) {
         continue;
       }
       final bytes = store.getObject(objectKey);
-      if (bytes.length > 10 * 1024 * 1024 ||
-          totalBytes + bytes.length > maxMaterialBytes) {
+      if (totalBytes + bytes.length > maxMaterialBytes) {
+        if (requestedIds != null) {
+          throw const FormatException('选中的产物与任务资料总大小超过 20 MB');
+        }
         continue;
       }
-      result.add({'name': name, 'base64': base64Encode(bytes)});
+      result.add({
+        'name': name,
+        'artifact_id': id,
+        'media_type': artifact['media_type'],
+        'base64': base64Encode(bytes),
+      });
       totalBytes += bytes.length;
-      reused++;
+      foundIds.add(id);
+      reusedNames.add(name);
+    }
+    if (requestedIds != null && !foundIds.containsAll(requestedIds)) {
+      throw StateError('选中的产物不属于当前任务或已不可用');
     }
     return result;
   }

@@ -14,6 +14,8 @@ void main() {
     'missing',
     'mcp-success',
     'mcp-error',
+    'mcp-read',
+    'mcp-large',
   ]) {
     test(
       '$scenario exercises real Genkit discovery, tool loop and delivery gate',
@@ -43,9 +45,13 @@ void main() {
             final catalog = (prompt['skills'] as List).whereType<Map>();
             final connectors = (prompt['connections'] as List).whereType<Map>();
             final proposal = {
-              'mode': 'workflow',
+              'mode': const {'mcp-read', 'mcp-large'}.contains(scenario)
+                  ? 'answer'
+                  : 'workflow',
               'answer_required': true,
-              'image_count': scenario.startsWith('text-only')
+              'image_count':
+                  const {'mcp-read', 'mcp-large'}.contains(scenario) ||
+                      scenario.startsWith('text-only')
                   ? 0
                   : scenario.startsWith('mcp-')
                   ? 1
@@ -94,7 +100,23 @@ void main() {
           String? tool;
           Map<String, dynamic>? input;
           if (preparing && scenario.startsWith('mcp-')) {
+            final large = scenario == 'mcp-large';
+            final directoryName = large
+                ? tools.firstWhere(
+                        (tool) => tool['function']['description']
+                            .toString()
+                            .contains('“search_tools”'),
+                      )['function']['name']
+                      as String
+                : null;
             final remoteName = tools
+                .where(
+                  (tool) =>
+                      !large ||
+                      tool['function']['description'].toString().contains(
+                        '“call_tool”',
+                      ),
+                )
                 .map((tool) => tool['function']?['name']?.toString())
                 .whereType<String>()
                 .where((name) => name.startsWith('mcp_'))
@@ -106,15 +128,23 @@ void main() {
                 'skill_ids': [],
                 'no_skill_reason': 'This task uses the selected MCP connector',
                 'tools': [
+                  if (directoryName != null)
+                    {'name': directoryName, 'count': 1},
                   {'name': remoteName, 'count': 1},
                 ],
                 'artifacts': [
-                  {'media_type': 'image/*', 'count': 1},
+                  if (!const {'mcp-read', 'mcp-large'}.contains(scenario))
+                    {'media_type': 'image/*', 'count': 1},
                 ],
               };
+            } else if (directoryName != null && !called(directoryName)) {
+              tool = directoryName;
+              input = {'query': 'fetch_card_119'};
             } else if (!called(remoteName)) {
               tool = remoteName;
-              input = {};
+              input = large
+                  ? {'tool_name': 'fetch_card_119', 'arguments': {}}
+                  : {};
             }
           } else if (preparing && scenario != 'missing') {
             if (scenario == 'implicit' && !called('use_skill')) {
@@ -253,8 +283,13 @@ void main() {
             );
           }
           if (scenario.startsWith('mcp-')) {
-            expect(result['before_approval'], 0);
+            expect(
+              result['before_approval'],
+              const {'mcp-read', 'mcp-large'}.contains(scenario) ? 1 : 0,
+            );
             expect(result['mcp_calls'], 1);
+            if (scenario == 'mcp-large')
+              expect(result['called_tools'], ['fetch_card_119']);
             expect(result['missing'], scenario == 'mcp-error');
             expect(result['artifacts'], scenario == 'mcp-error' ? 0 : 1);
             expect(

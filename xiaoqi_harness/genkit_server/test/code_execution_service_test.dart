@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:genkit/genkit.dart';
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
+import 'package:xiaoqi_genkit_server/src/execution_limits.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
 void main() {
@@ -89,34 +90,202 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
     },
   );
 
-  test('limits skill scripts to twelve executions per task', () async {
-    final service = DockerCodeExecutionService(
-      store,
-      pythonExecutable: pythonExecutable(),
-      workerPath: worker.path,
-    );
-    Future<String> runScript() => service.execute(
-      tenantId: 'personal',
-      taskId: 'task-code',
-      code: 'print("skill")',
-      language: 'python',
-      authorizedDomains: const [],
-      materials: const [],
-      skillFiles: const {
-        'scripts/test.py': [112],
-      },
-      cancellation: CancellationController().token,
-      scriptPath: 'scripts/test.py',
-    );
+  test(
+    'counts actual script attempts and retains the budget on resume',
+    () async {
+      final service = DockerCodeExecutionService(
+        store,
+        pythonExecutable: pythonExecutable(),
+        workerPath: worker.path,
+        limits: const ExecutionLimits(scriptExecutions: 3),
+      );
+      Future<String> runScript() => service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: 'print("skill")',
+        language: 'python',
+        authorizedDomains: const [],
+        materials: const [],
+        skillFiles: const {
+          'scripts/test.py': [112],
+        },
+        cancellation: CancellationController().token,
+        scriptPath: 'scripts/test.py',
+      );
 
-    await runScript();
-    final current = store.get('task/personal/task-code')!;
-    store.put('task/personal/task-code', {
-      ...current.value,
-      'skill_script_runs': 12,
-    }, current.revision);
-    await expectLater(runScript(), throwsA(isA<StateError>()));
-  });
+      for (var run = 1; run <= 3; run++) {
+        await runScript();
+        final value = store.get('task/personal/task-code')!.value;
+        expect(value['skill_script_runs'], run);
+        expect(value['code_execution_runs'], run);
+      }
+      await expectLater(runScript(), throwsA(isA<StateError>()));
+      final resumed = DockerCodeExecutionService(
+        store,
+        pythonExecutable: pythonExecutable(),
+        workerPath: worker.path,
+        limits: const ExecutionLimits(scriptExecutions: 3),
+      );
+      await expectLater(
+        resumed.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'print("skill")',
+          language: 'python',
+          authorizedDomains: const [],
+          materials: const [],
+          skillFiles: const {
+            'scripts/test.py': [112],
+          },
+          scriptPath: 'scripts/test.py',
+          cancellation: CancellationController().token,
+        ),
+        throwsStateError,
+      );
+    },
+  );
+
+  test(
+    'failed executions consume attempts and cannot reset the budget',
+    () async {
+      worker.writeAsStringSync('''
+import json
+print(json.dumps({"type":"result","ok":False,"error":"script failed"}), flush=True)
+''');
+      final service = DockerCodeExecutionService(
+        store,
+        pythonExecutable: pythonExecutable(),
+        workerPath: worker.path,
+        limits: const ExecutionLimits(toolOperations: 2),
+      );
+      Future<String> run() => service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: 'raise Exception()',
+        language: 'python',
+        authorizedDomains: const [],
+        materials: const [],
+        skillFiles: const {},
+        cancellation: CancellationController().token,
+      );
+      for (var attempt = 1; attempt <= 2; attempt++) {
+        await expectLater(run(), throwsStateError);
+        expect(
+          store.get('task/personal/task-code')!.value['code_execution_runs'],
+          attempt,
+        );
+      }
+      await expectLater(
+        run(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('预算已用完'),
+          ),
+        ),
+      );
+      expect(
+        store.get('task/personal/task-code')!.value['code_execution_runs'],
+        2,
+      );
+    },
+  );
+
+  for (final format in {
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'docx':
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'pdf': 'application/pdf',
+    'png': 'image/png',
+  }.entries) {
+    test('reuses ${format.key} bytes by owned task artifact ID', () async {
+      final bytes = [0, 255, 128, 80, 75, 3, 4, 10];
+      const id = 'binary-artifact';
+      const key = 'tenants/personal/tasks/task-code/artifacts/$id';
+      store.putTaskBlob(key, bytes);
+      final task = store.get('task/personal/task-code')!;
+      store.put('task/personal/task-code', {
+        ...task.value,
+        'artifacts': [
+          {
+            'id': id,
+            'name': 'report.${format.key}',
+            'media_type': format.value,
+            'object_key': key,
+          },
+        ],
+      }, task.revision);
+      worker.writeAsStringSync('''
+import base64, json, sys
+request = json.loads(sys.stdin.readline())
+material = next(item for item in request["materials"] if item["artifact_id"] == "$id")
+assert base64.b64decode(material["base64"]) == bytes([${bytes.join(',')}])
+assert material["media_type"] == "${format.value}"
+print(json.dumps({"type":"result","ok":True,"stdout":"binary preserved","artifacts":[]}), flush=True)
+''');
+      final service = DockerCodeExecutionService(
+        store,
+        pythonExecutable: pythonExecutable(),
+        workerPath: worker.path,
+      );
+      final result = await service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: 'print("read binary")',
+        language: 'python',
+        authorizedDomains: const [],
+        materials: const [],
+        skillFiles: const {},
+        artifactIds: const [id],
+        cancellation: CancellationController().token,
+      );
+      expect(result, contains('binary preserved'));
+    });
+  }
+
+  test(
+    'cannot inject another task artifact through a forged object key',
+    () async {
+      const id = 'foreign';
+      const key = 'tenants/other/tasks/private/artifacts/$id';
+      store.putTaskBlob(key, [1, 2, 3]);
+      final task = store.get('task/personal/task-code')!;
+      store.put('task/personal/task-code', {
+        ...task.value,
+        'artifacts': [
+          {
+            'id': id,
+            'name': 'secret.pdf',
+            'media_type': 'application/pdf',
+            'object_key': key,
+          },
+        ],
+      }, task.revision);
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'print("read")',
+          language: 'python',
+          authorizedDomains: const [],
+          materials: const [],
+          skillFiles: const {},
+          artifactIds: const [id],
+          cancellation: CancellationController().token,
+        ),
+        throwsStateError,
+      );
+      expect(
+        store.get('task/personal/task-code')!.value['code_execution_runs'],
+        isNull,
+      );
+    },
+  );
 
   test(
     'makes text artifacts available to the next isolated script call',

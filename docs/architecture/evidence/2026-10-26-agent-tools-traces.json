@@ -1,0 +1,37 @@
+{
+  "date": "2026-10-26",
+  "scope": "local real Genkit agent loop with simulated model and MCP endpoints",
+  "productionVerified": false,
+  "cliVersion": "1.44.1",
+  "flow": "verifyToolPermissions",
+  "flowTraceId": "cbf98096b32e1006345f382c69dde1ab",
+  "flowResult": {
+    "scenario": "all",
+    "passed": true,
+    "summary": "00:51 +4: All tests passed!"
+  },
+  "toolTraceEvidence": [
+    {
+      "traceId": "ef80c0fba5292a6f31e7b186ef9238a3",
+      "registeredTools": ["mcp_b718f135_29693a83b379", "mcp_b718f135_d12596698d9b"],
+      "coveredBehavior": "Search a 120-tool directory, then call the selected tool through its validated gateway"
+    },
+    {
+      "traceId": "f49427ef1f2e15254c348c3990a4e684",
+      "registeredTools": ["mcp_b718f135_2f204180382b"],
+      "coveredBehavior": "Trusted read in answer mode executes without an approval interrupt"
+    },
+    {
+      "traceId": "e8a76cb46722e18a233482f84adde5a5",
+      "registeredTools": ["mcp_b718f135_f702e46cb136"],
+      "coveredBehavior": "Unknown external tool approval and execution path; remote annotations do not grant permission"
+    }
+  ],
+  "limitations": [
+    "The verification covers local transport and agent behavior, not actual third-party accounts or production effects.",
+    "The flow result passed; the CLI process returned exit code 1 during Windows process cleanup because wmic.exe is absent.",
+    "A subsequent process inventory found no surviving bin/verify_tool_permissions.dart process.",
+    "CLI trace:get --format json returned these traces successfully; trace:list in this CLI version does not support --format.",
+    "A successful Genkit tool span is not evidence that an MCP application result succeeded; the mcp-error fixture independently checks the failed application result."
+  ]
+}

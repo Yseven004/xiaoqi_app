@@ -125,6 +125,38 @@ void main() {
     );
   });
 
+  test('routing omissions do not hide installed skills or workspace tools', () {
+    for (final mode in ['answer', 'workflow']) {
+      final names = agentToolNamesForRequest(
+        contract: TurnContract(mode: mode, imageLimit: 0),
+        capabilitySelected: true,
+        skillsAvailable: true,
+        codeExecutionAvailable: true,
+        imageGenerationAvailable: true,
+      );
+      expect(
+        names,
+        containsAll([
+          'use_skill',
+          'read_skill_resource',
+          'execute_skill_script',
+          'execute_python',
+        ]),
+      );
+      expect(names, isNot(contains('generate_image')));
+    }
+    for (final mode in ['cancel', 'clarify']) {
+      expect(
+        agentToolNamesForRequest(
+          contract: TurnContract(mode: mode, imageLimit: 0),
+          skillsAvailable: true,
+          codeExecutionAvailable: true,
+        ),
+        isEmpty,
+      );
+    }
+  });
+
   test(
     'explains a single selected capability and gives a next action',
     () async {
