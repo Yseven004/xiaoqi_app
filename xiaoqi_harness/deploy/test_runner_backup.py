@@ -22,7 +22,7 @@ for mount in mounts:
     source, target, *_ = mount.split(':')
     if source in ('app-test', 'runner-test'):
         source = str(root/source)
-    command = re.sub(re.escape(target) + r'(?=/|\s|$)', lambda _: shlex.quote(source), command)
+    command = re.sub(re.escape(target) + r'(?=/|\s|;|$)', lambda _: shlex.quote(source), command)
 sys.exit(subprocess.run(['/bin/sh', '-c', command]).returncode)
 '''
 
