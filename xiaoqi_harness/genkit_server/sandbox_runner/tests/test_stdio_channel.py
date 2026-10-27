@@ -1,5 +1,6 @@
 import json
 import socket
+import threading
 import unittest
 
 from stdio_channel import StdioChannel, MAX_MESSAGE_BYTES
@@ -40,6 +41,22 @@ class StdioChannelTests(unittest.TestCase):
         self.assertTrue(self.channel.closed)
         self.assertIsNotNone(self.channel.error)
         self.assertEqual(self.channel.poll()['messages'], [])
+
+    def test_cancel_wakes_long_poll_before_completion_acknowledgment(self):
+        entered = threading.Event()
+        finished = threading.Event()
+        def poll():
+            entered.set()
+            self.channel.poll(timeout=15)
+            finished.set()
+        thread = threading.Thread(target=poll, daemon=True)
+        thread.start()
+        self.assertTrue(entered.wait(timeout=1))
+        self.channel.close()
+        self.assertTrue(finished.wait(timeout=1))
+        # Acknowledgment needs this same lock; it must not wait 15 seconds.
+        self.channel.discard()
+        thread.join(timeout=1)
 
     def test_partial_message_at_exit_is_reported(self):
         self.peer.sendall(self.frame(1, b'{"jsonrpc":"2.0"'))

@@ -17,7 +17,7 @@ MAX_DIAGNOSTIC_BYTES = 16 * 1024
 
 class StdioChannel:
     def __init__(self) -> None:
-        self._messages: queue.Queue[dict[str, Any]] = queue.Queue(MAX_PENDING_MESSAGES)
+        self._messages: queue.Queue[dict[str, Any] | None] = queue.Queue(MAX_PENDING_MESSAGES)
         self._write_lock = threading.Lock()
         self._poll_lock = threading.Lock()
         self._pending: dict[str, Any] | None = None
@@ -71,7 +71,9 @@ class StdioChannel:
     def _poll(self, timeout: float) -> dict[str, Any]:
         messages = []
         try:
-            messages.append(self._pending if self._pending is not None else self._messages.get(timeout=0 if self.closed else timeout))
+            message = self._pending if self._pending is not None else self._messages.get(timeout=0 if self.closed else timeout)
+            if message is not None:
+                messages.append(message)
             self._pending = None
         except queue.Empty:
             pass
@@ -79,6 +81,8 @@ class StdioChannel:
         while len(messages) < 32:
             try:
                 message = self._messages.get_nowait()
+                if message is None:
+                    break
                 length = len(self._encode(message))
                 if messages and size + length > MAX_MESSAGE_BYTES:
                     self._pending = message
@@ -101,12 +105,19 @@ class StdioChannel:
 
     def close(self) -> None:
         self._closed.set()
+        self._wake_poll()
         if self._socket is not None:
             try:
                 self._socket.shutdown(2)
             except OSError:
                 pass
             self._socket.close()
+
+    def _wake_poll(self) -> None:
+        try:
+            self._messages.put_nowait(None)
+        except queue.Full:
+            pass
 
     def _read_exact(self, count: int) -> bytes:
         result = bytearray()
@@ -158,3 +169,4 @@ class StdioChannel:
                 self._error = "MCP process connection interrupted"
         finally:
             self._closed.set()
+            self._wake_poll()
