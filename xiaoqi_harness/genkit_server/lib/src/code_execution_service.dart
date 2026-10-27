@@ -12,10 +12,19 @@ import 'store.dart';
 import 'sandbox_mcp_transport.dart';
 
 class NetworkPermissionRequired implements Exception {
-  const NetworkPermissionRequired(this.domains, this.purpose);
+  const NetworkPermissionRequired(
+    this.domains,
+    this.purpose, {
+    required this.approvalHash,
+    required this.scopeHash,
+    this.details = const {},
+  });
 
   final List<String> domains;
   final String purpose;
+  final String approvalHash;
+  final String scopeHash;
+  final Map<String, dynamic> details;
 }
 
 /// The runner request was submitted: an external effect may already have
@@ -827,6 +836,38 @@ class DockerCodeExecutionService {
       }
     }
     throw StateError('无法锁定代码执行预算');
+  }
+
+  String inputFingerprint({
+    required String tenantId,
+    required String taskId,
+    required List<Map<String, dynamic>> materials,
+    List<String>? artifactIds,
+  }) => inputBinding(
+    tenantId: tenantId,
+    taskId: taskId,
+    materials: materials,
+    artifactIds: artifactIds,
+  ).fingerprint;
+
+  ({String fingerprint, List<String> names}) inputBinding({
+    required String tenantId,
+    required String taskId,
+    required List<Map<String, dynamic>> materials,
+    List<String>? artifactIds,
+  }) {
+    final inputs = _materialsForNextExecution(
+      tenantId: tenantId,
+      taskId: taskId,
+      materials: materials,
+      artifactIds: artifactIds,
+    );
+    return (
+      fingerprint: sha256.convert(utf8.encode(jsonEncode(inputs))).toString(),
+      names: inputs
+          .map((input) => input['name']?.toString() ?? '任务文件')
+          .toList(),
+    );
   }
 
   List<Map<String, dynamic>> _materialsForNextExecution({

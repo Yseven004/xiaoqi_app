@@ -71,6 +71,10 @@ class ToolExecution {
         'authorized_network_domains': <String>[],
         'requested_network_domains': <String>[],
         'network_purpose': null,
+        'network_details': null,
+        'requested_network_action_hash': null,
+        'requested_network_scope_hash': null,
+        'network_resume': null,
       };
     });
   }
@@ -113,6 +117,13 @@ class ToolExecution {
     if ((value['tool_authorization_denials'] as Map?)?[scopeHash] == true)
       return false;
     return null;
+  }
+
+  bool isAuthorizationScopeDenied(String scopeHash) {
+    check('read');
+    return (store.get(key)?.value['tool_authorization_denials']
+            as Map?)?[scopeHash] ==
+        true;
   }
 
   void check(String effect) {
@@ -207,12 +218,31 @@ class ToolExecution {
     invoke: invoke,
   );
 
+  /// Code attempts reserve their budget in DockerCodeExecutionService. This
+  /// entry supplies effect identity/result reuse without charging twice.
+  Future<Map<String, dynamic>> authorizedCode({
+    required String slot,
+    required Map<String, dynamic> arguments,
+    required Future<Map<String, dynamic>> Function(String id) invoke,
+    required bool Function(Object error) effectsPossible,
+  }) => _operation(
+    effect: 'external',
+    slot: slot,
+    arguments: arguments,
+    limit: limits.toolOperations,
+    invoke: invoke,
+    codeBudget: true,
+    effectsPossible: effectsPossible,
+  );
+
   Future<Map<String, dynamic>> _operation({
     required String effect,
     required String slot,
     required Map<String, dynamic> arguments,
     required int limit,
     required Future<Map<String, dynamic>> Function(String) invoke,
+    bool codeBudget = false,
+    bool Function(Object error)? effectsPossible,
   }) async {
     check(effect);
     final operationId = digest([requestIdentity, effect, slot]);
@@ -231,7 +261,9 @@ class ToolExecution {
           cached = Map<String, dynamic>.from(previous['result'] as Map);
           return value;
         }
-        throw StateError('操作正在处理或结果未知，不能重复提交');
+        if (previous['status'] != 'not_submitted') {
+          throw StateError('操作正在处理或结果未知，不能重复提交');
+        }
       }
       final reserved = effect != 'image'
           ? taskToolOperationsUsed(value)
@@ -247,6 +279,7 @@ class ToolExecution {
       operations[operationId] = {
         'request_identity': requestIdentity,
         'effect': effect,
+        if (codeBudget) 'budget_owner': 'code',
         'arguments_hash': hash,
         'status': 'running',
       };
@@ -257,9 +290,15 @@ class ToolExecution {
       final result = await invoke(operationId);
       _finish(operationId, 'succeeded', result);
       return result;
-    } catch (_) {
+    } catch (error) {
       // A failed HTTP await does not prove the provider rejected the request.
-      _finish(operationId, 'unknown', null);
+      _finish(
+        operationId,
+        codeBudget && effectsPossible?.call(error) == false
+            ? 'not_submitted'
+            : 'unknown',
+        null,
+      );
       rethrow;
     }
   }

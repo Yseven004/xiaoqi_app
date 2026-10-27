@@ -1141,12 +1141,16 @@ class CapabilityCloudSync {
     return isTerminal(status) && !cleanupPending ? status : null;
   }
 
-  Future<void> authorizeTaskDomains(String taskId, List<String> domains) async {
+  Future<void> authorizeTaskDomains(
+    String taskId,
+    List<String> domains, {
+    required String approvalHash,
+  }) async {
     final token = await _requireToken();
     final response = await _client.post(
       Uri.parse('$_baseUrl/agent/tasks/$taskId/authorize-network'),
       headers: _headers(token),
-      body: jsonEncode({'domains': domains}),
+      body: jsonEncode({'domains': domains, 'approval_hash': approvalHash}),
     );
     _checked(response);
   }

@@ -8,6 +8,7 @@ import 'capability_keywords.dart';
 import 'capability_scope.dart';
 import 'artifact_context.dart';
 import 'release.dart';
+import 'execution_limits.dart';
 import 'skill_market.dart';
 import 'package:yaml/yaml.dart';
 
@@ -2185,6 +2186,9 @@ class XiaoqiApi {
               'status': 'awaiting_network_permission',
               'requested_network_domains': required.domains,
               'network_purpose': required.purpose,
+              'network_details': required.details,
+              'requested_network_action_hash': required.approvalHash,
+              'requested_network_scope_hash': required.scopeHash,
               'updated_at': _now(),
             },
           );
@@ -2192,6 +2196,8 @@ class XiaoqiApi {
             'type': 'network_permission_required',
             'domains': required.domains,
             'purpose': required.purpose,
+            'approval_hash': required.approvalHash,
+            'details': required.details,
           });
           _logTaskEvent('awaiting_network_permission', taskId, {
             'domain_count': required.domains.length,
@@ -2305,6 +2311,8 @@ class XiaoqiApi {
         ],
         'requested_network_domains': value['requested_network_domains'] ?? [],
         'network_purpose': value['network_purpose'],
+        'network_details': value['network_details'],
+        'network_approval_hash': value['requested_network_action_hash'],
         'cloud_revision': doc.revision,
       });
     } on FormatException catch (error) {
@@ -2379,6 +2387,11 @@ class XiaoqiApi {
     try {
       final body = await _body(request, 2048);
       final domains = body['domains'];
+      final approvalHash = body['approval_hash'];
+      if (approvalHash is! String ||
+          !RegExp(r'^[a-f0-9]{64}$').hasMatch(approvalHash)) {
+        return _error('需要本次联网操作的确认标识', 400);
+      }
       if (domains is! List || domains.isEmpty)
         return _error('需要明确授权至少一个域名', 400);
       final requested =
@@ -2402,11 +2415,20 @@ class XiaoqiApi {
       if (doc == null) return _error('任务不存在', 404);
       if (doc.value['status'] != 'awaiting_network_permission')
         return _error('任务当前没有待确认的联网请求', 409);
+      if (doc.value['requested_network_action_hash'] != approvalHash) {
+        return _error('联网操作已变更，请查看当前确认请求', 409);
+      }
+      final scopeHash = doc.value['requested_network_scope_hash'];
+      if ((doc.value['tool_authorization_denials'] as Map?)?[scopeHash] ==
+          true) {
+        return _error('本任务已拒绝联网，请更新任务后重新确认', 409);
+      }
       final asked =
           (doc.value['requested_network_domains'] as List? ?? const [])
               .map((item) => item.toString())
               .toSet();
-      if (!requested.toSet().difference(asked).isEmpty)
+      if (requested.length != asked.length ||
+          !requested.toSet().containsAll(asked))
         return _error('只能授权本次任务已说明的域名', 400);
       final inputKey = doc.value['input_object_key']?.toString();
       if (inputKey == null || inputKey.isEmpty) {
@@ -2415,26 +2437,39 @@ class XiaoqiApi {
       final savedInput =
           jsonDecode(utf8.decode(store.getImmutable(inputKey)['input.json']!))
               as Map<String, dynamic>;
-      _mutateTask(
-        key,
-        (value) => {
+      _mutateTask(key, (value) {
+        if (value['status'] != 'awaiting_network_permission' ||
+            value['requested_network_action_hash'] != approvalHash ||
+            (value['tool_authorization_denials'] as Map?)?[scopeHash] == true) {
+          throw StateError('联网确认已失效');
+        }
+        final decisions = value['tool_authorizations'] as Map? ?? const {};
+        if (!decisions.containsKey(approvalHash) &&
+            decisions.length >= const ExecutionLimits().toolOperations) {
+          throw ExecutionBudgetExceeded('本任务的操作确认数量已达到上限');
+        }
+        return {
           ...value,
-          'authorized_network_domains': {
-            ...(value['authorized_network_domains'] as List? ?? const []).map(
-              (item) => item.toString(),
-            ),
-            ...requested,
-          }.toList()..sort(),
+          'tool_authorizations': {
+            ...?(value['tool_authorizations'] as Map?),
+            approvalHash: true,
+          },
           'requested_network_domains': [],
+          'requested_network_action_hash': null,
+          'requested_network_scope_hash': null,
           'status': 'queued',
           'attempt': (value['attempt'] as num? ?? 1).toInt() + 1,
           'updated_at': _now(),
-        },
-      );
+        };
+      });
       unawaited(_runTask(device.tenant, id, savedInput));
       return _json({'ok': true, 'status': 'queued'});
     } on FormatException catch (error) {
       return _error(error.message, 400);
+    } on ExecutionBudgetExceeded catch (error) {
+      return _error(error.message.toString(), 429);
+    } on StateError {
+      return _error('联网确认已失效，请刷新任务状态', 409);
     } on Object {
       return _error('授权联网失败', 503);
     }

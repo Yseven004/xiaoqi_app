@@ -10,6 +10,7 @@ import 'package:xiaoqi_genkit_server/src/execution_limits.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'package:xiaoqi_genkit_server/src/tool_execution.dart';
 import 'package:xiaoqi_genkit_server/src/turn_contract.dart';
+import 'package:xiaoqi_genkit_server/src/network_call_authorization.dart';
 
 void main() {
   test(
@@ -81,8 +82,31 @@ else:
         store,
         workerPath: worker.path,
         pythonExecutable: pythonExecutable(),
+        limits: const ExecutionLimits(toolOperations: 1),
       );
-      await service.execute(
+      final execution = ToolExecution(
+        store,
+        'personal',
+        'task-code',
+        TurnContract(mode: 'workflow', imageLimit: 0),
+        requestIdentity: 'network-budget',
+        limits: const ExecutionLimits(toolOperations: 1),
+      )..bind();
+      final grant = NetworkCallAuthorization(
+        execution: execution,
+        domains: ['example.com'],
+        tool: 'execute_python',
+        arguments: {'code': 'pass'},
+        authority: {},
+      );
+      grant.decide(
+        resumed: {
+          'approved': true,
+          'approval_hash': grant.approvalHash,
+          'domains': ['example.com'],
+        },
+      );
+      Future<String> invoke() => service.execute(
         tenantId: 'personal',
         taskId: 'task-code',
         code: 'pass',
@@ -95,10 +119,20 @@ else:
           checks++;
         },
       );
+      final output = await grant.execute(invoke);
+      expect(await grant.execute(invoke), output);
       final sent = jsonDecode(captured.readAsStringSync()) as Map;
       expect(sent['network_token'], token);
       expect(sent['authorized_domains'], ['example.com']);
       expect(checks, 3);
+      expect(
+        store.get('task/personal/task-code')!.value['code_execution_runs'],
+        1,
+      );
+      expect(
+        taskToolOperationsUsed(store.get('task/personal/task-code')!.value),
+        1,
+      );
     },
   );
 

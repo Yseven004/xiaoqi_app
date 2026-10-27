@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:genkit/genkit.dart';
+import 'package:genkit/experimental.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
@@ -72,6 +73,31 @@ Future<void> main(List<String> args) async {
       ? '请用纯文字整理这段材料，不需要图片或文件。'
       : '请整理成两页视觉学习笔记';
   DockerCodeExecutionService? codeExecutor;
+  final networkScenario = scenario.startsWith('text-only-network-');
+  final networkCounter = File('${directory.path}/network-executions');
+  if (networkScenario) {
+    final worker = File('${directory.path}/network_worker.py');
+    worker.writeAsStringSync('''
+import json,pathlib,sys
+r=json.loads(sys.stdin.readline())
+if r.get('action') == 'network_token':
+ print(json.dumps({'ok':True,'network_token':'123456789.${'a' * 64}'}))
+elif r.get('action'):
+ print(json.dumps({'ok':True}))
+else:
+ assert r['authorized_domains'] == ['example.com']
+ counter=pathlib.Path(${jsonEncode(networkCounter.path)})
+ counter.write_text(str(int(counter.read_text())+1 if counter.exists() else 1))
+ print(json.dumps({'type':'result','ok':True,'stdout':'network-routing-verified','artifacts':[],'cleanup_pending':False}))
+''');
+    codeExecutor = DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable:
+          Platform.environment['XIAOQI_TEST_PYTHON'] ??
+          (Platform.isWindows ? 'python' : 'python3'),
+    );
+  }
   if (scenario == 'text-only-workspace-retry') {
     final worker = File('${directory.path}/retry_worker.py');
     worker.writeAsStringSync('''
@@ -119,7 +145,7 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
           ? 'Return one plain text paragraph.'
           : 'Each page needs its own real image.',
     ),
-    if (scenario == 'script-available')
+    if (scenario == 'script-available' || networkScenario)
       'scripts/check.py': utf8.encode('print("checked")'),
   });
   store.put('cap/personal/notes', {
@@ -154,34 +180,122 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
       ? null
       : Genkit(promptDir: null, isDevEnv: true);
   try {
-    final result =
-        await GenkitXiaoqiAgentRuntime(
-          store,
-          images,
-          codeExecutor: codeExecutor,
-        ).runAgentTurn(
+    final runtime = GenkitXiaoqiAgentRuntime(
+      store,
+      images,
+      codeExecutor: codeExecutor,
+    );
+    final request = <String, dynamic>{
+      'model_id': 'mimo-v2.6-flash',
+      'current_turn_text': taskText,
+      'network_mode': scenario == 'text-only-network-on' ? 'on' : 'off',
+      'selected_capabilities': scenario == 'implicit'
+          ? []
+          : [
+              {'id': 'notes', 'version_id': 'v1'},
+              if (scenario == 'explicit-partial')
+                {'id': 'unavailable', 'version_id': 'v1'},
+            ],
+      'messages': [
+        {'role': 'user', 'content': taskText},
+      ],
+      if (scenario == 'text-only-network-file-changed')
+        'materials': [
+          {'id': 'source', 'name': 'source.txt', 'text': 'first version'},
+        ],
+    };
+    if (scenario == 'text-only-network-legacy') {
+      request.remove('current_turn_text');
+      NetworkPermissionRequired? permission;
+      try {
+        await runtime.run(
           tenantId: 'personal',
           taskId: 'turn',
-          request: {
-            'model_id': 'mimo-v2.6-flash',
-            'current_turn_text': taskText,
-            'selected_capabilities': scenario == 'implicit'
-                ? []
-                : [
-                    {'id': 'notes', 'version_id': 'v1'},
-                    if (scenario == 'explicit-partial')
-                      {'id': 'unavailable', 'version_id': 'v1'},
-                  ],
-          },
-          messages: agentMessagesFromRequest([
-            {'role': 'user', 'content': taskText},
-          ]),
-          onChunk: (_) {},
-          onProcessEvent: events.add,
+          request: request,
+          onDelta: (_) {},
           cancellation: CancellationController().token,
         );
+      } on NetworkPermissionRequired catch (required) {
+        permission = required;
+      }
+      if (permission == null || networkCounter.existsSync())
+        throw StateError('Expected unexecuted legacy approval');
+      final current = store.get('task/personal/turn')!;
+      store.put('task/personal/turn', {
+        ...current.value,
+        'tool_authorizations': {permission.approvalHash: true},
+      }, current.revision);
+      final text =
+          await GenkitXiaoqiAgentRuntime(
+            store,
+            images,
+            codeExecutor: codeExecutor,
+          ).run(
+            tenantId: 'personal',
+            taskId: 'turn',
+            request: request,
+            onDelta: (_) {},
+            cancellation: CancellationController().token,
+          );
+      stdout.writeln(
+        'RESULT:${jsonEncode({'text': text, 'network_before_approval': 0, 'network_runs': int.parse(networkCounter.readAsStringSync()), 'network_grants': store.get('task/personal/turn')!.value['authorized_network_domains']})}',
+      );
+      return;
+    }
+    final first = await runtime.runAgentTurn(
+      tenantId: 'personal',
+      taskId: 'turn',
+      request: request,
+      messages: agentMessagesFromRequest([
+        {'role': 'user', 'content': taskText},
+      ]),
+      onChunk: (_) {},
+      onProcessEvent: events.add,
+      cancellation: CancellationController().token,
+    );
+    var result = first;
+    var beforeApproval = 0;
+    if (networkScenario) {
+      beforeApproval = networkCounter.existsSync()
+          ? int.parse(networkCounter.readAsStringSync())
+          : 0;
+      final part = first.messages
+          .expand((message) => message.content)
+          .lastWhere(
+            (part) => part.isToolRequest && part.metadata?['interrupt'] is Map,
+          );
+      final pending = ToolRequestPart(
+        toolRequest: part.toolRequest!,
+        metadata: part.metadata,
+      );
+      final permission = part.metadata!['interrupt'] as Map;
+      final restart = pending.restart({
+        'approved': scenario != 'text-only-network-denied',
+        'domains': permission['domains'],
+        'approval_hash': permission['approval_hash'],
+      });
+      if (scenario == 'text-only-network-file-changed') {
+        request['materials'] = [
+          {
+            'id': 'source',
+            'name': 'source.txt',
+            'text': 'changed after approval',
+          },
+        ];
+      }
+      result = await runtime.runAgentTurn(
+        tenantId: 'personal',
+        taskId: 'turn',
+        request: request,
+        messages: first.messages,
+        restart: [restart],
+        onChunk: (_) {},
+        onProcessEvent: events.add,
+        cancellation: CancellationController().token,
+      );
+    }
     stdout.writeln(
-      'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'operation_count': (store.get('task/personal/turn')!.value['scope_operations'] as Map? ?? const {}).length, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length})}',
+      'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'operation_count': (store.get('task/personal/turn')!.value['scope_operations'] as Map? ?? const {}).length, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length, if (networkScenario) 'network_before_approval': beforeApproval, if (networkScenario) 'network_runs': networkCounter.existsSync() ? int.parse(networkCounter.readAsStringSync()) : 0, if (networkScenario) 'network_grants': store.get('task/personal/turn')!.value['authorized_network_domains'], if (networkScenario) 'network_interrupted': result.finishReason == AgentFinishReason.interrupted})}',
     );
   } finally {
     await telemetry?.shutdown();

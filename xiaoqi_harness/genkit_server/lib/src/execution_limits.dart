@@ -24,7 +24,11 @@ class ExecutionBudgetExceeded extends StateError {
 int taskToolOperationsUsed(Map<String, dynamic> task) {
   final operations = (task['scope_operations'] as Map? ?? const {}).values
       .whereType<Map>()
-      .where((operation) => operation['effect'] != 'image')
+      .where(
+        (operation) =>
+            operation['effect'] != 'image' &&
+            operation['budget_owner'] != 'code',
+      )
       .length;
   return operations + (task['code_execution_runs'] as num? ?? 0).toInt();
 }

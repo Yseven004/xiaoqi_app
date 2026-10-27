@@ -13,6 +13,13 @@ void main() {
     'text-only-workspace-retry',
     'text-only-shell',
     'text-only-search',
+    'text-only-network-python',
+    'text-only-network-on',
+    'text-only-network-script',
+    'text-only-network-denied',
+    'text-only-network-changed',
+    'text-only-network-file-changed',
+    'text-only-network-legacy',
     'text-only-unplanned-image',
     'image-format-repair',
     'missing',
@@ -259,6 +266,39 @@ void main() {
                 ],
               };
             } else if (textOnly) {
+              if (scenario.startsWith('text-only-network-')) {
+                final name = scenario == 'text-only-network-script'
+                    ? 'execute_skill_script'
+                    : 'execute_python';
+                final calls = RegExp(
+                  '"name":"$name"',
+                ).allMatches(serialized).length;
+                if (calls < 2) {
+                  tool = name;
+                  input = {
+                    if (name == 'execute_skill_script') ...{
+                      'script_path': 'scripts/check.py',
+                      'language': 'python',
+                    } else
+                      'code':
+                          scenario == 'text-only-network-changed' && calls > 0
+                          ? 'changed after first approved call'
+                          : 'original approved code',
+                    'skill_id': alias,
+                    'domains': ['example.com'],
+                    'purpose': '读取公开资料',
+                  };
+                } else if (scenario == 'text-only-network-denied' &&
+                    !called('execute_shell')) {
+                  tool = 'execute_shell';
+                  input = {
+                    'code': 'another entry',
+                    'skill_id': alias,
+                    'domains': ['example.com'],
+                    'purpose': '读取公开资料',
+                  };
+                }
+              }
               if (scenario == 'text-only-search') {
                 final attempts = RegExp(
                   r'"name":"web_search"',
@@ -393,10 +433,18 @@ void main() {
                 .toList();
             expect(
               firstToolNames.contains('execute_skill_script'),
-              scenario == 'script-available',
+              scenario == 'script-available' ||
+                  scenario.startsWith('text-only-network-'),
               reason:
                   'Only advertise installed script execution when real scripts exist',
             );
+          }
+          if (scenario == 'text-only-network-legacy') {
+            expect(result['network_before_approval'], 0);
+            expect(result['network_runs'], 1);
+            expect(result['network_grants'], isEmpty);
+            expect(result['text'], contains('纯文字'));
+            return;
           }
           if (scenario.startsWith('mcp-')) {
             final blocked = const {
@@ -473,6 +521,38 @@ void main() {
             expect(result['text'], contains('任务尚未完成'));
             expect(requests, hasLength(3));
           } else if (scenario.startsWith('text-only')) {
+            if (scenario.startsWith('text-only-network-')) {
+              expect(result['network_before_approval'], 0);
+              expect(result['network_grants'], isEmpty);
+              expect(
+                result['network_runs'],
+                const {
+                      'text-only-network-denied',
+                      'text-only-network-file-changed',
+                    }.contains(scenario)
+                    ? 0
+                    : 1,
+              );
+              expect(
+                result['network_interrupted'],
+                const {
+                  'text-only-network-changed',
+                  'text-only-network-file-changed',
+                }.contains(scenario),
+              );
+              if (const {
+                'text-only-network-changed',
+                'text-only-network-file-changed',
+              }.contains(scenario)) {
+                expect(
+                  jsonEncode(result['events']),
+                  contains('network_permission_required'),
+                );
+                return;
+              }
+              if (scenario == 'text-only-network-denied')
+                expect(jsonEncode(result['events']), contains('user_denied'));
+            }
             expect(result['missing'], isFalse, reason: jsonEncode(result));
             expect(result['generated'], 0);
             expect(result['artifacts'], 0);

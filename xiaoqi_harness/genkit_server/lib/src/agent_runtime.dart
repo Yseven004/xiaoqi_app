@@ -32,6 +32,8 @@ import 'intent_router.dart';
 import 'model_limits.dart';
 import 'history_context.dart';
 import 'tool_execution.dart';
+import 'network_call_authorization.dart';
+import 'network_resume.dart';
 import 'tool_access_policy.dart';
 import 'artifact_context.dart';
 
@@ -1407,17 +1409,46 @@ class GenkitXiaoqiAgentRuntime
     required void Function(String text) onDelta,
     required CancellationToken cancellation,
     void Function()? onImageGenerationStarted,
-  }) async => (await runAgentTurn(
-    tenantId: tenantId,
-    taskId: taskId,
-    request: request,
-    messages: agentMessagesFromRequest(request['messages']),
-    onChunk: (_) {},
-    onProcessEvent: (_) {},
-    cancellation: cancellation,
-    onImageGenerationStarted: onImageGenerationStarted,
-    onLegacyDelta: onDelta,
-  )).text;
+  }) async {
+    final resume = NetworkResume(store, tenantId, taskId);
+    final saved = resume.load(request);
+    final result = await runAgentTurn(
+      tenantId: tenantId,
+      taskId: taskId,
+      request: request,
+      messages:
+          saved?.messages ?? agentMessagesFromRequest(request['messages']),
+      restart: saved?.restart,
+      onChunk: (_) {},
+      onProcessEvent: (_) {},
+      cancellation: cancellation,
+      onImageGenerationStarted: onImageGenerationStarted,
+      onLegacyDelta: onDelta,
+    );
+    final pending = (result.messages.lastOrNull?.content ?? const <Part>[])
+        .where(
+          (part) =>
+              part.isToolRequest &&
+              (part.metadata?['interrupt'] as Map?)?['type'] ==
+                  'network_permission',
+        )
+        .lastOrNull;
+    if (result.finishReason == AgentFinishReason.interrupted &&
+        pending != null) {
+      final part = ToolRequestPart(
+        toolRequest: pending.toolRequest!,
+        metadata: pending.metadata,
+      );
+      resume.save(request: request, messages: result.messages, pending: part);
+      throw resume.permission(part);
+    }
+    if (result.finishReason == AgentFinishReason.interrupted) {
+      throw StateError('该任务仍有未确认的工具操作，尚未完成');
+    }
+    if (result.finishReason != AgentFinishReason.interrupted)
+      resume.complete(request);
+    return result.text;
+  }
 
   @override
   Future<XiaoqiAgentTurnResult> runAgentTurn({
@@ -2539,7 +2570,41 @@ class GenkitXiaoqiAgentRuntime
       rethrow;
     }
 
-    NetworkPermissionRequired? pendingPermission;
+    ToolResult<String>? networkApproval(
+      NetworkCallAuthorization grant,
+      String tool,
+      String purpose,
+      Object? resumed, {
+      required Map<String, dynamic> details,
+    }) {
+      final decision = grant.decide(resumed: resumed);
+      if (decision == ToolAccessDecision.allow) return null;
+      if (decision == ToolAccessDecision.deny) {
+        onProcessEvent({
+          'type': 'tool_skipped',
+          'tool': tool,
+          'reason': 'user_denied',
+        });
+        return ToolResult.response(
+          jsonEncode({
+            'status': 'denied',
+            'retryable': false,
+            'message': '用户选择保持断网。不得换入口或参数再次申请，离线处理仍可继续。',
+          }),
+        );
+      }
+      onProcessEvent({'type': 'network_permission_required', 'tool': tool});
+      return ToolResult.interrupt({
+        'type': 'network_permission',
+        'tool': tool,
+        'domains': grant.domains,
+        'purpose': purpose,
+        'approval_hash': grant.approvalHash,
+        'scope_hash': grant.scopeHash,
+        'details': details,
+      });
+    }
+
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'read_mcp_resource',
       description:
@@ -2671,8 +2736,8 @@ class GenkitXiaoqiAgentRuntime
         description:
             '在服务器隔离的 Docker 沙箱执行 $language 代码。Shell 使用 Bash，arguments 作为独立 argv 值传给脚本。仅用于用户明确要求执行代码、'
             '处理文件或对资料做程序化操作时。默认断网。'
-            '普通代码执行不得联网。当前技能确需访问公网时，须提供本技能 skill_id、domains 精确域名和 purpose；'
-            '联网开关已打开时沿用任务域名授权。资料和产物会在当前任务的隔离工作区中按需提供；'
+            '联网时提供 domains 精确域名及 purpose，确认仅绑定本次代码、参数和文件；搜索开关不是修改外部数据的授权。'
+            '搜索关闭时，仅当前已读取技能可用 skill_id 申请临时联网。资料和产物会在当前任务的隔离工作区中按需提供；'
             '先读 /workspace/input_manifest.json 获取当前输入的真实路径；不要复用旧沙箱绝对路径。'
             '可写工作目录为 /workspace/work，交付文件写入 /workspace/output，创建子目录时先创建父目录。'
             '不要向用户展示隔离工作区的路径或内部参数。',
@@ -2758,69 +2823,80 @@ class GenkitXiaoqiAgentRuntime
             'code_bytes': utf8.encode(input['code']?.toString() ?? '').length,
             'domain_count': requestedDomains.length,
           });
-          final permission = temporaryNetwork
-              ? null
-              : _networkPermission(
-                  tenantId,
-                  taskId,
-                  requestedDomains,
-                  input['purpose']?.toString() ?? '',
-                );
-          if (permission != null) {
-            final approvedDomains = request['remote_agent'] == true
-                ? _resumedAuthorizedDomains(context.resumed, permission)
-                : null;
-            if (approvedDomains == null) {
-              onProcessEvent({
-                'type': 'network_permission_required',
-                'tool': toolName,
-              });
-            }
-            if (request['remote_agent'] == true && approvedDomains == null) {
-              return ToolResult.interrupt({
-                'type': 'network_permission',
-                'tool': toolName,
-                'domains': permission.domains,
-                'purpose': permission.purpose,
-              });
-            }
-            if (approvedDomains == null) {
-              pendingPermission = permission;
-              return ToolResult.response(
-                jsonEncode({
-                  'status': 'awaiting_network_permission',
-                  'domains': permission.domains,
-                  'purpose': permission.purpose,
-                }),
-              );
-            }
-            _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
-          }
+          final materials = await _scriptMaterials(
+            tenantId,
+            request['materials'],
+          );
+          final artifactIds = (input['artifact_ids'] as List?)?.cast<String>();
+          final inputBinding = codeExecutor.inputBinding(
+            tenantId: tenantId,
+            taskId: taskId,
+            materials: materials,
+            artifactIds: artifactIds,
+          );
+          final fingerprint = inputBinding.fingerprint;
+          final grant = NetworkCallAuthorization(
+            execution: callExecution,
+            domains: requestedDomains,
+            tool: toolName,
+            arguments: input,
+            authority: {
+              'network_mode': networkMode,
+              'skill': skillReference,
+              'materials_fingerprint': fingerprint,
+            },
+          );
+          final approval = networkApproval(
+            grant,
+            toolName,
+            '${purpose.isEmpty ? '执行 $language 代码' : purpose}（可能访问或修改外部数据）',
+            context.resumed,
+            details: {
+              '代码': input['code'],
+              '参数': input['arguments'] ?? [],
+              if (skillName != null) '技能': skillName,
+              '文件': inputBinding.names,
+            },
+          );
+          if (approval != null) return approval;
           try {
-            final result = await codeExecutor.execute(
-              tenantId: tenantId,
-              taskId: taskId,
-              code: input['code']?.toString() ?? '',
-              language: language,
-              arguments: (input['arguments'] as List? ?? const [])
-                  .cast<String>(),
-              authorizedDomains: requestedDomains,
-              materials: await _scriptMaterials(tenantId, request['materials']),
-              skillFiles: skillFiles,
-              artifactIds: (input['artifact_ids'] as List?)?.cast<String>(),
-              cancellation: cancellation,
-              beforeSubmit: () {
-                callExecution.check('workspace');
-                if (_taskNetworkMode(
-                      tenantId,
-                      taskId,
-                      request['network_mode'],
-                    ) !=
-                    networkMode) {
-                  throw StateError('任务联网模式已变更，请按当前权限重新调用');
-                }
-                if (skillReference != null) selectedSkills.resolve(input);
-              },
+            final result = await grant.execute(
+              () => codeExecutor.execute(
+                tenantId: tenantId,
+                taskId: taskId,
+                code: input['code']?.toString() ?? '',
+                language: language,
+                arguments: (input['arguments'] as List? ?? const [])
+                    .cast<String>(),
+                authorizedDomains: requestedDomains,
+                materials: materials,
+                skillFiles: skillFiles,
+                artifactIds: artifactIds,
+                cancellation: cancellation,
+                beforeSubmit: () {
+                  callExecution.check('workspace');
+                  if (_taskNetworkMode(
+                        tenantId,
+                        taskId,
+                        request['network_mode'],
+                      ) !=
+                      networkMode) {
+                    throw StateError('任务联网模式已变更，请按当前权限重新调用');
+                  }
+                  if (skillReference != null) selectedSkills.resolve(input);
+                  if (requestedDomains.isNotEmpty &&
+                      (grant.decide() != ToolAccessDecision.allow ||
+                          codeExecutor.inputFingerprint(
+                                tenantId: tenantId,
+                                taskId: taskId,
+                                materials: materials,
+                                artifactIds: artifactIds,
+                              ) !=
+                              fingerprint)) {
+                    throw StateError('联网操作的授权或输入文件已变更，请重新确认');
+                  }
+                },
+              ),
             );
             onProcessEvent({
               'type': 'tool_succeeded',
@@ -3187,49 +3263,43 @@ class GenkitXiaoqiAgentRuntime
             throw const FormatException('脚本参数不能超过 32 项或 8 KB');
           }
 
-          // Validate the exact skill and script before granting any task egress.
-          // An imported script may mutate remote data. Network access always
-          // needs approval for this exact call, even when chat search is on.
-          final permission = requestedDomains.isEmpty
-              ? null
-              : NetworkPermissionRequired(
-                  requestedDomains,
-                  '运行技能 $skillName 的 $scriptPath：$purpose（可能访问或修改外部数据）',
-                );
-          List<String> approvedForThisCall = const [];
-          if (permission != null) {
-            final approvedDomains = request['remote_agent'] == true
-                ? _resumedAuthorizedDomains(context.resumed, permission)
-                : null;
-            if (approvedDomains == null) {
-              onProcessEvent({
-                'type': 'network_permission_required',
-                'tool': 'execute_skill_script',
-              });
-            }
-            if (request['remote_agent'] == true && approvedDomains == null) {
-              return ToolResult.interrupt({
-                'type': 'network_permission',
-                'tool': 'execute_skill_script',
-                'domains': permission.domains,
-                'purpose': permission.purpose,
-              });
-            }
-            if (approvedDomains == null) {
-              pendingPermission = permission;
-              return ToolResult.response(
-                jsonEncode({
-                  'status': 'awaiting_network_permission',
-                  'domains': permission.domains,
-                  'purpose': permission.purpose,
-                }),
-              );
-            }
-            approvedForThisCall = approvedDomains;
-            if (!temporaryNetwork) {
-              _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
-            }
-          }
+          final materials = await _scriptMaterials(
+            tenantId,
+            request['materials'],
+          );
+          final artifactIds = (input['artifact_ids'] as List?)?.cast<String>();
+          final inputBinding = codeExecutor.inputBinding(
+            tenantId: tenantId,
+            taskId: taskId,
+            materials: materials,
+            artifactIds: artifactIds,
+          );
+          final fingerprint = inputBinding.fingerprint;
+          final grant = NetworkCallAuthorization(
+            execution: callExecution,
+            domains: requestedDomains,
+            tool: 'execute_skill_script',
+            arguments: input,
+            authority: {
+              'network_mode': networkMode,
+              'skill': skillReference,
+              'script_sha256': sha256.convert(scriptBytes).toString(),
+              'materials_fingerprint': fingerprint,
+            },
+          );
+          final approval = networkApproval(
+            grant,
+            'execute_skill_script',
+            '运行技能 $skillName 的 $scriptPath，参数 ${jsonEncode(arguments)}：$purpose（可能访问或修改外部数据）',
+            context.resumed,
+            details: {
+              '技能': skillName,
+              '脚本': scriptPath,
+              '参数': arguments,
+              '文件': inputBinding.names,
+            },
+          );
+          if (approval != null) return approval;
           temporaryNetworkStarted = temporaryNetwork;
           temporaryNetworkCapability = skillName;
           onProcessEvent({
@@ -3242,26 +3312,43 @@ class GenkitXiaoqiAgentRuntime
             if (temporaryNetwork) 'temporary_network': true,
             if (temporaryNetwork) 'capability_name': skillName,
           });
-          final result = await codeExecutor.execute(
-            tenantId: tenantId,
-            taskId: taskId,
-            code: '# Execute installed skill entry',
-            language: input['language']?.toString() ?? '',
-            authorizedDomains: approvedForThisCall,
-            materials: await _scriptMaterials(tenantId, request['materials']),
-            skillFiles: skillFiles,
-            cancellation: cancellation,
-            scriptPath: scriptPath,
-            beforeSubmit: () {
-              callExecution.check('workspace');
-              if (_taskNetworkMode(tenantId, taskId, request['network_mode']) !=
-                  networkMode) {
-                throw StateError('任务联网模式已变更，请按当前权限重新调用');
-              }
-              selectedSkills.resolve(input);
-            },
-            arguments: arguments,
-            artifactIds: (input['artifact_ids'] as List?)?.cast<String>(),
+          final result = await grant.execute(
+            () => codeExecutor.execute(
+              tenantId: tenantId,
+              taskId: taskId,
+              code: '# Execute installed skill entry',
+              language: input['language']?.toString() ?? '',
+              authorizedDomains: requestedDomains,
+              materials: materials,
+              skillFiles: skillFiles,
+              cancellation: cancellation,
+              scriptPath: scriptPath,
+              beforeSubmit: () {
+                callExecution.check('workspace');
+                if (_taskNetworkMode(
+                      tenantId,
+                      taskId,
+                      request['network_mode'],
+                    ) !=
+                    networkMode) {
+                  throw StateError('任务联网模式已变更，请按当前权限重新调用');
+                }
+                selectedSkills.resolve(input);
+                if (requestedDomains.isNotEmpty &&
+                    (grant.decide() != ToolAccessDecision.allow ||
+                        codeExecutor.inputFingerprint(
+                              tenantId: tenantId,
+                              taskId: taskId,
+                              materials: materials,
+                              artifactIds: artifactIds,
+                            ) !=
+                            fingerprint)) {
+                  throw StateError('联网操作的授权或输入文件已变更，请重新确认');
+                }
+              },
+              arguments: arguments,
+              artifactIds: artifactIds,
+            ),
           );
           successfulScripts.add(skillReference['id']!);
           onProcessEvent({
@@ -3797,7 +3884,6 @@ class GenkitXiaoqiAgentRuntime
       }
       var response = await turn.response;
       response.assertValid();
-      if (pendingPermission != null) throw pendingPermission!;
       List<String> missingDelivery() {
         final artifacts =
             (store.get('task/$tenantId/$taskId')?.value['artifacts'] as List? ??
@@ -3862,7 +3948,6 @@ class GenkitXiaoqiAgentRuntime
         }
         response = await followup.response;
         response.assertValid();
-        if (pendingPermission != null) throw pendingPermission!;
       }
       final resultMessages = chat.messages
           .where(
@@ -4228,95 +4313,6 @@ class GenkitXiaoqiAgentRuntime
         .where((source) => source['url'] is String && source['title'] is String)
         .take(10)
         .toList(growable: false);
-  }
-
-  NetworkPermissionRequired? _networkPermission(
-    String tenantId,
-    String taskId,
-    Object? rawDomains,
-    String purpose,
-  ) {
-    final requested = _normalizeDomains(rawDomains);
-    if (requested.isEmpty) return null;
-    final task = store.get('task/$tenantId/$taskId');
-    if (task?.value['remote_agent_turn'] == true) {
-      if (_taskNetworkMode(tenantId, taskId, null) == 'off') {
-        throw StateError('本会话已关闭联网，服务端拒绝新的脚本公网连接。');
-      }
-      // Public egress is requested task-by-task through the existing exact-host
-      // Squid allow-list; user confirmation is not repeated for each domain.
-      _authorizeAgentTaskDomains(tenantId, taskId, requested);
-      return null;
-    }
-    final allowed = _authorizedDomains(tenantId, taskId).toSet();
-    final missing = requested
-        .where((domain) => !allowed.contains(domain))
-        .toList();
-    if (missing.isEmpty) return null;
-    final normalizedPurpose = purpose.trim();
-    return NetworkPermissionRequired(
-      missing,
-      normalizedPurpose.isEmpty
-          ? '工具需要访问这些域名以完成任务'
-          : normalizedPurpose.substring(
-              0,
-              normalizedPurpose.length > 300 ? 300 : normalizedPurpose.length,
-            ),
-    );
-  }
-
-  List<String> _authorizedDomains(String tenantId, String taskId) {
-    final task = store.get('task/$tenantId/$taskId');
-    return (task?.value['authorized_network_domains'] as List? ?? const [])
-        .map((value) => value.toString())
-        .toSet()
-        .toList()
-      ..sort();
-  }
-
-  void _authorizeAgentTaskDomains(
-    String tenantId,
-    String taskId,
-    List<String> domains,
-  ) {
-    final key = 'task/$tenantId/$taskId';
-    for (var attempt = 0; attempt < 8; attempt++) {
-      final current = store.get(key);
-      if (current == null)
-        throw StateError('Agent turn is no longer available.');
-      final authorized = {
-        ...(current.value['authorized_network_domains'] as List? ?? const [])
-            .map((value) => value.toString()),
-        ...domains,
-      }.toList()..sort();
-      try {
-        store.put(key, {
-          ...current.value,
-          'authorized_network_domains': authorized,
-        }, current.revision);
-        return;
-      } on RevisionConflict {
-        if (attempt == 7) rethrow;
-      }
-    }
-  }
-
-  static List<String>? _resumedAuthorizedDomains(
-    Object? resumed,
-    NetworkPermissionRequired? permission,
-  ) {
-    if (resumed is! Map || resumed['approved'] != true || permission == null) {
-      return null;
-    }
-    final provided = (resumed['domains'] as List? ?? const [])
-        .map((value) => value.toString())
-        .toSet();
-    final requested = permission.domains.toSet();
-    if (provided.length != requested.length ||
-        !provided.containsAll(requested)) {
-      return null;
-    }
-    return requested.toList()..sort();
   }
 
   static String _briefToolError(Object error) {

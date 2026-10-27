@@ -3044,7 +3044,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ),
                   const SizedBox(height: 10),
                   const Text(
-                    '确认后只执行这一次；后续每次调用都会再次询问。',
+                    '确认绑定当前对象和参数；内容变化后会重新判断。拒绝后等待你更新任务。',
                     style: TextStyle(color: Color(0xFF666666), fontSize: 13),
                   ),
                 ],
@@ -3067,31 +3067,54 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<bool> _confirmAgentNetworkAccess(
     String purpose,
-    List<String> domains,
-  ) async {
+    List<String> domains, {
+    Object? details,
+  }) async {
     if (!mounted || domains.isEmpty) return false;
     return await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
             backgroundColor: Colors.white,
             title: const Text('允许本次脚本联网？'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(purpose),
-                const SizedBox(height: 12),
-                for (final domain in domains)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Text('• $domain'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(purpose),
+                  if (details is Map && details.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    const Text('本次执行的内容：'),
+                    const SizedBox(height: 6),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5F5F7),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: SelectableText(
+                        const JsonEncoder.withIndent('  ').convert(details),
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  for (final domain in domains)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Text('• $domain'),
+                    ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '仅允许本次已确认的代码、参数和文件访问以上域名；不会给其他调用开放权限。',
+                    style: TextStyle(color: Color(0xFF666666), fontSize: 13),
                   ),
-                const SizedBox(height: 10),
-                const Text(
-                  '仅对此次任务开放以上域名。Python 执行本身不会额外询问。',
-                  style: TextStyle(color: Color(0xFF666666), fontSize: 13),
-                ),
-              ],
+                ],
+              ),
             ),
             actions: [
               TextButton(
@@ -3634,19 +3657,21 @@ $materialIndex
         final purpose = input['purpose']?.toString() ?? '脚本需要访问这些域名';
         _agentStreamPresentation.value = _agentStreamPresentation.value
             .copyWith(currentStep: '等待你确认联网权限');
-        final allow = await _confirmAgentNetworkAccess(purpose, domains);
+        final allow = await _confirmAgentNetworkAccess(
+          purpose,
+          domains,
+          details: input['details'],
+        );
         if (!_isCurrentRequest(generation, conversationId)) return null;
-        turn = allow
-            ? chat.resumeStream(
-                restart: [
-                  interrupt.restart({'approved': true, 'domains': domains}),
-                ],
-              )
-            : chat.resumeStream(
-                respond: [
-                  interrupt.respond({'approved': false, 'domains': domains}),
-                ],
-              );
+        turn = chat.resumeStream(
+          restart: [
+            interrupt.restart({
+              'approved': allow,
+              'domains': domains,
+              'approval_hash': input['approval_hash'],
+            }),
+          ],
+        );
       }
 
       final finalText = response.text.trimRight();
@@ -3882,12 +3907,14 @@ $materialIndex
             final allow = await _confirmAgentNetworkAccess(
               event['purpose']?.toString() ?? '脚本需要访问这些域名',
               domains,
+              details: event['details'],
             );
             if (!_isCurrentRequest(generation, conversationId)) return null;
             if (allow) {
               await CapabilityCloudSync.instance.authorizeTaskDomains(
                 taskId,
                 domains,
+                approvalHash: event['approval_hash'].toString(),
               );
             } else {
               final status = await CapabilityCloudSync.instance.cancelTask(
@@ -4864,12 +4891,14 @@ $text''';
             final allow = await _confirmAgentNetworkAccess(
               event['purpose']?.toString() ?? '脚本需要访问这些域名',
               domains,
+              details: event['details'],
             );
             if (!_isCurrentRequest(generation, conversationId)) return;
             if (allow) {
               await CapabilityCloudSync.instance.authorizeTaskDomains(
                 taskId,
                 domains,
+                approvalHash: event['approval_hash'].toString(),
               );
             } else {
               final status = await CapabilityCloudSync.instance

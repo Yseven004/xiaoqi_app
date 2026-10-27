@@ -51,14 +51,23 @@ class _NetworkRuntime implements XiaoqiAgentRuntime {
     cancellation.throwIfCancelled();
     if (!requested) {
       requested = true;
-      throw const NetworkPermissionRequired(['example.com'], '读取公开资料');
+      throw const NetworkPermissionRequired(
+        ['example.com'],
+        '读取公开资料',
+        approvalHash:
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        scopeHash:
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      );
     }
-    authorizedDomains =
-        (store
-                    .get('task/$tenantId/$taskId')!
-                    .value['authorized_network_domains']
-                as List)
-            .cast<String>();
+    final grant =
+        store.get('task/$tenantId/$taskId')!.value['tool_authorizations']
+            as Map;
+    if (grant['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'] !=
+        true) {
+      throw StateError('exact authorization missing');
+    }
+    authorizedDomains = ['example.com'];
     onDelta('读取完成');
     return '读取完成';
   }
@@ -467,11 +476,53 @@ void main() {
       contains('network_permission_required'),
     );
 
+    final missingHash = await call(
+      'POST',
+      '/v1/agent/tasks/task-network/authorize-network',
+      body: {
+        'domains': ['example.com'],
+      },
+    );
+    expect(missingHash.statusCode, 400);
+    final staleHash = await call(
+      'POST',
+      '/v1/agent/tasks/task-network/authorize-network',
+      body: {
+        'domains': ['example.com'],
+        'approval_hash':
+            'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+      },
+    );
+    expect(staleHash.statusCode, 409);
+    final permissionEvent = (events['events'] as List)
+        .whereType<Map>()
+        .lastWhere((event) => event['type'] == 'network_permission_required');
+    final (taskKey, beforeQuota) = store
+        .list('task/', limit: 10)
+        .singleWhere((entry) => entry.$2.value['task_id'] == 'task-network');
+    store.put(taskKey, {
+      ...beforeQuota.value,
+      'tool_authorizations': {
+        for (var i = 0; i < 128; i++) 'proposal-$i': true,
+      },
+    }, beforeQuota.revision);
+    final overQuota = await call(
+      'POST',
+      '/v1/agent/tasks/task-network/authorize-network',
+      body: {
+        'domains': ['example.com'],
+        'approval_hash': permissionEvent['approval_hash'],
+      },
+    );
+    expect(overQuota.statusCode, 429);
+    expect(store.get(taskKey)!.value['status'], 'awaiting_network_permission');
+    store.put(taskKey, beforeQuota.value, store.get(taskKey)!.revision);
     final authorized = await call(
       'POST',
       '/v1/agent/tasks/task-network/authorize-network',
       body: {
         'domains': ['example.com'],
+        'approval_hash': permissionEvent['approval_hash'],
       },
     );
     expect(authorized.statusCode, 200);
