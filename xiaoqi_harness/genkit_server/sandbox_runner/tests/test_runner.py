@@ -229,6 +229,16 @@ class RunnerValidationTests(unittest.TestCase):
             with self.subTest(paths=paths), self.assertRaises(server.RequestError):
                 server._make_archive([('skill/.xiaoqi/dependency-lock.json',json.dumps({'executables':paths}).encode())])
 
+    def test_source_execution_metadata_preserves_owner_mode_only(self) -> None:
+        files=[('skill/scripts/install.sh',b'#!/bin/sh\nprintf ok'),
+               ('skill/.xiaoqi-source-executables.json',json.dumps({'schema':1,'executables':['scripts/install.sh']}).encode())]
+        with tarfile.open(fileobj=io.BytesIO(server._make_archive(files))) as archive:
+            entry=archive.getmember('skill/scripts/install.sh')
+            self.assertEqual(entry.mode,0o755)
+            self.assertEqual(entry.uid,10001)
+        with self.assertRaises(server.RequestError):
+            server._make_archive([('skill/.xiaoqi-source-executables.json',b'{"executables":["../main.py"]}')])
+
     def test_input_manifest_preserves_binary_identity_and_current_paths(self) -> None:
         content = bytes([0, 255, 128, 80, 75, 3, 4])
         files, _, _, _ = server._request_files({

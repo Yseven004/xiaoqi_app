@@ -3,6 +3,7 @@ import hashlib
 import json
 import pathlib
 import shutil
+import shlex
 import subprocess
 import tempfile
 import tomllib
@@ -50,8 +51,16 @@ def copy_package(folder, destination):
             continue
         output_path = destination / relative
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, output_path)
+        shutil.copy2(path, output_path)
     return excluded
+
+
+def npm_bin_shim(folder, path):
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file() or not resolved.is_relative_to(folder.resolve()):
+        raise ValueError('npm executable link escapes its dependency directory')
+    target_name = 'node_modules/' + resolved.relative_to(folder.resolve()).as_posix()
+    return ('#!/bin/sh\nexec ' + shlex.quote('/workspace/skill/' + target_name) + ' "$@"\n').encode()
 
 
 source = pathlib.Path('/workspace/skill')
@@ -140,6 +149,16 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
         for folder, prefix in [(root / 'python', '.xiaoqi/python'), (root / 'node/node_modules', 'node_modules')]:
             for path in sorted(folder.rglob('*')):
                 if path.is_symlink():
+                    # npm's bin links become regular, task-local shims. Never
+                    # dereference arbitrary links or export a host path.
+                    if prefix == 'node_modules' and path.parent.name == '.bin':
+                        name = prefix + '/' + path.relative_to(folder).as_posix()
+                        shim = npm_bin_shim(folder, path)
+                        total += len(shim)
+                        if total > 40 * 1024 * 1024:
+                            raise ValueError('Dependencies exceed sandbox size limit (40 MB)')
+                        archive.writestr(name, shim)
+                        executable_files.append(name)
                     continue
                 if not path.is_file():
                     continue

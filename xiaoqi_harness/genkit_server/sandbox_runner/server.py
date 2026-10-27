@@ -243,8 +243,10 @@ def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
     files = list(files)
     staged = dict(files)
     executable_files = set()
-    lock_data = staged.get('skill/.xiaoqi/dependency-lock.json')
-    if lock_data is not None:
+    for metadata_path in ('skill/.xiaoqi-source-executables.json', 'skill/.xiaoqi/dependency-lock.json'):
+        lock_data = staged.get(metadata_path)
+        if lock_data is None:
+            continue
         try:
             lock = json.loads(lock_data)
             paths = lock.get('executables', [])
@@ -507,7 +509,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             "PYTHONPATH": "/workspace/skill/.xiaoqi/python",
             "NODE_PATH": "/workspace/skill/node_modules",
             "npm_config_cache": "/tmp/npm-cache",
-            "PATH": "/workspace/.python/bin:/usr/local/bin:/usr/bin:/bin:/workspace/skill/.xiaoqi/python/bin",
+            "PATH": "/workspace/.python/bin:/usr/local/bin:/usr/bin:/bin:/workspace/skill/.xiaoqi/python/bin:/workspace/skill/node_modules/.bin",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "0",
             "LANG": "C.UTF-8",

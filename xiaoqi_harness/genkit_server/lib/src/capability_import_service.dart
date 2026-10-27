@@ -52,6 +52,7 @@ class CapabilityImportService {
   static const maxExpandedBytes = 50 * 1024 * 1024;
   static const maxFileBytes = 10 * 1024 * 1024;
   static const maxFiles = 3000;
+  static const sourceExecutablesPath = '.xiaoqi-source-executables.json';
   static const maxUploadBodyBytes = ((maxArchiveBytes + 2) ~/ 3) * 4 + 65536;
   static const uploadExtensions = ['zip', 'tgz', 'tar.gz', 'skill', 'md'];
   static const _uuid = Uuid();
@@ -366,6 +367,7 @@ class CapabilityImportService {
     }
     final lower = fileName.toLowerCase();
     final Map<String, List<int>> files;
+    final executableFiles = <String>{};
     try {
       if (lower.endsWith('.md')) {
         if (bytes.length > maxFileBytes)
@@ -419,6 +421,7 @@ class CapabilityImportService {
             if (content.length != entry.size)
               throw const FormatException('TAR 文件内容不完整');
             files[path] = content;
+            if ((entry.mode & 0x49) != 0) executableFiles.add(path);
           },
         );
       } else {
@@ -437,7 +440,7 @@ class CapabilityImportService {
         }
       }
     }
-    return files;
+    return _preserveSourceExecutables(files, executableFiles);
   }
 
   static Map<String, List<int>> _decodeZip(
@@ -451,6 +454,7 @@ class CapabilityImportService {
       throw const FormatException('仓库文件过多');
     var total = 0;
     final files = <String, List<int>>{};
+    final executableFiles = <String>{};
     final seen = <String>{};
     String? prefix;
     for (final header in directory.fileHeaders) {
@@ -505,6 +509,52 @@ class CapabilityImportService {
           getCrc32(expanded) != header.crc32)
         throw const FormatException('压缩包内容校验失败');
       files[path] = expanded;
+      if (((header.externalFileAttributes >> 16) & 0x49) != 0)
+        executableFiles.add(path);
+    }
+    return _preserveSourceExecutables(files, executableFiles);
+  }
+
+  static Map<String, List<int>> _preserveSourceExecutables(
+    Map<String, List<int>> input,
+    Iterable<String> archived,
+  ) {
+    final files = Map<String, List<int>>.from(input);
+    final executableFiles = archived.toSet();
+    for (final path in input.keys.where(
+      (path) => path.split('/').last == sourceExecutablesPath,
+    )) {
+      final manifest = jsonDecode(utf8.decode(input[path]!));
+      if (manifest is! Map ||
+          manifest['schema'] != 1 ||
+          manifest['executables'] is! List ||
+          (manifest['executables'] as List).length > input.length) {
+        throw const FormatException('源码执行权限记录格式无效');
+      }
+      final parent = path.contains('/')
+          ? path.substring(0, path.lastIndexOf('/'))
+          : '';
+      for (final raw in manifest['executables'] as List) {
+        if (raw is! String) throw const FormatException('源码执行权限路径无效');
+        final name = _join(parent, safePath(raw));
+        if (!files.containsKey(name) ||
+            name.split('/').last == sourceExecutablesPath) {
+          throw const FormatException('源码执行权限记录引用了不存在的文件');
+        }
+        executableFiles.add(name);
+      }
+      files.remove(path);
+      executableFiles.remove(path);
+    }
+    if (executableFiles.isNotEmpty) {
+      final paths = executableFiles.toList()..sort();
+      files[sourceExecutablesPath] = utf8.encode(
+        jsonEncode({'schema': 1, 'executables': paths}),
+      );
+      if (files.values.fold<int>(0, (sum, bytes) => sum + bytes.length) >
+          maxExpandedBytes) {
+        throw const FormatException('源码及执行权限记录超过解压容量限制');
+      }
     }
     return files;
   }
@@ -514,11 +564,27 @@ class CapabilityImportService {
   static Map<String, List<int>> subtree(
     Map<String, List<int>> files,
     String root,
-  ) => {
-    for (final e in files.entries)
-      if (root.isEmpty || e.key.startsWith('$root/'))
-        (root.isEmpty ? e.key : e.key.substring(root.length + 1)): e.value,
-  };
+  ) {
+    final result = <String, List<int>>{
+      for (final e in files.entries)
+        if (root.isEmpty || e.key.startsWith('$root/'))
+          (root.isEmpty ? e.key : e.key.substring(root.length + 1)): e.value,
+    };
+    if (root.isNotEmpty && files[sourceExecutablesPath] != null) {
+      final manifest =
+          jsonDecode(utf8.decode(files[sourceExecutablesPath]!)) as Map;
+      final paths = (manifest['executables'] as List)
+          .cast<String>()
+          .where((path) => path.startsWith('$root/'))
+          .map((path) => path.substring(root.length + 1))
+          .toList();
+      if (paths.isNotEmpty)
+        result[sourceExecutablesPath] = utf8.encode(
+          jsonEncode({'schema': 1, 'executables': paths}),
+        );
+    }
+    return result;
+  }
 
   static List<Map<String, dynamic>> discover(
     Map<String, List<int>> files,
@@ -1075,6 +1141,10 @@ class CapabilityImportService {
         }
         components.add({...raw, 'root': relative});
       }
+      final normalizedPackage = _preserveSourceExecutables(package, const []);
+      package
+        ..clear()
+        ..addAll(normalizedPackage);
       final digest = digestFiles(package);
       final artifact =
           'tenants/$tenant/capabilities/$id/versions/$versionId-$digest.zip';

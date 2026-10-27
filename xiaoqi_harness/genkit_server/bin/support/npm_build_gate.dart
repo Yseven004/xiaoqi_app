@@ -25,11 +25,12 @@ Future<void> verifyNpmBuild(
       'dependencies': {'esbuild': '0.25.12'},
       'devDependencies': {'picocolors': '1.1.1'},
       'scripts': {
-        'postinstall': 'node scripts/install.cjs',
+        'postinstall': './scripts/install.sh',
         'build': 'node scripts/build.cjs',
       },
     }),
     'src/index.ts': 'export const message: string = "隔离构建成功";\n',
+    'scripts/install.sh': '#!/bin/sh\nset -eu\nnode scripts/install.cjs\n',
     'scripts/install.cjs': r'''
 const fs = require('node:fs');
 for (const name of ['MIMO_API_KEY','DEEPSEEK_API_KEY','SANDBOX_RUNNER_TOKEN']) {
@@ -56,13 +57,16 @@ const count = JSON.parse(fs.readFileSync('/workspace/skill/dist/install-count.js
 if (count !== 1 || moduleResult.message !== '隔离构建成功') throw new Error('built result changed');
 if (fs.existsSync('/workspace/skill/node_modules/picocolors')) throw new Error('build-only dependency was not pruned');
 if (!require('esbuild').transformSync('const value: number = 42',{loader:'ts'}).code.includes('42')) throw new Error('installed native dependency cannot execute');
+if (require('node:child_process').execFileSync('esbuild',['--version'],{encoding:'utf8'}).trim()!=='0.25.12') throw new Error('installed CLI shim did not run');
 fs.writeFileSync('/workspace/output/build-result.json',JSON.stringify({message:moduleResult.message,install_count:count}));
 ''',
   };
   Future<Map<String, dynamic>> inspect(Map<String, String> files) async {
     final archive = Archive();
     for (final entry in files.entries) {
-      archive.add(ArchiveFile.string(entry.key, entry.value));
+      final file = ArchiveFile.string(entry.key, entry.value);
+      if (entry.key == 'scripts/install.sh') file.mode = 0x1ed;
+      archive.add(file);
     }
     return importer.inspectUpload(
       tenant,

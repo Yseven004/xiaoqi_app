@@ -1,6 +1,7 @@
 """Test the installer's actual metadata functions without executing build code."""
 import ast
 import pathlib
+import shlex
 import tempfile
 import tomllib
 import unittest
@@ -9,13 +10,24 @@ import unittest
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'genkit_server/bin/prepare_dependencies.py'
 tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
 functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-             and node.name in {'registry_requirements', 'project_metadata'}]
-namespace = {'tomllib': tomllib}
+             and node.name in {'registry_requirements', 'project_metadata', 'npm_bin_shim'}]
+namespace = {'tomllib': tomllib,'shlex':shlex}
 exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), namespace)
 project_metadata = namespace['project_metadata']
 
 
 class PythonProjectMetadataTests(unittest.TestCase):
+    def test_npm_cli_shim_quotes_its_target_and_preserves_argv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory)/'node_modules'; root.mkdir()
+            target=root/"tool's;$(not-a-command)"
+            target.write_text('fixture')
+            shim=namespace['npm_bin_shim'](root,target).decode()
+            self.assertEqual(shlex.split(shim.splitlines()[1]), ['exec',"/workspace/skill/node_modules/tool's;$(not-a-command)",'$@'])
+            self.assertTrue(shim.endswith(' "$@"\n'))
+            outside=pathlib.Path(directory)/'outside';outside.write_text('private')
+            with self.assertRaises(ValueError):namespace['npm_bin_shim'](root,outside)
+
     def metadata(self, content, setup=False):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

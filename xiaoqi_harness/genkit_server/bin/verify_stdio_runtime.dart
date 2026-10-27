@@ -234,6 +234,8 @@ PY
         'npm_failed_build_preserves_installed_version': true,
         'pyproject_and_setup_build': true,
         'python_built_skill_offline_delivery': true,
+        'source_executable_permissions_roundtrip': true,
+        'npm_cli_entrypoint_offline': true,
       }),
     );
   } finally {

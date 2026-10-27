@@ -112,6 +112,97 @@ void main() {
   );
 
   test(
+    'archive executable bits survive repository subtrees and immutable storage',
+    () {
+      final input = Archive();
+      input.add(ArchiveFile.string('repo-main/one/SKILL.md', skill('one')));
+      input.add(
+        ArchiveFile.string(
+          'repo-main/one/scripts/run.sh',
+          '#!/bin/sh\nprintf ok\n',
+        )..mode = 0x9ed,
+      );
+      input.add(ArchiveFile.string('repo-main/two/SKILL.md', skill('two')));
+      input.add(
+        ArchiveFile.string('repo-main/two/scripts/read.py', 'print("text")'),
+      );
+      final files = CapabilityImportService.decodeRepository(
+        ZipEncoder().encode(input),
+      );
+      final one = CapabilityImportService.subtree(files, 'one');
+      final two = CapabilityImportService.subtree(files, 'two');
+      final metadata =
+          jsonDecode(
+                utf8.decode(
+                  one[CapabilityImportService.sourceExecutablesPath]!,
+                ),
+              )
+              as Map;
+      expect(metadata, {
+        'schema': 1,
+        'executables': ['scripts/run.sh'],
+      });
+      expect(
+        two.containsKey(CapabilityImportService.sourceExecutablesPath),
+        false,
+      );
+      store.putImmutable('source-mode-roundtrip', one);
+      final reopened = store.getImmutable('source-mode-roundtrip');
+      expect(
+        reopened[CapabilityImportService.sourceExecutablesPath],
+        one[CapabilityImportService.sourceExecutablesPath],
+      );
+      final tarBytes = GZipEncoder().encode(TarEncoder().encode(input));
+      final tar = CapabilityImportService.decodeUpload('source.tgz', tarBytes);
+      final tarMetadata = jsonDecode(
+        utf8.decode(
+          CapabilityImportService.subtree(
+            tar,
+            'repo-main/one',
+          )[CapabilityImportService.sourceExecutablesPath]!,
+        ),
+      );
+      expect(tarMetadata, metadata);
+    },
+  );
+
+  test(
+    'exported source execution metadata is rebased and rejects missing or escaping paths',
+    () {
+      final metadata = CapabilityImportService.sourceExecutablesPath;
+      final files = CapabilityImportService.decodeUpload(
+        'export.zip',
+        archive({
+          metadata: jsonEncode({
+            'schema': 1,
+            'executables': ['scripts/run.sh'],
+          }),
+          'scripts/run.sh': '#!/bin/sh\nprintf ok\n',
+        }),
+      );
+      final scoped = CapabilityImportService.subtree(files, 'repo-main');
+      expect(jsonDecode(utf8.decode(scoped[metadata]!)), {
+        'schema': 1,
+        'executables': ['scripts/run.sh'],
+      });
+      for (final path in ['../host', 'C:/host', 'missing.sh']) {
+        expect(
+          () => CapabilityImportService.decodeUpload(
+            'invalid.zip',
+            archive({
+              metadata: jsonEncode({
+                'schema': 1,
+                'executables': [path],
+              }),
+            }),
+          ),
+          throwsFormatException,
+        );
+      }
+    },
+  );
+
+  test(
     'stdio plugin installs its declared dependency and resolves an owned immutable command',
     () async {
       var preparations = 0;
