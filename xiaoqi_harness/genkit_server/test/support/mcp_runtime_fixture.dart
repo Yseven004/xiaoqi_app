@@ -299,6 +299,9 @@ Future<void> main(List<String> args) async {
       'RESULT:${jsonEncode({'text': next.text, 'missing': next.extensionEvidenceMissing, 'before_approval': beforeApproval, 'mcp_calls': calls, 'called_tools': calledTools, 'artifacts': artifacts.length, 'mcp_status': lastMcp['status'], 'events': events, 'approval_events': events.where((event) => event['type'] == 'mcp_tool_approval_required').length, 'tool_operation_count': (task['scope_operations'] as Map? ?? const {}).length, 'maximum_mcp_success_count': mcpSuccesses.isEmpty ? 0 : mcpSuccesses.reduce((a, b) => a > b ? a : b), 'called_arguments': calledArguments, 'pending_arguments': pendingAfter?['arguments'], 'pending_hash_changed': pendingAfter?['approval_hash'] != approval?['approval_hash']})}',
     );
   } finally {
+    stdout.writeln(
+      'MODEL_REQUESTS:${store.get('task/personal/turn')!.value['model_request_runs'] ?? 0}',
+    );
     await rpc.close(force: true);
     await serving.cancel();
     store.close();

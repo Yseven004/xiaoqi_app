@@ -5,13 +5,16 @@ class ExecutionLimits {
     this.toolOperations = 128,
     this.scriptExecutions = 64,
     this.modelTurns = 64,
+    this.modelRequests = 128,
   }) : assert(toolOperations > 0),
        assert(scriptExecutions > 0),
-       assert(modelTurns > 0);
+       assert(modelTurns > 0),
+       assert(modelRequests > 0);
 
   final int toolOperations;
   final int scriptExecutions;
   final int modelTurns;
+  final int modelRequests;
 }
 
 class ExecutionBudgetExceeded extends StateError {

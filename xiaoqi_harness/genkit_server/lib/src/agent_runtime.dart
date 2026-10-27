@@ -16,6 +16,7 @@ import 'deepseek_web_service.dart';
 import 'image_service.dart';
 import 'code_execution_service.dart';
 import 'execution_limits.dart';
+import 'task_model_client.dart';
 import 'skill_tool_recovery_middleware.dart';
 import 'agent_presentation_middleware.dart';
 import 'store.dart';
@@ -898,12 +899,14 @@ class GenkitXiaoqiAgentRuntime
                 name: selection.namespace,
                 apiKey: apiKey,
                 baseUrl: selection.baseUrl,
+                httpClient: TaskModelClient.current,
                 models: [CustomModelDefinition(name: selection.modelId)],
               )
             : openAI(
                 name: selection.namespace,
                 apiKey: apiKey,
                 baseUrl: selection.baseUrl,
+                httpClient: TaskModelClient.current,
                 models: [CustomModelDefinition(name: selection.modelId)],
               ),
       ],
@@ -1020,6 +1023,7 @@ class GenkitXiaoqiAgentRuntime
               name: selection.namespace,
               apiKey: key,
               baseUrl: selection.baseUrl,
+              httpClient: TaskModelClient.current,
               models: definitions,
             )
           else
@@ -1027,6 +1031,7 @@ class GenkitXiaoqiAgentRuntime
               name: selection.namespace,
               apiKey: key,
               baseUrl: selection.baseUrl,
+              httpClient: TaskModelClient.current,
               models: definitions,
             ),
         ],
@@ -1204,6 +1209,7 @@ class GenkitXiaoqiAgentRuntime
             name: selection.namespace,
             apiKey: apiKey,
             baseUrl: selection.baseUrl,
+            httpClient: TaskModelClient.current,
             models: [CustomModelDefinition(name: selection.modelId)],
           )
         else
@@ -1211,6 +1217,7 @@ class GenkitXiaoqiAgentRuntime
             name: selection.namespace,
             apiKey: apiKey,
             baseUrl: selection.baseUrl,
+            httpClient: TaskModelClient.current,
             models: [CustomModelDefinition(name: selection.modelId)],
           ),
       ],
@@ -1452,6 +1459,39 @@ class GenkitXiaoqiAgentRuntime
 
   @override
   Future<XiaoqiAgentTurnResult> runAgentTurn({
+    required String tenantId,
+    required String taskId,
+    required Map<String, dynamic> request,
+    required List<Message> messages,
+    List<ToolResponsePart>? respond,
+    List<ToolRequestPart>? restart,
+    required void Function(AgentStreamChunk chunk) onChunk,
+    required void Function(Map<String, Object?> event) onProcessEvent,
+    required CancellationToken cancellation,
+    void Function()? onImageGenerationStarted,
+    void Function(String text)? onLegacyDelta,
+  }) => TaskModelClient.run(
+    store: store,
+    tenantId: tenantId,
+    taskId: taskId,
+    cancellation: cancellation,
+    limits: codeExecutor.limits,
+    operation: () => _runAgentTurn(
+      tenantId: tenantId,
+      taskId: taskId,
+      request: request,
+      messages: messages,
+      respond: respond,
+      restart: restart,
+      onChunk: onChunk,
+      onProcessEvent: onProcessEvent,
+      cancellation: cancellation,
+      onImageGenerationStarted: onImageGenerationStarted,
+      onLegacyDelta: onLegacyDelta,
+    ),
+  );
+
+  Future<XiaoqiAgentTurnResult> _runAgentTurn({
     required String tenantId,
     required String taskId,
     required Map<String, dynamic> request,
@@ -2090,6 +2130,7 @@ class GenkitXiaoqiAgentRuntime
             name: selection.namespace,
             apiKey: apiKey,
             baseUrl: selection.baseUrl,
+            httpClient: TaskModelClient.current,
             models: [CustomModelDefinition(name: selection.modelId)],
           )
         else
@@ -2097,6 +2138,7 @@ class GenkitXiaoqiAgentRuntime
             name: selection.namespace,
             apiKey: apiKey,
             baseUrl: selection.baseUrl,
+            httpClient: TaskModelClient.current,
             models: [CustomModelDefinition(name: selection.modelId)],
           ),
         SkillsPlugin(),

@@ -94,6 +94,13 @@ Future<void> main(List<String> args) async {
     attachments: attachments,
   );
   final scenario = args.single;
+  // The real API calls _ensureRemoteAgentTask before invoking this runtime.
+  store.put('task/personal/attachment-$scenario', {
+    'task_id': 'attachment-$scenario',
+    'status': 'running',
+    'events': [],
+    'artifacts': [],
+  }, null);
   final events = <Map<String, Object?>>[];
   try {
     final result = await runtime.runAgentTurn(

@@ -40,6 +40,7 @@ void main() {
       '$scenario exercises real Genkit discovery, tool loop and delivery gate',
       () async {
         final requests = <Map<String, dynamic>>[];
+        var providerRequests = 0;
         final searchQueries = <String>[];
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final serving = server.listen((request) async {
@@ -65,6 +66,7 @@ void main() {
             await request.response.close();
             return;
           }
+          providerRequests++;
           if (serialized.contains('XIAOQI_TURN_INTENT_V1')) {
             final messages = (body['messages'] as List)
                 .whereType<Map>()
@@ -431,6 +433,16 @@ void main() {
               .split('\n')
               .firstWhere((line) => line.startsWith('RESULT:'));
           final result = jsonDecode(line.substring(7)) as Map;
+          final budgetLine = process.stdout
+              .toString()
+              .split('\n')
+              .singleWhere((line) => line.startsWith('MODEL_REQUESTS:'));
+          expect(
+            int.parse(budgetLine.substring('MODEL_REQUESTS:'.length)),
+            providerRequests,
+            reason:
+                'Count every actual provider attempt, including intent, repair and resume',
+          );
           expect(requests, isNotEmpty);
           if (!scenario.startsWith('mcp-')) {
             final firstToolNames = (requests.first['tools'] as List)

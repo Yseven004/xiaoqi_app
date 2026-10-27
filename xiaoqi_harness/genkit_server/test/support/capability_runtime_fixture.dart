@@ -298,6 +298,9 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
       'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'operation_count': (store.get('task/personal/turn')!.value['scope_operations'] as Map? ?? const {}).length, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length, if (networkScenario) 'network_before_approval': beforeApproval, if (networkScenario) 'network_runs': networkCounter.existsSync() ? int.parse(networkCounter.readAsStringSync()) : 0, if (networkScenario) 'network_grants': store.get('task/personal/turn')!.value['authorized_network_domains'], if (networkScenario) 'network_interrupted': result.finishReason == AgentFinishReason.interrupted})}',
     );
   } finally {
+    stdout.writeln(
+      'MODEL_REQUESTS:${store.get('task/personal/turn')!.value['model_request_runs'] ?? 0}',
+    );
     await telemetry?.shutdown();
     store.close();
     await directory.delete(recursive: true);
