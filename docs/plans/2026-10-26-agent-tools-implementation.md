@@ -1,12 +1,16 @@
 # Agent 工具全链路实施记录
 
-## 2026-10-28 P13 发布状态读取重试（本地实现，待发布）
+## 2026-10-28 P13 发布状态读取重试（本地验证完成）
+
+实际调用点核查：只有本地 `deploy_current.ps1` 和测试载入此 helper，远端 shell 作业和运行中 Dart/Python 服务不调用。该批仅本地发布查询控制器、测试和文档，按部署例外不需要重启/重新部署服务器（server deployment not needed）；当前线上保持已验证的 32ea38c。同步主版本后仍由正常 CI 复核，不将本地 Windows 跳过项冒充 Linux 通过。
 
 GitHub 构建状态 GET 遇到短暂传输/超时/特定临时服务错误时最多尝试三次，保持原请求路径、身份和每次超时；POST/DELETE 绝不自动重发，权限错误和限流不立即重试。真实 helper 的假 HTTP 测试覆盖连接/服务恢复、上限、禁止重放写操作及权限/限流停止；已有 main/commit/run 精确匹配、过期包只重建一次继续通过。三项 PowerShell 检查通过；Windows Python 发现 28 项、执行 12 项、跳过 16 项，不能代称 Linux 全部验证。官方参考和边界见 `docs/architecture/2026-10-28-deployment-read-retry.md`。此批不覆盖所有其他传输路径、不关闭 P13。
 
-## 2026-10-28 P07/P13 原租约与产物回收（本地实现，待发布）
+## 2026-10-28 P07/P13 原租约与产物回收（本批已部署）
 
 本批冻结后的完整本地验收：Dart 286 项、runner 52 项全部通过，静态分析无问题。准备提交合并修复后从主版本重新构建部署，线上暂仍为 1211afc。
+
+最终生产证据：main 32ea38c，CI `40559039419`/job `122382768688` 的 286 Dart、52 runner、28 部署测试、真实隔离/重启门禁和镜像往返通过。标准部署 `20261028-022041-32ea38c` 退出 0；健康/数据/清理通过，公开 HTTPS 经 Cloud Assistant 验证 200，产品/API 24 匹配，当前 healthy、唯一 latest-good 恢复点及数据存在。事件恢复与原租约产物回收一并上线，服务器已部署并验证。真机未验收，生图按用户要求后置。证据见 `docs/architecture/evidence/2026-10-28-mcp-recovery-release.json`，不关闭完整 P07/P13 或全计划。
 
 在 MCP 启动 POST 前，将租约 ID/token/原时间戳保存到独立私有 SQLite 文档，绑定租户/任务和 runner 地址，不写入任务视图或模型上下文，不记录插件环境和 runner Bearer。API 进程退出后，恢复直接访问原租约，关闭并保存原文件、确认持久化后才 ACK/删除检查点；不启动替代进程、不发送工具请求。当前 API 正在使用的租约跳过回收。ACK 失败保留身份，重试不重复保存产物。真实子进程直接退出的定向测试通过；跨租户和 runner 变更拒绝、在用租约标记、ACK 失败后再恢复均有覆盖。详见 `docs/architecture/2026-10-28-mcp-lease-checkpoints.md`。Genkit 未完成 RPC 的结果关联和 runner 重启持久化仍未完成，不关闭 P07/P13。
 

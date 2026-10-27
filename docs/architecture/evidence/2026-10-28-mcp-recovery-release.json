@@ -1,0 +1,28 @@
+{
+  "main_commit": "32ea38c67b13995dc528f62961db5189f93fe6e4",
+  "deployment_id": "20261028-022041-32ea38c",
+  "controller_exit": 0,
+  "ci": {
+    "run_id": 40559039419,
+    "job_id": 122382768688,
+    "dart_tests": 286,
+    "runner_tests": 52,
+    "deployment_tests": 28,
+    "stdio_runtime_gate": true,
+    "runner_restart_gate": true,
+    "image_export_import_roundtrip": true
+  },
+  "public_https_status": 200,
+  "public_https_check_location": "Cloud Assistant; local Windows TLS failed",
+  "current_health": "healthy",
+  "product": "2026-10-27-agent-tools-2",
+  "api_contract": 24,
+  "restore_point": "latest-good",
+  "restore_data": "present",
+  "health_data_and_cleanup": "passed",
+  "verification_profile": "non-image",
+  "live_image_service_verification": "deferred by user",
+  "device_verification": "not performed",
+  "log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261028-022041-32ea38c.log",
+  "remaining_scope": "Genkit pending RPC result association, runner lease persistence across restart, and other plan requirements remain open"
+}

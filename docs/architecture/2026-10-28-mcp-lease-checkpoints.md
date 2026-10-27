@@ -10,6 +10,8 @@ Tests use a real child API process that acquires a lease and exits without norma
 
 Final local checks: analyzer clean, complete Dart regression 286 passed, complete runner regression 52 passed. The runtime fixture performs two cleanup requests only because the first acknowledgment deliberately fails; startup count remains one throughout. No production or device success is inferred from these local checks.
 
+Production rollout: main 32ea38c, CI 40559039419 passed 286 Dart, 52 runner and 28 deployment tests, real isolated runtime/restart gates and image export/import roundtrip. Standard deployment 20261028-022041-32ea38c completed with controller exit 0, healthy service, HTTPS 200 checked through Cloud Assistant, matching product/API 24, data/cleanup checks passed and one latest-good restore point with data present. Device verification is not performed. Image-service checks remain deferred by the user. See the matching JSON release evidence for scope and log location.
+
 No Flutter/server public API contract change or client rebuild is required. Both server-side changes use the normal unified release deployment. Reverting the code does not erase private checkpoints or existing files; no credential migration or service purchase is involved.
 
 This recovers an original runner lease and its files after API loss. It does not reconstruct the Genkit pending RPC future, manufacture a successful tool return, persist leases through runner restart, or remove the existing lease expiration. Those remaining P07/P13 requirements remain open. Unknown effects must not be re-executed just to obtain a result.
