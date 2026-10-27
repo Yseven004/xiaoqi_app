@@ -133,3 +133,7 @@ main `3909642052e76457678243924d0ef639cd27d542` 的构建 `40432375369` 已成�
 普通脚本非零退出或超时后，runner 仍通过现有路径、文件类型与容量校验导出已经写出的文件；错误状态保留，不把部分输出当成任务成功。服务端收到终态清理结果后，后续抛出脚本错误不再将已清理容器重新标为待清理。连接断开或没有终态结果时仍保持待核实状态。主动取消的完整握手与断线恢复尚未覆盖，不能据此关闭 P13。
 
 本地执行服务 14 项、runner 25 项测试通过，`dart analyze` 无问题；Docker 门禁增加真实脚本写文件后 `exit 7` 的检查，验证失败状态、文件字节与清理状态，尚待 CI 执行。
+
+P12 提交 main `6ea39a7fd7b85eae7adc9d09d214f222ce1eb0ab` 的构建 `40436273537` 已通过 Linux 227 项服务端、24 项 runner 测试和真实 Docker 组合门禁，新增 `explicit_skill_mcp_shell_loop=true` 已出现在实际日志；资源清理与镜像往返校验也通过。发布包导出/上传最终状态仍独立核对。P13 后续提交 main `f74f3c7b22b8f6a1707b65352a3b714de7cb4f14` 的构建 `40436763890` 尚待验证，不复用 P12 的结果。
+
+Genkit CLI 的三次搜索 flow 通过，并从实际 Agent trace 中核对到三个成功的 `web_search` span，见 `docs/architecture/evidence/2026-10-27-search-budget-trace.json`。CLI 的 Windows 收尾仍因缺少 wmic 返回 1；随后 CIM 检查无遗留 Dart verifier/fixture。未将 CLI 退出状态或外部服务验收记为通过。

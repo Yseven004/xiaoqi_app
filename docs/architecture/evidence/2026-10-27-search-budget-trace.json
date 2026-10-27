@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-27",
+  "scope": "Local real Genkit Agent loop with deterministic model and search HTTP fixtures",
+  "productionVerified": false,
+  "cliVersion": "1.44.1",
+  "flow": "verifyToolPermissions",
+  "scenario": "text-only-search",
+  "flowTraceId": "4cfcb6248619d6a170cbc239f5fce45f",
+  "flowPassed": true,
+  "agentTraceId": "b960bae32472aa1d95ca9fb760d60352",
+  "tool": "web_search",
+  "successfulToolSpans": [
+    "46220c5f529a58cf",
+    "ed938bf0fdb60e5d",
+    "9042a9ee89c2a01a"
+  ],
+  "assertions": [
+    "Three distinct search requests reach the local provider in one Agent task",
+    "All three reservations persist in the task operation ledger",
+    "The former fixed two-search limit does not block the third request"
+  ],
+  "limitations": [
+    "No paid model, external search account or image service was called",
+    "CLI cleanup exited 1 because wmic.exe is absent; flow success is recorded separately",
+    "A subsequent CIM process check found no surviving Dart verifier or runtime fixture",
+    "This does not prove production deployment or task resource sizing"
+  ]
+}
