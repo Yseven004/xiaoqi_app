@@ -38,14 +38,20 @@ class DockerCodeExecutionService {
     this.store, {
     String? pythonExecutable,
     String? workerPath,
+    Uri? runnerUrl,
+    String? runnerToken,
     this.limits = const ExecutionLimits(),
   }) : _pythonExecutable = pythonExecutable,
-       _workerPath = workerPath;
+       _workerPath = workerPath,
+       _runnerUrl = runnerUrl,
+       _runnerToken = runnerToken;
 
   final CloudStore store;
   final ExecutionLimits limits;
   final String? _pythonExecutable;
   final String? _workerPath;
+  final Uri? _runnerUrl;
+  final String? _runnerToken;
   final _uuid = const Uuid();
 
   /// Keep the terminal error, not only the progress output before it.
@@ -157,8 +163,9 @@ class DockerCodeExecutionService {
     required CancellationToken cancellation,
   }) async {
     cancellation.throwIfCancelled();
-    final url = Platform.environment['SANDBOX_RUNNER_URL'];
-    final token = Platform.environment['SANDBOX_RUNNER_TOKEN'];
+    final url =
+        _runnerUrl?.toString() ?? Platform.environment['SANDBOX_RUNNER_URL'];
+    final token = _runnerToken ?? Platform.environment['SANDBOX_RUNNER_TOKEN'];
     if (url == null || token == null || token.length < 32) {
       throw StateError('服务器隔离 MCP 宿主未配置');
     }
@@ -171,6 +178,18 @@ class DockerCodeExecutionService {
     return SandboxMcpTransport.connect(
       runnerUrl: Uri.parse(url),
       runnerToken: token,
+      beforeStart: (identity) {
+        // Separate private document: credentials never enter task/model output.
+        store.put(
+          'private_mcp_lease/$tenantId/$taskId/${identity['lease_id']}',
+          {
+            ...identity,
+            'runner_url': url,
+            'task_binding': _runnerTaskId(tenantId, taskId),
+          },
+          null,
+        );
+      },
       request: {
         'task_id': _runnerTaskId(tenantId, taskId),
         'command': command,
@@ -234,6 +253,49 @@ class DockerCodeExecutionService {
       result['sandbox_id']?.toString(),
     );
     await transport.acknowledgeCompletion();
+    store.delete('private_mcp_lease/$tenantId/$taskId/${transport.leaseId}');
+  }
+
+  /// Recover outputs from a prior API process. Never creates a replacement lease.
+  Future<void> recoverMcpLeases({
+    required String tenantId,
+    required String taskId,
+  }) async {
+    final url =
+        _runnerUrl?.toString() ?? Platform.environment['SANDBOX_RUNNER_URL'];
+    final token = _runnerToken ?? Platform.environment['SANDBOX_RUNNER_TOKEN'];
+    if (url == null || token == null || token.length < 32) return;
+    final prefix = 'private_mcp_lease/$tenantId/$taskId/';
+    for (final (key, record) in store.list(
+      prefix,
+      limit: limits.toolOperations,
+    )) {
+      final value = record.value;
+      final id = value['lease_id'];
+      final leaseToken = value['lease_token'];
+      if (id is! String ||
+          leaseToken is! String ||
+          key != '$prefix$id' ||
+          value['task_binding'] != _runnerTaskId(tenantId, taskId) ||
+          value['runner_url'] != url ||
+          SandboxMcpTransport.isActive(id))
+        continue;
+      SandboxMcpTransport? transport;
+      try {
+        transport = SandboxMcpTransport.forRecovery(
+          runnerUrl: Uri.parse(url),
+          runnerToken: token,
+          leaseId: id,
+          leaseToken: leaseToken,
+        );
+        await finishMcp(tenantId, taskId, transport);
+      } on Object {
+        // Preserve identity until artifacts and acknowledgment both persist.
+        // An unavailable runner does not prove that the original call failed.
+      } finally {
+        await transport?.close();
+      }
+    }
   }
 
   Future<String> execute({
@@ -723,6 +785,7 @@ class DockerCodeExecutionService {
     required String tenantId,
     required String taskId,
   }) async {
+    await recoverMcpLeases(tenantId: tenantId, taskId: taskId);
     final operations =
         store.get('task/$tenantId/$taskId')?.value['code_execution_operations']
             as Map? ??

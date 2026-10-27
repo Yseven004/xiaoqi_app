@@ -82,7 +82,7 @@ class StdioChannel:
             try:
                 message = self._messages.get_nowait()
                 if message is None:
-                    break
+                    continue
                 length = len(self._encode(message))
                 if messages and size + length > MAX_MESSAGE_BYTES:
                     self._pending = message

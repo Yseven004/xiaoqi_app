@@ -10,9 +10,34 @@ import 'package:genkit_mcp/genkit_mcp.dart';
 /// JSON-RPC channel to a task-bound process hosted by the private runner.
 /// Neither plugin executables nor their environment run in the API process.
 class SandboxMcpTransport implements McpClientTransport {
-  SandboxMcpTransport._(this._baseUrl, this._runnerToken)
-    : _leaseId = _randomHex(16),
-      _leaseToken = _randomHex(32);
+  SandboxMcpTransport._(
+    this._baseUrl,
+    this._runnerToken, {
+    String? leaseId,
+    String? leaseToken,
+  }) : _leaseId = leaseId ?? _randomHex(16),
+       _leaseToken = leaseToken ?? _randomHex(32);
+
+  static final _activeLeases = <String>{};
+  static bool isActive(String leaseId) => _activeLeases.contains(leaseId);
+
+  /// Reclaim an original lease without starting or replaying any MCP process.
+  static SandboxMcpTransport forRecovery({
+    required Uri runnerUrl,
+    required String runnerToken,
+    required String leaseId,
+    required String leaseToken,
+  }) {
+    if (!RegExp(r'^[a-f0-9]{32}$').hasMatch(leaseId) ||
+        !RegExp(r'^[a-f0-9]{64}$').hasMatch(leaseToken))
+      throw const FormatException('Invalid MCP recovery identity');
+    return SandboxMcpTransport._(
+      runnerUrl,
+      runnerToken,
+      leaseId: leaseId,
+      leaseToken: leaseToken,
+    );
+  }
 
   final Uri _baseUrl;
   final String _runnerToken;
@@ -72,13 +97,22 @@ class SandboxMcpTransport implements McpClientTransport {
     required String runnerToken,
     required Map<String, dynamic> request,
     required CancellationToken cancellation,
+    FutureOr<void> Function(Map<String, dynamic> identity)? beforeStart,
   }) async {
     cancellation.throwIfCancelled();
     final transport = SandboxMcpTransport._(runnerUrl, runnerToken);
+    _activeLeases.add(transport.leaseId);
     try {
+      final issuedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      await beforeStart?.call({
+        'lease_id': transport._leaseId,
+        'lease_token': transport._leaseToken,
+        'issued_at': issuedAt,
+      });
+      cancellation.throwIfCancelled();
       await transport._request('POST', '/v1/mcp', {
         ...request,
-        'issued_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        'issued_at': issuedAt,
         'lease_id': transport._leaseId,
         'lease_token': transport._leaseToken,
       });
@@ -227,6 +261,7 @@ class SandboxMcpTransport implements McpClientTransport {
       // Runner lease expiry and owner-scoped startup cleanup are the backstop
       // when the control connection is lost; closing never restarts a process.
     } finally {
+      _activeLeases.remove(_leaseId);
       _http.close(force: true);
       unawaited(_inbound.close());
     }

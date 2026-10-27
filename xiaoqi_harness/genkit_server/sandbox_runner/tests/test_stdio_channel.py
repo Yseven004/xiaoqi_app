@@ -68,6 +68,8 @@ class StdioChannelTests(unittest.TestCase):
         for index in range(2):
             self.channel._messages.put_nowait({'jsonrpc':'2.0', 'id':index, 'result':'x' * (1100 * 1024)})
         self.channel.close()
+        self.channel._reader.join(timeout=2)
+        self.assertFalse(self.channel._reader.is_alive())
         first = self.channel.poll(timeout=0)
         self.assertEqual([item['id'] for item in first['messages']], [0])
         self.assertFalse(first['closed'])

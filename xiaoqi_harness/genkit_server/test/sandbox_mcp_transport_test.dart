@@ -147,6 +147,7 @@ void main() {
           observed.add(message);
           if (observed.length == 2) seen.complete();
         });
+        expect(SandboxMcpTransport.isActive(transport.leaseId), true);
         await transport.send({
           'jsonrpc': '2.0',
           'id': 1,
@@ -162,6 +163,7 @@ void main() {
         expect(store.get('task/tenant/task')!.value['artifacts'], hasLength(1));
         cancellation.cancel();
         await transport.close();
+        expect(SandboxMcpTransport.isActive(transport.leaseId), false);
         expect(deletes, 1);
         await executor.finishMcp('tenant', 'task', transport);
         await executor.finishMcp('tenant', 'task', transport);
