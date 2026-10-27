@@ -61,6 +61,93 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   });
 
   test(
+    'network execution carries private runner token and rechecks after grant',
+    () async {
+      final captured = File('${directory.path}/network-request.json');
+      final token = '123456789.${'a' * 64}';
+      worker.writeAsStringSync('''
+import json,sys
+r=json.loads(sys.stdin.readline())
+if r.get('action') == 'network_token':
+ print(json.dumps({'type':'result','ok':True,'network_token':'$token'}))
+elif r.get('action'):
+ print(json.dumps({'type':'result','ok':True}))
+else:
+ open(${jsonEncode(captured.path)},'w').write(json.dumps(r))
+ print(json.dumps({'type':'result','ok':True,'stdout':'done','artifacts':[],'cleanup_pending':False}))
+''');
+      var checks = 0;
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: 'pass',
+        language: 'python',
+        authorizedDomains: ['example.com'],
+        materials: [],
+        skillFiles: {},
+        cancellation: CancellationController().token,
+        beforeSubmit: () {
+          checks++;
+        },
+      );
+      final sent = jsonDecode(captured.readAsStringSync()) as Map;
+      expect(sent['network_token'], token);
+      expect(sent['authorized_domains'], ['example.com']);
+      expect(checks, 3);
+    },
+  );
+
+  test(
+    'network permission withdrawn during token lookup never submits execution',
+    () async {
+      final token = '123456789.${'a' * 64}';
+      worker.writeAsStringSync('''
+import json,sys
+r=json.loads(sys.stdin.readline())
+assert r['action'] == 'network_token'
+print(json.dumps({'type':'result','ok':True,'network_token':'$token'}))
+''');
+      var checks = 0;
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'pass',
+          language: 'python',
+          authorizedDomains: ['example.com'],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+          beforeSubmit: () {
+            if (++checks > 1) throw StateError('network permission withdrawn');
+          },
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            contains('withdrawn'),
+          ),
+        ),
+      );
+      expect(
+        store.get('task/personal/task-code')!.value['code_execution_runs'],
+        isNull,
+      );
+    },
+  );
+
+  test(
     'scope withdrawn during bridge startup never submits the old execution',
     () async {
       final scope = ToolExecution(
@@ -173,6 +260,8 @@ if payload:
     worker.writeAsStringSync('''
 import json,sys
 request=json.loads(sys.stdin.readline())
+if request.get('action') == 'network_token':
+ print(json.dumps({'ok':True,'network_token':'123456789.${'a' * 64}'})); sys.exit(0)
 if request.get('action'):
  print(json.dumps({'acknowledged':True,'cleanup_pending':False})); sys.exit(0)
 assert 'scripts/build.cjs' in request['skill_files']

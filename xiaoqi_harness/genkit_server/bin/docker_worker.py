@@ -37,9 +37,10 @@ def main() -> int:
 
     payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     disable_network = request.get("action") == "disable_network"
+    network_token = request.get('action') == 'network_token'
     cancel_execution = request.get('action') == 'cancel_execution'
     execution_action = {'cancel_execution': 'cancel', 'execution_result': 'result', 'ack_execution': 'ack'}.get(request.get('action'))
-    control = disable_network or execution_action is not None
+    control = disable_network or network_token or execution_action is not None
     task_id = request.get("task_id")
     if control and (
         not isinstance(task_id, str)
@@ -52,8 +53,8 @@ def main() -> int:
         _emit({'type': 'result', 'ok': False, 'error': '执行 ID 无效'})
         return 1
     endpoint = f'{base_url}/v1/executions/{execution_id}/{execution_action}' if execution_action is not None else (
-        f"{base_url}/v1/tasks/{task_id}/network/off"
-        if disable_network
+        f"{base_url}/v1/tasks/{task_id}/network/{'off' if disable_network else 'token'}"
+        if disable_network or network_token
         else f"{base_url}/v1/execute"
     )
     outgoing = urllib.request.Request(
@@ -68,7 +69,7 @@ def main() -> int:
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(outgoing, timeout=5 if execution_action is not None else 30 if disable_network else 270) as response:
+        with opener.open(outgoing, timeout=5 if execution_action is not None or network_token else 30 if disable_network else 270) as response:
             if control:
                 try:
                     raw = response.read(32 * 1024 * 1024 + 1)

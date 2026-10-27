@@ -11,6 +11,7 @@ import 'support/execution_recovery_gate.dart';
 import 'support/binary_artifact_gate.dart';
 import 'support/npm_build_gate.dart';
 import 'support/python_build_gate.dart';
+import 'support/network_lifecycle_gate.dart';
 
 /// Real Docker/official-package gate. No model or image-provider calls.
 Future<void> main() async {
@@ -210,6 +211,7 @@ PY
     await verifyBinaryArtifacts(store, executor, tenant);
     await verifyNpmBuild(store, executor, tenant);
     await verifyPythonBuild(store, executor, tenant);
+    await verifyNetworkLifecycle(store, executor, tenant);
     stdout.writeln(
       jsonEncode({
         'gate': 'stdio-runtime',
@@ -236,6 +238,8 @@ PY
         'python_built_skill_offline_delivery': true,
         'source_executable_permissions_roundtrip': true,
         'npm_cli_entrypoint_offline': true,
+        'network_live_revocation_and_immediate_reauthorization': true,
+        'network_exact_host_port_and_private_destination_boundaries': true,
       }),
     );
   } finally {

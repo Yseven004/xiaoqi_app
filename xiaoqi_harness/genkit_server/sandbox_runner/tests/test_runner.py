@@ -105,6 +105,7 @@ class RunnerValidationTests(unittest.TestCase):
 
     def test_disabled_network_prevents_proxy_creation_for_queued_task(self) -> None:
         task_id = "task-disabled-before-run"
+        token = server._network_token(task_id)
         control_client = Mock()
         control_client.containers.list.return_value = []
         with patch.object(server, "_get_client", return_value=control_client):
@@ -129,16 +130,56 @@ class RunnerValidationTests(unittest.TestCase):
                     "code": "print('hello')",
                     "language": "python",
                     "authorized_domains": ["example.com"],
+                    "network_token": token,
                 },
                 Mock(),
             )
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(execution_client.containers.create.call_count, 1)
-        self.assertEqual(
-            execution_client.containers.create.call_args.kwargs["image"],
-            server.SANDBOX_IMAGE,
-        )
+        self.assertFalse(result["ok"])
+        self.assertIn('联网授权已撤销', result['error'])
+        execution_client.containers.create.assert_not_called()
+        # Cleanup of a denied/offline execution must not resurrect this token.
+        self.assertFalse(server._network_token_is_current(task_id, token))
+
+    def test_network_reauthorization_accepts_new_token_without_waiting(self):
+        task_id = 'network-toggle-task'
+        old_token = server._network_token(task_id)
+        client = Mock()
+        client.containers.list.return_value = []
+        with patch.object(server, '_get_client', return_value=client):
+            server._disable_task_network(task_id)
+        new_token = server._network_token(task_id)
+        self.assertFalse(server._network_token_is_current(task_id, old_token))
+        self.assertTrue(server._network_token_is_current(task_id, new_token))
+        self.assertFalse(server._network_token_is_current('another-task', new_token))
+        self.assertFalse(server._network_token_is_current(task_id, new_token + 'a'))
+        with patch.object(server, '_network_token_key', b'new-runner-key'):
+            self.assertFalse(server._network_token_is_current(task_id, new_token))
+        issued = int(new_token.split('.')[0])
+        with patch.object(server.time, 'monotonic_ns', return_value=issued + (server.NETWORK_TOKEN_SECONDS + 1) * 1_000_000_000):
+            self.assertFalse(server._network_token_is_current(task_id, new_token))
+
+    def test_fresh_network_token_actually_starts_proxy_after_revocation(self):
+        task_id = 'fresh-network-task'
+        client = Mock()
+        client.containers.list.return_value = []
+        with patch.object(server, '_get_client', return_value=client):
+            server._disable_task_network(task_id)
+        container = Mock()
+        container.put_archive.return_value = True
+        container.attrs = {'State': {'Status': 'exited', 'ExitCode': 0, 'Running': False}}
+        proxy = Mock()
+        proxy.attrs = {'State': {'Running': False}}
+        client.containers.create.side_effect = [proxy, container]
+        with (patch.object(server, '_get_client', return_value=client),
+              patch.object(server, '_wait_for_proxy', return_value=True),
+              patch.object(server, '_decode_logs', return_value=''),
+              patch.object(server, '_safe_artifacts', return_value=[])):
+            result = server._run_sandbox({'task_id': task_id, 'code': 'pass', 'language': 'python',
+                'authorized_domains': ['example.com'], 'network_token': server._network_token(task_id)}, Mock())
+        self.assertTrue(result['ok'], result['error'])
+        proxy.start.assert_called_once()
+        self.assertEqual(client.containers.create.call_count, 2)
 
     def test_task_network_has_no_host_bridge_gateway(self) -> None:
         client = Mock()

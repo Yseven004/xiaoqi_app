@@ -255,6 +255,20 @@ class DockerCodeExecutionService {
     }.contains(language)) {
       throw const FormatException('不支持的代码语言');
     }
+    String? networkToken;
+    if (authorizedDomains.isNotEmpty) {
+      final grant = await _runnerControlResult({
+        'action': 'network_token',
+        'task_id': _runnerTaskId(tenantId, taskId),
+      });
+      networkToken = grant['network_token'] as String?;
+      if (networkToken == null ||
+          !RegExp(r'^[0-9]{1,20}\.[a-f0-9]{64}$').hasMatch(networkToken)) {
+        throw StateError('沙箱未返回有效的本次联网凭据');
+      }
+      cancellation.throwIfCancelled();
+      beforeSubmit?.call();
+    }
     final executionMaterials = _materialsForNextExecution(
       tenantId: tenantId,
       taskId: taskId,
@@ -360,6 +374,7 @@ class DockerCodeExecutionService {
             : '# Installed entry is staged in skill_files',
         'language': language,
         'authorized_domains': authorizedDomains,
+        if (networkToken != null) 'network_token': networkToken,
         'materials': executionMaterials,
         'skill_files': {
           for (final entry in skillFiles.entries)

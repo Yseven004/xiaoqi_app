@@ -2802,6 +2802,14 @@ class GenkitXiaoqiAgentRuntime
               cancellation: cancellation,
               beforeSubmit: () {
                 callExecution.check('workspace');
+                if (_taskNetworkMode(
+                      tenantId,
+                      taskId,
+                      request['network_mode'],
+                    ) !=
+                    networkMode) {
+                  throw StateError('任务联网模式已变更，请按当前权限重新调用');
+                }
                 if (skillReference != null) selectedSkills.resolve(input);
               },
             );
@@ -3237,6 +3245,10 @@ class GenkitXiaoqiAgentRuntime
             scriptPath: scriptPath,
             beforeSubmit: () {
               callExecution.check('workspace');
+              if (_taskNetworkMode(tenantId, taskId, request['network_mode']) !=
+                  networkMode) {
+                throw StateError('任务联网模式已变更，请按当前权限重新调用');
+              }
               selectedSkills.resolve(input);
             },
             arguments: arguments,
