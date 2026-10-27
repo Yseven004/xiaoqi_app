@@ -160,6 +160,60 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   );
 
   test(
+    'acknowledged files do not hide an earlier execution cleanup failure',
+    () async {
+      final clean = jsonEncode('${directory.path}/clean');
+      worker.writeAsStringSync('''
+import json, pathlib, sys
+request = json.loads(sys.stdin.readline())
+if request.get('action') == 'ack_execution':
+    second_file = pathlib.Path($clean+'-second')
+    second_id = second_file.read_text() if second_file.exists() else None
+    pending = not pathlib.Path($clean).exists() and request['execution_id'] != second_id
+    print(json.dumps({'type':'result','ok':True,'acknowledged':True,'cleanup_pending':pending}), flush=True)
+elif request.get('action') == 'execution_result':
+    print(json.dumps({'type':'result','ok':True,'finished':True,'cleanup_pending':not pathlib.Path($clean).exists(),'completion':None}), flush=True)
+else:
+    second = request['code'] == 'second'
+    if second:
+        pathlib.Path($clean+'-second').write_text(request['execution_id'])
+    print(json.dumps({'type':'sandbox_started','sandbox_id':request['execution_id']}), flush=True)
+    print(json.dumps({'type':'result','ok':True,'execution_id':request['execution_id'],'cleanup_pending':not second,'sandbox_id':request['execution_id'] if not second else None,'artifacts':[{'name':'second.txt' if second else 'first.txt','media_type':'text/plain','base64':'c2F2ZWQ='}]}), flush=True)
+''');
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      Future<String> run(String code) => service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: code,
+        language: 'shell',
+        authorizedDomains: [],
+        materials: [],
+        skillFiles: {},
+        cancellation: CancellationController().token,
+      );
+      await run('first');
+      await run('second');
+      var task = store.get('task/personal/task-code')!.value;
+      expect(task['sandbox_cleanup_pending'], true);
+      expect((task['artifacts'] as List), hasLength(2));
+      File('${directory.path}/clean').writeAsStringSync('clean');
+      await service.recoverExecutions(
+        tenantId: 'personal',
+        taskId: 'task-code',
+      );
+      task = store.get('task/personal/task-code')!.value;
+      expect(task['sandbox_cleanup_pending'], false);
+      expect(task['sandbox_id'], null);
+      expect(task['code_execution_runs'], 2);
+      expect((task['artifacts'] as List), hasLength(2));
+    },
+  );
+
+  test(
     'a rebuilt service recovers original files once and acknowledges after persistence',
     () async {
       final original = jsonEncode('${directory.path}/original.json');
@@ -282,6 +336,93 @@ print(json.dumps({'type':'result','ok':False,'error':'prepare failed, volume bus
       expect(
         store.get('task/personal/task-code')!.value['sandbox_cleanup_pending'],
         true,
+      );
+      worker.writeAsStringSync('''
+import json, sys
+request = json.loads(sys.stdin.readline())
+assert request['action'] == 'execution_result'
+print(json.dumps({'type':'result','ok':True,'finished':True,'cleanup_pending':False,'completion':None}), flush=True)
+''');
+      await service.recoverExecutions(
+        tenantId: 'personal',
+        taskId: 'task-code',
+      );
+      expect(
+        store.get('task/personal/task-code')!.value['sandbox_cleanup_pending'],
+        false,
+      );
+    },
+  );
+
+  test(
+    'a late broken stream cannot downgrade an already recovered execution',
+    () async {
+      final originalFile = jsonEncode('${directory.path}/original.json');
+      final ackFile = jsonEncode('${directory.path}/ack');
+      worker.writeAsStringSync('''
+import json, pathlib, sys, time
+request = json.loads(sys.stdin.readline())
+original = pathlib.Path($originalFile)
+ack = pathlib.Path($ackFile)
+if request.get('action') == 'execution_result':
+    first = json.loads(original.read_text())
+    result = {'type':'result','execution_id':first['execution_id'],'ok':True,'cleanup_pending':False,'stdout':'42','artifacts':[{'name':'recovered.txt','base64':'NDI=','media_type':'text/plain'}]}
+    print(json.dumps({'type':'result','ok':True,'finished':True,'cleanup_pending':False,'completion':None if ack.exists() else result}), flush=True)
+elif request.get('action') == 'ack_execution':
+    ack.write_text('ack')
+    print(json.dumps({'type':'result','ok':True,'acknowledged':True,'cleanup_pending':False}), flush=True)
+else:
+    assert not original.exists(), 'execution replayed'
+    original.write_text(json.dumps(request))
+    print(json.dumps({'type':'sandbox_started','sandbox_id':'late-stream'}), flush=True)
+    deadline = time.monotonic() + 10
+    while not ack.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ack.exists()
+    # The original result stream ends only after another service recovered it.
+''');
+      final first = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      final running = first.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: 'pass',
+        language: 'python',
+        authorizedDomains: [],
+        materials: [],
+        skillFiles: {},
+        cancellation: CancellationController().token,
+      );
+      final done = expectLater(running, throwsA(isA<SandboxExecutionError>()));
+      await Future.doWhile(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        return store.get('task/personal/task-code')!.value['sandbox_id'] !=
+            'late-stream';
+      }).timeout(const Duration(seconds: 10));
+      final resumed = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await resumed.recoverExecutions(
+        tenantId: 'personal',
+        taskId: 'task-code',
+      );
+      await done;
+      final task = store.get('task/personal/task-code')!.value;
+      final operation =
+          (task['code_execution_operations'] as Map).values.single as Map;
+      expect(operation['status'], 'persisted');
+      expect(operation['ack_pending'], false);
+      expect(task['sandbox_cleanup_pending'], false);
+      expect(task['code_execution_runs'], 1);
+      expect(task['artifacts'] as List, hasLength(1));
+      expect(
+        jsonEncode(resumed.recoveredExecutionResults('personal', 'task-code')),
+        contains('42'),
       );
     },
   );

@@ -197,14 +197,27 @@ class DockerCodeExecutionService {
       result['artifacts'],
       operationId: 'mcp:${transport.leaseId}',
     );
-    await transport.acknowledgeCompletion();
+    String? priorId;
+    _mutateTask(tenantId, taskId, (task) {
+      final operations = Map<String, dynamic>.from(
+        task['mcp_cleanup_operations'] as Map? ?? const {},
+      );
+      priorId = (operations[transport.leaseId] as Map?)?['sandbox_id']
+          ?.toString();
+      operations[transport.leaseId] = {
+        'cleanup_pending': result['cleanup_pending'] == true,
+        'sandbox_id': result['sandbox_id'] ?? priorId,
+      };
+      return {...task, 'mcp_cleanup_operations': operations};
+    });
     _finishSandboxCleanup(
       tenantId,
       taskId,
-      result['sandbox_id']?.toString(),
+      result['sandbox_id']?.toString() ?? priorId,
       result['cleanup_pending'] == true,
       result['sandbox_id']?.toString(),
     );
+    await transport.acknowledgeCompletion();
   }
 
   Future<String> execute({
@@ -305,7 +318,8 @@ class DockerCodeExecutionService {
                 (task) => {
                   ...task,
                   'sandbox_id': activeSandboxId,
-                  'sandbox_cleanup_pending': false,
+                  'sandbox_cleanup_pending':
+                      task['sandbox_cleanup_pending'] == true,
                   'updated_at': _now(),
                 },
               );
@@ -375,6 +389,9 @@ class DockerCodeExecutionService {
       if (result['execution_id'] != null &&
           result['execution_id'] != executionId)
         throw StateError('沙箱返回了其他执行的结果');
+      _recordExecution(tenantId, taskId, executionId, {
+        'cleanup_pending': result['cleanup_pending'] == true,
+      });
       _finishSandboxCleanup(
         tenantId,
         taskId,
@@ -411,10 +428,19 @@ class DockerCodeExecutionService {
       }
       return output.isEmpty ? '代码已执行，没有标准输出。' : output;
     } on Object catch (error, stack) {
-      if (requestSubmitted && !cleanupResultReceived) {
+      final persistedElsewhere =
+          ((store
+                      .get('task/$tenantId/$taskId')
+                      ?.value['code_execution_operations']
+                  as Map?)?[executionId]
+              as Map?)?['status'] ==
+          'persisted';
+      if (requestSubmitted && !cleanupResultReceived && !persistedElsewhere) {
         _recordExecution(tenantId, taskId, executionId, {'status': 'unknown'});
       }
-      if (!cleanupResultReceived && activeSandboxId != null) {
+      if (!cleanupResultReceived &&
+          !persistedElsewhere &&
+          activeSandboxId != null) {
         _markCleanupPending(tenantId, taskId, activeSandboxId);
       }
       if (requestSubmitted) {
@@ -511,7 +537,14 @@ class DockerCodeExecutionService {
       final operations = Map<String, dynamic>.from(
         task['code_execution_operations'] as Map? ?? const {},
       );
-      operations[id] = {...?(operations[id] as Map?), ...fields};
+      final previous = operations[id] as Map?;
+      operations[id] = {
+        ...?previous,
+        ...fields,
+        if (previous?['status'] == 'persisted' &&
+            const {'submitted', 'unknown'}.contains(fields['status']))
+          'status': 'persisted',
+      };
       return {...task, 'code_execution_operations': operations};
     });
   }
@@ -605,6 +638,7 @@ class DockerCodeExecutionService {
       final completion = response['completion'];
       if (response['finished'] == true &&
           completion is Map &&
+          completion['acknowledged'] != true &&
           completion['execution_id'] == id)
         return Map<String, dynamic>.from(completion);
     } on Object {
@@ -624,8 +658,13 @@ class DockerCodeExecutionService {
       final response = await _runnerControlResult(
         _executionControl('ack_execution', tenant, task, id, issuedAt),
       );
-      if (response['acknowledged'] == true)
-        _recordExecution(tenant, task, id, {'ack_pending': false});
+      if (response['acknowledged'] == true) {
+        _recordExecution(tenant, task, id, {
+          'ack_pending': false,
+          if (response.containsKey('cleanup_pending'))
+            'cleanup_pending': response['cleanup_pending'] == true,
+        });
+      }
     } on Object {
       // Files are already durable. A later read retries this acknowledgement.
     }
@@ -648,6 +687,34 @@ class DockerCodeExecutionService {
       if (operation['status'] == 'persisted') {
         if (operation['ack_pending'] == true)
           await _ackExecution(tenantId, taskId, entry.key as String, issuedAt);
+        if (operation['cleanup_pending'] == true) {
+          try {
+            final status = await _runnerControlResult(
+              _executionControl(
+                'execution_result',
+                tenantId,
+                taskId,
+                entry.key as String,
+                issuedAt,
+              ),
+            );
+            if (status['finished'] == true &&
+                status['cleanup_pending'] == false) {
+              _recordExecution(tenantId, taskId, entry.key as String, {
+                'cleanup_pending': false,
+              });
+              _finishSandboxCleanup(
+                tenantId,
+                taskId,
+                operation['sandbox_id']?.toString(),
+                false,
+                null,
+              );
+            }
+          } on Object {
+            // Keep the pending cleanup record when the runner cannot confirm it.
+          }
+        }
         continue;
       }
       if (!const {'submitted', 'unknown'}.contains(operation['status']))
@@ -665,6 +732,9 @@ class DockerCodeExecutionService {
         result['artifacts'],
         operationId: entry.key as String,
       );
+      _recordExecution(tenantId, taskId, entry.key as String, {
+        'cleanup_pending': result['cleanup_pending'] == true,
+      });
       _finishSandboxCleanup(
         tenantId,
         taskId,
@@ -860,18 +930,44 @@ class DockerCodeExecutionService {
     String? resultId,
   ) {
     final id = (resultId?.isNotEmpty == true ? resultId : activeId);
-    if (id == null && !cleanupPending) return;
-    _mutateTask(
-      tenantId,
-      taskId,
-      (task) => {
+    _mutateTask(tenantId, taskId, (task) {
+      final operations = [
+        ...(task['code_execution_operations'] as Map? ?? const {}).values
+            .whereType<Map>(),
+        ...(task['mcp_cleanup_operations'] as Map? ?? const {}).values
+            .whereType<Map>(),
+      ];
+      final trackedPending = operations.any(
+        (operation) => operation['cleanup_pending'] == true,
+      );
+      final currentOperations = operations
+          .where((operation) => operation['sandbox_id'] == task['sandbox_id'])
+          .toList();
+      final currentWasCleaned = currentOperations.any(
+        (operation) => operation['cleanup_pending'] == false,
+      );
+      final hasOtherActive =
+          task['sandbox_id'] != null &&
+          task['sandbox_id'] != id &&
+          !currentWasCleaned;
+      final pending =
+          cleanupPending ||
+          trackedPending ||
+          (hasOtherActive &&
+              currentOperations.isEmpty &&
+              task['sandbox_cleanup_pending'] == true);
+      return {
         ...task,
-        'sandbox_id': cleanupPending ? (id ?? task['sandbox_id']) : null,
-        'sandbox_cleanup_pending': cleanupPending,
-        'sandbox_cleanup_deadline': cleanupPending ? _now() + 300 : null,
+        'sandbox_id': hasOtherActive
+            ? task['sandbox_id']
+            : pending
+            ? (id ?? task['sandbox_id'])
+            : null,
+        'sandbox_cleanup_pending': pending,
+        'sandbox_cleanup_deadline': pending ? _now() + 300 : null,
         'updated_at': _now(),
-      },
-    );
+      };
+    });
   }
 
   void _markCleanupPending(String tenantId, String taskId, String? sandboxId) {

@@ -14,6 +14,10 @@ class ExecutionError(ValueError):
     pass
 
 
+class StorageUnavailable(RuntimeError):
+    pass
+
+
 class Execution:
     def __init__(self, task_id: str, issued_at: int, execution_id: str = ''):
         self.execution_id = execution_id
@@ -34,6 +38,7 @@ class Executions:
         # Requests from an earlier runner process must not be silently replayed.
         self._started_at = int(time.time() * 1000)
         self._db = None
+        self._storage_failed = False
         if db_path is not None:
             try:
                 self._open_journal(db_path)
@@ -86,8 +91,18 @@ class Executions:
         if self._db is None:
             return
         encoded = json.dumps({'task_id': entry.task_id, 'issued_at': entry.issued_at, 'claimed': entry.claimed, 'done': entry.done, 'cancelled': entry.cancelled.is_set(), 'result': entry.result}, ensure_ascii=False)
-        with self._db:
-            self._db.execute('INSERT OR REPLACE INTO executions(id, value) VALUES (?, ?)', (entry.execution_id, encoded))
+        try:
+            with self._db:
+                self._db.execute('INSERT OR REPLACE INTO executions(id, value) VALUES (?, ?)', (entry.execution_id, encoded))
+            self._storage_failed = False
+        except sqlite3.Error as error:
+            self._storage_failed = True
+            raise StorageUnavailable('Execution journal cannot store state') from error
+
+    @property
+    def healthy(self) -> bool:
+        with self._lock:
+            return not self._storage_failed
 
     def interrupted(self) -> list[Execution]:
         # Called before the HTTP listener starts; no new work can race recovery.
@@ -101,8 +116,8 @@ class Executions:
     def cleaned(self, entry: Execution):
         with self._lock:
             if entry.result is not None:
-                entry.result = {**entry.result, 'cleanup_pending': False, 'sandbox_id': None}
-                entry.payload_bytes = len(json.dumps(entry.result, ensure_ascii=False).encode())
+                entry.result = None if entry.result.get('acknowledged') else {**entry.result, 'cleanup_pending': False, 'sandbox_id': None}
+                entry.payload_bytes = len(json.dumps(entry.result, ensure_ascii=False).encode()) if entry.result is not None else 0
                 self._persist(entry)
 
     def checkpoint(self, entry: Execution, result: dict[str, Any]):
@@ -139,12 +154,17 @@ class Executions:
             raise ExecutionError('Execution request has expired; do not replay an unknown result')
         # Finished/cancel-before-start tombstones outlive the startup acceptance
         # window. Pruning cannot make the old request eligible to execute again.
-        for key, entry in list(self._entries.items()):
-            if ((entry.done and entry.result is None) or not entry.claimed) and now - entry.issued_at > 150000:
-                del self._entries[key]
-                if self._db is not None:
-                    with self._db:
-                        self._db.execute('DELETE FROM executions WHERE id=?', (key,))
+        expired = [key for key, entry in self._entries.items()
+                   if ((entry.done and entry.result is None) or not entry.claimed) and now - entry.issued_at > 150000]
+        if self._db is not None and expired:
+            try:
+                with self._db:
+                    self._db.executemany('DELETE FROM executions WHERE id=?', [(key,) for key in expired])
+            except sqlite3.Error as error:
+                self._storage_failed = True
+                raise StorageUnavailable('Execution journal cannot prune expired entries') from error
+        for key in expired:
+            del self._entries[key]
         if len(self._entries) >= self._capacity:
             raise ExecutionError('Execution registry capacity is exhausted')
         entry = Execution(task_id, issued_at, execution_id)
@@ -154,6 +174,8 @@ class Executions:
 
     def claim(self, request: dict[str, Any]) -> Execution:
         with self._lock:
+            if self._storage_failed:
+                raise StorageUnavailable('Execution journal is unavailable; no new execution started')
             entry = self._get(request)
             if entry.claimed:
                 raise ExecutionError('Execution already submitted; do not replay an unknown result')
@@ -192,7 +214,7 @@ class Executions:
     def read(self, request: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             entry = self._get(request, create=False)
-            return {'ok': True, 'finished': entry.done, 'completion': entry.result}
+            return {'ok': True, 'finished': entry.done, 'completion': entry.result, 'cleanup_pending': bool(entry.result and entry.result.get('cleanup_pending'))}
 
     def acknowledge(self, request: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -200,13 +222,18 @@ class Executions:
             if not entry.done:
                 raise ExecutionError('Execution is still running')
             previous, previous_size = entry.result, entry.payload_bytes
-            entry.result = None
-            entry.payload_bytes = 0
+            pending_cleanup = bool(entry.result and entry.result.get('cleanup_pending'))
+            entry.result = {'type': 'result', 'execution_id': entry.execution_id, 'cleanup_pending': True, 'sandbox_id': entry.result.get('sandbox_id'), 'acknowledged': True, 'artifacts': []} if pending_cleanup else None
+            entry.payload_bytes = len(json.dumps(entry.result).encode()) if entry.result is not None else 0
             try:
                 self._persist(entry)
             except Exception:
                 entry.result, entry.payload_bytes = previous, previous_size
                 raise
             if self._db is not None:
-                self._db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-            return {'ok': True, 'acknowledged': True}
+                try:
+                    self._db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                except sqlite3.Error as error:
+                    self._storage_failed = True
+                    raise StorageUnavailable('Execution journal cannot release its write-ahead log') from error
+            return {'ok': True, 'acknowledged': True, 'cleanup_pending': pending_cleanup}

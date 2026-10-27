@@ -1,13 +1,18 @@
 import sqlite3
 import tempfile
 import time
+import json
+import threading
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import server
-from execution_sessions import Executions, ExecutionError
+from execution_sessions import Executions, ExecutionError, StorageUnavailable
 
 
 class JournalTests(unittest.TestCase):
@@ -31,6 +36,95 @@ class JournalTests(unittest.TestCase):
                 registry.acknowledge(request)
             finally:
                 registry.close()
+            registry = Executions(db_path=path)
+            try:
+                self.assertIsNone(registry.read(request)['completion'])
+                with self.assertRaises(ExecutionError):
+                    registry.claim(request)
+            finally:
+                registry.close()
+
+    def test_storage_failure_reports_unhealthy_and_cannot_start_new_code(self):
+        with tempfile.TemporaryDirectory() as root:
+            registry = Executions(db_path=str(Path(root)/'journal.sqlite'))
+            request = self.request()
+            entry = registry.claim(request)
+            registry.finish(entry, {'execution_id': request['execution_id'], 'ok': True, 'stdout': 'durable result'})
+            registry._db.execute('PRAGMA query_only=ON')
+            with self.assertRaises(StorageUnavailable):
+                registry.claim({**request, 'execution_id': 'e'*32})
+            self.assertFalse(registry.healthy)
+            with patch.object(server, '_executions', registry), patch.object(server, 'RUNNER_TOKEN', 'test-token'), patch.object(server, '_get_client', return_value=Mock()), patch.object(server, '_run_sandbox') as run:
+                http = ThreadingHTTPServer(('127.0.0.1', 0), server.RunnerHandler)
+                thread = threading.Thread(target=http.serve_forever, daemon=True)
+                thread.start()
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                def call(path, body=None):
+                    outgoing = urllib.request.Request(f'http://127.0.0.1:{http.server_port}'+path, data=None if body is None else json.dumps(body).encode(), headers={'Authorization':'Bearer test-token'})
+                    return opener.open(outgoing, timeout=5)
+                try:
+                    with self.assertRaises(urllib.error.HTTPError) as unavailable:
+                        call('/health')
+                    self.assertEqual(unavailable.exception.code, 503)
+                    self.assertEqual(json.load(unavailable.exception)['reason'], 'execution_journal_unavailable')
+                    unavailable.exception.close()
+                    with self.assertRaises(urllib.error.HTTPError) as rejected:
+                        call('/v1/execute', {**request, 'execution_id':'f'*32,'code':'true','language':'shell'})
+                    self.assertEqual(rejected.exception.code, 503)
+                    rejected.exception.close()
+                    run.assert_not_called()
+                    with call('/v1/executions/'+request['execution_id']+'/result', request) as response:
+                        self.assertEqual(json.load(response)['completion']['stdout'], 'durable result')
+                    registry._db.execute('PRAGMA query_only=OFF')
+                    with call('/v1/executions/'+request['execution_id']+'/ack', request) as response:
+                        self.assertTrue(json.load(response)['acknowledged'])
+                    self.assertTrue(registry.healthy)
+                    with call('/health') as response:
+                        self.assertEqual(json.load(response)['status'], 'ready')
+                finally:
+                    http.shutdown()
+                    http.server_close()
+                    thread.join(timeout=3)
+                    registry.close()
+
+    def test_acknowledgement_releases_files_but_retains_cleanup_across_restart(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = str(Path(root)/'journal.sqlite')
+            registry = Executions(db_path=path)
+            request = self.request()
+            entry = registry.claim(request)
+            registry.finish(entry, {'execution_id':request['execution_id'],'ok':True,'cleanup_pending':True,'sandbox_id':'old-container','artifacts':[{'name':'big.txt','base64':'a'*65536}]})
+            self.assertTrue(registry.acknowledge(request)['cleanup_pending'])
+            self.assertLess(entry.payload_bytes, 1024)
+            self.assertEqual(registry.read(request)['completion']['artifacts'], [])
+            registry.close()
+            restored = Executions(db_path=path)
+            container = Mock()
+            removed = False
+            attempts = 0
+            def remove(**kwargs):
+                nonlocal removed, attempts
+                attempts += 1
+                if attempts == 1:
+                    raise server.DockerException('busy')
+                removed = True
+            container.remove.side_effect = remove
+            client = Mock()
+            client.containers.list.side_effect = lambda **kwargs: [] if removed else [container]
+            client.networks.list.return_value = []
+            client.volumes.list.return_value = []
+            try:
+                with patch.object(server, '_executions', restored):
+                    server._reconcile_restarted_cleanup(client)
+                    self.assertTrue(restored.read(request)['cleanup_pending'])
+                    server._reconcile_restarted_cleanup(client)
+                self.assertFalse(restored.read(request)['cleanup_pending'])
+                self.assertIsNone(restored.read(request)['completion'])
+                self.assertEqual(restored.pending_cleanup(), [])
+                for call in client.containers.list.call_args_list:
+                    self.assertIn('com.xiaoqi.execution-id='+request['execution_id'], call.kwargs['filters']['label'])
+            finally:
+                restored.close()
             registry = Executions(db_path=path)
             try:
                 self.assertIsNone(registry.read(request)['completion'])

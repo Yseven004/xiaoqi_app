@@ -22,7 +22,7 @@ from typing import Any, Iterable
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from mcp_sessions import LeaseError, McpSessions
-from execution_sessions import ExecutionError, Executions
+from execution_sessions import ExecutionError, Executions, StorageUnavailable
 from stdio_channel import StdioChannel
 
 
@@ -350,8 +350,25 @@ def _recover_interrupted_executions(client: docker.DockerClient) -> None:
 
 
 def _reconcile_restarted_cleanup(client: docker.DockerClient) -> None:
+    if not _executions.healthy:
+        return
     for execution in _executions.pending_cleanup():
         filters = {'label': [f'{OWNER_LABEL}=true', f'com.xiaoqi.execution-id={execution.execution_id}', f'com.xiaoqi.task-id={execution.task_id}']}
+        for container in client.containers.list(all=True, filters=filters):
+            try:
+                container.remove(force=True, v=True)
+            except DockerException:
+                pass
+        for network in client.networks.list(filters=filters):
+            try:
+                network.remove()
+            except DockerException:
+                pass
+        for volume in client.volumes.list(filters=filters):
+            try:
+                volume.remove(force=True)
+            except DockerException:
+                pass
         if not client.containers.list(all=True, filters=filters) and not client.networks.list(filters=filters) and not client.volumes.list(filters=filters):
             _executions.cleaned(execution)
 
@@ -743,6 +760,9 @@ class RunnerHandler(BaseHTTPRequestHandler):
         if self.path != "/health":
             self._json_response(404, {"error": "not found"})
             return
+        if not _executions.healthy:
+            self._json_response(503, {'status': 'unavailable', 'reason': 'execution_journal_unavailable'})
+            return
         try:
             client = _get_client()
             client.images.get(SANDBOX_IMAGE)
@@ -799,11 +819,16 @@ class RunnerHandler(BaseHTTPRequestHandler):
             try:
                 operation = {'cancel': _executions.cancel, 'result': _executions.read, 'ack': _executions.acknowledge}[execution_match.group(2)]
                 self._json_response(200, operation(request))
+            except StorageUnavailable:
+                self._json_response(503, {'error': 'execution_journal_unavailable'})
             except ExecutionError as error:
                 self._json_response(409, {'error': str(error)})
             return
         try:
             execution = _executions.claim(request)
+        except StorageUnavailable:
+            self._json_response(503, {'error': 'execution_journal_unavailable'})
+            return
         except ExecutionError as error:
             self._json_response(409, {'error': str(error)})
             return
@@ -841,6 +866,8 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 connected = False
             try:
                 result = _run_sandbox(request, send, cancellation=execution.cancelled, checkpoint=lambda result: _executions.checkpoint(execution, result))
+            except StorageUnavailable:
+                result = {**(execution.result or {}), 'type': 'result', 'ok': False, 'error': 'Execution journal unavailable; original workspace retained', 'cleanup_pending': True}
             except (RequestError, DockerException, RuntimeError, OSError) as error:
                 result = {'type': 'result', 'ok': False, 'error': str(error)[:500], 'artifacts': [], 'cleanup_pending': False}
             except Exception:
@@ -943,11 +970,22 @@ def main() -> int:
             raise RuntimeError(f"required local image is missing: {image}") from error
     server = ThreadingHTTPServer((RUNNER_HOST, RUNNER_PORT), RunnerHandler)
     server.daemon_threads = True
+    cleanup_stop = threading.Event()
+    def retry_cleanup():
+        while not cleanup_stop.wait(2):
+            try:
+                _reconcile_restarted_cleanup(_get_client())
+            except (DockerException, RuntimeError, OSError):
+                pass
+    cleanup_thread = threading.Thread(target=retry_cleanup, daemon=True)
+    cleanup_thread.start()
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
     finally:
+        cleanup_stop.set()
+        cleanup_thread.join(timeout=5)
         _mcp_sessions.close()
         _executions.close()
         server.server_close()
