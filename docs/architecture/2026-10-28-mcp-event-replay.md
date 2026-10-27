@@ -1,0 +1,13 @@
+# MCP response loss recovery
+
+The private runner previously removed a JSON-RPC response from its queue as soon as an HTTP GET read it. If that HTTP response was lost, the API could not retrieve the result again and closed the MCP process. Retrying the tool request would risk repeating external effects.
+
+Each lease now retains one bounded event batch and assigns a monotonically increasing cursor. The API sends `X-Xiaoqi-Event-Cursor` with its last fully validated batch. Repeating the preceding cursor retrieves the retained batch; advancing to the returned cursor acknowledges it and permits reading the next batch. Invalid, stale, future, missing or malformed cursors fail. The existing runner and lease tokens remain mandatory. Retained event bytes count toward the existing session payload budget and are discarded on completion acknowledgment. The channel reports closed only after its remaining bounded batches have drained.
+
+The API validates the full JSON-RPC batch and cursor before delivery, advances the cursor once and retries only event GETs on socket, HTTP transport or timeout failures, with at most three attempts. The cursor remains unchanged across those attempts. Tool POSTs, initialization, artifact acknowledgment and startup are not automatically replayed. Protocol errors and HTTP status errors still terminate the connection. Existing per-request deadlines, cancellation and cleanup remain active.
+
+This changes only the runner/API private protocol; both are deployed as one release, without a Flutter contract change. No legacy private-runner mode is retained. Rollback restores both images together using the existing deployment restore point.
+
+Verified locally: a real HTTP fixture drops a response after producing its JSON-RPC batch; the API retrieves the same batch, delivers two messages once and sends the tool request once. Runner tests cover replay until acknowledgment, stale/future/invalid cursor rejection, unchanged startup count, real HTTP authentication and replay, cache accounting and release, and closed-channel multi-batch drainage. The complete runner suite passes 52 tests; Dart analyzer passes. Complete Dart regression passes 285 tests. An earlier full invocation omitted the Windows Python test environment and failed to launch its bridge; after that process terminated the suite was rerun with the configured native Python and dependency paths, serially, and passed. Production rollout is recorded separately when terminal.
+
+This is transient transport recovery. It does not persist lease credentials across API restart, resume leases after runner restart, re-execute tools with unknown effects, extend the 120-second lease lifetime or claim that all P07/P13 recovery requirements are complete.

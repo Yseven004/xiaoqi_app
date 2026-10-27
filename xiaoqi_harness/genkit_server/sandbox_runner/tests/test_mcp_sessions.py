@@ -62,6 +62,27 @@ class McpLeaseTests(unittest.TestCase):
         with self.assertRaises(LeaseError):
             self.registry.create({**self.request, 'lease_id':'d'*32})
 
+    def test_event_response_replays_until_ack_without_resending_tool(self):
+        lease = self.registry.create(self.request)
+        self.assertTrue(lease.ready.wait(timeout=2))
+        message = {'jsonrpc':'2.0', 'id':1, 'result':{'ok':True}}
+        lease.channel._messages.put_nowait(message)
+        first = lease.poll_events(0, timeout=0)
+        self.assertEqual(first['cursor'], 1)
+        self.assertEqual(first['messages'], [message])
+        self.assertGreater(lease.payload_bytes, 0)
+        self.assertEqual(lease.poll_events(0, timeout=0), first)
+        self.assertEqual(lease.poll_events(1, timeout=0)['messages'], [])
+        self.assertEqual(lease.payload_bytes, 0)
+        for cursor in (0, -1, 2, True, '1'):
+            with self.assertRaises(LeaseError):
+                lease.poll_events(cursor, timeout=0)
+        second = {'jsonrpc':'2.0', 'id':2, 'result':{}}
+        lease.channel._messages.put_nowait(second)
+        self.assertEqual(lease.poll_events(1, timeout=0)['messages'], [second])
+        self.assertEqual(lease.poll_events(1, timeout=0)['cursor'], 2)
+        self.assertEqual(len(self.requests), 1)
+
     def test_real_http_control_authentication_protocol_and_cleanup(self):
         with patch.object(server, '_mcp_sessions', self.registry), patch.object(server, 'RUNNER_TOKEN', 'r'*40):
             http = ThreadingHTTPServer(('127.0.0.1', 0), server.RunnerHandler)
@@ -70,7 +91,7 @@ class McpLeaseTests(unittest.TestCase):
             def request(method, path, body=None, token='b'*64, runner='r'*40):
                 req = urllib.request.Request(f'http://127.0.0.1:{http.server_port}'+path,
                     method=method, data=json.dumps(body).encode() if body is not None else None,
-                    headers={'Authorization':'Bearer '+runner, 'X-Xiaoqi-Lease-Token':token, 'Content-Type':'application/json'})
+                    headers={'Authorization':'Bearer '+runner, 'X-Xiaoqi-Lease-Token':token, 'X-Xiaoqi-Event-Cursor':'0', 'Content-Type':'application/json'})
                 with urllib.request.urlopen(req, timeout=3) as response:
                     return json.load(response)
             try:
@@ -86,6 +107,7 @@ class McpLeaseTests(unittest.TestCase):
                 request('POST','/v1/mcp/'+'a'*32+'/messages',{'jsonrpc':'2.0','id':1,'method':'tools/list'})
                 events = request('GET','/v1/mcp/'+'a'*32+'/events')
                 self.assertEqual(events['messages'],[{'jsonrpc':'2.0','id':1,'result':{'ok':True}}])
+                self.assertEqual(request('GET','/v1/mcp/'+'a'*32+'/events'), events)
                 self.assertEqual(request('GET','/v1/mcp/'+'a'*32+'/artifacts')['artifacts'],[{'name':'sample.txt','base64':'aGVsbG8='}])
                 closed = request('DELETE','/v1/mcp/'+'a'*32)
                 self.assertTrue(closed['closed'])

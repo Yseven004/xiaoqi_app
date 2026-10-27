@@ -26,6 +26,10 @@ class McpLease:
         self.ready = threading.Event()
         self.done = threading.Event()
         self.result: dict[str, Any] | None = None
+        self._events_lock = threading.Lock()
+        self._event_sequence = 0
+        self._event_batch: dict[str, Any] | None = None
+        self._event_bytes = 0
         self._thread = threading.Thread(target=self._run, args=(request, run, slots), daemon=True)
 
     def start(self):
@@ -50,8 +54,30 @@ class McpLease:
     def stop(self):
         self.channel.close()
 
+    def poll_events(self, cursor: int, timeout: float = 15) -> dict[str, Any]:
+        """Acknowledge only on the next request; a lost HTTP response is replayable."""
+        if type(cursor) is not int or cursor < 0:
+            raise LeaseError("Invalid event cursor")
+        with self._events_lock:
+            if self._event_batch is not None and cursor == self._event_sequence - 1:
+                return self._event_batch
+            if cursor != self._event_sequence:
+                raise LeaseError("Invalid event cursor")
+            self._event_batch = None
+            self._event_bytes = 0
+            result = self.channel.poll(timeout=timeout)
+            if result["messages"] or result.get("closed") or result.get("error"):
+                self._event_sequence += 1
+                self._event_batch = {**result, "cursor": self._event_sequence}
+                self._event_bytes = len(json.dumps(self._event_batch, ensure_ascii=False).encode())
+                return self._event_batch
+            return {**result, "cursor": self._event_sequence}
+
     def discard(self):
         if self.done.is_set():
+            with self._events_lock:
+                self._event_batch = None
+                self._event_bytes = 0
             self.channel.discard()
             if self.result is not None:
                 self.result = {key: value for key, value in self.result.items()
@@ -60,8 +86,8 @@ class McpLease:
     @property
     def payload_bytes(self):
         if not self.done.is_set() or self.result is None:
-            return 0
-        return sum(len(item.get("base64", "")) for item in self.result.get("artifacts", []))
+            return self._event_bytes
+        return self._event_bytes + sum(len(item.get("base64", "")) for item in self.result.get("artifacts", []))
 
 
 class McpSessions:

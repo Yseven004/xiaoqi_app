@@ -25,6 +25,21 @@
   },
   "full_regression_before_added_agent_fixture": {"passed": 284, "failed": 0},
   "analyzer": "No issues found",
-  "production_deployment_verified": false,
+  "ci": {"run_id": 40553610761, "job_id": 122363620394, "dart_tests": 285, "runner_tests": 50, "deployment_tests": 28, "real_isolation_gate": true},
+  "production_deployment_verified": true,
+  "deployment": {
+    "main_commit": "1211afcabb43af8f9db9f32dc21fc6df02acb39d",
+    "id": "20261028-014556-1211afc",
+    "controller_exit": 0,
+    "health": "healthy",
+    "public_https_status": 200,
+    "public_https_check_location": "Cloud Assistant (local Windows TLS failed)",
+    "restore_point": "latest-good",
+    "restore_data": "present",
+    "product": "2026-10-27-agent-tools-2",
+    "api_contract": 24,
+    "data_and_cleanup_checks": "passed",
+    "log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261028-014556-1211afc.log"
+  },
   "device_verification": "not performed"
 }

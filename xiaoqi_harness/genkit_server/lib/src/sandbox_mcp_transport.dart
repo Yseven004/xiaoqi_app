@@ -24,6 +24,7 @@ class SandboxMcpTransport implements McpClientTransport {
   void Function()? _unregisterCancel;
   bool _closed = false;
   Map<String, dynamic>? _completion;
+  int _eventCursor = 0;
 
   /// Available after close, for the task artifact recorder (never model input).
   Map<String, dynamic>? get completion => _completion;
@@ -122,6 +123,8 @@ class SandboxMcpTransport implements McpClientTransport {
         'Bearer $_runnerToken',
       );
       request.headers.set('X-Xiaoqi-Lease-Token', _leaseToken);
+      if (method == 'GET' && path.endsWith('/events'))
+        request.headers.set('X-Xiaoqi-Event-Cursor', _eventCursor.toString());
       request.followRedirects = false;
       if (body != null) {
         request.headers.contentType = ContentType.json;
@@ -158,16 +161,26 @@ class SandboxMcpTransport implements McpClientTransport {
   Future<void> _poll() async {
     try {
       while (!_closed) {
-        final result = await _request('GET', '/v1/mcp/$_leaseId/events');
+        final result = await _readEvents();
         if (_closed) break;
         final messages = result['messages'];
         if (messages is! List || messages.length > 32) {
           throw const FormatException('Invalid MCP runner event batch');
         }
+        final cursor = result['cursor'];
+        final advances =
+            messages.isNotEmpty ||
+            result['closed'] == true ||
+            result['error'] != null;
+        if (cursor is! int || cursor != _eventCursor + (advances ? 1 : 0))
+          throw const FormatException('Invalid MCP event cursor');
         for (final message in messages) {
           if (message is! Map<String, dynamic> || message['jsonrpc'] != '2.0') {
             throw const FormatException('Invalid MCP runner protocol message');
           }
+        }
+        _eventCursor = cursor;
+        for (final message in messages) {
           _inbound.add(message);
         }
         if (result['error'] != null)
@@ -178,6 +191,22 @@ class SandboxMcpTransport implements McpClientTransport {
       if (!_closed) _inbound.addError(error, stack);
     } finally {
       await close();
+    }
+  }
+
+  Future<Map<String, dynamic>> _readEvents() async {
+    for (var attempt = 0; ; attempt++) {
+      try {
+        return await _request('GET', '/v1/mcp/$_leaseId/events');
+      } on Object catch (error) {
+        if (_closed ||
+            attempt >= 2 ||
+            (error is! SocketException &&
+                error is! HttpException &&
+                error is! TimeoutException))
+          rethrow;
+        // Only this cursor-addressed read is retryable. Never replay a tool POST.
+      }
     }
   }
 

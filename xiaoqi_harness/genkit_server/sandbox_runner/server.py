@@ -949,7 +949,10 @@ class RunnerHandler(BaseHTTPRequestHandler):
             elif lease_id is not None:
                 lease = _mcp_sessions.get(lease_id, token)
                 if method == "GET" and action == "events":
-                    result = lease.channel.poll()
+                    cursor = self.headers.get("X-Xiaoqi-Event-Cursor", "")
+                    if not re.fullmatch(r"0|[1-9][0-9]{0,15}", cursor):
+                        raise LeaseError("Invalid event cursor")
+                    result = dict(lease.poll_events(int(cursor)))
                     if lease.done.is_set():
                         result["completion"] = {key: value for key, value in (lease.result or {}).items()
                                                 if key in {"ok", "error", "cleanup_pending"}}

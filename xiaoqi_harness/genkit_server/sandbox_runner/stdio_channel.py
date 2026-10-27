@@ -91,7 +91,7 @@ class StdioChannel:
                 size += length
             except queue.Empty:
                 break
-        return {"messages": messages, "closed": self.closed,
+        return {"messages": messages, "closed": self.closed and self._pending is None and self._messages.empty(),
                 **({"error": self.error} if self.error else {})}
 
     def discard(self) -> None:

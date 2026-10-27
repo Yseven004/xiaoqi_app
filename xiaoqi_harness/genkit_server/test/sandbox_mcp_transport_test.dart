@@ -24,6 +24,9 @@ void main() {
       var deletes = 0;
       var acknowledgements = 0;
       var closed = false;
+      var eventCursor = 0;
+      var lostResponse = false;
+      Map<String, dynamic>? retainedBatch;
       final serving = server.listen((request) async {
         expect(
           request.headers.value(HttpHeaders.authorizationHeader),
@@ -53,13 +56,36 @@ void main() {
               ],
             };
           } else if (request.method == 'GET') {
+            final cursor = int.parse(
+              request.headers.value('X-Xiaoqi-Event-Cursor')!,
+            );
+            if (retainedBatch != null && cursor == eventCursor - 1) {
+              result = retainedBatch!;
+              request.response.headers.contentType = ContentType.json;
+              request.response.write(jsonEncode(result));
+              await request.response.close();
+              return;
+            }
+            expect(cursor, eventCursor);
             if (queued.isEmpty && !closed) await wake.future;
+            if (queued.isNotEmpty || closed) eventCursor++;
             result = {
               'messages': [...queued],
               'closed': closed,
+              'cursor': eventCursor,
             };
+            retainedBatch = result;
             queued.clear();
             wake = Completer<void>();
+            if (!lostResponse && (result['messages'] as List).isNotEmpty) {
+              lostResponse = true;
+              // The runner has produced the batch, but its HTTP response is lost.
+              final socket = await request.response.detachSocket(
+                writeHeaders: false,
+              );
+              socket.destroy();
+              return;
+            }
           } else if (request.method == 'POST' && path.endsWith('/ack')) {
             await request.drain<void>();
             acknowledgements++;
@@ -128,6 +154,7 @@ void main() {
         });
         await seen.future.timeout(const Duration(seconds: 5));
         expect(sent.single['method'], 'tools/list');
+        expect(lostResponse, true);
         expect(observed.first['result'], {'tools': []});
         expect(observed.last['method'], 'roots/list');
         final executor = DockerCodeExecutionService(store);

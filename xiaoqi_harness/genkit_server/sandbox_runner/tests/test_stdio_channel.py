@@ -64,6 +64,17 @@ class StdioChannelTests(unittest.TestCase):
         self.channel._reader.join(timeout=2)
         self.assertIsNotNone(self.channel.error)
 
+    def test_closed_channel_drains_all_bounded_batches_before_reporting_closed(self):
+        for index in range(2):
+            self.channel._messages.put_nowait({'jsonrpc':'2.0', 'id':index, 'result':'x' * (1100 * 1024)})
+        self.channel.close()
+        first = self.channel.poll(timeout=0)
+        self.assertEqual([item['id'] for item in first['messages']], [0])
+        self.assertFalse(first['closed'])
+        second = self.channel.poll(timeout=0)
+        self.assertEqual([item['id'] for item in second['messages']], [1])
+        self.assertTrue(second['closed'])
+
     def test_oversized_header_is_rejected_without_allocating_payload(self):
         self.peer.sendall(b'\x01\0\0\0' + (MAX_MESSAGE_BYTES + 1).to_bytes(4, 'big'))
         self.channel._reader.join(timeout=2)
