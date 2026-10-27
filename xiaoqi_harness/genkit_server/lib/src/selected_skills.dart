@@ -14,61 +14,34 @@ class SelectedSkills {
     this.tenant,
     Object? selections, {
     bool discover = false,
+    bool allowUnavailable = false,
     Iterable<String> excludedIds = const [],
   }) {
     selections ??= const [];
     if (selections is! List || selections.length > 16) {
       throw const FormatException('一次最多选择 16 个技能或插件');
     }
+    final selectedParents = <String>{};
     for (final raw in selections) {
       if (raw is! Map) throw const FormatException('扩展引用格式无效');
       final id = _id(raw['id']);
       final versionId = _id(raw['version_id']);
-      final record = _record(id);
-      final version = (record['versions'] as List)
-          .whereType<Map>()
-          .where((v) => v['id'] == versionId)
-          .firstOrNull;
-      if (version == null) throw StateError('扩展版本不存在，请刷新后重新选择');
-      final components = const {'github', 'upload'}.contains(record['origin'])
-          ? (version['components'] as List).whereType<Map>().toList()
-          : <Map>[
-              {
-                'id': 'legacy',
-                'root': '',
-                'name': record['name'],
-                'description': record['description'],
-              },
-            ];
-      final componentId = raw['component_id'];
-      if (componentId != null &&
-          !components.any((c) => c['id'] == componentId)) {
-        throw StateError('插件组件不存在或暂不支持');
-      }
-      for (final component in components) {
-        if (componentId != null && component['id'] != componentId) continue;
-        if (component['type'] != null && component['type'] != 'skill') continue;
-        final alias =
-            'skill-${sha256.convert(utf8.encode('$id/$versionId/${component['id']}')).toString().substring(0, 24)}';
-        entries[alias] = {
-          'id': alias,
-          'parent_id': id,
-          'version_id': versionId,
-          'component_id': component['id'].toString(),
-          'root': component['root'].toString(),
-          'name': component['name']?.toString() ?? record['name'].toString(),
-          'description': component['description']?.toString() ?? '',
-          'artifact_key': version['artifact_key'].toString(),
-        };
+      final componentId = raw['component_id'] == null
+          ? null
+          : _id(raw['component_id']);
+      selectedParents.add(id);
+      try {
+        _select(id, versionId, componentId, allowUnavailable: allowUnavailable);
+      } on Object {
+        if (!allowUnavailable) rethrow;
+        _unavailable(id);
       }
     }
     if (entries.length > 32)
       throw const FormatException('本次选择包含超过 32 个技能，请分次选择');
     explicitIds.addAll(entries.keys);
     if (discover) {
-      final pinnedParents = entries.values
-          .map((entry) => entry['parent_id'])
-          .toSet();
+      final pinnedParents = selectedParents;
       for (final (_, document) in store.list('cap/$tenant/', limit: 500)) {
         final record = document.value;
         final id = record['id']?.toString() ?? '';
@@ -84,23 +57,67 @@ class SelectedSkills {
           ]);
           for (final entry in candidate.entries.values) {
             if (entries.length >= 128) break;
-            final content = utf8.decode(
-              candidate.files(entry)['SKILL.md'] ?? const [],
-            );
-            final header = RegExp(
-              r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)',
-            ).firstMatch(content);
-            final metadata = header == null ? null : loadYaml(header.group(1)!);
-            if (metadata is Map && metadata['disable-model-invocation'] == true)
-              continue;
+            final metadata = candidate._metadata(entry);
+            if (metadata['disable-model-invocation'] == true) continue;
             entries.putIfAbsent(entry['id']!, () => entry);
           }
         } on Object {
           // An invalid installed candidate cannot disable healthy capabilities.
-          // Explicitly selected invalid versions still fail above.
           unavailableIds.add(id);
         }
       }
+    }
+  }
+
+  void _select(
+    String id,
+    String versionId,
+    String? componentId, {
+    required bool allowUnavailable,
+  }) {
+    final record = _record(id);
+    final version = (record['versions'] as List)
+        .whereType<Map>()
+        .where((v) => v['id'] == versionId)
+        .firstOrNull;
+    if (version == null) throw StateError('扩展版本不存在，请刷新后重新选择');
+    final components = const {'github', 'upload'}.contains(record['origin'])
+        ? (version['components'] as List).whereType<Map>().toList()
+        : <Map>[
+            {
+              'id': 'legacy',
+              'root': '',
+              'name': record['name'],
+              'description': record['description'],
+            },
+          ];
+    if (componentId != null && !components.any((c) => c['id'] == componentId)) {
+      throw StateError('插件组件不存在或暂不支持');
+    }
+    for (final component in components) {
+      if (componentId != null && component['id'] != componentId) continue;
+      if (component['type'] != null && component['type'] != 'skill') continue;
+      final alias =
+          'skill-${sha256.convert(utf8.encode('$id/$versionId/${component['id']}')).toString().substring(0, 24)}';
+      final entry = {
+        'id': alias,
+        'parent_id': id,
+        'version_id': versionId,
+        'component_id': component['id'].toString(),
+        'root': component['root'].toString(),
+        'name': component['name']?.toString() ?? record['name'].toString(),
+        'description': component['description']?.toString() ?? '',
+        'artifact_key': version['artifact_key'].toString(),
+      };
+      if (allowUnavailable) {
+        try {
+          _metadata(entry);
+        } on Object {
+          _unavailable(id, componentId: component['id'].toString());
+          continue;
+        }
+      }
+      entries[alias] = entry;
     }
   }
 
@@ -109,7 +126,36 @@ class SelectedSkills {
   final entries = <String, Map<String, String>>{};
   final explicitIds = <String>{};
   final unavailableIds = <String>[];
+  final unavailableSelections = <Map<String, String>>[];
   final _packages = <String, Map<String, List<int>>>{};
+
+  void _unavailable(String id, {String? componentId}) {
+    final record = store.get('cap/$tenant/$id')?.value;
+    unavailableSelections.add({
+      'id': id,
+      if (componentId != null) 'component_id': componentId,
+      'name': record?['name']?.toString() ?? '所选扩展',
+      'message': '所选扩展版本、组件或文件不可用，请刷新后重新选择',
+    });
+  }
+
+  Map _metadata(Map<String, String> entry) {
+    // Validate before staging so one corrupt or missing package cannot abort
+    // healthy components. This reads only a tenant-bound immutable package.
+    _assertCurrent(entry);
+    final package = _packages.putIfAbsent(
+      entry['artifact_key']!,
+      () => store.getImmutable(entry['artifact_key']!),
+    );
+    final files = CapabilityImportService.subtree(package, entry['root']!);
+    final content = utf8.decode(files['SKILL.md'] ?? const []);
+    final header = RegExp(
+      r'^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)',
+    ).firstMatch(content);
+    final metadata = header == null ? null : loadYaml(header.group(1)!);
+    if (metadata is! Map) throw const FormatException('技能缺少有效 YAML 信息');
+    return metadata;
+  }
 
   /// This artifact namespace is assigned only by the deployment-owned catalog.
   bool permitsGeneratedCode(Iterable<String> activeAliases) =>

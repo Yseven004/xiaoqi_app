@@ -136,6 +136,18 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
     ],
   }, null);
   store.put('task/personal/turn', {'artifacts': []}, null);
+  if (scenario == 'explicit-partial') {
+    store.put('cap/personal/unavailable', {
+      'id': 'unavailable',
+      'name': 'Unavailable plugin',
+      'kind': 'plugin',
+      'enabled': true,
+      'current_version_id': 'v1',
+      'versions': [
+        {'id': 'v1', 'artifact_key': 'private-package-diagnostic'},
+      ],
+    }, null);
+  }
   final events = <Map<String, Object?>>[];
   final telemetry =
       (Platform.environment['GENKIT_TELEMETRY_SERVER'] ?? '').isEmpty
@@ -157,6 +169,8 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
                 ? []
                 : [
                     {'id': 'notes', 'version_id': 'v1'},
+                    if (scenario == 'explicit-partial')
+                      {'id': 'unavailable', 'version_id': 'v1'},
                   ],
           },
           messages: agentMessagesFromRequest([

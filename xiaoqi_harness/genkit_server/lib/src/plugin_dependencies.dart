@@ -66,18 +66,24 @@ class PluginDependencies {
           record['enabled'] == false ||
           record['deleted_at'] != null)
         continue;
-      final version = (record['versions'] as List? ?? const [])
+      final versions = record['versions'];
+      final version = (versions is List ? versions : const [])
           .whereType<Map>()
           .where((v) => v['id'] == selection['version_id'])
           .firstOrNull;
-      if (version == null) throw StateError('插件版本已失效');
-      final files = store.getImmutable(version['artifact_key'].toString());
+      if (version == null) {
+        result.messages.add('插件 ${record['name']} 的所选版本已失效，请重新选择');
+        result.unavailable.add('插件所选版本已失效');
+        continue;
+      }
+      Map<String, List<int>> files;
       Map<String, dynamic> definitions;
       try {
+        files = store.getImmutable(version['artifact_key'].toString());
         definitions = declarations(files);
-      } on FormatException {
-        result.messages.add('插件 ${record['name']} 的连接声明格式或路径无效');
-        result.unavailable.add('插件连接声明格式或路径无效');
+      } on Object {
+        result.messages.add('插件 ${record['name']} 的文件或连接声明不可用，请重新安装或选择');
+        result.unavailable.add('插件文件或连接声明不可用');
         continue;
       }
       for (final entry in definitions.entries) {

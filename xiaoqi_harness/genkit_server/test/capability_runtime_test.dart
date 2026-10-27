@@ -6,6 +6,7 @@ import 'package:test/test.dart';
 void main() {
   for (final scenario in [
     'explicit',
+    'explicit-partial',
     'implicit',
     'script-available',
     'text-only',
@@ -516,10 +517,18 @@ void main() {
               expect(result['operation_count'], 3);
             }
           } else {
-            expect(result['missing'], isFalse);
+            expect(result['missing'], scenario == 'explicit-partial');
             expect(result['generated'], 2);
             expect(result['artifacts'], 2);
             expect(result['active'], hasLength(1));
+            if (scenario == 'explicit-partial') {
+              expect(result['text'], contains('任务尚未完成'));
+              expect(result['text'], contains('Unavailable plugin'));
+              expect(
+                jsonEncode(result),
+                isNot(contains('private-package-diagnostic')),
+              );
+            }
             expect(
               jsonEncode(result['events']),
               contains('read_skill_resource'),
@@ -539,6 +548,7 @@ void main() {
           }
           if (!const {
             'missing',
+            'explicit-partial',
             'mcp-error',
             'mcp-partial-selection',
             'mcp-partial-startup',

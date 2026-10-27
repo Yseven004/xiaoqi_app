@@ -1504,6 +1504,7 @@ class GenkitXiaoqiAgentRuntime
               const []),
       ],
       discover: true,
+      allowUnavailable: true,
       excludedIds: (request['excluded_capability_ids'] as List? ?? const [])
           .map((id) => id.toString()),
     );
@@ -1539,6 +1540,14 @@ class GenkitXiaoqiAgentRuntime
       if (event['type'] == 'tool_succeeded') persistDelivery();
       publishEvent(event);
     };
+    for (final failure in selectedSkills.unavailableSelections) {
+      onProcessEvent({
+        'type': 'tool_failed',
+        'tool': 'use_skill',
+        'capability_name': failure['name'],
+        'message': failure['message'],
+      });
+    }
     final mcpConnectionService = _mcpConnections ?? McpConnectionService(store);
     final pluginDependencies = PluginDependencies.resolve(
       store,
@@ -3556,6 +3565,11 @@ class GenkitXiaoqiAgentRuntime
     );
     if (pluginDependencies.messages.isNotEmpty)
       system.write('\n插件组件与依赖状态：\n${pluginDependencies.messages.join('\n')}');
+    if (selectedSkills.unavailableSelections.isNotEmpty) {
+      system.write(
+        '\n所选扩展不可用：\n${selectedSkills.unavailableSelections.map((failure) => '${failure['name']}：${failure['message']}').join('\n')}',
+      );
+    }
     if (mcpToolSummary.isNotEmpty)
       system.write('\n本轮 MCP 工具目录：\n${mcpToolSummary.join('\n')}');
     if (skillsAvailable ||
@@ -3813,6 +3827,11 @@ class GenkitXiaoqiAgentRuntime
           artifacts: artifacts,
         );
         missing.addAll(unavailableMcp);
+        missing.addAll(
+          selectedSkills.unavailableSelections.map(
+            (failure) => '${failure['name']}：${failure['message']}',
+          ),
+        );
         if (extensionSelected) missing.addAll(pluginDependencies.unavailable);
         return missing;
       }

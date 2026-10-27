@@ -262,9 +262,117 @@ void main() {
         '/workspace/skill/node_modules/@example/server/dist/index.js',
         '/workspace/output',
       ]);
+      store.put('cap/alice/${saved.value['id']}', {
+        ...saved.value,
+        'versions': [
+          ...(saved.value['versions'] as List),
+          {
+            'id': 'missing-files',
+            'artifact_key': 'private-missing-package-path',
+          },
+        ],
+      }, saved.revision);
+      final partial = PluginDependencies.resolve(store, 'alice', [
+        {'id': saved.value['id'], 'version_id': 'removed-version'},
+        {'id': saved.value['id'], 'version_id': 'missing-files'},
+        ...selection,
+      ]);
+      expect(partial.isolatedConnections, hasLength(1));
+      expect(partial.unavailable, hasLength(2));
+      expect(
+        jsonEncode(partial.messages),
+        isNot(contains('private-missing-package-path')),
+      );
       expect(
         PluginDependencies.resolve(store, 'bob', selection).isolatedConnections,
         isEmpty,
+      );
+    },
+  );
+
+  test(
+    'task selection isolates missing versions and corrupt sibling skills without implicit fallback',
+    () {
+      store.putImmutable('mixed-package', {
+        'good/SKILL.md': utf8.encode(skill('healthy-sibling')),
+        'bad/SKILL.md': [0xff],
+      });
+      store.put('cap/alice/mixed', {
+        'id': 'mixed',
+        'name': 'Mixed plugin',
+        'kind': 'plugin',
+        'origin': 'upload',
+        'enabled': true,
+        'current_version_id': 'v1',
+        'versions': [
+          {
+            'id': 'v1',
+            'artifact_key': 'mixed-package',
+            'components': [
+              {
+                'id': 'good',
+                'type': 'skill',
+                'root': 'good',
+                'name': 'Healthy sibling',
+              },
+              {
+                'id': 'bad',
+                'type': 'skill',
+                'root': 'bad',
+                'name': 'Corrupt sibling',
+              },
+            ],
+          },
+        ],
+      }, null);
+      store.put('cap/bob/foreign', {
+        'name': 'private-other-account-name',
+      }, null);
+      final selected = SelectedSkills(
+        store,
+        'alice',
+        [
+          {'id': 'mixed', 'version_id': 'removed'},
+          {'id': 'mixed', 'version_id': 'v1'},
+          {'id': 'foreign', 'version_id': 'v1'},
+        ],
+        discover: true,
+        allowUnavailable: true,
+      );
+      expect(selected.entries, hasLength(1));
+      expect(selected.explicitIds, hasLength(1));
+      expect(selected.entries.values.single['component_id'], 'good');
+      expect(
+        utf8.decode(
+          selected.files(selected.entries.values.single)['SKILL.md']!,
+        ),
+        contains('healthy-sibling'),
+      );
+      expect(selected.unavailableSelections, hasLength(3));
+      expect(
+        jsonEncode(selected.unavailableSelections),
+        isNot(contains('private-other-account-name')),
+      );
+      final pinnedMissing = SelectedSkills(
+        store,
+        'alice',
+        [
+          {'id': 'mixed', 'version_id': 'removed'},
+        ],
+        discover: true,
+        allowUnavailable: true,
+      );
+      expect(
+        pinnedMissing.entries,
+        isEmpty,
+        reason:
+            'A missing explicit version must not silently fall back to current_version_id',
+      );
+      expect(
+        () => SelectedSkills(store, 'alice', [
+          {'id': '../invalid', 'version_id': 'v1'},
+        ], allowUnavailable: true),
+        throwsFormatException,
       );
     },
   );
