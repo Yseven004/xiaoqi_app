@@ -540,8 +540,9 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             stderr = _decode_logs(container, "stderr")
         except DockerException:
             pass
-        if run_error is None or stdio is not None:
-            artifacts = _safe_artifacts(container)
+        # Failed and timed-out scripts may already have produced useful files.
+        # Export only through the same bounded path/size validator as success.
+        artifacts = _safe_artifacts(container)
     finally:
         if stdio is not None:
             stdio.close()

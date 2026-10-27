@@ -305,6 +305,7 @@ class DockerCodeExecutionService {
     unawaited(process.stderr.drain<void>());
 
     var requestSubmitted = false;
+    var cleanupResultReceived = false;
     try {
       final request = <String, dynamic>{
         'task_id': _runnerTaskId(tenantId, taskId),
@@ -344,6 +345,7 @@ class DockerCodeExecutionService {
         result['cleanup_pending'] == true,
         result['sandbox_id']?.toString(),
       );
+      cleanupResultReceived = true;
       final artifactNames = await _saveArtifacts(
         tenantId,
         taskId,
@@ -363,7 +365,7 @@ class DockerCodeExecutionService {
       }
       return output.isEmpty ? '代码已执行，没有标准输出。' : output;
     } on Object catch (error, stack) {
-      if (activeSandboxId != null) {
+      if (!cleanupResultReceived && activeSandboxId != null) {
         _markCleanupPending(tenantId, taskId, activeSandboxId);
       }
       if (requestSubmitted) {

@@ -140,6 +140,31 @@ PY
         'Shell argv was interpreted as a command instead of literal data',
       );
     }
+    try {
+      await executor.execute(
+        tenantId: tenant,
+        taskId: task,
+        language: 'shell',
+        code: "printf 'recoverable' > /workspace/output/partial.txt\nexit 7",
+        authorizedDomains: [],
+        materials: [],
+        skillFiles: {},
+        cancellation: CancellationController().token,
+      );
+      throw StateError('Failing script was incorrectly reported as successful');
+    } on SandboxExecutionError {
+      final failedTask = store.get('task/$tenant/$task')!.value;
+      final partial = (failedTask['artifacts'] as List)
+          .whereType<Map>()
+          .singleWhere((item) => item['name'] == 'partial.txt');
+      if (utf8.decode(store.getObject(partial['object_key'])) !=
+              'recoverable' ||
+          failedTask['sandbox_cleanup_pending'] != false) {
+        throw StateError(
+          'Failed script lost partial files or confirmed cleanup',
+        );
+      }
+    }
     await verifyStdioAgent(store, executor, tenant, files);
     stdout.writeln(
       jsonEncode({
@@ -154,6 +179,7 @@ PY
         'mcp_to_shell_file_handoff': true,
         'agent_mcp_shell_loop': true,
         'explicit_skill_mcp_shell_loop': true,
+        'failed_script_partial_artifacts': true,
       }),
     );
   } finally {

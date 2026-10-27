@@ -13,6 +13,26 @@ from stdio_channel import StdioChannel
 
 
 class RunnerValidationTests(unittest.TestCase):
+    def test_failed_script_preserves_validated_partial_artifacts_and_cleanup(self):
+        client = Mock()
+        volume = Mock()
+        volume.name = 'xq-code-volume'
+        client.volumes.create.return_value = volume
+        container = Mock()
+        container.put_archive.return_value = True
+        container.attrs = {'State': {'Status': 'exited', 'ExitCode': 7, 'Running': False}}
+        client.containers.create.return_value = container
+        partial = [{'name': 'partial.txt', 'media_type': 'text/plain', 'base64': 'cGFydGlhbA=='}]
+        with patch.object(server, '_get_client', return_value=client), patch.object(server, '_decode_logs', return_value=''), patch.object(server, '_safe_artifacts', return_value=partial) as export:
+            result = server._run_sandbox({'task_id': 'failed-task', 'language': 'shell', 'code': 'exit 7'}, Mock())
+        self.assertFalse(result['ok'])
+        self.assertIn('7', result['error'])
+        self.assertEqual(result['artifacts'], partial)
+        export.assert_called_once_with(container)
+        self.assertFalse(result['cleanup_pending'])
+        container.remove.assert_called_once_with(force=True, v=True)
+        volume.remove.assert_called_once_with(force=True)
+
     def test_shell_arguments_and_installed_script_are_not_reparsed(self):
         arguments = ['value with spaces', '', 'literal; $(not-a-host-command)']
         files, language, args, scripts = server._request_files({'code':'printf "%s" "$1"','language':'shell','arguments':arguments})

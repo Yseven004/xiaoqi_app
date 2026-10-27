@@ -59,6 +59,40 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   });
 
   test(
+    'failed script retains partial files without reopening confirmed cleanup',
+    () async {
+      worker.writeAsStringSync(
+        worker.readAsStringSync().replaceFirst(
+          '"ok":True',
+          '"ok":False,"error":"exit 7"',
+        ),
+      );
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'exit 7',
+          language: 'shell',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+        ),
+        throwsA(isA<SandboxExecutionError>()),
+      );
+      final task = store.get('task/personal/task-code')!.value;
+      expect(task['sandbox_cleanup_pending'], false);
+      final file = (task['artifacts'] as List).single as Map;
+      expect(utf8.decode(store.getObject(file['object_key'])), 'saved');
+    },
+  );
+
+  test(
     'code and query share one atomic task budget across resume and steering',
     () async {
       const limits = ExecutionLimits(toolOperations: 2);
