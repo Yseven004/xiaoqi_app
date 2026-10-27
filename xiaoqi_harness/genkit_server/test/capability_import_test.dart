@@ -486,6 +486,62 @@ void main() {
     },
   );
 
+  test(
+    'cached skill bytes cannot outlive removal of their version or component binding',
+    () async {
+      final importer = service({
+        'SKILL.md': skill('bound-source'),
+        'scripts/run.py': 'print("owned")',
+      });
+      final inspection = await importer.inspect(
+        'alice',
+        'https://github.com/example/bound-source',
+      );
+      final candidate = (inspection['candidates'] as List).single as Map;
+      final installed = await importer.install(
+        'alice',
+        inspection['id'],
+        candidate['id'],
+      );
+      final selected = SelectedSkills(store, 'alice', [
+        {
+          'id': installed.value['id'],
+          'version_id': installed.value['current_version_id'],
+        },
+      ]);
+      final entry = selected.entries.values.single;
+      expect(selected.files(entry).containsKey('scripts/run.py'), true);
+      final key = 'cap/alice/${installed.value['id']}';
+      store.put(key, {...installed.value, 'versions': []}, installed.revision);
+      expect(() => selected.files(entry), throwsStateError);
+      expect(
+        () => selected.resolve({'skill_id': entry['id']}),
+        throwsStateError,
+      );
+      final current = store.get(key)!;
+      final versions = (installed.value['versions'] as List)
+          .whereType<Map>()
+          .map(
+            (version) => {
+              ...version,
+              'components': (version['components'] as List)
+                  .whereType<Map>()
+                  .map((component) => {...component, 'root': 'changed-root'})
+                  .toList(),
+            },
+          )
+          .toList();
+      store.put(key, {
+        ...installed.value,
+        'versions': versions,
+      }, current.revision);
+      expect(
+        () => selected.resolve({'skill_id': entry['id']}),
+        throwsStateError,
+      );
+    },
+  );
+
   test('standard plugin and multiple standalone candidates are discovered', () {
     final standalone = CapabilityImportService.discover({
       'a/SKILL.md': utf8.encode(skill('same-name')),

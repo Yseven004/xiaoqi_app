@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:archive/archive.dart';
@@ -58,6 +59,105 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
     store.close();
     directory.deleteSync(recursive: true);
   });
+
+  test(
+    'scope withdrawn during bridge startup never submits the old execution',
+    () async {
+      final scope = ToolExecution(
+        store,
+        'personal',
+        'task-code',
+        TurnContract(mode: 'workflow', imageLimit: 0),
+        requestIdentity: 'original',
+      )..bind();
+      final submitted = File('${directory.path}/submitted.json');
+      worker.writeAsStringSync('''
+import sys
+payload=sys.stdin.readline()
+if payload:
+ open(${jsonEncode(submitted.path)},'w').write(payload)
+''');
+      var checks = 0;
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'print("old operation")',
+          language: 'python',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+          beforeSubmit: () {
+            checks++;
+            if (checks == 1)
+              scheduleMicrotask(() {
+                ToolExecution(
+                  store,
+                  'personal',
+                  'task-code',
+                  TurnContract(mode: 'workflow', imageLimit: 0),
+                  requestIdentity: 'updated',
+                ).bind();
+              });
+            scope.check('workspace');
+          },
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'scope failure',
+            contains('用户已更新任务'),
+          ),
+        ),
+      );
+      expect(checks, 2);
+      expect(submitted.existsSync(), false);
+      final task = store.get('task/personal/task-code')!.value;
+      expect(task['code_execution_runs'], 1);
+      expect(task['code_execution_operations'], isNull);
+    },
+  );
+
+  test(
+    'scope rejected before bridge startup does not consume an execution attempt',
+    () async {
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'print("old")',
+          language: 'python',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+          beforeSubmit: () => throw StateError('revoked-before-start'),
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'scope failure',
+            'revoked-before-start',
+          ),
+        ),
+      );
+      expect(
+        store.get('task/personal/task-code')!.value['code_execution_runs'] ?? 0,
+        0,
+      );
+    },
+  );
 
   Future<Map<String, List<int>>> prepareArchive(
     Map<String, String> entries,
@@ -124,10 +224,10 @@ print(json.dumps({'type':'result','ok':True,'stdout':'','stderr':'','cleanup_pen
           '.xiaoqi/dependency-lock.json': '{}',
           '.xiaoqi/built/../escape': 'poison',
         },
-      {
-        '.xiaoqi/dependency-lock.json': '{}',
-        '.xiaoqi/built/C:/escape': 'poison',
-      },
+        {
+          '.xiaoqi/dependency-lock.json': '{}',
+          '.xiaoqi/built/C:/escape': 'poison',
+        },
       ]) {
         await expectLater(prepareArchive(entries), throwsStateError);
       }

@@ -16,6 +16,38 @@ void main() {
   late Directory directory;
   late CloudStore store;
   test(
+    'network decisions survive same-scope resume and expire with a changed request',
+    () {
+      ToolExecution scope(String identity) => ToolExecution(
+        store,
+        'personal',
+        'network-grants',
+        TurnContract(mode: 'workflow', imageLimit: 0),
+        requestIdentity: identity,
+      )..bind();
+      scope('first');
+      final task = store.get('task/personal/network-grants')!;
+      store.put('task/personal/network-grants', {
+        ...task.value,
+        'authorized_network_domains': ['api.example.com'],
+        'requested_network_domains': ['files.example.com'],
+        'network_purpose': 'old purpose',
+      }, task.revision);
+      scope('first');
+      expect(
+        store
+            .get('task/personal/network-grants')!
+            .value['authorized_network_domains'],
+        ['api.example.com'],
+      );
+      scope('updated');
+      final updated = store.get('task/personal/network-grants')!.value;
+      expect(updated['authorized_network_domains'], isEmpty);
+      expect(updated['requested_network_domains'], isEmpty);
+      expect(updated['network_purpose'], isNull);
+    },
+  );
+  test(
     'authorization survives resume, denies repeated proposals and resets on steering',
     () {
       ToolExecution scope(String identity) => ToolExecution(

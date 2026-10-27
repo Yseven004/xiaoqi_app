@@ -423,7 +423,7 @@ void main() {
           'reasoning_id': 'call-2',
           'revision': 1,
           'status': 'completed',
-          'text': 'API_KEY 是 999。',
+          'text': 'API_KEY 是 VALUECHECK_999_XYZ。',
         },
       ]);
       final turn = ownerAgent.chat().sendStream(
@@ -446,7 +446,7 @@ void main() {
       expect(rows.every((row) => row['status'] == 'completed'), isTrue);
       expect(response.state!['process_status'], 'completed');
       expect(observed.toString(), isNot(contains('private-')));
-      expect(observed.toString(), isNot(contains('999')));
+      expect(observed.toString(), isNot(contains('VALUECHECK_999_XYZ')));
       final stored = store.get('task/personal/full-public-process')!.value;
       expect(jsonEncode(stored['events']), isNot(contains('/workspace')));
       expect(jsonEncode(stored['events']), isNot(contains('private-')));

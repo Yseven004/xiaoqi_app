@@ -68,6 +68,9 @@ class ToolExecution {
         if (prior != null) 'delivery_evidence': <String, dynamic>{},
         'tool_authorizations': <String, dynamic>{},
         'tool_authorization_denials': <String, dynamic>{},
+        'authorized_network_domains': <String>[],
+        'requested_network_domains': <String>[],
+        'network_purpose': null,
       };
     });
   }

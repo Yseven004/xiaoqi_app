@@ -239,8 +239,10 @@ class DockerCodeExecutionService {
     String? scriptPath,
     List<String> arguments = const [],
     List<String>? artifactIds,
+    void Function()? beforeSubmit,
   }) async {
     cancellation.throwIfCancelled();
+    beforeSubmit?.call();
     if (scriptPath == null &&
         (code.trim().isEmpty || utf8.encode(code).length > 64 * 1024)) {
       throw const FormatException('代码不能为空且不能超过 64 KB');
@@ -366,6 +368,8 @@ class DockerCodeExecutionService {
         if (scriptPath != null) 'script_path': scriptPath,
         if (arguments.isNotEmpty) 'arguments': arguments,
       };
+      cancellation.throwIfCancelled();
+      beforeSubmit?.call();
       _recordExecution(tenantId, taskId, executionId, {
         'issued_at': issuedAt,
         'status': 'submitted',
@@ -461,6 +465,19 @@ class DockerCodeExecutionService {
       unregisterCancel();
       cancelDeadline?.cancel();
       if (cancelRequest != null) await cancelRequest;
+      if (!requestSubmitted) {
+        // A revoked scope must not leave a bridge waiting for its first input.
+        process.kill(ProcessSignal.sigterm);
+        await process.stdin.close().catchError((Object _) {});
+        await process.exitCode.timeout(
+          const Duration(seconds: 5),
+          onTimeout: () {
+            process.kill(ProcessSignal.sigkill);
+            throw StateError('未提交执行的桥接进程未能及时停止');
+          },
+        );
+        await stdoutDone.future;
+      }
     }
   }
 

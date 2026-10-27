@@ -2187,14 +2187,23 @@ class GenkitXiaoqiAgentRuntime
           if (spec == null) {
             client = await mcpConnectionService.connect(connection);
           } else {
-            execution.check('workspace');
+            final startupExecution = execution;
+            startupExecution.check('workspace');
+            final materials = await _scriptMaterials(
+              tenantId,
+              request['materials'],
+            );
+            startupExecution.check('workspace');
+            if (!mcpConnectionService.isCurrent(tenantId, connection)) {
+              throw StateError('MCP 连接或插件版本已变更，请刷新连接状态');
+            }
             final transport = await codeExecutor.connectMcp(
               tenantId: tenantId,
               taskId: taskId,
               command: spec.command,
               environment: spec.environment,
               files: spec.files,
-              materials: await _scriptMaterials(tenantId, request['materials']),
+              materials: materials,
               cancellation: cancellation,
             );
             isolatedMcpTransports.add(transport);
@@ -2660,7 +2669,8 @@ class GenkitXiaoqiAgentRuntime
             '不要向用户展示隔离工作区的路径或内部参数。',
         inputSchema: _executePythonSchema,
         fn: (input, context) async {
-          execution.check('workspace');
+          final callExecution = execution;
+          callExecution.check('workspace');
           final networkMode = _taskNetworkMode(
             tenantId,
             taskId,
@@ -2790,6 +2800,10 @@ class GenkitXiaoqiAgentRuntime
               skillFiles: skillFiles,
               artifactIds: (input['artifact_ids'] as List?)?.cast<String>(),
               cancellation: cancellation,
+              beforeSubmit: () {
+                callExecution.check('workspace');
+                if (skillReference != null) selectedSkills.resolve(input);
+              },
             );
             onProcessEvent({
               'type': 'tool_succeeded',
@@ -3084,7 +3098,8 @@ class GenkitXiaoqiAgentRuntime
           '执行受任务资源预算约束；失败后不得自动重试副作用操作。脚本只能访问本次任务资料和当前技能文件，默认断网。',
       inputSchema: _executeSkillScriptSchema,
       fn: (input, context) async {
-        execution.check('workspace');
+        final callExecution = execution;
+        callExecution.check('workspace');
         _logAgentRuntime('tool_called', taskId, {
           'tool_name': 'execute_skill_script',
           'input_fields': input.keys.toList()..sort(),
@@ -3220,6 +3235,10 @@ class GenkitXiaoqiAgentRuntime
             skillFiles: skillFiles,
             cancellation: cancellation,
             scriptPath: scriptPath,
+            beforeSubmit: () {
+              callExecution.check('workspace');
+              selectedSkills.resolve(input);
+            },
             arguments: arguments,
             artifactIds: (input['artifact_ids'] as List?)?.cast<String>(),
           );

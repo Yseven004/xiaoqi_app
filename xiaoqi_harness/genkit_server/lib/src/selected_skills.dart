@@ -160,7 +160,7 @@ class SelectedSkills {
             ? entries.values.single
             : null);
     if (entry == null) throw StateError('只能使用本次选中的技能，请使用目录中的技能 ID');
-    _record(entry['parent_id']!);
+    _assertCurrent(entry);
     if (input['version_id'] != null &&
         input['version_id'] != entry['version_id']) {
       throw StateError('技能版本与本次绑定版本不一致');
@@ -171,7 +171,7 @@ class SelectedSkills {
   Map<String, List<int>> files(Map entry) {
     final bound = entries[entry['id']];
     if (bound == null) throw StateError('技能未获本次任务授权');
-    _record(bound['parent_id']!);
+    _assertCurrent(bound);
     return CapabilityImportService.subtree(
       _packages.putIfAbsent(
         bound['artifact_key']!,
@@ -179,5 +179,28 @@ class SelectedSkills {
       ),
       bound['root']!,
     );
+  }
+
+  void _assertCurrent(Map<String, String> entry) {
+    final record = _record(entry['parent_id']!);
+    final version = (record['versions'] as List? ?? const [])
+        .whereType<Map>()
+        .where(
+          (version) =>
+              version['id'] == entry['version_id'] &&
+              version['artifact_key'] == entry['artifact_key'],
+        )
+        .firstOrNull;
+    if (version == null) throw StateError('本次绑定的技能版本已移除或变更，请重新选择');
+    if (const {'github', 'upload'}.contains(record['origin']) &&
+        !(version['components'] as List? ?? const []).whereType<Map>().any(
+          (component) =>
+              component['id'] == entry['component_id'] &&
+              component['root'] == entry['root'] &&
+              (component['type'] == null || component['type'] == 'skill') &&
+              component['status'] != 'unsupported',
+        )) {
+      throw StateError('本次绑定的技能组件已移除或变更，请重新选择');
+    }
   }
 }
