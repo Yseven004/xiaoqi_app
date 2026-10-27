@@ -253,9 +253,27 @@ class DockerCodeExecutionService {
       throw StateError('本机 Docker 沙箱执行桥接文件不存在');
     }
 
+    final executionId = const Uuid().v4().replaceAll('-', '');
+    final issuedAt = DateTime.now().millisecondsSinceEpoch;
     final process = await Process.start(executable, [worker]);
+    Timer? cancelDeadline;
+    Future<void>? cancelRequest;
     final unregisterCancel = cancellation.onCancel(() {
-      process.kill(ProcessSignal.sigterm);
+      // Keep the result stream alive while the runner stops the exact execution
+      // and exports partial files. Only a failed handshake kills the bridge.
+      cancelDeadline ??= Timer(const Duration(seconds: 15), () {
+        process.kill(ProcessSignal.sigterm);
+      });
+      cancelRequest ??=
+          _runnerControl({
+            'action': 'cancel_execution',
+            'task_id': _runnerTaskId(tenantId, taskId),
+            'execution_id': executionId,
+            'issued_at': issuedAt,
+          }, timeout: const Duration(seconds: 8)).catchError((Object _) {
+            // No acknowledgement does not prove cleanup. The original stream may
+            // still report it; otherwise the deadline leaves an unknown result.
+          });
     });
     final resultCompleter = Completer<Map<String, dynamic>>();
     final stdoutDone = Completer<void>();
@@ -309,6 +327,8 @@ class DockerCodeExecutionService {
     try {
       final request = <String, dynamic>{
         'task_id': _runnerTaskId(tenantId, taskId),
+        'execution_id': executionId,
+        'issued_at': issuedAt,
         'code': scriptPath == null
             ? code
             : '# Installed entry is staged in skill_files',
@@ -377,12 +397,22 @@ class DockerCodeExecutionService {
       rethrow;
     } finally {
       unregisterCancel();
+      cancelDeadline?.cancel();
+      if (cancelRequest != null) await cancelRequest;
     }
   }
 
   Future<void> disableNetwork({
     required String tenantId,
     required String taskId,
+  }) => _runnerControl({
+    'action': 'disable_network',
+    'task_id': _runnerTaskId(tenantId, taskId),
+  });
+
+  Future<void> _runnerControl(
+    Map<String, dynamic> request, {
+    Duration timeout = const Duration(seconds: 35),
   }) async {
     final executable =
         _pythonExecutable ??
@@ -402,18 +432,13 @@ class DockerCodeExecutionService {
         .transform(const LineSplitter())
         .toList();
     unawaited(process.stderr.drain<void>());
-    process.stdin.writeln(
-      jsonEncode({
-        'action': 'disable_network',
-        'task_id': _runnerTaskId(tenantId, taskId),
-      }),
-    );
+    process.stdin.writeln(jsonEncode(request));
     await process.stdin.close();
     final exitCode = await process.exitCode.timeout(
-      const Duration(seconds: 35),
+      timeout,
       onTimeout: () {
         process.kill(ProcessSignal.sigterm);
-        throw TimeoutException('撤销运行中脚本的公网代理超时');
+        throw TimeoutException('沙箱控制请求超时');
       },
     );
     final lines = await outputFuture.timeout(const Duration(seconds: 2));
@@ -430,7 +455,7 @@ class DockerCodeExecutionService {
       }
     }
     if (exitCode != 0 || result?['ok'] != true) {
-      throw StateError(result?['error']?.toString() ?? '无法撤销运行中脚本的公网代理');
+      throw StateError(result?['error']?.toString() ?? '无法完成沙箱控制请求');
     }
   }
 

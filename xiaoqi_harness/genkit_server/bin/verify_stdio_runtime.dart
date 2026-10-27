@@ -165,6 +165,42 @@ PY
         );
       }
     }
+    const cancelledTask = 'stdio-gate-code-cancel';
+    store.put('task/$tenant/$cancelledTask', {
+      'status': 'running',
+      'artifacts': [],
+      'events': [],
+    }, null);
+    final codeCancellation = CancellationController();
+    final stopped = executor
+        .execute(
+          tenantId: tenant,
+          taskId: cancelledTask,
+          language: 'shell',
+          code: 'sleep 60',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: codeCancellation.token,
+        )
+        .then<void>(
+          (_) => throw StateError('Cancelled script reported success'),
+          onError: (Object error) {
+            if (error is! SandboxExecutionError) throw error;
+          },
+        );
+    await Future.doWhile(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      return store.get('task/$tenant/$cancelledTask')!.value['sandbox_id'] ==
+          null;
+    }).timeout(const Duration(seconds: 30));
+    codeCancellation.cancel();
+    await stopped.timeout(const Duration(seconds: 20));
+    final cancelledState = store.get('task/$tenant/$cancelledTask')!.value;
+    if (cancelledState['sandbox_cleanup_pending'] != false ||
+        cancelledState['sandbox_id'] != null) {
+      throw StateError('Cancelled execution cleanup was not confirmed');
+    }
     await verifyStdioAgent(store, executor, tenant, files);
     stdout.writeln(
       jsonEncode({
@@ -180,6 +216,7 @@ PY
         'agent_mcp_shell_loop': true,
         'explicit_skill_mcp_shell_loop': true,
         'failed_script_partial_artifacts': true,
+        'running_code_cancel_cleanup': true,
       }),
     );
   } finally {

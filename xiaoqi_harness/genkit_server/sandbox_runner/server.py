@@ -22,6 +22,7 @@ from typing import Any, Iterable
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from mcp_sessions import LeaseError, McpSessions
+from execution_sessions import ExecutionError, Executions
 from stdio_channel import StdioChannel
 
 
@@ -52,6 +53,7 @@ RUNNER_PORT = int(os.environ.get("SANDBOX_RUNNER_PORT", "8090"))
 
 _docker: docker.DockerClient | None = None
 _slots = threading.BoundedSemaphore(1)
+_executions = Executions()
 _network_policy_lock = threading.Lock()
 _disabled_task_networks: dict[str, float] = {}
 
@@ -378,7 +380,9 @@ def _decode_logs(container: Any, stream: str) -> str:
     return decoded[-MAX_LOG_BYTES:].decode("utf-8", errors="replace")
 
 
-def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None) -> dict[str, Any]:
+def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None, cancellation: threading.Event | None = None) -> dict[str, Any]:
+    if cancellation is not None and cancellation.is_set():
+        raise RequestError('Execution was cancelled before startup')
     client = _get_client()
     task_id = str(request.get("task_id") or "")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", task_id):
@@ -502,6 +506,8 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             raise RuntimeError("无法准备本次任务的临时工作区")
         if stdio is not None and stdio.closed:
             raise RequestError("MCP startup was cancelled")
+        if cancellation is not None and cancellation.is_set():
+            raise RequestError('Execution was cancelled before startup')
         container.start()
         if stdio is not None:
             attached = container.attach_socket(params={"stdin": True, "stdout": True, "stderr": True, "stream": True, "logs": True})
@@ -515,6 +521,13 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             state = container.attrs.get("State", {})
             if state.get("Status") in {"exited", "dead"}:
                 exit_code = int(state.get("ExitCode", 1))
+                break
+            if cancellation is not None and cancellation.is_set():
+                run_error = 'Execution cancelled; existing files were retained'
+                try:
+                    container.kill()
+                except DockerException:
+                    pass
                 break
             if stdio is not None and stdio.closed:
                 run_error = stdio.error or "MCP connection closed"
@@ -543,6 +556,10 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
         # Failed and timed-out scripts may already have produced useful files.
         # Export only through the same bounded path/size validator as success.
         artifacts = _safe_artifacts(container)
+    except (RequestError, DockerException, RuntimeError, OSError) as error:
+        # Preserve the cleanup outcome even when preparation or export failed.
+        # An exception escaping the finally block used to lose that outcome.
+        run_error = str(error)[:500]
     finally:
         if stdio is not None:
             stdio.close()
@@ -671,7 +688,8 @@ class RunnerHandler(BaseHTTPRequestHandler):
             r"/v1/tasks/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/network/off",
             self.path,
         )
-        if self.path != "/v1/execute" and disable_match is None:
+        cancel_match = re.fullmatch(r'/v1/executions/([a-f0-9]{32})/cancel', self.path)
+        if self.path != "/v1/execute" and disable_match is None and cancel_match is None:
             self._json_response(404, {"error": "not found"})
             return
         if not _authorized(self):
@@ -703,12 +721,38 @@ class RunnerHandler(BaseHTTPRequestHandler):
             except (DockerException, RuntimeError) as error:
                 self._json_response(503, {"error": str(error)[:300]})
             return
-        if not _slots.acquire(timeout=180):
-            self._json_response(429, {"error": "服务器代码沙箱正在处理其他任务，请稍后重试"})
+        if cancel_match is not None:
+            if request.get('execution_id') != cancel_match.group(1):
+                self._json_response(400, {'error': 'Execution ID does not match request path'})
+                return
+            try:
+                self._json_response(200, _executions.cancel(request))
+            except ExecutionError as error:
+                self._json_response(409, {'error': str(error)})
             return
-        self._start_stream()
         try:
-            result = _run_sandbox(request, self._send)
+            execution = _executions.claim(request)
+        except ExecutionError as error:
+            self._json_response(409, {'error': str(error)})
+            return
+        acquired = False
+        deadline = time.monotonic() + 180
+        while not execution.cancelled.is_set() and time.monotonic() < deadline:
+            if _slots.acquire(timeout=0.25):
+                acquired = True
+                break
+        if not acquired:
+            _executions.finish(execution)
+            if execution.cancelled.is_set():
+                self._start_stream()
+                self._send({'type': 'result', 'ok': False, 'error': 'Execution cancelled before startup', 'artifacts': [], 'cleanup_pending': False})
+                self._finish_stream()
+            else:
+                self._json_response(429, {"error": "服务器代码沙箱正在处理其他任务，请稍后重试"})
+            return
+        try:
+            self._start_stream()
+            result = _run_sandbox(request, self._send, cancellation=execution.cancelled)
             self._send(result)
         except ClientDisconnected:
             return
@@ -720,10 +764,11 @@ class RunnerHandler(BaseHTTPRequestHandler):
 
         except Exception:
             try:
-                self._send({"type": "result", "ok": False, "error": "服务器本机 Docker 沙箱执行失败", "artifacts": [], "cleanup_pending": False})
+                self._send({"type": "result", "ok": False, "error": "服务器本机 Docker 沙箱执行失败", "artifacts": [], "cleanup_pending": True})
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
         finally:
+            _executions.finish(execution)
             _slots.release()
             try:
                 self._finish_stream()

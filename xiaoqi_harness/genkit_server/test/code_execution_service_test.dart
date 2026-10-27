@@ -160,6 +160,66 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   );
 
   test(
+    'cancel keeps the result bridge alive until partial files and cleanup persist',
+    () async {
+      final marker = jsonEncode('${directory.path}/cancel.json');
+      final identity = jsonEncode('${directory.path}/execution.json');
+      worker.writeAsStringSync('''
+import json, pathlib, sys, time
+request = json.loads(sys.stdin.readline())
+marker = pathlib.Path($marker)
+identity = pathlib.Path($identity)
+if request.get('action') == 'cancel_execution':
+    original = json.loads(identity.read_text())
+    assert all(request[key] == original[key] for key in ['task_id', 'execution_id', 'issued_at'])
+    marker.write_text('cancel')
+    print(json.dumps({'type':'result', 'ok':True}), flush=True)
+else:
+    identity.write_text(json.dumps(request))
+    print(json.dumps({'type':'sandbox_started','sandbox_id':'cancel-sandbox'}), flush=True)
+    deadline = time.monotonic() + 10
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert marker.exists(), 'cancel control was not received'
+    print(json.dumps({'type':'result','ok':False,'error':'cancelled','artifacts':[{'name':'partial.txt','base64':'cGFydGlhbA==','media_type':'text/plain'}], 'cleanup_pending':False}), flush=True)
+''');
+      final cancellation = CancellationController();
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      final execution = service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        code: 'pass',
+        language: 'python',
+        authorizedDomains: [],
+        materials: [],
+        skillFiles: {},
+        cancellation: cancellation.token,
+      );
+      // Attach the error observer before triggering cancellation.
+      final finished = expectLater(
+        execution,
+        throwsA(isA<SandboxExecutionError>()),
+      );
+      await Future.doWhile(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        return store.get('task/personal/task-code')!.value['sandbox_id'] !=
+            'cancel-sandbox';
+      }).timeout(const Duration(seconds: 10));
+      cancellation.cancel();
+      await finished;
+      final task = store.get('task/personal/task-code')!.value;
+      expect(task['sandbox_cleanup_pending'], false);
+      final artifact = (task['artifacts'] as List).single as Map;
+      expect(utf8.decode(store.getObject(artifact['object_key'])), 'partial');
+      expect(File('${directory.path}/cancel.json').existsSync(), true);
+    },
+  );
+
+  test(
     'installed Shell entry uses its immutable file budget rather than inline code limit',
     () async {
       worker.writeAsStringSync(r'''

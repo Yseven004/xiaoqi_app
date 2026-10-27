@@ -37,14 +37,20 @@ def main() -> int:
 
     payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     disable_network = request.get("action") == "disable_network"
+    cancel_execution = request.get('action') == 'cancel_execution'
+    control = disable_network or cancel_execution
     task_id = request.get("task_id")
-    if disable_network and (
+    if control and (
         not isinstance(task_id, str)
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", task_id)
     ):
         _emit({"type": "result", "ok": False, "error": "任务 ID 无效"})
         return 1
-    endpoint = (
+    execution_id = request.get('execution_id')
+    if cancel_execution and (not isinstance(execution_id, str) or not re.fullmatch(r'[a-f0-9]{32}', execution_id)):
+        _emit({'type': 'result', 'ok': False, 'error': '执行 ID 无效'})
+        return 1
+    endpoint = f'{base_url}/v1/executions/{execution_id}/cancel' if cancel_execution else (
         f"{base_url}/v1/tasks/{task_id}/network/off"
         if disable_network
         else f"{base_url}/v1/execute"
@@ -55,25 +61,25 @@ def main() -> int:
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            "Accept": "application/json" if disable_network else "application/x-ndjson",
+            "Accept": "application/json" if control else "application/x-ndjson",
         },
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(outgoing, timeout=30 if disable_network else 270) as response:
-            if disable_network:
+        with opener.open(outgoing, timeout=5 if cancel_execution else 30 if disable_network else 270) as response:
+            if control:
                 try:
                     result = json.loads(response.read(1024 * 1024))
                 except (json.JSONDecodeError, UnicodeDecodeError):
-                    result = {"ok": False, "error": "本机 Docker 沙箱返回了无效的联网控制响应"}
+                    result = {"ok": False, "error": "本机 Docker 沙箱返回了无效的控制响应"}
                 if not isinstance(result, dict) or result.get("ok") is not True:
                     _emit({
                         "type": "result",
                         "ok": False,
-                        "error": result.get("error", "无法撤销运行中脚本的公网代理")
+                        "error": result.get("error", "无法完成沙箱控制请求")
                         if isinstance(result, dict)
-                        else "本机 Docker 沙箱返回了无效的联网控制响应",
+                        else "本机 Docker 沙箱返回了无效的控制响应",
                     })
                     return 1
                 _emit({"type": "result", "ok": True, **result})

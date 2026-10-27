@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY server.py ./server.py
 COPY stdio_channel.py ./stdio_channel.py
 COPY mcp_sessions.py ./mcp_sessions.py
+COPY execution_sessions.py ./execution_sessions.py
 COPY tests/ ./tests/
 RUN python3 -m unittest discover -s tests -v
 
