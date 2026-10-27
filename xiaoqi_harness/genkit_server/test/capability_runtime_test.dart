@@ -16,6 +16,8 @@ void main() {
     'image-format-repair',
     'missing',
     'mcp-success',
+    'mcp-partial-selection',
+    'mcp-partial-startup',
     'mcp-error',
     'mcp-read',
     'mcp-large',
@@ -408,7 +410,21 @@ void main() {
             expect(result['mcp_calls'], blocked ? 0 : 1);
             if (scenario == 'mcp-large')
               expect(result['called_tools'], ['fetch_card_119']);
-            expect(result['missing'], scenario == 'mcp-error' || blocked);
+            expect(
+              result['missing'],
+              scenario == 'mcp-error' ||
+                  blocked ||
+                  scenario.startsWith('mcp-partial-'),
+            );
+            if (scenario.startsWith('mcp-partial-')) {
+              expect(result['text'], contains('任务尚未完成'));
+              expect(result['text'], contains('Unavailable component'));
+              expect(jsonEncode(result['events']), contains('mcp_connection'));
+              expect(
+                jsonEncode(result),
+                isNot(contains('private-connection-diagnostic')),
+              );
+            }
             expect(
               result['artifacts'],
               scenario == 'mcp-error' || blocked ? 0 : 1,
@@ -524,6 +540,8 @@ void main() {
           if (!const {
             'missing',
             'mcp-error',
+            'mcp-partial-selection',
+            'mcp-partial-startup',
             'mcp-denied',
             'mcp-disabled',
             'mcp-reconfigured',

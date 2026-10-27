@@ -40,6 +40,11 @@ Future<List<Map<String, dynamic>>> listAllMcpTools(
   throw StateError('MCP 工具目录分页超过限制');
 }
 
+class McpTaskSelection {
+  final connections = <McpConnectionCredentials>[];
+  final unavailable = <Map<String, String>>[];
+}
+
 class McpConnectionCredentials {
   const McpConnectionCredentials({
     required this.id,
@@ -753,6 +758,47 @@ class McpConnectionService {
     final result = <McpConnectionCredentials>[];
     for (final id in ids) {
       result.add(await _read(tenantId, id));
+    }
+    return result;
+  }
+
+  /// A broken component must not prevent the other selected components loading.
+  /// Invalid request structure remains an error; per-connection failures contain
+  /// only safe recovery information, never decrypted credentials or exceptions.
+  Future<McpTaskSelection> selectedForTask(
+    String tenantId,
+    Object? rawIds,
+  ) async {
+    if (rawIds != null && rawIds is! List) {
+      throw const FormatException('一次最多选择 8 个 MCP 连接器');
+    }
+    final ids = (rawIds as List? ?? const [])
+        .map((raw) => _safeId(raw is Map ? raw['id'] : raw))
+        .toSet();
+    if (ids.length > 8) throw const FormatException('一次最多选择 8 个 MCP 连接器');
+    final result = McpTaskSelection();
+    for (final id in ids) {
+      final value = store.get(_key(tenantId, id))?.value;
+      String? reason;
+      if (value == null || value['deleted_at'] != null) {
+        reason = '连接器不存在，请刷新后重新选择';
+      } else if (value['enabled'] == false) {
+        reason = '连接器已停用，请在 MCP 连接器中启用';
+      } else if (value['status'] != null && value['status'] != 'ready') {
+        reason = '连接器尚未就绪，请在 MCP 连接器中检查连接状态';
+      } else {
+        try {
+          result.connections.add(await _read(tenantId, id));
+          continue;
+        } on Object {
+          reason = '连接配置或凭据不可用，请在 MCP 连接器中重新保存并检查连接';
+        }
+      }
+      result.unavailable.add({
+        'id': id,
+        'name': value?['name']?.toString() ?? 'MCP 连接器',
+        'message': reason,
+      });
     }
     return result;
   }

@@ -39,6 +39,8 @@ class FixtureMcpConnections extends McpConnectionService {
   ];
   @override
   Future<GenkitMcpClient> connect(McpConnectionCredentials connection) async {
+    if (connection.id == 'unavailable')
+      throw StateError('private-connection-diagnostic');
     final client = createMcpClient(
       McpClientOptions(
         name: 'fixture',
@@ -175,6 +177,15 @@ Future<void> main(List<String> args) async {
     'catalog_id': 'fixture',
   }, null);
   store.put('task/personal/turn', {'artifacts': [], 'events': []}, null);
+  if (args.single.startsWith('mcp-partial-')) {
+    store.put('mcp/personal/unavailable', {
+      'id': 'unavailable',
+      'name': 'Unavailable component',
+      'status': 'ready',
+      'enabled': args.single != 'mcp-partial-selection',
+      'url': 'https://example.com/unavailable',
+    }, null);
+  }
   final runtime = GenkitXiaoqiAgentRuntime(
     store,
     ImageService(store),
@@ -189,6 +200,7 @@ Future<void> main(List<String> args) async {
     'model_id': 'mimo-v2.6-flash',
     'current_turn_text': userText,
     'selected_mcp_connections': [
+      if (args.single.startsWith('mcp-partial-')) {'id': 'unavailable'},
       {'id': 'library'},
     ],
   };

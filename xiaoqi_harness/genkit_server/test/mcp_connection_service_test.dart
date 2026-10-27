@@ -22,6 +22,78 @@ void main() {
   });
 
   test(
+    'task selection keeps healthy components and tenant-safe failure details',
+    () async {
+      final healthy = await service.save('tenant-a', {
+        'name': 'Healthy',
+        'url': 'https://example.com/mcp',
+      });
+      final disabled = await service.save('tenant-a', {
+        'name': 'Disabled',
+        'url': 'https://example.com/disabled',
+        'enabled': false,
+      });
+      final disabledKey = 'mcp/tenant-a/${disabled['id']}';
+      final disabledDocument = store.get(disabledKey)!;
+      store.put(disabledKey, {
+        ...disabledDocument.value,
+        'enabled': false,
+      }, disabledDocument.revision);
+      final broken = await service.save('tenant-a', {
+        'name': 'Broken',
+        'url': 'https://example.com/broken',
+        'bearer_token': 'never-expose-this',
+      });
+      final brokenKey = 'mcp/tenant-a/${broken['id']}';
+      final document = store.get(brokenKey)!;
+      store.put(brokenKey, {
+        ...document.value,
+        'encrypted_bearer_token': {
+          'version': 99,
+          'ciphertext': 'never-expose-this',
+        },
+      }, document.revision);
+      final other = await service.save('tenant-b', {
+        'name': 'Other private name',
+        'url': 'https://example.com/other',
+        'bearer_token': 'other-secret',
+      });
+      final selected = await service.selectedForTask('tenant-a', [
+        disabled['id'],
+        broken['id'],
+        other['id'],
+        healthy['id'],
+        healthy['id'],
+      ]);
+      expect(selected.connections.map((c) => c.id), [healthy['id']]);
+      expect(selected.unavailable, hasLength(3));
+      expect(selected.unavailable[0]['message'], contains('已停用'));
+      expect(selected.unavailable[1]['message'], contains('重新保存'));
+      expect(selected.unavailable[2]['name'], 'MCP 连接器');
+      final encoded = jsonEncode(selected.unavailable);
+      expect(encoded, isNot(contains('never-expose-this')));
+      expect(encoded, isNot(contains('Other private name')));
+      expect(encoded, isNot(contains('other-secret')));
+    },
+  );
+
+  test(
+    'task selection rejects malformed requests without silently dropping IDs',
+    () async {
+      for (final request in [
+        42,
+        ['../escape'],
+        List.generate(9, (i) => 'connection-$i'),
+      ]) {
+        await expectLater(
+          service.selectedForTask('tenant-a', request),
+          throwsFormatException,
+        );
+      }
+    },
+  );
+
+  test(
     'stores bearer tokens encrypted and keeps records tenant-scoped',
     () async {
       final publicRecord = await service.save('tenant-a', {

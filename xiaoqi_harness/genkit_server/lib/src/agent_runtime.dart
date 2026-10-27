@@ -1549,13 +1549,18 @@ class GenkitXiaoqiAgentRuntime
         (request['excluded_capability_ids'] as List? ?? const [])
             .map((value) => value.toString())
             .toSet();
-    final explicitMcpConnections = await mcpConnectionService
-        .selected(tenantId, [
+    final explicitMcpSelection = await mcpConnectionService
+        .selectedForTask(tenantId, [
           ...(request['selected_mcp_connections'] as List? ?? const []),
           ...pluginDependencies.connectionIds.where(
             (id) => !excludedIds.contains(id),
           ),
         ]);
+    final explicitMcpConnections = explicitMcpSelection.connections;
+    final unavailableMcp = <String>[
+      for (final failure in explicitMcpSelection.unavailable)
+        '${failure['name']}：${failure['message']}',
+    ];
     explicitMcpConnections.addAll(
       pluginDependencies.isolatedConnections.where(
         (connection) => !excludedIds.contains(connection.id),
@@ -2153,7 +2158,17 @@ class GenkitXiaoqiAgentRuntime
     final isolatedMcpTransports = <SandboxMcpTransport>[];
     final isolatedMcpById = <String, SandboxMcpTransport>{};
     final mcpToolNames = <String>[];
-    final mcpToolSummary = <String>[];
+    final mcpToolSummary = <String>[
+      for (final failure in unavailableMcp) '- $failure；本轮不可用',
+    ];
+    for (final failure in explicitMcpSelection.unavailable) {
+      onProcessEvent({
+        'type': 'tool_failed',
+        'tool': 'mcp_connection',
+        'connection_name': failure['name'],
+        'message': failure['message'],
+      });
+    }
     final resourceClients = <String, GenkitMcpClient>{};
     final resourceUris = <String, Set<String>>{};
     try {
@@ -2207,7 +2222,10 @@ class GenkitXiaoqiAgentRuntime
             'tool': 'mcp_connection',
             'connection_name': connection.name,
           });
-          if (activeMcpIds.contains(connection.id)) rethrow;
+          cancellation.throwIfCancelled();
+          if (activeMcpIds.contains(connection.id)) {
+            unavailableMcp.add('${connection.name}：连接失败，请检查 MCP 连接或插件配置后继续');
+          }
           mcpToolSummary.add('- ${connection.name}：连接失败，本轮不可用');
           continue;
         }
@@ -2220,8 +2238,10 @@ class GenkitXiaoqiAgentRuntime
             (cursor) => client.listTools(cursor: cursor),
           );
         } on Object {
-          if (cancellation.isCancelled || activeMcpIds.contains(connection.id))
-            rethrow;
+          cancellation.throwIfCancelled();
+          if (activeMcpIds.contains(connection.id)) {
+            unavailableMcp.add('${connection.name}：工具目录读取失败，请检查 MCP 连接后继续');
+          }
           onProcessEvent({
             'type': 'tool_failed',
             'tool': 'mcp_connection',
@@ -3761,11 +3781,8 @@ class GenkitXiaoqiAgentRuntime
           loadedSkills: loadedSkills,
           artifacts: artifacts,
         );
-        if (extensionSelected &&
-            !skillSelected &&
-            explicitMcpConnections.isEmpty) {
-          missing.addAll(pluginDependencies.unavailable);
-        }
+        missing.addAll(unavailableMcp);
+        if (extensionSelected) missing.addAll(pluginDependencies.unavailable);
         return missing;
       }
 
