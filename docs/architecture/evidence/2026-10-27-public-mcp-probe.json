@@ -1,0 +1,24 @@
+{
+  "checked_at": "2026-10-27T13:20:53.839916Z",
+  "application_commit": "be3012b00c8f9271980c735db3efdac3f053989c",
+  "documentation": "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+  "endpoint": "https://mcp.deepwiki.com/mcp",
+  "source_usage": "Hosted public service; no implementation code copied",
+  "authentication": "none",
+  "server": {"name": "DeepWiki", "version": "2.14.3", "protocol": "2025-11-25"},
+  "tools": ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"],
+  "invoked": {"name": "read_wiki_structure", "arguments": {"repoName": "firebase/genkit"}},
+  "content_characters": 2549,
+  "application_save_select_connect": true,
+  "cross_tenant_selection_denied": true,
+  "disabled_connection_rejected": true,
+  "untrusted_tool_effect": "unknown",
+  "paid_model_or_image_calls": 0,
+  "data_scope": "Public repository only; temporary local CloudStore deleted after closing the real client",
+  "scope": "Application connection lifecycle and live tool call; not full Agent approval, user account, ECS, or Flutter acceptance",
+  "observations": [
+    "Actual live question tool name differs from the documentation example; schema and names must come from discovery.",
+    "Unknown catalog endpoint remains unknown effect; remote naming and annotations did not create read authorization.",
+    "No production connection, credential, account, or task data was modified."
+  ]
+}
