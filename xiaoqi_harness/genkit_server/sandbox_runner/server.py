@@ -498,6 +498,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
         container.start()
         if stdio is not None:
             attached = container.attach_socket(params={"stdin": True, "stdout": True, "stderr": True, "stream": True, "logs": True})
+            stdio.exporter = lambda: _safe_artifacts(container)
             stdio.attach(attached._sock)
         send({"type": "sandbox_started", "sandbox_id": sandbox_id})
         started_at = time.monotonic()
@@ -725,7 +726,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
         self._handle_mcp("DELETE")
 
     def _handle_mcp(self, method: str) -> None:
-        route = re.fullmatch(r"/v1/mcp(?:/([a-f0-9]{32})(?:/(messages|events|ack))?)?", self.path)
+        route = re.fullmatch(r"/v1/mcp(?:/([a-f0-9]{32})(?:/(messages|events|artifacts|ack))?)?", self.path)
         if route is None:
             self._json_response(404, {"error": "not found"})
             return
@@ -764,6 +765,13 @@ class RunnerHandler(BaseHTTPRequestHandler):
                     if lease.done.is_set():
                         result["completion"] = {key: value for key, value in (lease.result or {}).items()
                                                 if key in {"ok", "error", "cleanup_pending"}}
+                elif method == "GET" and action == "artifacts":
+                    if lease.done.is_set():
+                        result = {"artifacts":(lease.result or {}).get("artifacts", [])}
+                    elif lease.channel.exporter is not None:
+                        result = {"artifacts":lease.channel.exporter()}
+                    else:
+                        raise RuntimeError("MCP workspace is not ready")
                 elif method == "POST" and action == "messages":
                     lease.channel.send(body)
                     result = {"ok": True}
@@ -783,7 +791,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
             self._json_response(200, result)
         except (LeaseError, ValueError, UnicodeDecodeError):
             self._json_response(400, {"error": "Invalid or unavailable MCP lease"})
-        except (RuntimeError, OSError):
+        except (RuntimeError, OSError, DockerException):
             self._json_response(503, {"error": "MCP process connection unavailable"})
 
 

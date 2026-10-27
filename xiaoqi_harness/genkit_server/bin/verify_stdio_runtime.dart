@@ -79,6 +79,14 @@ Future<void> main() async {
           'Official filesystem roundtrip or directory boundary failed',
         );
       }
+      await executor.snapshotMcp(tenant, task, transport);
+      if ((store.get('task/$tenant/$task')!.value['artifacts'] as List)
+              .length !=
+          1) {
+        throw StateError(
+          'MCP artifact is unavailable before delivery verification',
+        );
+      }
       cancellation.cancel();
     } finally {
       await client.close();

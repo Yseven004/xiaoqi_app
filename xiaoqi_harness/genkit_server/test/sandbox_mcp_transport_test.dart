@@ -42,7 +42,17 @@ void main() {
         } else {
           expect(request.headers.value('X-Xiaoqi-Lease-Token'), leaseToken);
           expect(path, startsWith('/v1/mcp/$leaseId'));
-          if (request.method == 'GET') {
+          if (request.method == 'GET' && path.endsWith('/artifacts')) {
+            result = {
+              'artifacts': [
+                {
+                  'name': 'retained.txt',
+                  'media_type': 'text/plain',
+                  'base64': base64Encode(utf8.encode('retained bytes')),
+                },
+              ],
+            };
+          } else if (request.method == 'GET') {
             if (queued.isEmpty && !closed) await wake.future;
             result = {
               'messages': [...queued],
@@ -120,10 +130,12 @@ void main() {
         expect(sent.single['method'], 'tools/list');
         expect(observed.first['result'], {'tools': []});
         expect(observed.last['method'], 'roots/list');
+        final executor = DockerCodeExecutionService(store);
+        await executor.snapshotMcp('tenant', 'task', transport);
+        expect(store.get('task/tenant/task')!.value['artifacts'], hasLength(1));
         cancellation.cancel();
         await transport.close();
         expect(deletes, 1);
-        final executor = DockerCodeExecutionService(store);
         await executor.finishMcp('tenant', 'task', transport);
         await executor.finishMcp('tenant', 'task', transport);
         final task = store.get('task/tenant/task')!.value;

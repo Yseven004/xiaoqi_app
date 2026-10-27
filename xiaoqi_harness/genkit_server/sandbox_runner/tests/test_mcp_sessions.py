@@ -21,6 +21,7 @@ class McpLeaseTests(unittest.TestCase):
             self.requests.append(request)
             client, peer = socket.socketpair()
             channel.attach(client)
+            channel.exporter = lambda: [{'name':'sample.txt','base64':'aGVsbG8='}]
             event({'type':'sandbox_started'})
             def echo():
                 with peer, peer.makefile('rb') as reader:
@@ -85,6 +86,7 @@ class McpLeaseTests(unittest.TestCase):
                 request('POST','/v1/mcp/'+'a'*32+'/messages',{'jsonrpc':'2.0','id':1,'method':'tools/list'})
                 events = request('GET','/v1/mcp/'+'a'*32+'/events')
                 self.assertEqual(events['messages'],[{'jsonrpc':'2.0','id':1,'result':{'ok':True}}])
+                self.assertEqual(request('GET','/v1/mcp/'+'a'*32+'/artifacts')['artifacts'],[{'name':'sample.txt','base64':'aGVsbG8='}])
                 closed = request('DELETE','/v1/mcp/'+'a'*32)
                 self.assertTrue(closed['closed'])
                 self.assertFalse(closed['cleanup_pending'])

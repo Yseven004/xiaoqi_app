@@ -2171,6 +2171,7 @@ class GenkitXiaoqiAgentRuntime
 
     final mcpClients = <GenkitMcpClient>[];
     final isolatedMcpTransports = <SandboxMcpTransport>[];
+    final isolatedMcpById = <String, SandboxMcpTransport>{};
     final mcpToolNames = <String>[];
     final mcpToolSummary = <String>[];
     final resourceClients = <String, GenkitMcpClient>{};
@@ -2200,6 +2201,7 @@ class GenkitXiaoqiAgentRuntime
               cancellation: cancellation,
             );
             isolatedMcpTransports.add(transport);
+            isolatedMcpById[connection.id] = transport;
             client = createMcpClient(
               McpClientOptions(
                 name: 'xiaoqi-${connection.id}',
@@ -2404,6 +2406,14 @@ class GenkitXiaoqiAgentRuntime
                         .callTool(name: remoteToolName, arguments: input)
                         .timeout(const Duration(seconds: 60));
                     cancellation.throwIfCancelled();
+                    final isolatedTransport = isolatedMcpById[connection.id];
+                    if (isolatedTransport != null) {
+                      await codeExecutor.snapshotMcp(
+                        tenantId,
+                        taskId,
+                        isolatedTransport,
+                      );
+                    }
                     return McpToolResultAdapter(
                       store,
                       tenantId,

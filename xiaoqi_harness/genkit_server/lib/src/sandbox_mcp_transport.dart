@@ -29,6 +29,9 @@ class SandboxMcpTransport implements McpClientTransport {
   Map<String, dynamic>? get completion => _completion;
   String get leaseId => _leaseId;
 
+  Future<Object?> snapshotArtifacts() async =>
+      (await _request('GET', '/v1/mcp/$_leaseId/artifacts'))['artifacts'];
+
   Future<void> acknowledgeCompletion() async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
     try {
@@ -134,7 +137,7 @@ class SandboxMcpTransport implements McpClientTransport {
       }
       final bytes = BytesBuilder(copy: false);
       await for (final chunk in response) {
-        final responseBudget = method == 'DELETE'
+        final responseBudget = method == 'DELETE' || path.endsWith('/artifacts')
             ? 32 * 1024 * 1024
             : 4 * 1024 * 1024;
         if (bytes.length + chunk.length > responseBudget) {

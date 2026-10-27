@@ -170,6 +170,19 @@ class DockerCodeExecutionService {
     );
   }
 
+  Future<void> snapshotMcp(
+    String tenantId,
+    String taskId,
+    SandboxMcpTransport transport,
+  ) async {
+    await _saveArtifacts(
+      tenantId,
+      taskId,
+      await transport.snapshotArtifacts(),
+      operationId: 'mcp:${transport.leaseId}',
+    );
+  }
+
   Future<void> finishMcp(
     String tenantId,
     String taskId,

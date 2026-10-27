@@ -26,6 +26,7 @@ class StdioChannel:
         self._closed = threading.Event()
         self._diagnostic = b""
         self._error: str | None = None
+        self.exporter: Any = None
 
     @property
     def closed(self) -> bool:
