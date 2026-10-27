@@ -636,13 +636,13 @@ class DockerCodeExecutionService {
     String? resultId,
   ) {
     final id = (resultId?.isNotEmpty == true ? resultId : activeId);
-    if (id == null) return;
+    if (id == null && !cleanupPending) return;
     _mutateTask(
       tenantId,
       taskId,
       (task) => {
         ...task,
-        'sandbox_id': cleanupPending ? id : null,
+        'sandbox_id': cleanupPending ? (id ?? task['sandbox_id']) : null,
         'sandbox_cleanup_pending': cleanupPending,
         'sandbox_cleanup_deadline': cleanupPending ? _now() + 300 : null,
         'updated_at': _now(),

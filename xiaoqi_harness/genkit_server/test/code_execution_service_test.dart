@@ -160,6 +160,39 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   );
 
   test(
+    'cleanup failure before a container ID exists remains visible',
+    () async {
+      worker.writeAsStringSync('''
+import json, sys
+json.loads(sys.stdin.readline())
+print(json.dumps({'type':'result','ok':False,'error':'prepare failed, volume busy','cleanup_pending':True,'artifacts':[]}), flush=True)
+''');
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'pass',
+          language: 'python',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+        ),
+        throwsA(isA<SandboxExecutionError>()),
+      );
+      expect(
+        store.get('task/personal/task-code')!.value['sandbox_cleanup_pending'],
+        true,
+      );
+    },
+  );
+
+  test(
     'cancel keeps the result bridge alive until partial files and cleanup persist',
     () async {
       final marker = jsonEncode('${directory.path}/cancel.json');
