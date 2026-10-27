@@ -9,7 +9,7 @@ import zipfile
 
 source = pathlib.Path('/workspace/skill')
 output = pathlib.Path('/workspace/output/dependencies.zip')
-with tempfile.TemporaryDirectory() as temp:
+with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
     root = pathlib.Path(temp)
     lock = {'schema': 1, 'python': [], 'npm': {}}
     if (source / 'requirements.txt').exists():

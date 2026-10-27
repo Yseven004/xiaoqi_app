@@ -255,3 +255,5 @@ main `33c7491f01b0446a6c9bab7938af0a24287ab76d` 的构建 `40472719882` 全部�
 依据 [npm v11 rebuild 官方文档](https://docs.npmjs.com/cli/v11/commands/npm-rebuild/)和[生命周期说明](https://docs.npmjs.com/cli/v11/using-npm/scripts/)（2026-10-27 核对，参考 CLI 行为，不复制实现），使用按已验证依赖身份生成的 allowScripts，未使用全局跳过策略开关。真实验收样本使用根包 postinstall 和 [esbuild 0.25.12](https://registry.npmjs.org/esbuild/0.25.12)（MIT，registry gitHead `208f539945b145e7c9d6d844290f81c3fe5af320`）：依赖 postinstall 生成本机可执行文件后构建 TypeScript，保存包内 dist，再断网执行已安装技能交付。另故意使下一版本 build 失败，验证原启用版本保持不变。该样本与源码/依赖均将在隔离 Docker 执行，尚未称真实构建已通过。
 
 本地静态分析无问题，完整服务端 253 项通过；随后增加驱动器路径边界，静态分析及两项构建归档针对性测试再次通过。安装器 Python 语法检查通过；第一次语法命令使用了错误相对路径，改为绝对路径后成功，没有在宿主运行安装器。此批待 CI 的实际 npm 生命周期/构建门禁和服务器发布，当前线上尚无这些 npm 改进。pyproject/setup.py、更多构建环境、安装结果未知时的恢复与其他组件主线仍须继续，不关闭 P10/P13 或总任务。
+
+main `5e8f0fd42e287f99b9bc5cd8f9c78a6f978c53bb` 的 CI `40490298905` 在真实 npm 门禁失败，未导出发布产物、未部署。实际日志显示根包 postinstall 和 esbuild postinstall 已开始，但 esbuild 启动 `/tmp/.../bin/esbuild` 返回 EACCES；不是“脚本仍被导入规则拒绝”。构建临时目录改用已有 `/workspace/work` 任务卷，以支持在隔离环境运行本机编译工具；不修改只读根文件系统、UID、能力、网络和资源限制。修正后需新 CI 证明，不能把已通过静态测试当作原失败门禁通过。打包后本机可执行文件模式的保留仍须独立核验，不能仅靠本次构建成功关闭该项。
