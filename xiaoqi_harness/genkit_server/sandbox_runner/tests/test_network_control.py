@@ -1,25 +1,16 @@
 from __future__ import annotations
 
-import contextlib
-import importlib.util
-import io
 import json
-import os
-from pathlib import Path
 import threading
 import unittest
+import urllib.request
 from unittest.mock import Mock, patch
 from http.server import ThreadingHTTPServer
 
 import server
 
-spec = importlib.util.spec_from_file_location('network_worker', Path(__file__).parents[2] / 'bin' / 'docker_worker.py')
-worker = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(worker)
-
-
 class NetworkControlTests(unittest.TestCase):
-    def test_private_bridge_token_control_and_revocation_roundtrip(self):
+    def test_private_http_token_control_and_revocation_roundtrip(self):
         token = 'test-runner-token-' + 'a' * 32
         client = Mock()
         client.containers.list.return_value = []
@@ -30,12 +21,16 @@ class NetworkControlTests(unittest.TestCase):
             thread.start()
             try:
                 def control(action):
-                    output = io.StringIO()
-                    with (patch.dict(os.environ, {'SANDBOX_RUNNER_URL': f'http://127.0.0.1:{http.server_port}', 'SANDBOX_RUNNER_TOKEN': token}),
-                          patch.object(worker.sys, 'stdin', io.StringIO(json.dumps({'action': action, 'task_id': 'network-control-task'}))),
-                          contextlib.redirect_stdout(output)):
-                        self.assertEqual(worker.main(), 0)
-                    return json.loads(output.getvalue())
+                    suffix = 'token' if action == 'network_token' else 'off'
+                    request = urllib.request.Request(
+                        f'http://127.0.0.1:{http.server_port}/v1/tasks/network-control-task/network/{suffix}',
+                        data=json.dumps({'task_id': 'network-control-task'}).encode(),
+                        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+                        method='POST')
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    with opener.open(request, timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                        return json.load(response)
 
                 old = control('network_token')['network_token']
                 self.assertTrue(server._network_token_is_current('network-control-task', old))
