@@ -169,13 +169,25 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
     'id': 'filesystem',
     'name': 'Filesystem verification',
     'kind': 'plugin',
+    'origin': 'github',
     'enabled': true,
     'current_version_id': 'v1',
     'components': [
       {'id': 'filesystem', 'type': 'mcp', 'status': 'supported', 'root': ''},
     ],
     'versions': [
-      {'id': 'v1', 'artifact_key': 'verification/stdio-plugin'},
+      {
+        'id': 'v1',
+        'artifact_key': 'verification/stdio-plugin',
+        'components': [
+          {
+            'id': 'filesystem',
+            'type': 'mcp',
+            'status': 'supported',
+            'root': '',
+          },
+        ],
+      },
     ],
   }, null);
   store.put('task/$tenant/$task', {
