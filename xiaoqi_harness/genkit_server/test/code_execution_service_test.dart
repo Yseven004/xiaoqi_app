@@ -1109,4 +1109,191 @@ print(json.dumps({"type": "result", "ok": True, "network": "off"}), flush=True)
 
     await service.disableNetwork(tenantId: 'personal', taskId: 'task-code');
   });
+  test(
+    'an unrelated scope identity never submits code to the runner',
+    () async {
+      final submitted = File('${directory.path}/unrelated-submission');
+      worker.writeAsStringSync('''
+import json, pathlib, sys
+json.loads(sys.stdin.readline())
+pathlib.Path(${jsonEncode(submitted.path)}).write_text('submitted')
+''');
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'pass',
+          language: 'python',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          scopeOperationId: 'f' * 64,
+          cancellation: CancellationController().token,
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error is SandboxExecutionError,
+            'submitted effects',
+            false,
+          ),
+        ),
+      );
+      expect(submitted.existsSync(), false);
+      expect(
+        store
+            .get('task/personal/task-code')!
+            .value['code_execution_operations'],
+        isNull,
+      );
+    },
+  );
+
+  for (final scenario in [
+    'success',
+    'failed',
+    'legacy-unknown',
+    'other-unknown',
+  ]) {
+    test(
+      'confirmed $scenario result reconciles its original authorized code operation',
+      () async {
+        final ok = scenario != 'failed';
+        final originalPath = '${directory.path}/linked-original.json';
+        final readyPath = '${directory.path}/linked-ready';
+        worker.writeAsStringSync('''
+import json, pathlib, sys
+r = json.loads(sys.stdin.readline())
+original = pathlib.Path(${jsonEncode(originalPath)})
+if r.get('action') == 'network_token':
+    print(json.dumps({'type':'result','ok':True,'network_token':'123456789.'+'a'*64}))
+elif r.get('action') == 'execution_result':
+    first = json.loads(original.read_text())
+    assert all(r[k] == first[k] for k in ['task_id','execution_id','issued_at'])
+    done = pathlib.Path(${jsonEncode(readyPath)}).exists()
+    result = {'type':'result','ok':${ok ? 'True' : 'False'},'stdout':'original output 42','execution_id':first['execution_id'],'cleanup_pending':False,'artifacts':[{'name':'original.txt','base64':'b3JpZ2luYWwgYnl0ZXM='}],${ok ? '' : "'error':'original script failed',"}}
+    print(json.dumps({'type':'result','ok':True,'finished':done,'completion':result if done else None}))
+elif r.get('action') == 'ack_execution':
+    print(json.dumps({'type':'result','ok':True,'acknowledged':True}))
+else:
+    assert r['authorized_domains'] == ['example.com']
+    assert not original.exists(), 'the original code was replayed'
+    original.write_text(json.dumps(r))
+    print(json.dumps({'type':'sandbox_started','sandbox_id':'linked-sandbox'}))
+''');
+        ToolExecution makeExecution() => ToolExecution(
+          store,
+          'personal',
+          'task-code',
+          TurnContract(mode: 'workflow', imageLimit: 0),
+          requestIdentity: 'linked-user-request',
+        )..bind();
+        NetworkCallAuthorization makeGrant(ToolExecution execution) =>
+            NetworkCallAuthorization(
+              execution: execution,
+              domains: ['example.com'],
+              tool: 'execute_python',
+              arguments: {'code': 'pass'},
+              authority: {'inputs': 'original-inputs'},
+            );
+        DockerCodeExecutionService makeService() => DockerCodeExecutionService(
+          store,
+          workerPath: worker.path,
+          pythonExecutable: pythonExecutable(),
+        );
+        var execution = makeExecution();
+        var grant = makeGrant(execution);
+        grant.decide(
+          resumed: {
+            'approved': true,
+            'approval_hash': grant.approvalHash,
+            'domains': ['example.com'],
+          },
+        );
+        await expectLater(
+          grant.execute(
+            () => makeService().execute(
+              tenantId: 'personal',
+              taskId: 'task-code',
+              code: 'pass',
+              language: 'python',
+              authorizedDomains: ['example.com'],
+              materials: [],
+              skillFiles: {},
+              scopeOperationId: grant.operationId,
+              cancellation: CancellationController().token,
+            ),
+          ),
+          throwsA(isA<SandboxExecutionError>()),
+        );
+        execution.markUncertainNetworkExecution(
+          'original-code',
+          operationId: grant.operationId,
+        );
+        if (scenario == 'legacy-unknown')
+          execution.markUncertainNetworkExecution('older-unlinked-code');
+        if (scenario == 'other-unknown')
+          execution.markUncertainNetworkExecution(
+            'another-pending-call',
+            operationId: 'e' * 64,
+          );
+        expect(execution.hasUncertainNetworkExecution, true);
+        final submitted = store.get('task/personal/task-code')!.value;
+        final id = (submitted['code_execution_operations'] as Map).keys.single;
+        expect(
+          (submitted['scope_operations']
+              as Map)[grant.operationId]['execution_id'],
+          id,
+        );
+        expect(
+          (submitted['scope_operations'] as Map)[grant.operationId]['status'],
+          'unknown',
+        );
+        File(readyPath).writeAsStringSync('ready');
+        store.close();
+        store = CloudStore(root: directory.path);
+        execution = makeExecution();
+        grant = makeGrant(execution);
+        await makeService().recoverExecutions(
+          tenantId: 'personal',
+          taskId: 'task-code',
+        );
+        final recovered = store.get('task/personal/task-code')!.value;
+        final parent =
+            (recovered['scope_operations'] as Map)[grant.operationId] as Map;
+        expect(parent['status'], ok ? 'succeeded' : 'failed');
+        expect(parent['result']['output'], contains('original output 42'));
+        expect(parent['result']['output'], contains('original.txt'));
+        expect(
+          execution.hasUncertainNetworkExecution,
+          const {'legacy-unknown', 'other-unknown'}.contains(scenario),
+        );
+        var replays = 0;
+        final cached = grant.execute(() async {
+          replays++;
+          return 'must not rerun';
+        });
+        if (ok) {
+          expect(await cached, contains('original output 42'));
+        } else {
+          await expectLater(cached, throwsA(isA<StateError>()));
+        }
+        execution.markUncertainNetworkExecution(
+          'late-error',
+          operationId: grant.operationId,
+        );
+        expect(
+          execution.hasUncertainNetworkExecution,
+          const {'legacy-unknown', 'other-unknown'}.contains(scenario),
+        );
+        expect(replays, 0);
+        expect(recovered['code_execution_runs'], 1);
+        expect((recovered['artifacts'] as List), hasLength(1));
+      },
+    );
+  }
 }

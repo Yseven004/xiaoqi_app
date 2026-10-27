@@ -36,6 +36,8 @@ class NetworkCallAuthorization {
   final List<String> domains;
   final String approvalHash;
   final String scopeHash;
+  String get operationId =>
+      execution.operationIdentity('external', 'network:$approvalHash');
 
   Future<String> execute(Future<String> Function() invoke) async {
     if (decide() != ToolAccessDecision.allow) throw StateError('本次联网执行尚未获得授权');
@@ -46,6 +48,7 @@ class NetworkCallAuthorization {
       invoke: (_) async => {'output': await invoke()},
       effectsPossible: (error) => error is SandboxExecutionError,
     );
+    if (result['ok'] == false) throw StateError(result['output'].toString());
     return result['output'].toString();
   }
 

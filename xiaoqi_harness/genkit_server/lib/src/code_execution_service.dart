@@ -311,6 +311,7 @@ class DockerCodeExecutionService {
     List<String> arguments = const [],
     List<String>? artifactIds,
     void Function()? beforeSubmit,
+    String? scopeOperationId,
   }) async {
     cancellation.throwIfCancelled();
     beforeSubmit?.call();
@@ -459,6 +460,7 @@ class DockerCodeExecutionService {
       _recordExecution(tenantId, taskId, executionId, {
         'issued_at': issuedAt,
         'status': 'submitted',
+        if (scopeOperationId != null) 'scope_operation_id': scopeOperationId,
       });
       requestSubmitted = true;
       process.stdin.writeln(jsonEncode(request));
@@ -503,7 +505,13 @@ class DockerCodeExecutionService {
         result['artifacts'],
         operationId: executionId,
       );
-      _storeExecutionOutput(tenantId, taskId, executionId, result);
+      _storeExecutionOutput(
+        tenantId,
+        taskId,
+        executionId,
+        result,
+        artifactNames: artifactNames,
+      );
       _recordExecution(tenantId, taskId, executionId, {
         'status': 'persisted',
         'ok': result['ok'] == true,
@@ -512,14 +520,7 @@ class DockerCodeExecutionService {
       if (result['execution_id'] == executionId)
         await _ackExecution(tenantId, taskId, executionId, issuedAt);
       cancellation.throwIfCancelled();
-      final output = [
-        result['stdout']?.toString() ?? '',
-        result['stderr']?.toString().isNotEmpty == true
-            ? 'stderr:\n${result['stderr']}'
-            : '',
-        if (artifactNames.isNotEmpty) '已生成文件：${artifactNames.join('、')}',
-        if (result['error'] != null) 'error: ${result['error']}',
-      ].where((value) => value.isNotEmpty).join('\n');
+      final output = _executionText(result, artifactNames);
       if (result['ok'] != true) {
         throw StateError(output.isEmpty ? 'Docker 沙箱执行失败' : output);
       }
@@ -648,14 +649,89 @@ class DockerCodeExecutionService {
         task['code_execution_operations'] as Map? ?? const {},
       );
       final previous = operations[id] as Map?;
-      operations[id] = {
+      final updated = <String, dynamic>{
         ...?previous,
         ...fields,
         if (previous?['status'] == 'persisted' &&
             const {'submitted', 'unknown'}.contains(fields['status']))
           'status': 'persisted',
       };
-      return {...task, 'code_execution_operations': operations};
+      var scopes = Map<String, dynamic>.from(
+        task['scope_operations'] as Map? ?? const {},
+      );
+      if (fields['scope_operation_id'] is String) {
+        final scopeId = fields['scope_operation_id'] as String;
+        final parent = scopes[scopeId];
+        if (!RegExp(r'^[a-f0-9]{64}$').hasMatch(scopeId) ||
+            parent is! Map ||
+            parent['effect'] != 'external' ||
+            parent['budget_owner'] != 'code' ||
+            parent['arguments_hash'] is! String ||
+            parent['status'] != 'running' ||
+            parent['request_identity'] !=
+                (task['turn_scope'] as Map?)?['request_identity'] ||
+            (parent['execution_id'] != null && parent['execution_id'] != id))
+          throw StateError('代码执行与原操作的身份不匹配，未提交运行');
+        scopes[scopeId] = {...parent, 'execution_id': id};
+        updated['scope_arguments_hash'] = parent['arguments_hash'];
+      }
+      operations[id] = updated;
+      var value = <String, dynamic>{
+        ...task,
+        'code_execution_operations': operations,
+        'scope_operations': scopes,
+      };
+      if (updated['status'] == 'persisted' &&
+          updated['scope_operation_id'] is String) {
+        final scopeId = updated['scope_operation_id'] as String;
+        final parent = scopes[scopeId];
+        if (parent is Map &&
+            parent['execution_id'] == id &&
+            parent['arguments_hash'] == updated['scope_arguments_hash']) {
+          final saved =
+              jsonDecode(
+                    utf8.decode(
+                      store.getObject(
+                        'tenants/$tenant/tasks/$taskId/executions/$id/result.json',
+                      ),
+                    ),
+                  )
+                  as Map;
+          if (saved['ok'] is bool && saved['ok'] == updated['ok']) {
+            final names = (saved['artifact_names'] as List? ?? const [])
+                .cast<String>();
+            scopes[scopeId] = {
+              ...parent,
+              'status': saved['ok'] == true ? 'succeeded' : 'failed',
+              'result': {
+                'ok': saved['ok'],
+                'output': _executionText(saved, names),
+              },
+            };
+            final uncertain = Map<String, dynamic>.from(
+              task['uncertain_network_scopes'] as Map? ?? const {},
+            );
+            final requestId = parent['request_identity'];
+            final prior = uncertain[requestId];
+            if (prior is Map && prior['operation_ids'] is List) {
+              final pending = (prior['operation_ids'] as List)
+                  .where((other) => other != scopeId)
+                  .toList();
+              if (pending.isEmpty && prior['unlinked'] != true) {
+                uncertain.remove(requestId);
+              } else {
+                uncertain[requestId] = {...prior, 'operation_ids': pending};
+              }
+            }
+            value = {
+              ...value,
+              'scope_operations': scopes,
+              'uncertain_network_scopes': uncertain,
+            };
+          }
+        }
+      }
+      return value;
     });
   }
 
@@ -663,8 +739,9 @@ class DockerCodeExecutionService {
     String tenant,
     String task,
     String id,
-    Map<String, dynamic> result,
-  ) {
+    Map<String, dynamic> result, {
+    List<String> artifactNames = const [],
+  }) {
     store.putTaskBlob(
       'tenants/$tenant/tasks/$task/executions/$id/result.json',
       utf8.encode(
@@ -673,9 +750,23 @@ class DockerCodeExecutionService {
           'stdout': result['stdout'],
           'stderr': result['stderr'],
           'error': result['error'],
+          'artifact_names': artifactNames,
         }),
       ),
     );
+  }
+
+  static String _executionText(Map result, List<String> artifactNames) {
+    final output = [
+      result['stdout']?.toString() ?? '',
+      if (result['stderr']?.toString().isNotEmpty == true)
+        'stderr:\n${result['stderr']}',
+      if (artifactNames.isNotEmpty) '已生成文件：${artifactNames.join('、')}',
+      if (result['error'] != null) 'error: ${result['error']}',
+    ].where((value) => value.isNotEmpty).join('\n');
+    return output.isEmpty
+        ? (result['ok'] == true ? '代码已执行，没有标准输出。' : 'Docker 沙箱执行失败')
+        : output;
   }
 
   /// Recovered stdout is task data, never permission or executable instructions.
@@ -837,7 +928,7 @@ class DockerCodeExecutionService {
         issuedAt,
       );
       if (result == null) continue;
-      await _saveArtifacts(
+      final artifactNames = await _saveArtifacts(
         tenantId,
         taskId,
         result['artifacts'],
@@ -853,7 +944,13 @@ class DockerCodeExecutionService {
         result['cleanup_pending'] == true,
         result['sandbox_id']?.toString(),
       );
-      _storeExecutionOutput(tenantId, taskId, entry.key as String, result);
+      _storeExecutionOutput(
+        tenantId,
+        taskId,
+        entry.key as String,
+        result,
+        artifactNames: artifactNames,
+      );
       _recordExecution(tenantId, taskId, entry.key as String, {
         'status': 'persisted',
         'ok': result['ok'] == true,

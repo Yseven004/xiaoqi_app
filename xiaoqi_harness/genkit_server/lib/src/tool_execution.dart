@@ -39,16 +39,36 @@ class ToolExecution {
       ) ==
       true;
 
-  void markUncertainNetworkExecution(String codeHash) {
-    _update(
-      (value) => {
-        ...value,
-        'uncertain_network_scopes': {
-          ...?(value['uncertain_network_scopes'] as Map?),
-          requestIdentity: {'code_hash': codeHash, 'status': 'unknown'},
-        },
-      },
-    );
+  String operationIdentity(String effect, String slot) =>
+      digest([requestIdentity, effect, slot]);
+
+  void markUncertainNetworkExecution(String codeHash, {String? operationId}) {
+    _update((value) {
+      final parent = (value['scope_operations'] as Map?)?[operationId];
+      if (operationId != null &&
+          parent is Map &&
+          parent['execution_id'] is String &&
+          const {'succeeded', 'failed'}.contains(parent['status']) &&
+          parent['result'] is Map)
+        return value;
+      final scopes = Map<String, dynamic>.from(
+        value['uncertain_network_scopes'] as Map? ?? const {},
+      );
+      final prior = scopes[requestIdentity] as Map?;
+      scopes[requestIdentity] = {
+        'code_hash': codeHash,
+        'status': 'unknown',
+        'operation_ids': {
+          for (final id in prior?['operation_ids'] as List? ?? const []) id,
+          if (operationId != null) operationId,
+        }.toList(),
+        'unlinked':
+            operationId == null ||
+            (prior != null &&
+                (prior['operation_ids'] is! List || prior['unlinked'] == true)),
+      };
+      return {...value, 'uncertain_network_scopes': scopes};
+    });
   }
 
   void bind() {
@@ -245,7 +265,7 @@ class ToolExecution {
     bool Function(Object error)? effectsPossible,
   }) async {
     check(effect);
-    final operationId = digest([requestIdentity, effect, slot]);
+    final operationId = operationIdentity(effect, slot);
     final hash = digest(arguments);
     Map<String, dynamic>? cached;
     _update((value) {
@@ -257,7 +277,9 @@ class ToolExecution {
       if (previous != null) {
         if (previous['arguments_hash'] != hash)
           throw StateError('同一操作的参数已经变化，请明确重新生成');
-        if (previous['status'] == 'succeeded' && previous['result'] is Map) {
+        if ((previous['status'] == 'succeeded' ||
+                (codeBudget && previous['status'] == 'failed')) &&
+            previous['result'] is Map) {
           cached = Map<String, dynamic>.from(previous['result'] as Map);
           return value;
         }
@@ -288,27 +310,46 @@ class ToolExecution {
     if (cached != null) return cached!;
     try {
       final result = await invoke(operationId);
-      _finish(operationId, 'succeeded', result);
+      final confirmed = _finish(operationId, 'succeeded', result);
+      if (codeBudget && confirmed != null) {
+        check(effect);
+        return confirmed;
+      }
       return result;
     } catch (error) {
       // A failed HTTP await does not prove the provider rejected the request.
-      _finish(
+      final confirmed = _finish(
         operationId,
         codeBudget && effectsPossible?.call(error) == false
             ? 'not_submitted'
             : 'unknown',
         null,
       );
+      if (codeBudget && confirmed != null) {
+        check(effect);
+        return confirmed;
+      }
       rethrow;
     }
   }
 
-  void _finish(String id, String status, Map<String, dynamic>? result) {
+  Map<String, dynamic>? _finish(
+    String id,
+    String status,
+    Map<String, dynamic>? result,
+  ) {
+    Map<String, dynamic>? confirmed;
     _update((value) {
       final operations = Map<String, dynamic>.from(
         value['scope_operations'] as Map? ?? const {},
       );
       final previous = Map<String, dynamic>.from(operations[id] as Map);
+      if (previous['execution_id'] is String &&
+          const {'succeeded', 'failed'}.contains(previous['status']) &&
+          previous['result'] is Map) {
+        confirmed = Map<String, dynamic>.from(previous['result'] as Map);
+        return value; // A late transport failure cannot downgrade a confirmed runner result.
+      }
       operations[id] = {
         ...previous,
         'status': status,
@@ -316,6 +357,7 @@ class ToolExecution {
       };
       return {...value, 'scope_operations': operations};
     });
+    return confirmed;
   }
 
   void _update(Map<String, dynamic> Function(Map<String, dynamic>) mutate) {

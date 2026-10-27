@@ -2909,6 +2909,9 @@ class GenkitXiaoqiAgentRuntime
           try {
             final result = await grant.execute(
               () => codeExecutor.execute(
+                scopeOperationId: requestedDomains.isEmpty
+                    ? null
+                    : grant.operationId,
                 tenantId: tenantId,
                 taskId: taskId,
                 code: input['code']?.toString() ?? '',
@@ -2954,13 +2957,14 @@ class GenkitXiaoqiAgentRuntime
             return ToolResult.response(result);
           } on Object catch (error) {
             if (requestedDomains.isNotEmpty && error is SandboxExecutionError) {
-              execution.markUncertainNetworkExecution(
+              callExecution.markUncertainNetworkExecution(
                 ToolExecution.digest({
                   'code': input['code'],
                   'language': language,
                   'arguments': input['arguments'],
                   'domains': requestedDomains,
                 }),
+                operationId: grant.operationId,
               );
             }
             if (cancellation.isCancelled) rethrow;
@@ -3251,6 +3255,7 @@ class GenkitXiaoqiAgentRuntime
         var temporaryNetworkStarted = false;
         Map<String, String>? executingSkill;
         var executingDomains = <String>[];
+        String? executingOperationId;
         try {
           final scriptPath = _safeSkillScriptPath(
             input['script_path']?.toString() ?? '',
@@ -3359,8 +3364,12 @@ class GenkitXiaoqiAgentRuntime
             if (temporaryNetwork) 'temporary_network': true,
             if (temporaryNetwork) 'capability_name': skillName,
           });
+          executingOperationId = grant.operationId;
           final result = await grant.execute(
             () => codeExecutor.execute(
+              scopeOperationId: requestedDomains.isEmpty
+                  ? null
+                  : grant.operationId,
               tenantId: tenantId,
               taskId: taskId,
               code: '# Execute installed skill entry',
@@ -3411,13 +3420,14 @@ class GenkitXiaoqiAgentRuntime
           return ToolResult.response(result);
         } on Object catch (error) {
           if (executingDomains.isNotEmpty && error is SandboxExecutionError) {
-            execution.markUncertainNetworkExecution(
+            callExecution.markUncertainNetworkExecution(
               ToolExecution.digest({
                 'skill': executingSkill,
                 'path': input['script_path'],
                 'arguments': input['arguments'],
                 'domains': executingDomains,
               }),
+              operationId: executingOperationId,
             );
           }
           if (cancellation.isCancelled) rethrow;
