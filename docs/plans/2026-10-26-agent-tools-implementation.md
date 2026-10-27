@@ -231,3 +231,15 @@ main `55f28191ea83cbf3b8366c78a35f5a751877c757` 的 CI `40467516721` 全部成�
 检查真实 Flutter 调用入口发现，批准使用 `restart(approved:true, approval_hash)`，拒绝却使用 `respond(approved:false)`，后者由 SDK 直接形成工具答复，不会进入保存拒绝的服务端处理。这与已通过的服务端拒绝 fixture 路径不一致，可能在后续调用再次弹出确认。
 
 现统一使用已有 `restart` 入口，批准和拒绝均携带当前 `approval_hash`，由服务端原有精确动作校验保存决定。未改变卡片、按钮或用户流程，也未新增 HTTP 字段/契约；这是一处现有协议调用修复。SDK 的 false/restart 行为已有真实 Agent 拒绝回归，客户端现与其一致。`flutter analyze lib/pages/home_page.dart` 无 error/warning，但因三处原有 info 提示退出 1（3398 的 null-aware、6637/7273 的 if 大括号，均不在本次补丁）；未称静态分析零问题。依赖解析生成的注册文件仅有行尾变化，已恢复，不提交。客户端真机和最终使用效果未执行验证，待用户真机验证；此批 Flutter-only 修改不需要服务器部署。
+
+## P09 阶段发布证据
+
+main `1c2bf4cc1469b5fc2951c2b9d1a8f9eb0686b44c` 的构建 `40469965522` 全部成功，包括真实隔离执行门禁。`deploy_current.ps1 -VerificationProfile non-image` 发布 `20261027-161140-1c2bf4c` 返回 0，公开健康经 Cloud Assistant 验证 200、新产品版本/API 23，当前容器健康，单个应急恢复点及数据备份存在。进度查询曾短暂中断，控制器继续跟踪原任务，没有重启部署。日志记录三项非生图能力检查通过，BookToSkill 3 个产物完整性通过；生图三项继续明确后置未验证。部署日志为原主仓库 `.codex-artifacts/deploy/20261027-161140-1c2bf4c.log`。本阶段服务器已部署并验证，客户端拒绝修复仍需客户端重建和用户验收。
+
+## P06 真实二进制格式多步验收（进行中）
+
+增加隔离 Docker 门禁，使用纯合成内容依次创建、按产物 ID 重读、修改并以同名重新导出 XLSX/DOCX/PDF/PNG；随后分别验证默认读取最新版本和显式读取原版/新版，检查文件 ID、内容哈希及格式内容变化，另验证跨任务引用被拒绝。验证内容覆盖中文单元格/公式/字体、中文段落/表格、PDF 页旋转/中文元数据以及 PNG 像素/透明度。全部格式读写步骤断网，依赖仅由已有隔离准备流程从 PyPI 下载并记录哈希，不接触生产凭据或用户文件。
+
+2026-10-27 核对一手来源后，代表依赖固定为 [openpyxl 3.1.5](https://pypi.org/project/openpyxl/3.1.5/)（2024-06-28，MIT）、[python-docx 1.2.0](https://pypi.org/project/python-docx/1.2.0/)（2025-06-16，MIT）、[pypdf 6.1.3](https://pypi.org/project/pypdf/6.1.3/)（2025-10-22，BSD-3-Clause）、[Pillow 11.3.0](https://pypi.org/project/pillow/11.3.0/)（2025-07-01，MIT-CMU）。这是直接使用库 API 的测试样本，不是应用新增默认依赖，也不声称上述版本为最新版本；不复制项目实现代码。Office 与图形依赖分两组准备以遵守现有 40 MB/10 MB 限制。新增八次离线执行和两次依赖准备后，总门禁超时由 360 秒调整为 600 秒，单次执行预算不变。
+
+本地 Dart 分析、两组内嵌 Python 语法和 Shell 语法检查通过；没有本机 Docker，真实格式编辑/版本重读还须对应提交 CI 运行。当前仅新增验证代码，未修改服务运行行为或 API，不需要服务器部署。P06 的资源读取入口与目标平台全流程仍未关闭。

@@ -8,6 +8,7 @@ import 'package:xiaoqi_genkit_server/src/isolated_mcp_spec.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'support/stdio_agent_gate.dart';
 import 'support/execution_recovery_gate.dart';
+import 'support/binary_artifact_gate.dart';
 
 /// Real Docker/official-package gate. No model or image-provider calls.
 Future<void> main() async {
@@ -204,6 +205,7 @@ PY
     }
     await verifyStdioAgent(store, executor, tenant, files);
     await verifyExecutionRecovery(store, directory, tenant);
+    await verifyBinaryArtifacts(store, executor, tenant);
     stdout.writeln(
       jsonEncode({
         'gate': 'stdio-runtime',
@@ -220,6 +222,9 @@ PY
         'failed_script_partial_artifacts': true,
         'running_code_cancel_cleanup': true,
         'disconnected_code_result_recovery': true,
+        'binary_formats_edit_reexport': ['xlsx', 'docx', 'pdf', 'png'],
+        'binary_original_and_latest_versions': true,
+        'binary_cross_task_rejected': true,
       }),
     );
   } finally {
