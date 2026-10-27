@@ -11,6 +11,7 @@ void main() {
     'text-only',
     'text-only-workspace-retry',
     'text-only-shell',
+    'text-only-search',
     'text-only-unplanned-image',
     'image-format-repair',
     'missing',
@@ -23,12 +24,31 @@ void main() {
       '$scenario exercises real Genkit discovery, tool loop and delivery gate',
       () async {
         final requests = <Map<String, dynamic>>[];
+        final searchQueries = <String>[];
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final serving = server.listen((request) async {
           final body =
               jsonDecode(await utf8.decoder.bind(request).join())
                   as Map<String, dynamic>;
           final serialized = jsonEncode(body['messages']);
+          if (request.uri.path.endsWith('/tools/search')) {
+            searchQueries.add(body['query'].toString());
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(
+              jsonEncode({
+                'summary': 'local-search-result',
+                'results': [
+                  {
+                    'title': 'Fixture source',
+                    'url': 'https://example.com/source-${searchQueries.length}',
+                    'summary': 'local-search-result',
+                  },
+                ],
+              }),
+            );
+            await request.response.close();
+            return;
+          }
           if (serialized.contains('XIAOQI_TURN_INTENT_V1')) {
             final messages = (body['messages'] as List)
                 .whereType<Map>()
@@ -173,6 +193,8 @@ void main() {
                     {'name': 'execute_python', 'count': 1},
                   if (scenario == 'text-only-shell')
                     {'name': 'execute_shell', 'count': 1},
+                  if (scenario == 'text-only-search')
+                    {'name': 'web_search', 'count': 3},
                 ],
                 'artifacts': [
                   if (!textOnly)
@@ -187,6 +209,19 @@ void main() {
                 ],
               };
             } else if (textOnly) {
+              if (scenario == 'text-only-search') {
+                final attempts = RegExp(
+                  r'"name":"web_search"',
+                ).allMatches(serialized).length;
+                if (attempts < 3) {
+                  tool = 'web_search';
+                  input = {
+                    'query': 'fixture search ${attempts + 1}',
+                    'skill_id': alias,
+                    'purpose': '核验当前步骤的公开来源',
+                  };
+                }
+              }
               if (scenario == 'text-only-shell' && !called('execute_shell')) {
                 tool = 'execute_shell';
                 input = {
@@ -280,6 +315,12 @@ void main() {
               'MIMO_API_KEY': 'local-test',
               'MIMO_BASE_URL': 'http://127.0.0.1:${server.port}/v1',
               'XIAOQI_CAPTURE_TRACES': '0',
+              if (scenario == 'text-only-search') ...{
+                'DEEPSEEK_API_KEY': 'local-search-fixture',
+                'DEEPSEEK_BASE_URL': 'http://127.0.0.1:${server.port}/v1',
+                'DEEPSEEK_SEARCH_BASE_URL':
+                    'http://127.0.0.1:${server.port}/v1',
+              },
             },
             stdoutEncoding: utf8,
             stderrEncoding: utf8,
@@ -357,6 +398,18 @@ void main() {
             if (scenario == 'text-only-shell') {
               expect(jsonEncode(requests), contains('shell-routing-verified'));
               expect(jsonEncode(result['events']), contains('execute_shell'));
+            }
+            if (scenario == 'text-only-search') {
+              expect(searchQueries, [
+                'fixture search 1',
+                'fixture search 2',
+                'fixture search 3',
+              ]);
+              expect(
+                jsonEncode(requests),
+                isNot(contains('search_budget_exhausted')),
+              );
+              expect(result['operation_count'], 3);
             }
           } else {
             expect(result['missing'], isFalse);

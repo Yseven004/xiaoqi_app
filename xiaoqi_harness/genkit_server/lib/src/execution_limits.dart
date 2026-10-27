@@ -17,3 +17,14 @@ class ExecutionLimits {
 class ExecutionBudgetExceeded extends StateError {
   ExecutionBudgetExceeded(super.message);
 }
+
+/// IO reservations and direct code attempts are disjoint runtime entries.
+/// Includes earlier request scopes in this task, including failed attempts.
+/// A new user turn gets a new task ID; steering/resume keeps the existing ID.
+int taskToolOperationsUsed(Map<String, dynamic> task) {
+  final operations = (task['scope_operations'] as Map? ?? const {}).values
+      .whereType<Map>()
+      .where((operation) => operation['effect'] != 'image')
+      .length;
+  return operations + (task['code_execution_runs'] as num? ?? 0).toInt();
+}

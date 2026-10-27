@@ -64,14 +64,17 @@ Future<void> verifyStdioAgent(
       if (preparing) {
         final write = alias('write_file');
         final read = alias('read_text_file');
+        final skill = RegExp(
+          r'skill-[a-f0-9]{24}',
+        ).firstMatch(serialized)?.group(0);
+        if (skill == null)
+          throw StateError('Selected skill was not exposed alongside MCP');
         bool called(String tool) => serialized.contains('"name":"$tool"');
         if (!called('set_task_deliverables')) {
           name = 'set_task_deliverables';
           input = {
             'steps': ['写入文件', '核对文件', '执行 Shell 接力'],
-            'skill_ids': [],
-            'no_skill_reason':
-                'The selected plugin provides MCP tools directly',
+            'skill_ids': [skill],
             'tools': [
               {'name': write, 'count': 1},
               {'name': read, 'count': 1},
@@ -151,6 +154,9 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
   });
   store.putImmutable('verification/stdio-plugin', {
     ...installedFiles,
+    'SKILL.md': utf8.encode(
+      '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n',
+    ),
     '.mcp.json': utf8.encode(
       jsonEncode({
         'mcpServers': {
@@ -174,6 +180,14 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
     'current_version_id': 'v1',
     'components': [
       {'id': 'filesystem', 'type': 'mcp', 'status': 'supported', 'root': ''},
+      {
+        'id': 'instructions',
+        'type': 'skill',
+        'status': 'supported',
+        'root': '',
+        'name': 'File workflow',
+        'description': 'Use MCP and Shell together',
+      },
     ],
     'versions': [
       {
@@ -185,6 +199,14 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
             'type': 'mcp',
             'status': 'supported',
             'root': '',
+          },
+          {
+            'id': 'instructions',
+            'type': 'skill',
+            'status': 'supported',
+            'root': '',
+            'name': 'File workflow',
+            'description': 'Use MCP and Shell together',
           },
         ],
       },
@@ -221,6 +243,16 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
         );
     if (result.extensionEvidenceMissing)
       throw StateError('Agent delivery evidence incomplete');
+    if (result.activeCapabilities?.any(
+          (capability) =>
+              capability['id'] == 'filesystem' &&
+              capability['component_id'] == 'instructions',
+        ) !=
+        true) {
+      throw StateError(
+        'Selected skill did not remain active during mixed execution',
+      );
+    }
     final artifacts =
         (store.get('task/$tenant/$task')!.value['artifacts'] as List)
             .whereType<Map>();

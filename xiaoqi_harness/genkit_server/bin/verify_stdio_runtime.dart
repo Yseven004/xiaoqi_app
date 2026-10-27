@@ -153,6 +153,7 @@ PY
         'shell_literal_argv': true,
         'mcp_to_shell_file_handoff': true,
         'agent_mcp_shell_loop': true,
+        'explicit_skill_mcp_shell_loop': true,
       }),
     );
   } finally {

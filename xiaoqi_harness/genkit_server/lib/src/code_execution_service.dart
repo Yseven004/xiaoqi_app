@@ -448,7 +448,7 @@ class DockerCodeExecutionService {
       final scripts = (current.value['skill_script_runs'] as num? ?? 0).toInt();
       final executions = (current.value['code_execution_runs'] as num? ?? 0)
           .toInt();
-      if (executions >= limits.toolOperations) {
+      if (taskToolOperationsUsed(current.value) >= limits.toolOperations) {
         throw ExecutionBudgetExceeded('本次任务的代码执行预算已用完');
       }
       if (skillScript && scripts >= limits.scriptExecutions) {

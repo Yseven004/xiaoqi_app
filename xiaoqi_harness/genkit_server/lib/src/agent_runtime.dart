@@ -2396,9 +2396,10 @@ class GenkitXiaoqiAgentRuntime
                 'capability_name': connection.name,
               });
               try {
-                final invoke =
-                    effect == ToolEffect.read || effect == ToolEffect.workspace
+                final invoke = effect == ToolEffect.read
                     ? execution.query
+                    : effect == ToolEffect.workspace
+                    ? execution.workspace
                     : execution.authorizedExternal;
                 final normalized = await invoke(
                   slot: '$alias:$approvalHash',
@@ -2534,9 +2535,6 @@ class GenkitXiaoqiAgentRuntime
     );
     var imageToolCalled = false;
     var imageCalls = delivery.succeeded['generate_image'] ?? 0;
-    // shortcut: two distinct searches per turn; explicit research mode can
-    // later opt into a larger server-side budget.
-    var webSearchCalls = 0;
     final webSearchCache = <String, Map<String, Object?>>{};
     if (taskMaterials.isNotEmpty) {
       ai.defineTool<Map<String, dynamic>, String>(
@@ -2806,19 +2804,6 @@ class GenkitXiaoqiAgentRuntime
             });
             return ToolResult.response(jsonEncode(cached));
           }
-          if (webSearchCalls >= 2) {
-            onProcessEvent({
-              'type': 'tool_skipped',
-              'tool': 'web_search',
-              'reason': 'search_budget_exhausted',
-            });
-            return ToolResult.response(
-              jsonEncode({
-                'status': 'budget_exhausted',
-                'message': '本轮联网搜索次数已用完。请使用已有来源回答；无法核验时明确说明。',
-              }),
-            );
-          }
           final networkMode = _taskNetworkMode(
             tenantId,
             taskId,
@@ -2856,7 +2841,6 @@ class GenkitXiaoqiAgentRuntime
           final skillName = temporaryNetwork
               ? _stagedSkillName(skillReference, stagedSkills.entries)
               : null;
-          webSearchCalls++;
           onProcessEvent({
             'type': 'tool_started',
             'tool': 'web_search',
@@ -2870,18 +2854,25 @@ class GenkitXiaoqiAgentRuntime
             if (skillReference != null) 'skill_id': skillReference['id'],
           });
           try {
-            final result = await webSearch.search(query);
-            _recordWebSources(
-              tenantId,
-              taskId,
-              result.sources.map((source) => source.toJson()).toList(),
+            final encodedResult = await execution.query(
+              slot: 'web_search',
+              arguments: {'query': query},
+              invoke: (_) async {
+                final result = await webSearch.search(query);
+                _recordWebSources(
+                  tenantId,
+                  taskId,
+                  result.sources.map((source) => source.toJson()).toList(),
+                );
+                return Map<String, dynamic>.from(result.toJson());
+              },
             );
-            final encodedResult = result.toJson();
             webSearchCache[cacheKey] = encodedResult;
             onProcessEvent({
               'type': 'tool_succeeded',
               'tool': 'web_search',
-              'source_count': result.sources.length,
+              'source_count':
+                  (encodedResult['sources'] as List? ?? const []).length,
               if (temporaryNetwork) 'temporary_network': true,
               if (skillName != null) 'capability_name': skillName,
             });
@@ -2897,7 +2888,13 @@ class GenkitXiaoqiAgentRuntime
               if (skillName != null) 'capability_name': skillName,
             });
             return ToolResult.response(
-              jsonEncode({'status': 'unavailable', 'message': message}),
+              jsonEncode({
+                'status': error is ExecutionBudgetExceeded
+                    ? 'budget_exhausted'
+                    : 'unavailable',
+                'retryable': error is! ExecutionBudgetExceeded,
+                'message': message,
+              }),
             );
           }
         },

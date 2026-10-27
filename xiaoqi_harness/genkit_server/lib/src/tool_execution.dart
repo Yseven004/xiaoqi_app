@@ -135,6 +135,19 @@ class ToolExecution {
     invoke: invoke,
   );
 
+  /// Isolated workspace calls are fresh; prior writes must not stale later reads.
+  Future<Map<String, dynamic>> workspace({
+    required String slot,
+    required Map<String, dynamic> arguments,
+    required Future<Map<String, dynamic>> Function(String id) invoke,
+  }) => _operation(
+    effect: 'workspace',
+    slot: '$slot:${const Uuid().v4()}',
+    arguments: arguments,
+    limit: limits.toolOperations,
+    invoke: invoke,
+  );
+
   /// Caller must validate a grant for these exact external operation arguments.
   /// Intent routing alone neither grants nor revokes an explicit user approval.
   Future<Map<String, dynamic>> authorizedExternal({
@@ -175,16 +188,16 @@ class ToolExecution {
         }
         throw StateError('操作正在处理或结果未知，不能重复提交');
       }
-      final reserved = operations.values
-          .whereType<Map>()
-          .where(
-            (op) =>
-                op['request_identity'] == requestIdentity &&
-                (effect == 'image'
-                    ? op['effect'] == 'image'
-                    : op['effect'] != 'image'),
-          )
-          .length;
+      final reserved = effect != 'image'
+          ? taskToolOperationsUsed(value)
+          : operations.values
+                .whereType<Map>()
+                .where(
+                  (op) =>
+                      op['request_identity'] == requestIdentity &&
+                      op['effect'] == 'image',
+                )
+                .length;
       if (reserved >= limit) throw ExecutionBudgetExceeded('已达到本轮操作数量上限');
       operations[operationId] = {
         'request_identity': requestIdentity,

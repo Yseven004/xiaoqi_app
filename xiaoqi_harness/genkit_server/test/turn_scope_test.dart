@@ -103,6 +103,35 @@ void main() {
     expect(() => runner.check('image'), throwsStateError);
   });
   test(
+    'workspace calls repeat against current data and retain their true effect',
+    () async {
+      final runner = ToolExecution(
+        store,
+        'personal',
+        'task-1',
+        TurnContract(mode: 'answer', imageLimit: 0),
+        requestIdentity: 'workspace',
+      )..bind();
+      var value = 0;
+      for (var index = 1; index <= 2; index++) {
+        final result = await runner.workspace(
+          slot: 'same-tool',
+          arguments: {'path': 'file'},
+          invoke: (_) async => {'value': ++value},
+        );
+        expect(result['value'], index);
+      }
+      final operations =
+          store.get('task/personal/task-1')!.value['scope_operations'] as Map;
+      expect(
+        operations.values.every(
+          (operation) => operation['effect'] == 'workspace',
+        ),
+        isTrue,
+      );
+    },
+  );
+  test(
     'uncertain network execution survives runtime recreation and permits offline recovery',
     () async {
       final scope = TurnContract(mode: 'workflow', imageLimit: 0);

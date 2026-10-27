@@ -6,6 +6,8 @@ import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/execution_limits.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
+import 'package:xiaoqi_genkit_server/src/tool_execution.dart';
+import 'package:xiaoqi_genkit_server/src/turn_contract.dart';
 
 void main() {
   test(
@@ -55,6 +57,73 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
     store.close();
     directory.deleteSync(recursive: true);
   });
+
+  test(
+    'code and query share one atomic task budget across resume and steering',
+    () async {
+      const limits = ExecutionLimits(toolOperations: 2);
+      final queries = ToolExecution(
+        store,
+        'personal',
+        'task-code',
+        TurnContract(mode: 'workflow', imageLimit: 0),
+        requestIdentity: 'first',
+        limits: limits,
+      )..bind();
+      await queries.query(
+        slot: 'search',
+        arguments: {},
+        invoke: (_) async => {'ok': true},
+      );
+      Future<String> runCode() =>
+          DockerCodeExecutionService(
+            store,
+            workerPath: worker.path,
+            pythonExecutable: pythonExecutable(),
+            limits: limits,
+          ).execute(
+            tenantId: 'personal',
+            taskId: 'task-code',
+            code: 'print(1)',
+            language: 'python',
+            authorizedDomains: [],
+            materials: [],
+            skillFiles: {},
+            cancellation: CancellationController().token,
+          );
+      await runCode();
+      expect(
+        taskToolOperationsUsed(store.get('task/personal/task-code')!.value),
+        2,
+      );
+      await expectLater(runCode(), throwsA(isA<ExecutionBudgetExceeded>()));
+      var providerCalls = 0;
+      final steered = ToolExecution(
+        store,
+        'personal',
+        'task-code',
+        TurnContract(mode: 'workflow', imageLimit: 0),
+        requestIdentity: 'second',
+        limits: limits,
+      )..bind();
+      await expectLater(
+        steered.query(
+          slot: 'search',
+          arguments: {},
+          invoke: (_) async {
+            providerCalls++;
+            return {};
+          },
+        ),
+        throwsA(isA<ExecutionBudgetExceeded>()),
+      );
+      expect(providerCalls, 0);
+      expect(
+        store.get('task/personal/task-code')!.value['code_execution_runs'],
+        1,
+      );
+    },
+  );
 
   test(
     'installed Shell entry uses its immutable file budget rather than inline code limit',

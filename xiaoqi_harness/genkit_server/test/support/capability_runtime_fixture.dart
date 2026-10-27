@@ -64,7 +64,9 @@ Future<void> main(List<String> args) async {
   final images = FixtureImages(store);
   final scenario = args.single;
   final textOnly = scenario.startsWith('text-only');
-  final taskText = scenario == 'text-only-shell'
+  final taskText = scenario == 'text-only-search'
+      ? '请用技能检索三个不同来源并用纯文字说明。'
+      : scenario == 'text-only-shell'
       ? '请用 Shell 处理任务资料并返回纯文字，不需要图片或文件。'
       : textOnly
       ? '请用纯文字整理这段材料，不需要图片或文件。'
@@ -165,7 +167,7 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
           cancellation: CancellationController().token,
         );
     stdout.writeln(
-      'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length})}',
+      'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'operation_count': (store.get('task/personal/turn')!.value['scope_operations'] as Map? ?? const {}).length, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length})}',
     );
   } finally {
     await telemetry?.shutdown();
