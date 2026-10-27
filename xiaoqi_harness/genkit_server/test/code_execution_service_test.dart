@@ -160,6 +160,100 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   );
 
   test(
+    'a rebuilt service recovers original files once and acknowledges after persistence',
+    () async {
+      final original = jsonEncode('${directory.path}/original.json');
+      final ready = jsonEncode('${directory.path}/ready');
+      final ack = jsonEncode('${directory.path}/ack');
+      worker.writeAsStringSync('''
+import json, pathlib, sys
+request = json.loads(sys.stdin.readline())
+original = pathlib.Path($original)
+if request.get('action') == 'execution_result':
+    first = json.loads(original.read_text())
+    assert all(request[key] == first[key] for key in ['task_id','execution_id','issued_at'])
+    completed = pathlib.Path($ready).exists()
+    result = {'type':'result','ok':True,'stdout':'calculation result: 42','execution_id':first['execution_id'],'cleanup_pending':False,'artifacts':[{'name':'recovered.txt','media_type':'text/plain','base64':'cmVjb3ZlcmVk'}]}
+    print(json.dumps({'type':'result','ok':True,'finished':completed,'completion':result if completed else None}), flush=True)
+elif request.get('action') == 'ack_execution':
+    retry = pathlib.Path($ack).exists()
+    pathlib.Path($ack).write_text('ack')
+    print(json.dumps({'type':'result','ok':retry,'acknowledged':retry}), flush=True)
+else:
+    assert not original.exists(), 'code was replayed'
+    original.write_text(json.dumps(request))
+    print(json.dumps({'type':'sandbox_started','sandbox_id':'recovery-sandbox'}), flush=True)
+    # Simulates losing the stream while the runner continues independently.
+''');
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'pass',
+          language: 'python',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+        ),
+        throwsA(isA<SandboxExecutionError>()),
+      );
+      expect(File('${directory.path}/ack').existsSync(), false);
+      File('${directory.path}/ready').writeAsStringSync('ready');
+      store.close();
+      store = CloudStore(root: directory.path);
+      final resumed = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await resumed.recoverExecutions(
+        tenantId: 'personal',
+        taskId: 'task-code',
+      );
+      expect(
+        ((store
+                        .get('task/personal/task-code')!
+                        .value['code_execution_operations']
+                    as Map)
+                .values
+                .single
+            as Map)['ack_pending'],
+        true,
+      );
+      await resumed.recoverExecutions(
+        tenantId: 'personal',
+        taskId: 'task-code',
+      );
+      final task = store.get('task/personal/task-code')!.value;
+      final artifact = (task['artifacts'] as List).single as Map;
+      expect(utf8.decode(store.getObject(artifact['object_key'])), 'recovered');
+      expect(
+        (task['events'] as List).whereType<Map>().where(
+          (event) => event['type'] == 'artifacts_ready',
+        ),
+        hasLength(1),
+      );
+      expect(task['sandbox_cleanup_pending'], false);
+      expect(File('${directory.path}/ack').existsSync(), true);
+      final record =
+          (task['code_execution_operations'] as Map).values.single as Map;
+      expect(record['status'], 'persisted');
+      expect(record['ack_pending'], false);
+      expect(task['code_execution_runs'], 1);
+      expect(
+        jsonEncode(resumed.recoveredExecutionResults('personal', 'task-code')),
+        contains('calculation result: 42'),
+      );
+    },
+  );
+
+  test(
     'cleanup failure before a container ID exists remains visible',
     () async {
       worker.writeAsStringSync('''

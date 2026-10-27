@@ -38,7 +38,8 @@ def main() -> int:
     payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     disable_network = request.get("action") == "disable_network"
     cancel_execution = request.get('action') == 'cancel_execution'
-    control = disable_network or cancel_execution
+    execution_action = {'cancel_execution': 'cancel', 'execution_result': 'result', 'ack_execution': 'ack'}.get(request.get('action'))
+    control = disable_network or execution_action is not None
     task_id = request.get("task_id")
     if control and (
         not isinstance(task_id, str)
@@ -47,10 +48,10 @@ def main() -> int:
         _emit({"type": "result", "ok": False, "error": "任务 ID 无效"})
         return 1
     execution_id = request.get('execution_id')
-    if cancel_execution and (not isinstance(execution_id, str) or not re.fullmatch(r'[a-f0-9]{32}', execution_id)):
+    if execution_action is not None and (not isinstance(execution_id, str) or not re.fullmatch(r'[a-f0-9]{32}', execution_id)):
         _emit({'type': 'result', 'ok': False, 'error': '执行 ID 无效'})
         return 1
-    endpoint = f'{base_url}/v1/executions/{execution_id}/cancel' if cancel_execution else (
+    endpoint = f'{base_url}/v1/executions/{execution_id}/{execution_action}' if execution_action is not None else (
         f"{base_url}/v1/tasks/{task_id}/network/off"
         if disable_network
         else f"{base_url}/v1/execute"
@@ -67,11 +68,14 @@ def main() -> int:
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(outgoing, timeout=5 if cancel_execution else 30 if disable_network else 270) as response:
+        with opener.open(outgoing, timeout=5 if execution_action is not None else 30 if disable_network else 270) as response:
             if control:
                 try:
-                    result = json.loads(response.read(1024 * 1024))
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                    raw = response.read(32 * 1024 * 1024 + 1)
+                    if len(raw) > 32 * 1024 * 1024:
+                        raise ValueError('Control response exceeds capacity')
+                    result = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
                     result = {"ok": False, "error": "本机 Docker 沙箱返回了无效的控制响应"}
                 if not isinstance(result, dict) or result.get("ok") is not True:
                     _emit({
@@ -101,6 +105,7 @@ def main() -> int:
             "type": "result",
             "ok": False,
             "error": f"本机 Docker 沙箱拒绝了请求（HTTP {error.code}）",
+            "transport_error": True,
             "artifacts": [],
         })
         return 1
@@ -109,6 +114,7 @@ def main() -> int:
             "type": "result",
             "ok": False,
             "error": f"本机 Docker 沙箱连接失败（{type(error).__name__}）",
+            "transport_error": True,
             "artifacts": [],
         })
         return 1

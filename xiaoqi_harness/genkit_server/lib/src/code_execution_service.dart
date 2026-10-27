@@ -296,6 +296,9 @@ class DockerCodeExecutionService {
           if (message['type'] == 'sandbox_started') {
             activeSandboxId = message['sandbox_id']?.toString();
             if (activeSandboxId != null && activeSandboxId!.isNotEmpty) {
+              _recordExecution(tenantId, taskId, executionId, {
+                'sandbox_id': activeSandboxId,
+              });
               _mutateTask(
                 tenantId,
                 taskId,
@@ -342,6 +345,10 @@ class DockerCodeExecutionService {
         if (scriptPath != null) 'script_path': scriptPath,
         if (arguments.isNotEmpty) 'arguments': arguments,
       };
+      _recordExecution(tenantId, taskId, executionId, {
+        'issued_at': issuedAt,
+        'status': 'submitted',
+      });
       requestSubmitted = true;
       process.stdin.writeln(jsonEncode(request));
       await process.stdin.close();
@@ -353,11 +360,21 @@ class DockerCodeExecutionService {
         },
       );
       await stdoutDone.future.timeout(const Duration(seconds: 10));
-      if (!resultCompleter.isCompleted) {
-        _markCleanupPending(tenantId, taskId, activeSandboxId);
-        throw StateError('Docker 沙箱没有返回任务结果');
+      var result = resultCompleter.isCompleted
+          ? await resultCompleter.future
+          : null;
+      if (result == null || result['transport_error'] == true) {
+        result = await _executionResult(
+          tenantId,
+          taskId,
+          executionId,
+          issuedAt,
+        );
+        if (result == null) throw StateError('Docker 沙箱结果尚未确认，请查询原执行，不能直接重跑');
       }
-      final result = await resultCompleter.future;
+      if (result['execution_id'] != null &&
+          result['execution_id'] != executionId)
+        throw StateError('沙箱返回了其他执行的结果');
       _finishSandboxCleanup(
         tenantId,
         taskId,
@@ -370,7 +387,16 @@ class DockerCodeExecutionService {
         tenantId,
         taskId,
         result['artifacts'],
+        operationId: executionId,
       );
+      _storeExecutionOutput(tenantId, taskId, executionId, result);
+      _recordExecution(tenantId, taskId, executionId, {
+        'status': 'persisted',
+        'ok': result['ok'] == true,
+        'ack_pending': result['execution_id'] == executionId,
+      });
+      if (result['execution_id'] == executionId)
+        await _ackExecution(tenantId, taskId, executionId, issuedAt);
       cancellation.throwIfCancelled();
       final output = [
         result['stdout']?.toString() ?? '',
@@ -385,6 +411,9 @@ class DockerCodeExecutionService {
       }
       return output.isEmpty ? '代码已执行，没有标准输出。' : output;
     } on Object catch (error, stack) {
+      if (requestSubmitted && !cleanupResultReceived) {
+        _recordExecution(tenantId, taskId, executionId, {'status': 'unknown'});
+      }
       if (!cleanupResultReceived && activeSandboxId != null) {
         _markCleanupPending(tenantId, taskId, activeSandboxId);
       }
@@ -414,6 +443,13 @@ class DockerCodeExecutionService {
     Map<String, dynamic> request, {
     Duration timeout = const Duration(seconds: 35),
   }) async {
+    await _runnerControlResult(request, timeout: timeout);
+  }
+
+  Future<Map<String, dynamic>> _runnerControlResult(
+    Map<String, dynamic> request, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
     final executable =
         _pythonExecutable ??
         Platform.environment['SANDBOX_WORKER_PYTHON'] ??
@@ -430,6 +466,11 @@ class DockerCodeExecutionService {
     final outputFuture = process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
+        .map((line) {
+          if (line.length > 32 * 1024 * 1024)
+            throw const FormatException('沙箱控制响应超过大小限制');
+          return line;
+        })
         .toList();
     unawaited(process.stderr.drain<void>());
     process.stdin.writeln(jsonEncode(request));
@@ -456,6 +497,189 @@ class DockerCodeExecutionService {
     }
     if (exitCode != 0 || result?['ok'] != true) {
       throw StateError(result?['error']?.toString() ?? '无法完成沙箱控制请求');
+    }
+    return result!;
+  }
+
+  void _recordExecution(
+    String tenant,
+    String taskId,
+    String id,
+    Map<String, dynamic> fields,
+  ) {
+    _mutateTask(tenant, taskId, (task) {
+      final operations = Map<String, dynamic>.from(
+        task['code_execution_operations'] as Map? ?? const {},
+      );
+      operations[id] = {...?(operations[id] as Map?), ...fields};
+      return {...task, 'code_execution_operations': operations};
+    });
+  }
+
+  void _storeExecutionOutput(
+    String tenant,
+    String task,
+    String id,
+    Map<String, dynamic> result,
+  ) {
+    store.putTaskBlob(
+      'tenants/$tenant/tasks/$task/executions/$id/result.json',
+      utf8.encode(
+        jsonEncode({
+          'ok': result['ok'] == true,
+          'stdout': result['stdout'],
+          'stderr': result['stderr'],
+          'error': result['error'],
+        }),
+      ),
+    );
+  }
+
+  /// Recovered stdout is task data, never permission or executable instructions.
+  List<Map<String, dynamic>> recoveredExecutionResults(
+    String tenant,
+    String task,
+  ) {
+    final operations =
+        store.get('task/$tenant/$task')?.value['code_execution_operations']
+            as Map? ??
+        const {};
+    final recovered = operations.entries
+        .where(
+          (entry) =>
+              entry.value is Map && (entry.value as Map)['recovered'] == true,
+        )
+        .toList();
+    return recovered.reversed
+        .take(4)
+        .map((entry) {
+          final id = entry.key.toString();
+          if (!RegExp(r'^[a-f0-9]{32}$').hasMatch(id))
+            return <String, dynamic>{};
+          final result =
+              jsonDecode(
+                    utf8.decode(
+                      store.getObject(
+                        'tenants/$tenant/tasks/$task/executions/$id/result.json',
+                      ),
+                    ),
+                  )
+                  as Map;
+          final output = jsonEncode(result);
+          return <String, dynamic>{
+            'execution_id': id,
+            'status': 'persisted',
+            'output': output.length <= 4000
+                ? output
+                : '${output.substring(0, 1000)}\n…\n${output.substring(output.length - 2900)}',
+            'truncated': output.length > 4000,
+          };
+        })
+        .where((item) => item.isNotEmpty)
+        .toList();
+  }
+
+  Map<String, dynamic> _executionControl(
+    String action,
+    String tenant,
+    String task,
+    String id,
+    int issuedAt,
+  ) => {
+    'action': action,
+    'task_id': _runnerTaskId(tenant, task),
+    'execution_id': id,
+    'issued_at': issuedAt,
+  };
+
+  Future<Map<String, dynamic>?> _executionResult(
+    String tenant,
+    String task,
+    String id,
+    int issuedAt,
+  ) async {
+    try {
+      final response = await _runnerControlResult(
+        _executionControl('execution_result', tenant, task, id, issuedAt),
+      );
+      final completion = response['completion'];
+      if (response['finished'] == true &&
+          completion is Map &&
+          completion['execution_id'] == id)
+        return Map<String, dynamic>.from(completion);
+    } on Object {
+      // The runner may have restarted or the control connection may be down.
+      // Neither case authorizes replay of an operation with unknown effects.
+    }
+    return null;
+  }
+
+  Future<void> _ackExecution(
+    String tenant,
+    String task,
+    String id,
+    int issuedAt,
+  ) async {
+    try {
+      final response = await _runnerControlResult(
+        _executionControl('ack_execution', tenant, task, id, issuedAt),
+      );
+      if (response['acknowledged'] == true)
+        _recordExecution(tenant, task, id, {'ack_pending': false});
+    } on Object {
+      // Files are already durable. A later read retries this acknowledgement.
+    }
+  }
+
+  /// Reconcile existing execution IDs without submitting code again.
+  Future<void> recoverExecutions({
+    required String tenantId,
+    required String taskId,
+  }) async {
+    final operations =
+        store.get('task/$tenantId/$taskId')?.value['code_execution_operations']
+            as Map? ??
+        const {};
+    for (final entry in operations.entries) {
+      if (entry.key is! String || entry.value is! Map) continue;
+      final operation = entry.value as Map;
+      final issuedAt = operation['issued_at'];
+      if (issuedAt is! int) continue;
+      if (operation['status'] == 'persisted') {
+        if (operation['ack_pending'] == true)
+          await _ackExecution(tenantId, taskId, entry.key as String, issuedAt);
+        continue;
+      }
+      if (!const {'submitted', 'unknown'}.contains(operation['status']))
+        continue;
+      final result = await _executionResult(
+        tenantId,
+        taskId,
+        entry.key as String,
+        issuedAt,
+      );
+      if (result == null) continue;
+      await _saveArtifacts(
+        tenantId,
+        taskId,
+        result['artifacts'],
+        operationId: entry.key as String,
+      );
+      _finishSandboxCleanup(
+        tenantId,
+        taskId,
+        operation['sandbox_id']?.toString(),
+        result['cleanup_pending'] == true,
+        result['sandbox_id']?.toString(),
+      );
+      _storeExecutionOutput(tenantId, taskId, entry.key as String, result);
+      _recordExecution(tenantId, taskId, entry.key as String, {
+        'status': 'persisted',
+        'ok': result['ok'] == true,
+        'ack_pending': true,
+        'recovered': true,
+      });
+      await _ackExecution(tenantId, taskId, entry.key as String, issuedAt);
     }
   }
 

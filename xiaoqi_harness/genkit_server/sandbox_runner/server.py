@@ -688,8 +688,8 @@ class RunnerHandler(BaseHTTPRequestHandler):
             r"/v1/tasks/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/network/off",
             self.path,
         )
-        cancel_match = re.fullmatch(r'/v1/executions/([a-f0-9]{32})/cancel', self.path)
-        if self.path != "/v1/execute" and disable_match is None and cancel_match is None:
+        execution_match = re.fullmatch(r'/v1/executions/([a-f0-9]{32})/(cancel|result|ack)', self.path)
+        if self.path != "/v1/execute" and disable_match is None and execution_match is None:
             self._json_response(404, {"error": "not found"})
             return
         if not _authorized(self):
@@ -721,12 +721,13 @@ class RunnerHandler(BaseHTTPRequestHandler):
             except (DockerException, RuntimeError) as error:
                 self._json_response(503, {"error": str(error)[:300]})
             return
-        if cancel_match is not None:
-            if request.get('execution_id') != cancel_match.group(1):
+        if execution_match is not None:
+            if request.get('execution_id') != execution_match.group(1):
                 self._json_response(400, {'error': 'Execution ID does not match request path'})
                 return
             try:
-                self._json_response(200, _executions.cancel(request))
+                operation = {'cancel': _executions.cancel, 'result': _executions.read, 'ack': _executions.acknowledge}[execution_match.group(2)]
+                self._json_response(200, operation(request))
             except ExecutionError as error:
                 self._json_response(409, {'error': str(error)})
             return
@@ -742,33 +743,41 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 acquired = True
                 break
         if not acquired:
-            _executions.finish(execution)
+            result = {'type': 'result', 'ok': False, 'execution_id': request['execution_id'], 'error': 'Execution cancelled before startup' if execution.cancelled.is_set() else 'Execution queue wait expired', 'artifacts': [], 'cleanup_pending': False}
+            _executions.finish(execution, result)
             if execution.cancelled.is_set():
                 self._start_stream()
-                self._send({'type': 'result', 'ok': False, 'error': 'Execution cancelled before startup', 'artifacts': [], 'cleanup_pending': False})
+                self._send(result)
                 self._finish_stream()
             else:
                 self._json_response(429, {"error": "服务器代码沙箱正在处理其他任务，请稍后重试"})
             return
+        connected = True
+        def send(event):
+            nonlocal connected
+            if not connected:
+                return
+            try:
+                self._send(event)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                connected = False
+        result = None
         try:
-            self._start_stream()
-            result = _run_sandbox(request, self._send, cancellation=execution.cancelled)
-            self._send(result)
-        except ClientDisconnected:
-            return
-        except (RequestError, DockerException, RuntimeError, OSError) as error:
             try:
-                self._send({"type": "result", "ok": False, "error": str(error)[:500], "artifacts": [], "cleanup_pending": False})
+                self._start_stream()
             except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
-
-        except Exception:
+                connected = False
             try:
-                self._send({"type": "result", "ok": False, "error": "服务器本机 Docker 沙箱执行失败", "artifacts": [], "cleanup_pending": True})
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
+                result = _run_sandbox(request, send, cancellation=execution.cancelled)
+            except (RequestError, DockerException, RuntimeError, OSError) as error:
+                result = {'type': 'result', 'ok': False, 'error': str(error)[:500], 'artifacts': [], 'cleanup_pending': False}
+            except Exception:
+                result = {'type': 'result', 'ok': False, 'error': '服务器本机 Docker 沙箱执行失败', 'artifacts': [], 'cleanup_pending': True}
+            result = {**result, 'execution_id': request['execution_id']}
+            _executions.finish(execution, result)
+            send(result)
         finally:
-            _executions.finish(execution)
+            _executions.finish(execution, result)
             _slots.release()
             try:
                 self._finish_stream()

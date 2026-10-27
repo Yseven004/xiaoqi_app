@@ -63,6 +63,79 @@ class ExecutionTests(unittest.TestCase):
     def test_active_cancellation_keeps_result_stream_and_partial_files(self):
         self._http_cancel(queued=False)
 
+    def test_unacknowledged_result_survives_expiry_and_ack_prevents_replay(self):
+        registry = Executions(capacity=1)
+        request = self.request()
+        entry = registry.claim(request)
+        result = {'ok': True, 'artifacts': [{'name': 'result.txt', 'base64': 'b2s='}]}
+        registry.finish(entry, result)
+        with patch('execution_sessions.time.time', return_value=(request['issued_at'] + 200000) / 1000):
+            self.assertEqual(registry.read(request)['completion'], result)
+            with self.assertRaises(ExecutionError):
+                registry.claim({**self.request('b'), 'issued_at': request['issued_at'] + 200000})
+            with self.assertRaises(ExecutionError):
+                registry.acknowledge({**request, 'task_id': 'foreign'})
+            registry.acknowledge(request)
+            self.assertIsNone(registry.read(request)['completion'])
+            registry.claim({**self.request('b'), 'issued_at': request['issued_at'] + 200000})
+            with self.assertRaises(ExecutionError):
+                registry.claim(request)
+
+    def test_unacknowledged_payload_applies_backpressure_until_ack(self):
+        registry = Executions()
+        request = self.request()
+        entry = registry.claim(request)
+        with self.assertRaises(ExecutionError):
+            registry.acknowledge(request)
+        registry.finish(entry, {'ok': True})
+        entry.payload_bytes = 32 * 1024 * 1024 + 1
+        with self.assertRaises(ExecutionError):
+            registry.claim(self.request('b'))
+        registry.acknowledge(request)
+        registry.claim(self.request('b'))
+
+    def test_disconnected_execution_can_be_read_and_acknowledged_without_replay(self):
+        registry = Executions()
+        release = threading.Event()
+        partial = [{'name': 'recovered.txt', 'base64': 'cmVjb3ZlcmVk'}]
+        def run(request, send, *, cancellation):
+            send({'type': 'sandbox_started', 'sandbox_id': 'disconnect-test'})
+            self.assertTrue(release.wait(3))
+            send({'type': 'heartbeat'})
+            send({'type': 'heartbeat'})
+            return {'type': 'result', 'ok': True, 'artifacts': partial, 'cleanup_pending': False}
+        with patch.object(server, 'RUNNER_TOKEN', 'test-token'), patch.object(server, '_executions', registry), patch.object(server, '_slots', threading.BoundedSemaphore(1)), patch.object(server, '_run_sandbox', side_effect=run) as runner:
+            http = ThreadingHTTPServer(('127.0.0.1', 0), server.RunnerHandler)
+            thread = threading.Thread(target=http.serve_forever, daemon=True)
+            thread.start()
+            request = self.request()
+            def post(path):
+                outgoing = urllib.request.Request(f'http://127.0.0.1:{http.server_port}' + path, data=json.dumps(request).encode(), headers={'Authorization': 'Bearer test-token'})
+                return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(outgoing, timeout=5)
+            try:
+                response = post('/v1/execute')
+                self.assertEqual(json.loads(response.readline())['type'], 'sandbox_started')
+                response.close()
+                release.set()
+                deadline = time.monotonic() + 3
+                while not registry.read(request)['finished'] and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                path = f"/v1/executions/{request['execution_id']}"
+                with post(path + '/result') as response:
+                    completed = json.load(response)
+                self.assertTrue(completed['finished'])
+                self.assertEqual(completed['completion']['artifacts'], partial)
+                with post(path + '/ack') as response:
+                    self.assertTrue(json.load(response)['acknowledged'])
+                with post(path + '/result') as response:
+                    self.assertIsNone(json.load(response)['completion'])
+                runner.assert_called_once()
+            finally:
+                release.set()
+                http.shutdown()
+                http.server_close()
+                thread.join(timeout=3)
+
     def test_queued_cancellation_never_starts_a_sandbox(self):
         self._http_cancel(queued=True)
 
