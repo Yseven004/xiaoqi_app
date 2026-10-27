@@ -79,6 +79,39 @@ void main() {
   );
 
   test(
+    'Shell requirements and auxiliary script resources remain installable',
+    () async {
+      final importer = service({
+        'SKILL.md':
+            '---\nname: shell-notes\ndescription: Process a local file\nallowed-tools: Bash\n---\nRun scripts/process.sh inside the task workspace.\n',
+        'scripts/process.sh': 'printf "%s" "\$1"\n',
+        'scripts/options.yaml': 'format: text\n',
+      });
+      final inspected = await importer.inspect(
+        'alice',
+        'https://github.com/example/shell',
+      );
+      final candidate = (inspected['candidates'] as List).single as Map;
+      expect(candidate['status'], 'supported');
+      expect((candidate['components'] as List).single['has_scripts'], isTrue);
+      final saved = await importer.install(
+        'alice',
+        inspected['id'],
+        candidate['id'],
+      );
+      final selected = SelectedSkills(store, 'alice', [
+        {
+          'id': saved.value['id'],
+          'version_id': saved.value['current_version_id'],
+        },
+      ]);
+      final files = selected.files(selected.entries.values.single);
+      expect(utf8.decode(files['scripts/process.sh']!), contains('printf'));
+      expect(utf8.decode(files['scripts/options.yaml']!), 'format: text\n');
+    },
+  );
+
+  test(
     'stdio plugin installs its declared dependency and resolves an owned immutable command',
     () async {
       var preparations = 0;

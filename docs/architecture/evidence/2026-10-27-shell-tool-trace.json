@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-27",
+  "scope": "Real local Genkit agent loop with simulated model and sandbox worker; Docker Shell execution is a separate CI gate",
+  "productionVerified": false,
+  "cliVersion": "1.44.1",
+  "flow": "verifyToolPermissions",
+  "scenario": "text-only-shell",
+  "flowTraceId": "6aa5fe70fe767817e8a8cbf7ee1d74de",
+  "flowPassed": true,
+  "agentTraceId": "97ce92a181718407edd9e605580e63b7",
+  "toolSpanId": "191b63eb468d25e7",
+  "toolName": "execute_shell",
+  "toolOutputMarker": "shell-routing-verified",
+  "toolSpanStatus": "OK",
+  "verified": [
+    "Agent discovers and calls execute_shell",
+    "Sandbox request carries shell language, separate argv including an empty argument, and no authorized domains",
+    "Delivery gate accepts the real successful tool response"
+  ],
+  "limitations": [
+    "This trace verifies agent routing, not execution by a real Docker daemon.",
+    "CLI process exited 1 at Windows cleanup because wmic.exe is absent; the flow itself passed.",
+    "A subsequent process inventory found no surviving permission-verifier or capability-runtime fixture process.",
+    "No model-provider or image-provider account was used."
+  ]
+}

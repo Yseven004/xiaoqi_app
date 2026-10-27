@@ -6,6 +6,7 @@ RUN apt-get update \
       fontconfig fonts-noto-cjk latexmk texlive-lang-chinese texlive-xetex \
  && rm -rf /var/lib/apt/lists/* \
  && command -v xelatex >/dev/null \
+ && command -v bash >/dev/null \
  && kpsewhich xeCJK.sty >/dev/null \
  && fc-match 'Noto Sans CJK SC' | grep -qi 'Noto Sans CJK SC' \
  && groupadd --gid 10001 sandbox \

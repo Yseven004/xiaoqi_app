@@ -247,6 +247,7 @@ String _agentToolLabel(String name) => switch (name) {
   'web_search' => '联网搜索',
   'web_fetch' => '阅读网页',
   'execute_python' => 'Python',
+  'execute_shell' => 'Shell',
   'execute_skill_script' => '技能脚本',
   'use_skill' => '读取技能',
   'read_skill_resource' => '读取技能资料',

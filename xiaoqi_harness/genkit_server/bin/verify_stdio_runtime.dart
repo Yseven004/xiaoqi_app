@@ -6,6 +6,7 @@ import 'package:genkit_mcp/genkit_mcp.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/isolated_mcp_spec.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
+import 'support/stdio_agent_gate.dart';
 
 /// Real Docker/official-package gate. No model or image-provider calls.
 Future<void> main() async {
@@ -104,6 +105,42 @@ Future<void> main() async {
     }
     if (transport.completion?['cleanup_pending'] != false)
       throw StateError('MCP cleanup was not confirmed');
+    const literal = r'value; $(touch /workspace/output/unwanted)';
+    await executor.execute(
+      tenantId: tenant,
+      taskId: task,
+      language: 'shell',
+      code: r'''set -eu
+[ "$#" -eq 2 ]
+[ -z "$2" ]
+printf '%s' "$1" > /workspace/output/shell.txt
+python3 - <<'PY'
+import json, pathlib
+manifest = json.loads(pathlib.Path('/workspace/input_manifest.json').read_text())
+item = next(item for item in manifest['inputs'] if item['name'] == 'roundtrip.txt')
+assert pathlib.Path(item['path']).read_text() == 'isolated-stdio-roundtrip'
+PY
+(sleep 60; printf 'late' > /workspace/output/late.txt) >/dev/null 2>&1 &
+''',
+      arguments: [literal, ''],
+      authorizedDomains: [],
+      materials: [],
+      skillFiles: {},
+      cancellation: CancellationController().token,
+    );
+    final finalArtifacts =
+        (store.get('task/$tenant/$task')!.value['artifacts'] as List)
+            .whereType<Map>();
+    final shell = finalArtifacts
+        .where((item) => item['name'] == 'shell.txt')
+        .single;
+    if (utf8.decode(store.getObject(shell['object_key'])) != literal ||
+        finalArtifacts.any((item) => item['name'] == 'unwanted')) {
+      throw StateError(
+        'Shell argv was interpreted as a command instead of literal data',
+      );
+    }
+    await verifyStdioAgent(store, executor, tenant, files);
     stdout.writeln(
       jsonEncode({
         'gate': 'stdio-runtime',
@@ -113,6 +150,9 @@ Future<void> main() async {
         'directory_boundary': true,
         'artifact_integrity': true,
         'cancel_cleanup': true,
+        'shell_literal_argv': true,
+        'mcp_to_shell_file_handoff': true,
+        'agent_mcp_shell_loop': true,
       }),
     );
   } finally {

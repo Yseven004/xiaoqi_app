@@ -27,4 +27,14 @@ done
 if [[ "$ready" != yes ]]; then docker logs --tail 80 xiaoqi-stdio-gate-runner; exit 1; fi
 timeout --kill-after=30s 360 docker run --rm --name xiaoqi-stdio-gate-probe --network xiaoqi-stdio-gate \
   --env SANDBOX_RUNNER_TOKEN --env SANDBOX_RUNNER_URL=http://xiaoqi-stdio-gate-runner:8090 \
+  --env MIMO_API_KEY=stdio-fixture --env MIMO_BASE_URL=http://127.0.0.1:40443/v1 \
   --entrypoint /app/bin/verify_stdio_runtime xiaoqi-genkit-server:local
+for resource in container network volume; do
+  case "$resource" in
+    container) remaining="$(docker ps -aq --filter label=com.xiaoqi.ci-stdio-sandbox=true)";;
+    network) remaining="$(docker network ls -q --filter label=com.xiaoqi.ci-stdio-sandbox=true)";;
+    volume) remaining="$(docker volume ls -q --filter label=com.xiaoqi.ci-stdio-sandbox=true)";;
+  esac
+  [[ -z "$remaining" ]] || { printf 'SANDBOX_RESOURCE_LEAK type=%s\n' "$resource"; exit 1; }
+done
+printf 'SANDBOX_RESOURCES_CLEAN\n'

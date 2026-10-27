@@ -2866,12 +2866,7 @@ class XiaoqiApi {
                 'scripts',
                 'references',
                 'assets',
-              }.contains(parts.first) ||
-              (parts.first == 'scripts' &&
-                  !RegExp(
-                    r'\.(py|js|mjs|cjs|ts|mts)$',
-                    caseSensitive: false,
-                  ).hasMatch(path))) {
+              }.contains(parts.first)) {
             throw const FormatException('技能资源路径无效');
           }
           try {

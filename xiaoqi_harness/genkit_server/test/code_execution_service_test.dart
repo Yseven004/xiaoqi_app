@@ -57,6 +57,38 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   });
 
   test(
+    'installed Shell entry uses its immutable file budget rather than inline code limit',
+    () async {
+      worker.writeAsStringSync(r'''
+import base64, json, sys
+request = json.loads(sys.stdin.readline())
+assert request['script_path'] == 'scripts/large.sh'
+assert request['language'] == 'shell'
+assert len(request['code'].encode()) < 100
+assert len(base64.b64decode(request['skill_files']['scripts/large.sh'])) == 70 * 1024
+print(json.dumps({'type':'result','ok':True,'stdout':'file-budget-verified','stderr':'','artifacts':[],'cleanup_pending':False}), flush=True)
+''');
+      final result =
+          await DockerCodeExecutionService(
+            store,
+            workerPath: worker.path,
+            pythonExecutable: pythonExecutable(),
+          ).execute(
+            tenantId: 'personal',
+            taskId: 'task-code',
+            code: '',
+            language: 'shell',
+            authorizedDomains: [],
+            materials: [],
+            skillFiles: {'scripts/large.sh': List.filled(70 * 1024, 35)},
+            scriptPath: 'scripts/large.sh',
+            cancellation: CancellationController().token,
+          );
+      expect(result, 'file-budget-verified');
+    },
+  );
+
+  test(
     'tracks local Docker sandbox lifecycle and stores a private task artifact',
     () async {
       final service = DockerCodeExecutionService(

@@ -221,10 +221,16 @@ class DockerCodeExecutionService {
     List<String>? artifactIds,
   }) async {
     cancellation.throwIfCancelled();
-    if (code.trim().isEmpty || utf8.encode(code).length > 64 * 1024) {
+    if (scriptPath == null &&
+        (code.trim().isEmpty || utf8.encode(code).length > 64 * 1024)) {
       throw const FormatException('代码不能为空且不能超过 64 KB');
     }
-    if (!const {'python', 'javascript', 'typescript'}.contains(language)) {
+    if (!const {
+      'python',
+      'javascript',
+      'typescript',
+      'shell',
+    }.contains(language)) {
       throw const FormatException('不支持的代码语言');
     }
     final executionMaterials = _materialsForNextExecution(
@@ -302,7 +308,9 @@ class DockerCodeExecutionService {
     try {
       final request = <String, dynamic>{
         'task_id': _runnerTaskId(tenantId, taskId),
-        'code': code,
+        'code': scriptPath == null
+            ? code
+            : '# Installed entry is staged in skill_files',
         'language': language,
         'authorized_domains': authorizedDomains,
         'materials': executionMaterials,
@@ -311,7 +319,7 @@ class DockerCodeExecutionService {
             entry.key: base64Encode(entry.value),
         },
         if (scriptPath != null) 'script_path': scriptPath,
-        if (scriptPath != null) 'arguments': arguments,
+        if (arguments.isNotEmpty) 'arguments': arguments,
       };
       requestSubmitted = true;
       process.stdin.writeln(jsonEncode(request));

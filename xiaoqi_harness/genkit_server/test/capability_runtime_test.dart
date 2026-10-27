@@ -10,6 +10,7 @@ void main() {
     'script-available',
     'text-only',
     'text-only-workspace-retry',
+    'text-only-shell',
     'text-only-unplanned-image',
     'image-format-repair',
     'missing',
@@ -170,6 +171,8 @@ void main() {
                   {'name': 'read_skill_resource', 'count': 1},
                   if (scenario == 'text-only-workspace-retry')
                     {'name': 'execute_python', 'count': 1},
+                  if (scenario == 'text-only-shell')
+                    {'name': 'execute_shell', 'count': 1},
                 ],
                 'artifacts': [
                   if (!textOnly)
@@ -184,6 +187,13 @@ void main() {
                 ],
               };
             } else if (textOnly) {
+              if (scenario == 'text-only-shell' && !called('execute_shell')) {
+                tool = 'execute_shell';
+                input = {
+                  'code': r'printf "%s" "$1"',
+                  'arguments': [r'literal; $(not-a-host-command)', ''],
+                };
+              }
               if (scenario == 'text-only-workspace-retry') {
                 final attempts = RegExp(
                   r'"name":"execute_python"',
@@ -343,6 +353,10 @@ void main() {
               expect(transcript, contains('terminal-workspace-cause'));
               expect(transcript, contains('recovered'));
               expect(transcript, isNot(contains('连续失败两次')));
+            }
+            if (scenario == 'text-only-shell') {
+              expect(jsonEncode(requests), contains('shell-routing-verified'));
+              expect(jsonEncode(result['events']), contains('execute_shell'));
             }
           } else {
             expect(result['missing'], isFalse);

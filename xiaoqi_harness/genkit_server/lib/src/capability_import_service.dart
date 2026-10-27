@@ -795,17 +795,11 @@ class CapabilityImportService {
         issues.add('技能名称、说明或正文无效');
       final allowed = header['allowed-tools']?.toString() ?? '';
       if (allowed.isNotEmpty &&
-          RegExp(
-            r'Bash|Shell|Computer|Browser|mcp',
-            caseSensitive: false,
-          ).hasMatch(allowed))
-        issues.add('依赖当前未提供的工具：$allowed');
+          RegExp(r'Computer|Browser', caseSensitive: false).hasMatch(allowed))
+        warnings.add('声明了需要核对实际宿主的工具：$allowed；执行前须确认可用能力');
       for (final path in files.keys) {
         safePath(path);
         if (path.startsWith('.xiaoqi/')) issues.add('包含保留的运行环境目录');
-        if (path.startsWith('scripts/') &&
-            !RegExp(r'\.(py|js|mjs|cjs|ts|mts|json|md|txt)$').hasMatch(path))
-          issues.add('脚本类型暂不支持：$path');
       }
       if (files.containsKey('setup.py') || files.containsKey('Dockerfile'))
         issues.add('需要自定义构建环境，暂不支持');
@@ -832,7 +826,11 @@ class CapabilityImportService {
           : 'partial',
       'issues': issues,
       'warnings': warnings,
-      'has_scripts': files.keys.any((p) => p.startsWith('scripts/')),
+      'has_scripts': files.keys.any(
+        (p) => RegExp(
+          r'^scripts/.+\.(?:py|js|mjs|cjs|ts|mts|sh|bash)$',
+        ).hasMatch(p),
+      ),
       'has_dependencies':
           files.containsKey('requirements.txt') ||
           files.containsKey('package.json'),

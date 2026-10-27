@@ -64,6 +64,11 @@ Future<void> main(List<String> args) async {
   final images = FixtureImages(store);
   final scenario = args.single;
   final textOnly = scenario.startsWith('text-only');
+  final taskText = scenario == 'text-only-shell'
+      ? '请用 Shell 处理任务资料并返回纯文字，不需要图片或文件。'
+      : textOnly
+      ? '请用纯文字整理这段材料，不需要图片或文件。'
+      : '请整理成两页视觉学习笔记';
   DockerCodeExecutionService? codeExecutor;
   if (scenario == 'text-only-workspace-retry') {
     final worker = File('${directory.path}/retry_worker.py');
@@ -74,6 +79,24 @@ counter = pathlib.Path(__file__).with_suffix('.count')
 attempt = int(counter.read_text()) + 1 if counter.exists() else 1
 counter.write_text(str(attempt))
 print(json.dumps({'type':'result', 'ok':attempt >= 3, 'stdout':'recovered' if attempt >= 3 else 'progress\\n' * 1000, 'stderr':'' if attempt >= 3 else 'FileNotFoundError: terminal-workspace-cause', 'artifacts':[], 'cleanup_pending':False}), flush=True)
+''');
+    codeExecutor = DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable:
+          Platform.environment['XIAOQI_TEST_PYTHON'] ??
+          (Platform.isWindows ? 'python' : 'python3'),
+    );
+  }
+  if (scenario == 'text-only-shell') {
+    final worker = File('${directory.path}/shell_worker.py');
+    worker.writeAsStringSync(r'''
+import json, sys
+request = json.loads(sys.stdin.readline())
+assert request['language'] == 'shell'
+assert request['arguments'] == ['literal; $(not-a-host-command)', '']
+assert request['authorized_domains'] == []
+print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','stderr':'','artifacts':[],'cleanup_pending':False}), flush=True)
 ''');
     codeExecutor = DockerCodeExecutionService(
       store,
@@ -112,6 +135,10 @@ print(json.dumps({'type':'result', 'ok':attempt >= 3, 'stdout':'recovered' if at
   }, null);
   store.put('task/personal/turn', {'artifacts': []}, null);
   final events = <Map<String, Object?>>[];
+  final telemetry =
+      (Platform.environment['GENKIT_TELEMETRY_SERVER'] ?? '').isEmpty
+      ? null
+      : Genkit(promptDir: null, isDevEnv: true);
   try {
     final result =
         await GenkitXiaoqiAgentRuntime(
@@ -123,9 +150,7 @@ print(json.dumps({'type':'result', 'ok':attempt >= 3, 'stdout':'recovered' if at
           taskId: 'turn',
           request: {
             'model_id': 'mimo-v2.6-flash',
-            'current_turn_text': textOnly
-                ? '请用纯文字整理这段材料，不需要图片或文件。'
-                : '请整理成两页视觉学习笔记',
+            'current_turn_text': taskText,
             'selected_capabilities': scenario == 'implicit'
                 ? []
                 : [
@@ -133,10 +158,7 @@ print(json.dumps({'type':'result', 'ok':attempt >= 3, 'stdout':'recovered' if at
                   ],
           },
           messages: agentMessagesFromRequest([
-            {
-              'role': 'user',
-              'content': textOnly ? '请用纯文字整理这段材料，不需要图片或文件。' : '请整理成两页视觉学习笔记',
-            },
+            {'role': 'user', 'content': taskText},
           ]),
           onChunk: (_) {},
           onProcessEvent: events.add,
@@ -146,6 +168,7 @@ print(json.dumps({'type':'result', 'ok':attempt >= 3, 'stdout':'recovered' if at
       'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length})}',
     );
   } finally {
+    await telemetry?.shutdown();
     store.close();
     await directory.delete(recursive: true);
   }

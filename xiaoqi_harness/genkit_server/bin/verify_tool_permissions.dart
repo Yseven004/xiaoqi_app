@@ -31,6 +31,7 @@ void main() {
         'mcp-large',
         'mcp-success',
         'mcp-error',
+        'text-only-shell',
       }.contains(scenario)) {
         throw const FormatException('Unknown verification scenario');
       }
@@ -38,7 +39,7 @@ void main() {
         'test',
         'test/capability_runtime_test.dart',
         '--name',
-        scenario == 'all' ? '^mcp-' : '^$scenario ',
+        scenario == 'all' ? '^(mcp-|text-only-shell )' : '^$scenario ',
         '--reporter',
         'expanded',
       ]);

@@ -429,6 +429,11 @@ SchemanticType<Map<String, dynamic>> _objectToolSchema(
 final _executePythonSchema = _objectToolSchema(
   const {
     'code': {'type': 'string', 'minLength': 1, 'maxLength': 65536},
+    'arguments': {
+      'type': 'array',
+      'items': {'type': 'string'},
+      'maxItems': 32,
+    },
     'skill_id': {'type': 'string', 'minLength': 1, 'maxLength': 128},
     'artifact_ids': {
       'type': 'array',
@@ -458,7 +463,7 @@ final _executeSkillScriptSchema = _objectToolSchema(
     'script_path': {'type': 'string', 'minLength': 1},
     'language': {
       'type': 'string',
-      'enum': ['python', 'javascript', 'typescript'],
+      'enum': ['python', 'javascript', 'typescript', 'shell'],
     },
     'arguments': {
       'type': 'array',
@@ -799,6 +804,7 @@ List<String> agentToolNamesForRequest({
   final workspace = contract?.permitsWorkspace == true;
   return [
     if (codeExecutionAvailable && workspace) 'execute_python',
+    if (codeExecutionAvailable && workspace) 'execute_shell',
     if (imageGenerationAvailable && contract?.permitsImages == true)
       'generate_image',
     if (skillsAvailable && workspace) 'execute_skill_script',
@@ -1673,7 +1679,7 @@ class GenkitXiaoqiAgentRuntime
           .keys
           .any(
             (path) => RegExp(
-              r'^scripts/.+\.(?:py|js|mjs|cjs|ts|mts)$',
+              r'^scripts/.+\.(?:py|js|mjs|cjs|ts|mts|sh|bash)$',
             ).hasMatch(path),
           ),
     );
@@ -2582,186 +2588,198 @@ class GenkitXiaoqiAgentRuntime
         },
       );
     }
-    ai.defineTool<Map<String, dynamic>, String>(
-      name: 'execute_python',
-      description:
-          '在服务器隔离的 Docker 沙箱执行 Python 代码。仅用于用户明确要求执行代码、'
-          '处理文件或对资料做程序化操作时。默认断网。'
-          '普通代码执行不得联网。当前技能确需访问公网时，须提供本技能 skill_id、domains 精确域名和 purpose；'
-          '联网开关已打开时沿用任务域名授权。资料和产物会在当前任务的隔离工作区中按需提供；'
-          '先读 /workspace/input_manifest.json 获取当前输入的真实路径；不要复用旧沙箱绝对路径。'
-          '可写工作目录为 /workspace/work，交付文件写入 /workspace/output，创建子目录时先创建父目录。'
-          '不要向用户展示隔离工作区的路径或内部参数。',
-      inputSchema: _executePythonSchema,
-      fn: (input, context) async {
-        execution.check('workspace');
-        final networkMode = _taskNetworkMode(
-          tenantId,
-          taskId,
-          request['network_mode'],
-        );
-        final requestedDomains = _normalizeDomains(input['domains']);
-        if (requestedDomains.isNotEmpty &&
-            execution.hasUncertainNetworkExecution) {
-          return ToolResult.response(
-            jsonEncode({
-              'status': 'external_result_unknown',
-              'retryable': false,
-              'message': '前一次联网代码的外部结果未知，请先核实结果并由用户明确下一步。离线文件处理仍可继续。',
-            }),
+    void registerCodeTool(String toolName, String language) {
+      ai.defineTool<Map<String, dynamic>, String>(
+        name: toolName,
+        description:
+            '在服务器隔离的 Docker 沙箱执行 $language 代码。Shell 使用 Bash，arguments 作为独立 argv 值传给脚本。仅用于用户明确要求执行代码、'
+            '处理文件或对资料做程序化操作时。默认断网。'
+            '普通代码执行不得联网。当前技能确需访问公网时，须提供本技能 skill_id、domains 精确域名和 purpose；'
+            '联网开关已打开时沿用任务域名授权。资料和产物会在当前任务的隔离工作区中按需提供；'
+            '先读 /workspace/input_manifest.json 获取当前输入的真实路径；不要复用旧沙箱绝对路径。'
+            '可写工作目录为 /workspace/work，交付文件写入 /workspace/output，创建子目录时先创建父目录。'
+            '不要向用户展示隔离工作区的路径或内部参数。',
+        inputSchema: _executePythonSchema,
+        fn: (input, context) async {
+          execution.check('workspace');
+          final networkMode = _taskNetworkMode(
+            tenantId,
+            taskId,
+            request['network_mode'],
           );
-        }
-        final skillId = input['skill_id']?.toString().trim() ?? '';
-        final skillReference =
-            skillId.isNotEmpty || selectedSkills.explicitIds.length == 1
-            ? selectedSkills.resolve(input)
-            : null;
-        if (skillReference != null &&
-            !loadedSkills.contains(skillReference['id'])) {
-          return ToolResult.response(
-            jsonEncode({'ok': false, 'error': '请先 use_skill 读取该技能全文，再使用其执行权限'}),
-          );
-        }
-        final temporaryNetwork =
-            networkMode == 'off' &&
-            requestedDomains.isNotEmpty &&
-            skillReference != null;
-        if (networkMode == 'off' &&
-            requestedDomains.isNotEmpty &&
-            !temporaryNetwork) {
-          onProcessEvent({
-            'type': 'tool_failed',
-            'tool': 'execute_python',
-            'message': '联网搜索已关闭；只有技能确需联网时才能临时联网。',
-          });
-          return ToolResult.response(
-            jsonEncode({
-              'status': 'blocked',
-              'message': '普通代码执行不能联网。请开启联网开关，或由当前技能说明其联网用途。',
-            }),
-          );
-        }
-        final purpose = input['purpose']?.toString().trim() ?? '';
-        if (temporaryNetwork && purpose.isEmpty) {
-          onProcessEvent({
-            'type': 'tool_failed',
-            'tool': 'execute_python',
-            'message': '技能申请临时联网时必须说明用途。',
-          });
-          return ToolResult.response(
-            jsonEncode({'status': 'blocked', 'message': '缺少技能联网用途。'}),
-          );
-        }
-        final skillName = temporaryNetwork
-            ? _stagedSkillName(skillReference, stagedSkills.entries)
-            : null;
-        final skillFiles = skillReference == null
-            ? <String, List<int>>{}
-            : selectedSkills.files(skillReference);
-        onProcessEvent({
-          'type': 'tool_started',
-          'tool': 'execute_python',
-          if (temporaryNetwork) 'temporary_network': true,
-          if (skillName != null) 'capability_name': skillName,
-        });
-        _logAgentRuntime('tool_called', taskId, {
-          'tool_name': 'execute_python',
-          'input_fields': input.keys.toList()..sort(),
-          'code_bytes': utf8.encode(input['code']?.toString() ?? '').length,
-          'domain_count': requestedDomains.length,
-        });
-        final permission = temporaryNetwork
-            ? null
-            : _networkPermission(
-                tenantId,
-                taskId,
-                requestedDomains,
-                input['purpose']?.toString() ?? '',
-              );
-        if (permission != null) {
-          final approvedDomains = request['remote_agent'] == true
-              ? _resumedAuthorizedDomains(context.resumed, permission)
-              : null;
-          if (approvedDomains == null) {
-            onProcessEvent({
-              'type': 'network_permission_required',
-              'tool': 'execute_python',
-            });
-          }
-          if (request['remote_agent'] == true && approvedDomains == null) {
-            return ToolResult.interrupt({
-              'type': 'network_permission',
-              'tool': 'execute_python',
-              'domains': permission.domains,
-              'purpose': permission.purpose,
-            });
-          }
-          if (approvedDomains == null) {
-            pendingPermission = permission;
+          final requestedDomains = _normalizeDomains(input['domains']);
+          if (requestedDomains.isNotEmpty &&
+              execution.hasUncertainNetworkExecution) {
             return ToolResult.response(
               jsonEncode({
-                'status': 'awaiting_network_permission',
+                'status': 'external_result_unknown',
+                'retryable': false,
+                'message': '前一次联网代码的外部结果未知，请先核实结果并由用户明确下一步。离线文件处理仍可继续。',
+              }),
+            );
+          }
+          final skillId = input['skill_id']?.toString().trim() ?? '';
+          final skillReference =
+              skillId.isNotEmpty || selectedSkills.explicitIds.length == 1
+              ? selectedSkills.resolve(input)
+              : null;
+          if (skillReference != null &&
+              !loadedSkills.contains(skillReference['id'])) {
+            return ToolResult.response(
+              jsonEncode({
+                'ok': false,
+                'error': '请先 use_skill 读取该技能全文，再使用其执行权限',
+              }),
+            );
+          }
+          final temporaryNetwork =
+              networkMode == 'off' &&
+              requestedDomains.isNotEmpty &&
+              skillReference != null;
+          if (networkMode == 'off' &&
+              requestedDomains.isNotEmpty &&
+              !temporaryNetwork) {
+            onProcessEvent({
+              'type': 'tool_failed',
+              'tool': toolName,
+              'message': '联网搜索已关闭；只有技能确需联网时才能临时联网。',
+            });
+            return ToolResult.response(
+              jsonEncode({
+                'status': 'blocked',
+                'message': '普通代码执行不能联网。请开启联网开关，或由当前技能说明其联网用途。',
+              }),
+            );
+          }
+          final purpose = input['purpose']?.toString().trim() ?? '';
+          if (temporaryNetwork && purpose.isEmpty) {
+            onProcessEvent({
+              'type': 'tool_failed',
+              'tool': toolName,
+              'message': '技能申请临时联网时必须说明用途。',
+            });
+            return ToolResult.response(
+              jsonEncode({'status': 'blocked', 'message': '缺少技能联网用途。'}),
+            );
+          }
+          final skillName = temporaryNetwork
+              ? _stagedSkillName(skillReference, stagedSkills.entries)
+              : null;
+          final skillFiles = skillReference == null
+              ? <String, List<int>>{}
+              : selectedSkills.files(skillReference);
+          onProcessEvent({
+            'type': 'tool_started',
+            'tool': toolName,
+            if (temporaryNetwork) 'temporary_network': true,
+            if (skillName != null) 'capability_name': skillName,
+          });
+          _logAgentRuntime('tool_called', taskId, {
+            'tool_name': toolName,
+            'input_fields': input.keys.toList()..sort(),
+            'code_bytes': utf8.encode(input['code']?.toString() ?? '').length,
+            'domain_count': requestedDomains.length,
+          });
+          final permission = temporaryNetwork
+              ? null
+              : _networkPermission(
+                  tenantId,
+                  taskId,
+                  requestedDomains,
+                  input['purpose']?.toString() ?? '',
+                );
+          if (permission != null) {
+            final approvedDomains = request['remote_agent'] == true
+                ? _resumedAuthorizedDomains(context.resumed, permission)
+                : null;
+            if (approvedDomains == null) {
+              onProcessEvent({
+                'type': 'network_permission_required',
+                'tool': toolName,
+              });
+            }
+            if (request['remote_agent'] == true && approvedDomains == null) {
+              return ToolResult.interrupt({
+                'type': 'network_permission',
+                'tool': toolName,
                 'domains': permission.domains,
                 'purpose': permission.purpose,
-              }),
-            );
+              });
+            }
+            if (approvedDomains == null) {
+              pendingPermission = permission;
+              return ToolResult.response(
+                jsonEncode({
+                  'status': 'awaiting_network_permission',
+                  'domains': permission.domains,
+                  'purpose': permission.purpose,
+                }),
+              );
+            }
+            _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
           }
-          _authorizeAgentTaskDomains(tenantId, taskId, approvedDomains);
-        }
-        try {
-          final result = await codeExecutor.execute(
-            tenantId: tenantId,
-            taskId: taskId,
-            code: input['code']?.toString() ?? '',
-            language: 'python',
-            authorizedDomains: requestedDomains,
-            materials: await _scriptMaterials(tenantId, request['materials']),
-            skillFiles: skillFiles,
-            artifactIds: (input['artifact_ids'] as List?)?.cast<String>(),
-            cancellation: cancellation,
-          );
-          onProcessEvent({
-            'type': 'tool_succeeded',
-            'tool': 'execute_python',
-            if (temporaryNetwork) 'temporary_network': true,
-            if (skillName != null) 'capability_name': skillName,
-          });
-          return ToolResult.response(result);
-        } on Object catch (error) {
-          if (requestedDomains.isNotEmpty && error is SandboxExecutionError) {
-            execution.markUncertainNetworkExecution(
-              ToolExecution.digest({
-                'code': input['code'],
-                'domains': requestedDomains,
-              }),
+          try {
+            final result = await codeExecutor.execute(
+              tenantId: tenantId,
+              taskId: taskId,
+              code: input['code']?.toString() ?? '',
+              language: language,
+              arguments: (input['arguments'] as List? ?? const [])
+                  .cast<String>(),
+              authorizedDomains: requestedDomains,
+              materials: await _scriptMaterials(tenantId, request['materials']),
+              skillFiles: skillFiles,
+              artifactIds: (input['artifact_ids'] as List?)?.cast<String>(),
+              cancellation: cancellation,
             );
-          }
-          if (cancellation.isCancelled) rethrow;
-          final message = DockerCodeExecutionService.failureDetails(error);
-          final retryable =
-              requestedDomains.isEmpty && error is! ExecutionBudgetExceeded;
-          onProcessEvent({
-            'type': 'tool_failed',
-            'tool': 'execute_python',
-            'message': message,
-            'retryable': retryable,
-            if (temporaryNetwork) 'temporary_network': true,
-            if (skillName != null) 'capability_name': skillName,
-          });
-          return ToolResult.response(
-            jsonEncode({
-              'status': 'script_error',
-              'code': 'script_error',
-              'retryable': retryable,
+            onProcessEvent({
+              'type': 'tool_succeeded',
+              'tool': toolName,
+              if (temporaryNetwork) 'temporary_network': true,
+              if (skillName != null) 'capability_name': skillName,
+            });
+            return ToolResult.response(result);
+          } on Object catch (error) {
+            if (requestedDomains.isNotEmpty && error is SandboxExecutionError) {
+              execution.markUncertainNetworkExecution(
+                ToolExecution.digest({
+                  'code': input['code'],
+                  'language': language,
+                  'arguments': input['arguments'],
+                  'domains': requestedDomains,
+                }),
+              );
+            }
+            if (cancellation.isCancelled) rethrow;
+            final message = DockerCodeExecutionService.failureDetails(error);
+            final retryable =
+                requestedDomains.isEmpty && error is! ExecutionBudgetExceeded;
+            onProcessEvent({
+              'type': 'tool_failed',
+              'tool': toolName,
               'message': message,
-              'instruction': retryable
-                  ? '根据完整异常修正离线代码和当前输入路径后重试；不要重复相同失败代码。仍受任务资源预算和取消约束。'
-                  : '不可自动重放外部操作或已耗尽预算的执行。保留已完成文件，如实说明阻塞并先核实外部结果。',
-            }),
-          );
-        }
-      },
-    );
+              'retryable': retryable,
+              if (temporaryNetwork) 'temporary_network': true,
+              if (skillName != null) 'capability_name': skillName,
+            });
+            return ToolResult.response(
+              jsonEncode({
+                'status': 'script_error',
+                'code': 'script_error',
+                'retryable': retryable,
+                'message': message,
+                'instruction': retryable
+                    ? '根据完整异常修正离线代码和当前输入路径后重试；不要重复相同失败代码。仍受任务资源预算和取消约束。'
+                    : '不可自动重放外部操作或已耗尽预算的执行。保留已完成文件，如实说明阻塞并先核实外部结果。',
+              }),
+            );
+          }
+        },
+      );
+    }
+
+    registerCodeTool('execute_python', 'python');
+    registerCodeTool('execute_shell', 'shell');
     if (searchAvailable) {
       ai.defineTool<Map<String, dynamic>, String>(
         name: 'web_search',
@@ -3004,7 +3022,7 @@ class GenkitXiaoqiAgentRuntime
       name: 'execute_skill_script',
       description:
           '对自动选择技能提供精确 skill_id；技能版本由服务端绑定。执行当前技能已同步版本中的脚本。'
-          '只接受 scripts/ 下真实存在的 .py、.js、.mjs、.cjs、.ts 或 .mts 文件；'
+          '只接受 scripts/ 下真实存在的 .py、.js、.mjs、.cjs、.ts、.mts、.sh 或 .bash 文件；Shell 的 language 为 shell。'
           '执行受任务资源预算约束；失败后不得自动重试副作用操作。脚本只能访问本次任务资料和当前技能文件，默认断网。',
       inputSchema: _executeSkillScriptSchema,
       fn: (input, context) async {
@@ -3019,6 +3037,7 @@ class GenkitXiaoqiAgentRuntime
         String? temporaryNetworkCapability;
         var temporaryNetworkStarted = false;
         Map<String, String>? executingSkill;
+        var executingDomains = <String>[];
         try {
           final scriptPath = _safeSkillScriptPath(
             input['script_path']?.toString() ?? '',
@@ -3035,6 +3054,18 @@ class GenkitXiaoqiAgentRuntime
             request['network_mode'],
           );
           final requestedDomains = _normalizeDomains(input['domains']);
+          executingDomains = requestedDomains;
+          if (requestedDomains.isNotEmpty &&
+              execution.hasUncertainNetworkExecution) {
+            return ToolResult.response(
+              jsonEncode({
+                'ok': false,
+                'status': 'external_result_unknown',
+                'retryable': false,
+                'error': '前一次联网代码的外部结果未知，请先核实结果。离线处理仍可继续。',
+              }),
+            );
+          }
           final temporaryNetwork =
               networkMode == 'off' && requestedDomains.isNotEmpty;
           final purpose = input['purpose']?.toString().trim() ?? '';
@@ -3124,7 +3155,7 @@ class GenkitXiaoqiAgentRuntime
           final result = await codeExecutor.execute(
             tenantId: tenantId,
             taskId: taskId,
-            code: utf8.decode(scriptBytes),
+            code: '# Execute installed skill entry',
             language: input['language']?.toString() ?? '',
             authorizedDomains: approvedForThisCall,
             materials: await _scriptMaterials(tenantId, request['materials']),
@@ -3147,6 +3178,16 @@ class GenkitXiaoqiAgentRuntime
           });
           return ToolResult.response(result);
         } on Object catch (error) {
+          if (executingDomains.isNotEmpty && error is SandboxExecutionError) {
+            execution.markUncertainNetworkExecution(
+              ToolExecution.digest({
+                'skill': executingSkill,
+                'path': input['script_path'],
+                'arguments': input['arguments'],
+                'domains': executingDomains,
+              }),
+            );
+          }
           if (cancellation.isCancelled) rethrow;
           final message = DockerCodeExecutionService.failureDetails(error);
           if (executingSkill != null)
@@ -3345,6 +3386,7 @@ class GenkitXiaoqiAgentRuntime
               (name) =>
                   const {
                     'execute_python',
+                    'execute_shell',
                     'execute_skill_script',
                   }.contains(name) ||
                   mcpToolNames.contains(name),
@@ -3472,7 +3514,7 @@ class GenkitXiaoqiAgentRuntime
       system.write(
         '\n\n联网默认关闭。普通聊天、知识问答、写作和普通代码执行不得访问公网；'
         '不得仅因用户问题需要实时信息而搜索。只有已验证的技能确实需要公开网页或脚本联网完成本任务时，'
-        '才可以调用 web_search、execute_python 或 execute_skill_script 临时联网；调用时必须提供精确 skill_id、'
+        '才可以调用 web_search、execute_python、execute_shell 或 execute_skill_script 临时联网；调用时必须提供精确 skill_id、'
         '最短必要查询词或明确用途与精确域名。技能 ID 必须来自当前账号可用的技能目录，'
         '不得把普通问题伪装成技能任务。临时联网只限本次工具调用，不能保留域名授权。',
       );
@@ -4248,6 +4290,7 @@ class GenkitXiaoqiAgentRuntime
       'python' => const {'py'},
       'javascript' => const {'js', 'mjs', 'cjs'},
       'typescript' => const {'ts', 'mts'},
+      'shell' => const {'sh', 'bash'},
       _ => const <String>{},
     };
     if (!allowed.contains(extension))

@@ -148,14 +148,14 @@ def _safe_filename(value: Any, fallback: str) -> str:
 
 
 def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], str, list[str], list[str]]:
+    script_path = request.get("script_path")
     code = request.get("code")
-    if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES:
+    if script_path is None and (not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES):
         raise RequestError("代码不能为空且不能超过 64 KB")
     language = str(request.get("language") or "").lower()
-    if language not in {"python", "javascript", "typescript"}:
+    if language not in {"python", "javascript", "typescript", "shell"}:
         raise RequestError("不支持的代码语言")
 
-    script_path = request.get("script_path")
     arguments = request.get("arguments", [])
     if script_path is not None:
         script_path = _safe_relative(script_path)
@@ -166,6 +166,7 @@ def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], st
             "python": {".py"},
             "javascript": {".js", ".mjs", ".cjs"},
             "typescript": {".ts", ".mts"},
+            "shell": {".sh", ".bash"},
         }[language]
         if extension not in allowed:
             raise RequestError("技能脚本扩展名与语言不匹配")
@@ -175,8 +176,10 @@ def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], st
             raise RequestError("技能脚本参数无效")
         if sum(len(item.encode("utf-8")) for item in arguments) > 8 * 1024:
             raise RequestError("技能脚本参数超过 8 KB")
-    else:
-        arguments = []
+    if not isinstance(arguments, list) or len(arguments) > MAX_SCRIPT_ARGUMENTS or any(not isinstance(item, str) or "\x00" in item for item in arguments):
+        raise RequestError("代码参数必须是独立文本值")
+    if sum(len(item.encode("utf-8")) for item in arguments) > 8 * 1024:
+        raise RequestError("代码参数超过 8 KB")
 
     files: list[tuple[str, bytes]] = []
     input_manifest: list[dict[str, Any]] = []
@@ -229,9 +232,9 @@ def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], st
     if script_path is not None and f"skill/{script_path}" not in {name for name, _ in files}:
         raise RequestError("技能脚本文件不存在")
     if script_path is None:
-        extension = {"python": ".py", "javascript": ".js", "typescript": ".ts"}[language]
+        extension = {"python": ".py", "javascript": ".js", "typescript": ".ts", "shell": ".sh"}[language]
         files.append((f"main{extension}", code.encode("utf-8")))
-    return files, language, (arguments if script_path is not None else []), ([script_path] if script_path else [])
+    return files, language, arguments, ([script_path] if script_path else [])
 
 
 def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
@@ -267,12 +270,16 @@ def _command(language: str, arguments: list[str], script_paths: list[str]) -> li
             return ["python3", "-B", path, *arguments]
         if language == "javascript":
             return ["node", "--disable-proto=throw", path, *arguments]
+        if language == "shell":
+            return ["bash", "--noprofile", "--norc", path, *arguments]
         return ["node", "--experimental-strip-types", path, *arguments]
     if language == "python":
-        return ["python3", "-B", "/workspace/main.py"]
+        return ["python3", "-B", "/workspace/main.py", *arguments]
     if language == "javascript":
-        return ["node", "--disable-proto=throw", "/workspace/main.js"]
-    return ["node", "--experimental-strip-types", "/workspace/main.ts"]
+        return ["node", "--disable-proto=throw", "/workspace/main.js", *arguments]
+    if language == "shell":
+        return ["bash", "--noprofile", "--norc", "/workspace/main.sh", *arguments]
+    return ["node", "--experimental-strip-types", "/workspace/main.ts", *arguments]
 
 
 def _get_client() -> docker.DockerClient:

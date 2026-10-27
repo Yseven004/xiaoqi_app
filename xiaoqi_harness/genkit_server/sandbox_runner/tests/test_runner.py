@@ -13,6 +13,21 @@ from stdio_channel import StdioChannel
 
 
 class RunnerValidationTests(unittest.TestCase):
+    def test_shell_arguments_and_installed_script_are_not_reparsed(self):
+        arguments = ['value with spaces', '', 'literal; $(not-a-host-command)']
+        files, language, args, scripts = server._request_files({'code':'printf "%s" "$1"','language':'shell','arguments':arguments})
+        self.assertIn('main.sh', dict(files))
+        self.assertEqual(server._command(language,args,scripts),['bash','--noprofile','--norc','/workspace/main.sh',*arguments])
+        files, language, args, scripts = server._request_files({'code':'placeholder','language':'shell','arguments':arguments,
+            'script_path':'scripts/check.sh','skill_files':{'scripts/check.sh':base64.b64encode(b'printf "%s" "$1"').decode()}})
+        self.assertEqual(server._command(language,args,scripts),['bash','--noprofile','--norc','/workspace/skill/scripts/check.sh',*arguments])
+
+    def test_installed_script_uses_file_budget_not_inline_code_limit(self):
+        source = b'# installed script\n' + b'#' * (70 * 1024)
+        files, language, args, scripts = server._request_files({'language':'shell',
+            'script_path':'scripts/large.sh','skill_files':{'scripts/large.sh':base64.b64encode(source).decode()}})
+        self.assertEqual(dict(files)['skill/scripts/large.sh'],source)
+        self.assertEqual(scripts,['scripts/large.sh'])
     def test_stdio_uses_isolated_container_and_literal_arguments(self):
         client = Mock()
         volume = Mock()
