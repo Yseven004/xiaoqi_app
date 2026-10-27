@@ -48,7 +48,7 @@ class McpConnectionCredentials {
     required this.bearerToken,
     this.catalogId,
     this.isolated,
-    this.revision,
+    this.authorizationRevision,
   });
 
   final String id;
@@ -57,7 +57,7 @@ class McpConnectionCredentials {
   final String? bearerToken;
   final String? catalogId;
   final IsolatedMcpSpec? isolated;
-  final int? revision;
+  final String? authorizationRevision;
 
   McpServerConfig serverConfig() => McpServerConfig(
     url: url,
@@ -220,7 +220,7 @@ class McpConnectionService {
     McpConnectionCredentials connection,
   ) => {
     'url': connection.url.toString(),
-    'revision': connection.revision,
+    'revision': connection.authorizationRevision,
     'catalog_id': _policyEntry(connection)?.id,
     'policy_version': _policyEntry(connection)?.version,
     if (connection.isolated != null)
@@ -228,6 +228,18 @@ class McpConnectionService {
   };
 
   bool isCurrent(String tenantId, McpConnectionCredentials connection) {
+    final isolated = connection.isolated;
+    if (isolated != null) {
+      if (isolated.capabilityId == null || isolated.versionId == null)
+        return false;
+      final record = store.get('cap/$tenantId/${isolated.capabilityId}')?.value;
+      return record != null &&
+          record['enabled'] != false &&
+          record['deleted_at'] == null &&
+          (record['versions'] as List? ?? const []).whereType<Map>().any(
+            (version) => version['id'] == isolated.versionId,
+          );
+    }
     final document = store.get(_key(tenantId, connection.id));
     if (document == null) return false;
     final value = document.value;
@@ -236,8 +248,35 @@ class McpConnectionService {
         (value['status'] == null || value['status'] == 'ready') &&
         value['url'] == connection.url.toString() &&
         value['catalog_id'] == connection.catalogId &&
-        (connection.revision == null ||
-            connection.revision == document.revision);
+        connection.authorizationRevision != null &&
+        connection.authorizationRevision == _authorizationRevision(value);
+  }
+
+  String _authorizationRevision(Map<String, dynamic> value) {
+    final encrypted = value['encrypted_bearer_token'] as Map?;
+    // Health checks and presentation changes are not authorization changes.
+    // Only values that select the endpoint/account enter this fingerprint.
+    return crypto.sha256
+        .convert(
+          utf8.encode(
+            jsonEncode({
+              'url': value['url'],
+              'catalog_id': value['catalog_id'],
+              'credential': encrypted == null
+                  ? null
+                  : {
+                      for (final key in const [
+                        'version',
+                        'nonce',
+                        'ciphertext',
+                        'mac',
+                      ])
+                        key: encrypted[key],
+                    },
+            }),
+          ),
+        )
+        .toString();
   }
 
   List<McpCatalogEntry> catalog() {
@@ -757,7 +796,7 @@ class McpConnectionService {
       url: parseRemoteUrl(document.value['url']?.toString() ?? ''),
       bearerToken: token,
       catalogId: document.value['catalog_id']?.toString(),
-      revision: document.revision,
+      authorizationRevision: _authorizationRevision(document.value),
     );
   }
 

@@ -2166,6 +2166,8 @@ class GenkitXiaoqiAgentRuntime
         });
         GenkitMcpClient client;
         try {
+          if (!mcpConnectionService.isCurrent(tenantId, connection))
+            throw StateError('MCP 连接或绑定版本已失效');
           final spec = connection.isolated;
           if (spec == null) {
             client = await mcpConnectionService.connect(connection);
@@ -2256,25 +2258,7 @@ class GenkitXiaoqiAgentRuntime
             inputSchema: _mcpToolInputSchema(exposedTool['inputSchema']),
             fn: (requestInput, context) async {
               execution.check('read');
-              final isolated = connection.isolated;
-              if (isolated != null) {
-                final record = store
-                    .get('cap/$tenantId/${isolated.capabilityId}')
-                    ?.value;
-                if (record == null ||
-                    record['enabled'] == false ||
-                    record['deleted_at'] != null ||
-                    !(record['versions'] as List? ?? const [])
-                        .whereType<Map>()
-                        .any(
-                          (version) => version['id'] == isolated.versionId,
-                        )) {
-                  throw StateError('插件或所选版本已停用，不能继续调用 MCP');
-                }
-              } else if (!mcpConnectionService.isCurrent(
-                tenantId,
-                connection,
-              )) {
+              if (!mcpConnectionService.isCurrent(tenantId, connection)) {
                 onProcessEvent({
                   'type': 'tool_failed',
                   'tool': 'MCP · ${connection.name} · $exposedName',
@@ -2531,6 +2515,7 @@ class GenkitXiaoqiAgentRuntime
       ),
       fn: (input, context) async {
         final id = input['connection_id']?.toString() ?? '';
+        execution.check('read');
         final uri = input['uri']?.toString() ?? '';
         final client = resourceClients[id];
         if (client == null || resourceUris[id]?.contains(uri) != true) {
@@ -2538,17 +2523,41 @@ class GenkitXiaoqiAgentRuntime
             jsonEncode({'status': 'failed', 'error': '只能读取本轮工具已返回的同源资源'}),
           );
         }
+        final connection = selectedMcpConnections
+            .where((connection) => connection.id == id)
+            .firstOrNull;
+        if (connection == null ||
+            !mcpConnectionService.isCurrent(tenantId, connection)) {
+          onProcessEvent({
+            'type': 'tool_failed',
+            'tool': 'read_mcp_resource',
+            'message': 'MCP 连接或绑定版本已失效',
+          });
+          return ToolResult.response(
+            jsonEncode({
+              'status': 'unavailable',
+              'retryable': false,
+              'error': 'MCP 连接或绑定版本已失效，请刷新连接状态',
+            }),
+          );
+        }
         onProcessEvent({'type': 'tool_started', 'tool': 'read_mcp_resource'});
         try {
-          final raw = await client
-              .readResource(uri: uri)
-              .timeout(const Duration(seconds: 60));
-          cancellation.throwIfCancelled();
-          final result = McpToolResultAdapter(
-            store,
-            tenantId,
-            taskId,
-          ).normalize(raw);
+          final result = await execution.query(
+            slot: 'read_mcp_resource',
+            arguments: {'connection_id': id, 'uri': uri},
+            invoke: (_) async {
+              final raw = await client
+                  .readResource(uri: uri)
+                  .timeout(const Duration(seconds: 60));
+              cancellation.throwIfCancelled();
+              return McpToolResultAdapter(
+                store,
+                tenantId,
+                taskId,
+              ).normalize(raw);
+            },
+          );
           onProcessEvent({
             'type': result['status'] == 'completed'
                 ? 'tool_succeeded'

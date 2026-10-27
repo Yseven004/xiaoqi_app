@@ -4,6 +4,7 @@ import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/mcp_connection_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'package:xiaoqi_genkit_server/src/tool_access_policy.dart';
+import 'package:xiaoqi_genkit_server/src/isolated_mcp_spec.dart';
 
 class _CatalogConnections extends McpConnectionService {
   _CatalogConnections(super.store);
@@ -29,6 +30,54 @@ class _CatalogConnections extends McpConnectionService {
 }
 
 void main() {
+  test(
+    'isolated startup and calls share the immutable plugin availability check',
+    () {
+      final root = Directory.systemTemp.createTempSync('isolated-current-');
+      final store = CloudStore(root: root.path);
+      final service = _CatalogConnections(store);
+      final connection = McpConnectionCredentials(
+        id: 'isolated',
+        name: 'Plugin',
+        url: Uri.parse('isolated://workspace/plugin'),
+        bearerToken: null,
+        isolated: IsolatedMcpSpec(
+          ['node', 'server.js'],
+          {},
+          {},
+          capabilityId: 'plugin',
+          versionId: 'v1',
+        ),
+      );
+      store.put('cap/personal/plugin', {
+        'enabled': true,
+        'versions': [
+          {'id': 'v1'},
+        ],
+      }, null);
+      try {
+        expect(service.isCurrent('personal', connection), true);
+        expect(service.isCurrent('other', connection), false);
+        var record = store.get('cap/personal/plugin')!;
+        store.put('cap/personal/plugin', {
+          ...record.value,
+          'enabled': false,
+        }, record.revision);
+        expect(service.isCurrent('personal', connection), false);
+        record = store.get('cap/personal/plugin')!;
+        store.put('cap/personal/plugin', {
+          'enabled': true,
+          'versions': [
+            {'id': 'v2'},
+          ],
+        }, record.revision);
+        expect(service.isCurrent('personal', connection), false);
+      } finally {
+        store.close();
+        root.deleteSync(recursive: true);
+      }
+    },
+  );
   test('availability and explicit denial cannot be overridden by a grant', () {
     expect(
       ToolAccessPolicy.decide(
@@ -141,6 +190,19 @@ void main() {
         expect(service.isCurrent('personal', selected), true);
         expect(service.isCurrent('other', selected), false);
         var current = store.get(key)!;
+        store.put(key, {
+          ...current.value,
+          'name': 'Renamed',
+          'tool_count': 99,
+          'updated_at': 'health-refresh',
+        }, current.revision);
+        expect(
+          service.isCurrent('personal', selected),
+          true,
+          reason:
+              'A health or presentation update must not revoke the actual connection authority',
+        );
+        current = store.get(key)!;
         store.put(key, {
           ...current.value,
           'encrypted_bearer_token': {'changed': true},

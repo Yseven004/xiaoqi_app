@@ -5,37 +5,37 @@
   "cliVersion": "1.44.1",
   "flow": "verifyToolPermissions",
   "scenario": "authorization",
-  "flowTraceId": "709421749d918214ff261aff10a3c6da",
+  "flowTraceId": "37632e352ab9ec1f64b699cbd0cf892b",
   "flowPassed": true,
   "cases": [
     {
       "scenario": "mcp-approved-repeat",
-      "agentTraceId": "246e901781b8e68389d0f5c249051b6a",
-      "toolSpans": ["cc8b2000816cb3ff", "05a7b37f48210db6"],
+      "agentTraceId": "4bdcc76d461bb6ea60690404cf424c46",
+      "toolSpans": ["fe02f34dcc960fdf", "23d5bab61ce519ec"],
       "assertions": "Two SDK tool calls reuse one explicitly approved operation; one approval event, one actual MCP call and one success reservation"
     },
     {
       "scenario": "mcp-denied",
-      "agentTraceId": "dbea805270bce55e795dd57e450bbdfa",
-      "toolSpans": ["6cc1e9123f58c133", "ab056a7db6856060"],
+      "agentTraceId": "26bf8f47fba2f13f482246bf03f61dcd",
+      "toolSpans": ["54f4ddfb63a4df83", "8d34a61a13fff160"],
       "assertions": "Two attempted SDK calls return denied; only the original approval is shown and no MCP call executes"
     },
     {
       "scenario": "mcp-disabled",
-      "agentTraceId": "4b93ab47acce52db0d216a3f33769b3f",
-      "toolSpans": ["d28e2c9518963a24"],
+      "agentTraceId": "7c83fefe92ae43279dfce0d8827df79d",
+      "toolSpans": ["4324367e960ff8ff"],
       "assertions": "Connection disabled after discovery returns unavailable before any tool call"
     },
     {
       "scenario": "mcp-reconfigured",
-      "agentTraceId": "9bc8f0eb631620b6fc2d2613793d99b6",
-      "toolSpans": ["d4bc6f8556e08636"],
+      "agentTraceId": "10d28a8b0a357087392592e210a67c7c",
+      "toolSpans": ["3ec8ff5b25c66a6c"],
       "assertions": "Stored credentials changed after discovery invalidate the captured connection revision; no tool call executes"
     },
     {
       "scenario": "mcp-argument-change",
-      "agentTraceId": "fcaf65e2bfb2cc8aac52abe497c4a77b",
-      "toolSpans": ["0936627a3cfa0575", "58b2ae658fd71b97"],
+      "agentTraceId": "8118a22faf6a33d982133e6fbed36032",
+      "toolSpans": ["06b142cf5b17ca48", "25626b62065e8fd6"],
       "assertions": "Approved destination A executes once; destination B interrupts with a different approval hash and is not executed"
     }
   ],
