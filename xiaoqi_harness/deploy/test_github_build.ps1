@@ -45,6 +45,38 @@ try {
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }
 
+# Exercise the real HTTP policy without credentials or external requests.
+$script:httpCalls = 0
+$script:httpScenario = 'recover'
+function Get-GitHubBuildHeaders { @{Authorization='Bearer fixture-only'} }
+function Start-Sleep { param([int]$Milliseconds, [int]$Seconds) }
+function Invoke-RestMethod {
+    param($Uri, $Method, $Headers, $TimeoutSec, $Body, $ContentType, $ErrorAction)
+    $script:httpCalls++
+    if ($script:httpScenario -eq 'forbidden') { throw [Net.Http.HttpRequestException]::new('forbidden', $null, [Net.HttpStatusCode]::Forbidden) }
+    if ($script:httpScenario -eq 'limited') { throw [Net.Http.HttpRequestException]::new('rate limited', $null, [Net.HttpStatusCode]::TooManyRequests) }
+    if ($script:httpScenario -eq 'service' -and $script:httpCalls -lt 3) { throw [Net.Http.HttpRequestException]::new('unavailable', $null, [Net.HttpStatusCode]::ServiceUnavailable) }
+    if ($script:httpScenario -eq 'always' -or ($script:httpScenario -eq 'recover' -and $script:httpCalls -lt 3)) { throw [Net.Http.HttpRequestException]::new('connection interrupted') }
+    return [pscustomobject]@{ok=$true}
+}
+if (-not (Invoke-GitHubBuildApi -Path '/repos/Yseven004/xiaoqi_app/actions/runs').ok -or $script:httpCalls -ne 3) { throw 'A transient GET did not recover.' }
+$script:httpScenario = 'service'; $script:httpCalls = 0
+if (-not (Invoke-GitHubBuildApi -Path '/repos/Yseven004/xiaoqi_app/actions/runs').ok -or $script:httpCalls -ne 3) { throw 'A transient service GET did not recover.' }
+$script:httpScenario = 'always'; $script:httpCalls = 0
+Assert-Rejected { Invoke-GitHubBuildApi -Path '/repos/Yseven004/xiaoqi_app/actions/runs' } 'connection interrupted'
+if ($script:httpCalls -ne 3) { throw 'GET retry exceeded its budget.' }
+foreach ($method in @('POST','DELETE')) {
+    $script:httpCalls = 0
+    Assert-Rejected { Invoke-GitHubBuildApi -Path '/repos/Yseven004/xiaoqi_app/actions/runs' -Method $method } 'connection interrupted'
+    if ($script:httpCalls -ne 1) { throw 'An ambiguous mutation was replayed.' }
+}
+$script:httpScenario = 'forbidden'; $script:httpCalls = 0
+Assert-Rejected { Invoke-GitHubBuildApi -Path '/repos/Yseven004/xiaoqi_app/actions/runs' } 'forbidden'
+if ($script:httpCalls -ne 1) { throw 'An authorization failure was retried.' }
+$script:httpScenario = 'limited'; $script:httpCalls = 0
+Assert-Rejected { Invoke-GitHubBuildApi -Path '/repos/Yseven004/xiaoqi_app/actions/runs' } 'rate limited'
+if ($script:httpCalls -ne 1) { throw 'A rate limit was retried without honoring server cooldown.' }
+
 # Verify run selection and expired-artifact recovery without calling GitHub.
 $script:commit = 'a' * 40
 $script:queries = 0

@@ -10,10 +10,24 @@ function Get-GitHubBuildHeaders {
 function Invoke-GitHubBuildApi {
     param([string]$Path, [string]$Method = 'GET', $Body = $null)
     if ($Path -notmatch '^/repos/Yseven004/xiaoqi_app/') { throw 'Unexpected build repository path.' }
-    # No retry for mutations: an ambiguous response must not repeat a write.
     $arguments = @{ Uri = "https://api.github.com$Path"; Method = $Method; Headers = (Get-GitHubBuildHeaders); TimeoutSec = 30 }
     if ($null -ne $Body) { $arguments.Body = $Body | ConvertTo-Json -Compress; $arguments.ContentType = 'application/json' }
-    Invoke-RestMethod @arguments
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try { return Invoke-RestMethod @arguments -ErrorAction Stop } catch {
+            # Only bounded reads may retry; an ambiguous write never repeats.
+            if ($Method -ne 'GET' -or $attempt -eq 3) { throw }
+            $failure = $_.Exception
+            $status = $null
+            if ($failure.PSObject.Properties['StatusCode'] -and $null -ne $failure.StatusCode) { $status = [int]$failure.StatusCode }
+            if ($failure.PSObject.Properties['Response'] -and $null -ne $failure.Response) { $status = [int]$failure.Response.StatusCode }
+            $transient = if ($null -ne $status) { $status -in @(408,500,502,503,504) } else {
+                $failure -is [Net.Http.HttpRequestException] -or $failure -is [Net.WebException] -or
+                $failure -is [TimeoutException] -or $failure -is [Threading.Tasks.TaskCanceledException]
+            }
+            if (-not $transient) { throw }
+            Start-Sleep -Milliseconds (200 * $attempt)
+        }
+    }
 }
 
 function Get-MainReleaseCommit {
