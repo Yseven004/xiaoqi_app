@@ -56,8 +56,10 @@ class FixtureMcpConnections extends McpConnectionService {
 }
 
 Future<void> main(List<String> args) async {
+  final publicRead = args.single == 'mcp-public-read';
   final readOnly = const {
     'mcp-read',
+    'mcp-public-read',
     'mcp-large',
     'mcp-disabled',
     'mcp-reconfigured',
@@ -111,6 +113,8 @@ Future<void> main(List<String> args) async {
             {
               'name': toolCount > 1
                   ? 'fetch_card_$i'
+                  : publicRead
+                  ? 'read_wiki_structure'
                   : readOnly
                   ? 'fetch_card'
                   : 'make_card',
@@ -119,8 +123,12 @@ Future<void> main(List<String> args) async {
               'inputSchema': {
                 'type': 'object',
                 'properties': {
-                  'destination': {'type': 'string'},
+                  if (publicRead)
+                    'repoName': {'type': 'string'}
+                  else
+                    'destination': {'type': 'string'},
                 },
+                if (publicRead) 'required': ['repoName'],
                 'additionalProperties': false,
               },
             },
@@ -173,8 +181,10 @@ Future<void> main(List<String> args) async {
     'id': 'library',
     'name': 'Library',
     'status': 'ready',
-    'url': 'https://example.com/mcp',
-    'catalog_id': 'fixture',
+    'url': publicRead
+        ? 'https://mcp.deepwiki.com/mcp'
+        : 'https://example.com/mcp',
+    if (!publicRead) 'catalog_id': 'fixture',
   }, null);
   store.put('task/personal/turn', {'artifacts': [], 'events': []}, null);
   if (args.single.startsWith('mcp-partial-')) {

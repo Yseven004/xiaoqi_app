@@ -28,6 +28,7 @@ void main() {
     'mcp-partial-startup',
     'mcp-error',
     'mcp-read',
+    'mcp-public-read',
     'mcp-large',
     'mcp-approved-repeat',
     'mcp-denied',
@@ -85,6 +86,7 @@ void main() {
               'mode':
                   const {
                     'mcp-read',
+                    'mcp-public-read',
                     'mcp-large',
                     'mcp-disabled',
                     'mcp-reconfigured',
@@ -95,6 +97,7 @@ void main() {
               'image_count':
                   const {
                         'mcp-read',
+                        'mcp-public-read',
                         'mcp-large',
                         'mcp-disabled',
                         'mcp-reconfigured',
@@ -201,6 +204,7 @@ void main() {
                 'artifacts': [
                   if (!const {
                     'mcp-read',
+                    'mcp-public-read',
                     'mcp-large',
                     'mcp-disabled',
                     'mcp-reconfigured',
@@ -221,6 +225,8 @@ void main() {
               tool = remoteName;
               input = large
                   ? {'tool_name': 'fetch_card_119', 'arguments': {}}
+                  : scenario == 'mcp-public-read'
+                  ? {'repoName': 'firebase/genkit'}
                   : scenario == 'mcp-argument-change'
                   ? {'destination': remoteResponses == 0 ? 'A' : 'B'}
                   : {};
@@ -454,8 +460,21 @@ void main() {
             }.contains(scenario);
             expect(
               result['before_approval'],
-              const {'mcp-read', 'mcp-large'}.contains(scenario) ? 1 : 0,
+              const {
+                    'mcp-read',
+                    'mcp-large',
+                    'mcp-public-read',
+                  }.contains(scenario)
+                  ? 1
+                  : 0,
             );
+            if (scenario == 'mcp-public-read') {
+              expect(result['approval_events'], 0);
+              expect(result['called_tools'], ['read_wiki_structure']);
+              expect(result['called_arguments'], [
+                {'repoName': 'firebase/genkit'},
+              ]);
+            }
             expect(result['mcp_calls'], blocked ? 0 : 1);
             if (scenario == 'mcp-large')
               expect(result['called_tools'], ['fetch_card_119']);

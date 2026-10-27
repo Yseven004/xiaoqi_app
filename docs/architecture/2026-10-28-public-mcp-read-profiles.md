@@ -1,0 +1,15 @@
+# Reviewed public MCP reads
+
+Public documentation queries should not require a separate approval for every call. The application now owns a versioned read profile for the unauthenticated `https://mcp.deepwiki.com/mcp` endpoint. This is a reviewed service rule, not authority supplied by remote annotations or a `read_*` name.
+
+The profile recognizes `read_wiki_structure`, `read_wiki_contents`, and the live server's `ask_wiki_question`. The two reads require exactly `repoName`; questions require exactly `repoName` and `question`, with one repository or at most ten. The runtime passes both the discovered input schema and actual arguments into effect classification. New schema fields, arguments, unknown tools, alternate endpoints, credentials and unknown catalog identities retain the existing unknown-effect confirmation. Existing owned catalog policies retain precedence. Tenant ownership, enabled state and configuration revision checks still run before submission.
+
+Profile identity and revision participate in the approval authority binding, so changing the rule invalidates earlier exact approvals. There is no public API or storage migration, no new connection auto-installed, and no new client release requirement. Reverting this change returns these uncataloged reads to confirmation.
+
+Reference: [official DeepWiki MCP documentation](https://docs.devin.ai/work-with-devin/deepwiki-mcp), checked 2026-10-28. The live directory reports DeepWiki 2.14.3 and MCP protocol 2025-11-25. The documented question name and live tool name differ; the implementation uses the verified live schema. This is a hosted-service integration; no third-party implementation source was copied and no source license is inferred.
+
+Local validation: analyzer clean; full 284-test regression passed before adding the additional Agent fixture; the added `mcp-public-read` case then passed using the actual Genkit loop and MCP transport against a local fixture, proving zero approval events, one call and unchanged repository arguments. Four profile unit tests cover the allow rule and fallback boundaries. External live application save/select/connect, all three queries, tenant rejection and disablement rejection passed separately. No paid model or image calls were made. The live service returned 2,549 structure characters and 2,159,921 content characters; output length is recorded rather than publishing repository content. This does not prove production deployment or device behavior.
+
+The first external attempt timed out at the existing 15-second connector timeout. A second attempt succeeded without changing the timeout or retrying any write. One concurrent local test start encountered Windows sqlite3.dll locking; after the probe terminated the complete regression was run serially and passed. Neither failure was treated as success.
+
+P01/P05 remain open for other services and already-authorized action mapping. MCP restart/reconnect, generic plugin component support and the remaining plan items are not closed by this profile.

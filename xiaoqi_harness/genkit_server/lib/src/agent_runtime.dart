@@ -2405,7 +2405,12 @@ class GenkitXiaoqiAgentRuntime
               final resumed = context.resumed;
               final effect = connection.isolated != null
                   ? ToolEffect.workspace
-                  : mcpConnectionService.effectFor(connection, remoteToolName);
+                  : mcpConnectionService.effectFor(
+                      connection,
+                      remoteToolName,
+                      inputSchema: rawTool['inputSchema'],
+                      arguments: input,
+                    );
               final approvalHash = ToolAccessPolicy.actionHash(
                 connectionId: connection.id,
                 tool: remoteToolName,

@@ -14,6 +14,7 @@ import 'store.dart';
 import 'capability_keywords.dart';
 import 'tool_access_policy.dart';
 import 'isolated_mcp_spec.dart';
+import 'trusted_mcp_read_profiles.dart';
 
 Future<List<Map<String, dynamic>>> listAllMcpTools(
   Future<Map<String, dynamic>> Function(String? cursor) readPage,
@@ -214,8 +215,22 @@ class McpConnectionService {
           )
           .firstOrNull;
 
-  ToolEffect effectFor(McpConnectionCredentials connection, String tool) {
+  bool _hasPublicReadProfile(McpConnectionCredentials connection) =>
+      connection.catalogId == null &&
+      connection.bearerToken == null &&
+      TrustedMcpReadProfiles.matchesEndpoint(connection.url);
+
+  ToolEffect effectFor(
+    McpConnectionCredentials connection,
+    String tool, {
+    Object? inputSchema,
+    Map<String, dynamic>? arguments,
+  }) {
     final entry = _policyEntry(connection);
+    if (entry == null &&
+        _hasPublicReadProfile(connection) &&
+        TrustedMcpReadProfiles.permits(tool, inputSchema, arguments))
+      return ToolEffect.read;
     final effect = entry?.toolEffects[tool] ?? ToolEffect.unknown;
     // A remote server cannot claim our isolated task workspace as its own.
     return effect == ToolEffect.workspace ? ToolEffect.unknown : effect;
@@ -228,6 +243,10 @@ class McpConnectionService {
     'revision': connection.authorizationRevision,
     'catalog_id': _policyEntry(connection)?.id,
     'policy_version': _policyEntry(connection)?.version,
+    if (_hasPublicReadProfile(connection)) ...{
+      'read_profile_id': TrustedMcpReadProfiles.id,
+      'read_profile_version': TrustedMcpReadProfiles.version,
+    },
     if (connection.isolated != null)
       'capability_version': connection.isolated!.versionId,
   };

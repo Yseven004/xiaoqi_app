@@ -1,0 +1,30 @@
+{
+  "checked_at": "2026-10-27T17:42:56.704493Z",
+  "endpoint": "https://mcp.deepwiki.com/mcp",
+  "server_version": "2.14.3",
+  "protocol": "2025-11-25",
+  "repository": "firebase/genkit",
+  "profile_version": "2026-10-28-repo-read-v1",
+  "live_calls": {
+    "read_wiki_structure": {"effect": "read", "content_characters": 2549},
+    "read_wiki_contents": {"effect": "read", "content_characters": 2159921},
+    "ask_wiki_question": {"effect": "read", "content_characters": 485}
+  },
+  "application_save_select_connect": true,
+  "cross_tenant_selection_denied": true,
+  "disabled_connection_rejected": true,
+  "tool_name_alone_effect": "unknown",
+  "paid_model_or_image_calls": 0,
+  "local_genkit_fixture": {
+    "scenario": "mcp-public-read",
+    "passed": true,
+    "approval_events": 0,
+    "rpc_calls": 1,
+    "arguments": {"repoName": "firebase/genkit"},
+    "external_service": false
+  },
+  "full_regression_before_added_agent_fixture": {"passed": 284, "failed": 0},
+  "analyzer": "No issues found",
+  "production_deployment_verified": false,
+  "device_verification": "not performed"
+}
