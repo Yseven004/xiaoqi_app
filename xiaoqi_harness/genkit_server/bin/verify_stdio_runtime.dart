@@ -9,6 +9,7 @@ import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'support/stdio_agent_gate.dart';
 import 'support/execution_recovery_gate.dart';
 import 'support/binary_artifact_gate.dart';
+import 'support/npm_build_gate.dart';
 
 /// Real Docker/official-package gate. No model or image-provider calls.
 Future<void> main() async {
@@ -206,6 +207,7 @@ PY
     await verifyStdioAgent(store, executor, tenant, files);
     await verifyExecutionRecovery(store, directory, tenant);
     await verifyBinaryArtifacts(store, executor, tenant);
+    await verifyNpmBuild(store, executor, tenant);
     stdout.writeln(
       jsonEncode({
         'gate': 'stdio-runtime',
@@ -225,6 +227,9 @@ PY
         'binary_formats_edit_reexport': ['xlsx', 'docx', 'pdf', 'png'],
         'binary_original_and_latest_versions': true,
         'binary_cross_task_rejected': true,
+        'npm_root_and_dependency_lifecycle': true,
+        'npm_built_skill_offline_delivery': true,
+        'npm_failed_build_preserves_installed_version': true,
       }),
     );
   } finally {

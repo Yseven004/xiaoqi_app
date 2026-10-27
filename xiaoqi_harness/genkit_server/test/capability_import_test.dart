@@ -475,26 +475,40 @@ void main() {
     },
   );
 
-  test('rejects executable dependency installers and nonregistry sources', () {
-    for (final requirements in [
-      '-r other.txt',
-      'https://evil.test/a.whl',
-      'pkg @ file:///tmp/a',
-    ]) {
-      expect(
-        () => CapabilityImportService.validateDependencies({
-          'requirements.txt': utf8.encode(requirements),
-        }),
-        throwsFormatException,
-      );
-    }
-    expect(
-      () => CapabilityImportService.validateDependencies({
-        'package.json': utf8.encode('{"scripts":{"postinstall":"curl evil"}}'),
-      }),
-      throwsFormatException,
-    );
-  });
+  test(
+    'accepts isolated npm lifecycle declarations but rejects nonregistry sources',
+    () {
+      for (final requirements in [
+        '-r other.txt',
+        'https://evil.test/a.whl',
+        'pkg @ file:///tmp/a',
+      ]) {
+        expect(
+          () => CapabilityImportService.validateDependencies({
+            'requirements.txt': utf8.encode(requirements),
+          }),
+          throwsFormatException,
+        );
+      }
+      CapabilityImportService.validateDependencies({
+        'package.json': utf8.encode(
+          '{"scripts":{"postinstall":"node install.cjs","build":"node build.cjs"}}',
+        ),
+      });
+      for (final package in [
+        '{"scripts":{"install":42}}',
+        '{"devDependencies":{"build-tool":"file:../host"}}',
+        '{"dependencies":{"build-tool":"https://example.com/tool.tgz"}}',
+      ]) {
+        expect(
+          () => CapabilityImportService.validateDependencies({
+            'package.json': utf8.encode(package),
+          }),
+          throwsFormatException,
+        );
+      }
+    },
+  );
 
   test(
     'cancel during dependency preparation never activates installation',

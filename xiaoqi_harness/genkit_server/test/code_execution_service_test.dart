@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:archive/archive.dart';
 
 import 'package:genkit/genkit.dart';
 import 'package:test/test.dart';
@@ -57,6 +58,81 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
     store.close();
     directory.deleteSync(recursive: true);
   });
+
+  Future<Map<String, List<int>>> prepareArchive(
+    Map<String, String> entries,
+  ) async {
+    final archive = Archive();
+    for (final entry in entries.entries) {
+      archive.add(ArchiveFile.string(entry.key, entry.value));
+    }
+    final encoded = base64Encode(ZipEncoder().encode(archive));
+    File(
+      '${directory.path}/prepare_dependencies.py',
+    ).writeAsStringSync('# trusted installer fixture');
+    worker.writeAsStringSync('''
+import json,sys
+request=json.loads(sys.stdin.readline())
+if request.get('action'):
+ print(json.dumps({'acknowledged':True,'cleanup_pending':False})); sys.exit(0)
+assert 'scripts/build.cjs' in request['skill_files']
+print(json.dumps({'type':'result','ok':True,'stdout':'','stderr':'','cleanup_pending':False,'artifacts':[{'name':'dependencies.zip','media_type':'application/zip','base64':'$encoded'}]}),flush=True)
+''');
+    return DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable: pythonExecutable(),
+    ).prepareDependencies('personal', {
+      'package.json': utf8.encode(
+        '{"scripts":{"build":"node scripts/build.cjs"}}',
+      ),
+      'scripts/build.cjs': utf8.encode('// package-owned build source'),
+    });
+  }
+
+  test(
+    'prepared build output keeps package paths and source reaches isolated worker',
+    () async {
+      final prepared = await prepareArchive({
+        '.xiaoqi/dependency-lock.json': '{"schema":1}',
+        '.xiaoqi/built/dist/index.cjs': 'module.exports=42;',
+      });
+      expect(utf8.decode(prepared['dist/index.cjs']!), 'module.exports=42;');
+      expect(prepared.containsKey('.xiaoqi/built/dist/index.cjs'), false);
+      expect(
+        store.list('task/personal/').length,
+        1,
+        reason: 'temporary dependency task must be removed',
+      );
+    },
+  );
+
+  test(
+    'prepared build output cannot overwrite reserved runtime or alias dependencies',
+    () async {
+      for (final entries in [
+        {
+          '.xiaoqi/dependency-lock.json': '{}',
+          '.xiaoqi/built/.xiaoqi/dependency-lock.json': 'poison',
+        },
+        {
+          '.xiaoqi/dependency-lock.json': '{}',
+          'node_modules/pkg/index.js': 'original',
+          '.xiaoqi/built/node_modules/pkg/index.js': 'poison',
+        },
+        {
+          '.xiaoqi/dependency-lock.json': '{}',
+          '.xiaoqi/built/../escape': 'poison',
+        },
+      {
+        '.xiaoqi/dependency-lock.json': '{}',
+        '.xiaoqi/built/C:/escape': 'poison',
+      },
+      ]) {
+        await expectLater(prepareArchive(entries), throwsStateError);
+      }
+    },
+  );
 
   test(
     'failed script retains partial files without reopening confirmed cleanup',

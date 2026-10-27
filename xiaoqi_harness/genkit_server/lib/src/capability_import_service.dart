@@ -855,17 +855,18 @@ class CapabilityImportService {
     }
     if (files.containsKey('package.json')) {
       final value = jsonDecode(utf8.decode(files['package.json']!)) as Map;
-      if (value['scripts'] is Map &&
-          (value['scripts'] as Map).keys.any(
-            (k) => const [
-              'preinstall',
-              'install',
-              'postinstall',
-              'prepare',
-            ].contains(k),
-          ))
-        throw const FormatException('npm 包需要安装脚本，暂不支持');
-      for (final field in ['dependencies', 'optionalDependencies']) {
+      final scripts = value['scripts'];
+      if (scripts != null &&
+          (scripts is! Map ||
+              scripts.values.any((script) => script is! String))) {
+        throw const FormatException('npm 脚本声明必须为文本映射');
+      }
+      for (final field in [
+        'dependencies',
+        'optionalDependencies',
+        'devDependencies',
+        'peerDependencies',
+      ]) {
         final deps = value[field];
         if (deps == null) continue;
         if (deps is! Map) throw const FormatException('npm 依赖格式无效');

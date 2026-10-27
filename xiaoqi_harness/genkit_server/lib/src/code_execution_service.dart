@@ -84,10 +84,8 @@ class DockerCodeExecutionService {
           'registry.npmjs.org',
         ],
         materials: [],
-        skillFiles: {
-          for (final name in ['requirements.txt', 'package.json'])
-            if (files[name] != null) name: files[name]!,
-        },
+        // Build hooks need their own source files, not API-host paths or data.
+        skillFiles: files,
         cancellation: cancellation ?? CancellationController().token,
       );
       final artifacts = store.get(key)!.value['artifacts'] as List;
@@ -112,7 +110,16 @@ class DockerCodeExecutionService {
           throw StateError('依赖包路径校验失败');
         total += file.size;
         if (total > 40 * 1024 * 1024) throw StateError('依赖体积超出限制');
-        prepared[file.name] = file.content;
+        final preparedName = file.name.startsWith('.xiaoqi/built/')
+            ? file.name.substring('.xiaoqi/built/'.length)
+            : file.name;
+        if (preparedName.isEmpty ||
+            RegExp(r'[\x00-\x1f:]').hasMatch(preparedName) ||
+            preparedName.startsWith('.xiaoqi/') && preparedName != file.name) {
+          throw StateError('构建产物不能覆盖保留的运行环境目录');
+        }
+        if (prepared.containsKey(preparedName)) throw StateError('依赖包包含重复产物路径');
+        prepared[preparedName] = file.content;
       }
       if (!prepared.containsKey('.xiaoqi/dependency-lock.json'))
         throw StateError('依赖锁定记录缺失');
