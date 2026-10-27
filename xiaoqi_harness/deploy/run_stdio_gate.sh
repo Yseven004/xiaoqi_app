@@ -10,10 +10,12 @@ cleanup() {
   for item in $(docker network ls -q --filter label=com.xiaoqi.ci-stdio-sandbox=true); do docker network rm "$item" >/dev/null || true; done
   for item in $(docker volume ls -q --filter label=com.xiaoqi.ci-stdio-sandbox=true); do docker volume rm "$item" >/dev/null || true; done
   docker network rm xiaoqi-stdio-gate >/dev/null 2>&1 || true
+  docker volume rm xiaoqi-stdio-gate-results >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 docker network create xiaoqi-stdio-gate >/dev/null
 docker run --detach --name xiaoqi-stdio-gate-runner --network xiaoqi-stdio-gate \
+  --volume xiaoqi-stdio-gate-results:/var/lib/xiaoqi-runner \
   --volume /var/run/docker.sock:/var/run/docker.sock:ro --env SANDBOX_RUNNER_TOKEN \
   --env XIAOQI_SANDBOX_OWNER_LABEL=com.xiaoqi.ci-stdio-sandbox \
   --env XIAOQI_SANDBOX_IMAGE=xiaoqi-code-sandbox:local \
@@ -29,6 +31,7 @@ timeout --kill-after=30s 360 docker run --rm --name xiaoqi-stdio-gate-probe --ne
   --env SANDBOX_RUNNER_TOKEN --env SANDBOX_RUNNER_URL=http://xiaoqi-stdio-gate-runner:8090 \
   --env MIMO_API_KEY=stdio-fixture --env MIMO_BASE_URL=http://127.0.0.1:40443/v1 \
   --entrypoint /app/bin/verify_stdio_runtime xiaoqi-genkit-server:local
+python3 xiaoqi_harness/deploy/verify_runner_restart.py xiaoqi-stdio-gate-runner
 for resource in container network volume; do
   case "$resource" in
     container) remaining="$(docker ps -aq --filter label=com.xiaoqi.ci-stdio-sandbox=true)";;

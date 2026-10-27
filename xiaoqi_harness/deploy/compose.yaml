@@ -56,10 +56,12 @@ services:
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?Set SANDBOX_RUNNER_TOKEN in single-server.env}
       XIAOQI_SANDBOX_IMAGE: xiaoqi-code-sandbox:local
       XIAOQI_SANDBOX_PROXY_IMAGE: xiaoqi-sandbox-proxy:local
+      XIAOQI_EXECUTION_DB: /var/lib/xiaoqi-runner/executions.sqlite3
     expose:
       - "8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - sandbox-results:/var/lib/xiaoqi-runner
     read_only: true
     tmpfs:
       - /tmp:mode=1777,size=32m
@@ -117,6 +119,7 @@ services:
 
 volumes:
   xiaoqi-data:
+  sandbox-results:
   caddy-data:
   caddy-config:
 

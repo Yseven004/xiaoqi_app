@@ -13,6 +13,7 @@ RESTORE_ROOT="$ROOT/restore"
 LATEST="$RESTORE_ROOT/latest-good"
 NEXT="$RESTORE_ROOT/next"
 VOLUME="xiaoqi-single-server_xiaoqi-data"
+RUNNER_VOLUME="xiaoqi-single-server_sandbox-results"
 
 LOCAL_IMAGES=(
   "xiaoqi-genkit-server:local"
@@ -145,7 +146,12 @@ backup_data() {
     -v "$VOLUME:/data:ro" \
     -v "$output_dir:/backup" \
     alpine:3.22 \
-    sh -c 'tar -czf /backup/data.tgz -C /data .'
+    sh -c 'tar -czf /backup/data.tgz -C /data .' || return 1
+  docker run --rm \
+    -v "$RUNNER_VOLUME:/data:ro" \
+    -v "$output_dir:/backup" \
+    alpine:3.22 \
+    sh -c 'tar -czf /backup/runner-data.tgz -C /data .'
 }
 
 restore_data() {
@@ -155,7 +161,14 @@ restore_data() {
     -v "$VOLUME:/data" \
     -v "$input_dir:/backup:ro" \
     alpine:3.22 \
-    sh -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -xzf /backup/data.tgz -C /data'
+    sh -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -xzf /backup/data.tgz -C /data' || return 1
+  if [[ -f "$input_dir/runner-data.tgz" ]]; then
+    docker run --rm \
+      -v "$RUNNER_VOLUME:/data" \
+      -v "$input_dir:/backup:ro" \
+      alpine:3.22 \
+      sh -c 'if [ ! -s /data/executions.sqlite3 ]; then rm -f /data/executions.sqlite3-wal /data/executions.sqlite3-shm; tar -xzf /backup/runner-data.tgz -C /data; fi'
+  fi
 }
 
 install_source() {

@@ -53,7 +53,7 @@ RUNNER_PORT = int(os.environ.get("SANDBOX_RUNNER_PORT", "8090"))
 
 _docker: docker.DockerClient | None = None
 _slots = threading.BoundedSemaphore(1)
-_executions = Executions()
+_executions = Executions(db_path=os.environ.get('XIAOQI_EXECUTION_DB'))
 _network_policy_lock = threading.Lock()
 _disabled_task_networks: dict[str, float] = {}
 
@@ -321,6 +321,41 @@ def _remove_stale_resources(client: docker.DockerClient) -> None:
             pass
 
 
+def _recover_interrupted_executions(client: docker.DockerClient) -> None:
+    for execution in _executions.interrupted():
+        result = execution.result or {'type': 'result', 'execution_id': execution.execution_id, 'ok': False, 'error': 'Runner restarted; the original execution was stopped. External effects may already have occurred; do not automatically replay it.', 'stdout': '', 'stderr': '', 'artifacts': []}
+        result = {**result, 'restarted': True, 'cleanup_pending': True}
+        filters = {'label': [f'{OWNER_LABEL}=true', f'com.xiaoqi.execution-id={execution.execution_id}', f'com.xiaoqi.task-id={execution.task_id}']}
+        containers = client.containers.list(all=True, filters=filters)
+        for container in containers:
+            try:
+                container.reload()
+                if container.attrs.get('State', {}).get('Running'):
+                    container.kill()
+            except NotFound:
+                continue
+        for container in containers:
+            if container.labels.get('com.xiaoqi.role') == 'network-proxy':
+                continue
+            try:
+                result['artifacts'] = _safe_artifacts(container)
+                result['stdout'] = _decode_logs(container, 'stdout')[-40000:]
+                result['stderr'] = _decode_logs(container, 'stderr')[-20000:]
+                result['sandbox_id'] = container.id
+            except (RequestError, DockerException, OSError):
+                result['error'] = (result.get('error') or '') + ' Some output could not be recovered.'
+        # Persist the files before removing any workspace. A later startup must
+        # not overwrite this terminal result if cleanup or the runner crashes.
+        _executions.finish(execution, result)
+
+
+def _reconcile_restarted_cleanup(client: docker.DockerClient) -> None:
+    for execution in _executions.pending_cleanup():
+        filters = {'label': [f'{OWNER_LABEL}=true', f'com.xiaoqi.execution-id={execution.execution_id}', f'com.xiaoqi.task-id={execution.task_id}']}
+        if not client.containers.list(all=True, filters=filters) and not client.networks.list(filters=filters) and not client.volumes.list(filters=filters):
+            _executions.cleaned(execution)
+
+
 def _safe_artifacts(container: Any) -> list[dict[str, str]]:
     try:
         stream, _stat = container.get_archive("/workspace/output")
@@ -380,7 +415,7 @@ def _decode_logs(container: Any, stream: str) -> str:
     return decoded[-MAX_LOG_BYTES:].decode("utf-8", errors="replace")
 
 
-def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None, cancellation: threading.Event | None = None) -> dict[str, Any]:
+def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None, cancellation: threading.Event | None = None, checkpoint: Any = None) -> dict[str, Any]:
     if cancellation is not None and cancellation.is_set():
         raise RequestError('Execution was cancelled before startup')
     client = _get_client()
@@ -411,6 +446,8 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
     payload = _make_archive(files)
     suffix = uuid.uuid4().hex
     labels = {OWNER_LABEL: "true", "com.xiaoqi.task-id": task_id[:128]}
+    if stdio is None and isinstance(request.get('execution_id'), str) and re.fullmatch(r'[a-f0-9]{32}', request['execution_id']):
+        labels['com.xiaoqi.execution-id'] = request['execution_id']
     volume = None
     network = None
     proxy = None
@@ -422,6 +459,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
     stdout = ""
     stderr = ""
     artifacts: list[dict[str, str]] = []
+    process_finished = False
     try:
         volume = client.volumes.create(
             name=f"xq-code-{suffix}",
@@ -556,11 +594,25 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
         # Failed and timed-out scripts may already have produced useful files.
         # Export only through the same bounded path/size validator as success.
         artifacts = _safe_artifacts(container)
+        process_finished = True
     except (RequestError, DockerException, RuntimeError, OSError) as error:
         # Preserve the cleanup outcome even when preparation or export failed.
         # An exception escaping the finally block used to lose that outcome.
         run_error = str(error)[:500]
     finally:
+        if checkpoint is not None:
+            try:
+                checkpoint({'type': 'result', 'execution_id': request['execution_id'], 'ok': process_finished and run_error is None, 'stdout': stdout[-40000:], 'stderr': stderr[-20000:], 'error': run_error if process_finished or run_error else 'Execution outcome is unknown', 'artifacts': artifacts, 'cleanup_pending': True, 'sandbox_id': sandbox_id})
+            except Exception:
+                # Stop effects but retain workspaces if durable result storage
+                # failed. Startup recovery can still export these exact files.
+                for running in (container, proxy):
+                    if running is not None:
+                        try:
+                            running.kill()
+                        except DockerException:
+                            pass
+                raise
         if stdio is not None:
             stdio.close()
         if attached is not None:
@@ -639,6 +691,25 @@ class RunnerHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_args: Any) -> None:
         return
 
+    def _unauthorized(self) -> None:
+        # Closing a socket with an unread small POST body can reset TCP before
+        # the client sees its 401 (notably on Windows). Never parse the body;
+        # bound both bytes and time spent draining an unauthenticated request.
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            length = 0
+        if 0 < length <= 4096:
+            previous_timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(1)
+                self.rfile.read(length)
+            except OSError:
+                pass
+            finally:
+                self.connection.settimeout(previous_timeout)
+        self._json_response(401, {'error': 'unauthorized'})
+
     def _json_response(self, status: int, data: dict[str, Any]) -> None:
         body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
@@ -693,7 +764,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
             self._json_response(404, {"error": "not found"})
             return
         if not _authorized(self):
-            self._json_response(401, {"error": "unauthorized"})
+            self._unauthorized()
             return
         try:
             length = int(self.headers.get("Content-Length", "-1"))
@@ -737,9 +808,10 @@ class RunnerHandler(BaseHTTPRequestHandler):
             self._json_response(409, {'error': str(error)})
             return
         acquired = False
+        slots = _slots
         deadline = time.monotonic() + 180
         while not execution.cancelled.is_set() and time.monotonic() < deadline:
-            if _slots.acquire(timeout=0.25):
+            if slots.acquire(timeout=0.25):
                 acquired = True
                 break
         if not acquired:
@@ -768,7 +840,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 connected = False
             try:
-                result = _run_sandbox(request, send, cancellation=execution.cancelled)
+                result = _run_sandbox(request, send, cancellation=execution.cancelled, checkpoint=lambda result: _executions.checkpoint(execution, result))
             except (RequestError, DockerException, RuntimeError, OSError) as error:
                 result = {'type': 'result', 'ok': False, 'error': str(error)[:500], 'artifacts': [], 'cleanup_pending': False}
             except Exception:
@@ -778,7 +850,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
             send(result)
         finally:
             _executions.finish(execution, result)
-            _slots.release()
+            slots.release()
             try:
                 self._finish_stream()
             except (BrokenPipeError, ConnectionResetError, OSError):
@@ -793,7 +865,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
             self._json_response(404, {"error": "not found"})
             return
         if not _authorized(self):
-            self._json_response(401, {"error": "unauthorized"})
+            self._unauthorized()
             return
         lease_id, action = route.groups()
         token = self.headers.get("X-Xiaoqi-Lease-Token", "")
@@ -861,7 +933,9 @@ def main() -> int:
     if len(RUNNER_TOKEN) < 32:
         raise RuntimeError("SANDBOX_RUNNER_TOKEN must contain at least 32 characters")
     client = _get_client()
+    _recover_interrupted_executions(client)
     _remove_stale_resources(client)
+    _reconcile_restarted_cleanup(client)
     for image in (SANDBOX_IMAGE, PROXY_IMAGE):
         try:
             client.images.get(image)
@@ -875,6 +949,7 @@ def main() -> int:
         pass
     finally:
         _mcp_sessions.close()
+        _executions.close()
         server.server_close()
     return 0
 

@@ -98,7 +98,7 @@ class ExecutionTests(unittest.TestCase):
         registry = Executions()
         release = threading.Event()
         partial = [{'name': 'recovered.txt', 'base64': 'cmVjb3ZlcmVk'}]
-        def run(request, send, *, cancellation):
+        def run(request, send, *, cancellation, checkpoint=None):
             send({'type': 'sandbox_started', 'sandbox_id': 'disconnect-test'})
             self.assertTrue(release.wait(3))
             send({'type': 'heartbeat'})
@@ -146,7 +146,7 @@ class ExecutionTests(unittest.TestCase):
             slots.acquire()
         started = threading.Event()
         partial = [{'name': 'partial.txt', 'base64': 'cGFydGlhbA=='}]
-        def run(request, send, *, cancellation):
+        def run(request, send, *, cancellation, checkpoint=None):
             started.set()
             send({'type': 'sandbox_started', 'sandbox_id': 'sandbox-test'})
             self.assertTrue(cancellation.wait(3))
@@ -157,9 +157,10 @@ class ExecutionTests(unittest.TestCase):
             thread.start()
             base = f'http://127.0.0.1:{http.server_port}'
             request = self.request()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             def post(path, body, token='test-token'):
                 outgoing = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
-                return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(outgoing, timeout=5).read().decode()
+                return opener.open(outgoing, timeout=5).read().decode()
             try:
                 with ThreadPoolExecutor(max_workers=1) as pool:
                     result = pool.submit(post, '/v1/execute', request)

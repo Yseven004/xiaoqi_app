@@ -45,7 +45,9 @@ elif a[0] == 'run':
             if ':/backup' in mount:
                 output = pathlib.Path(mount.split(':/backup')[0])
                 if '--output' in a: (output/'store.json').write_text('{}')
-                if any('tar -czf' in x for x in a): (output/'data.tgz').write_bytes(b'backup')
+                if any('tar -czf' in x for x in a):
+                    name = 'runner-data.tgz' if any('runner-data.tgz' in x for x in a) else 'data.tgz'
+                    (output/name).write_bytes(b'backup')
 '''
 CURL = '#!/usr/bin/env python3\nprint(\'{"status":"ok","release_id":"test","api_contract_version":"18"}\')\n'
 DF = '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/test 40000000 1 %s 1%% /\\n" "${FAKE_FREE_KB:-30000000}"\n'
