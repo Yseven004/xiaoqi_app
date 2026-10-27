@@ -314,15 +314,22 @@ void main() {
   );
 
   test('imports a pyproject skill with a clear dependency warning', () async {
-    final importer = service({
-      'SKILL.md': skill(
-        'book-to-skill',
-        'MCP is mentioned for some hosts; Claude Code only has an optional path.',
-      ),
-      'pyproject.toml':
-          '[project.optional-dependencies]\npdf = ["pypdf>=4.0"]\n',
-      'scripts/extract.py': 'print("extract")',
-    });
+    final importer = service(
+      {
+        'SKILL.md': skill(
+          'book-to-skill',
+          'MCP is mentioned for some hosts; Claude Code only has an optional path.',
+        ),
+        'pyproject.toml':
+            '[project.optional-dependencies]\npdf = ["pypdf>=4.0"]\n',
+        'scripts/extract.py': 'print("extract")',
+      },
+      prepare: (tenant, files, {cancellation}) async => {
+        '.xiaoqi/dependency-lock.json': utf8.encode(
+          '{"schema":1,"python_optional_groups":["pdf"]}',
+        ),
+      },
+    );
     final inspected = await importer.inspect(
       'alice',
       'https://github.com/example/book-to-skill',
@@ -349,6 +356,44 @@ void main() {
       containsAll(['SKILL.md', 'scripts/extract.py']),
     );
   });
+
+  test(
+    'Python packaging entries prepare dependencies and auxiliary Dockerfile does not block them',
+    () async {
+      for (final entry in ['pyproject.toml', 'setup.py']) {
+        var prepared = false;
+        final importer = service(
+          {
+            'SKILL.md': skill('python-build'),
+            entry: entry == 'setup.py'
+                ? 'from setuptools import setup\nsetup(name="fixture",version="1")'
+                : '[project]\nname="fixture"\nversion="1"\n',
+            'Dockerfile': 'FROM scratch\n',
+            'scripts/use.py': 'print("installed")',
+          },
+          prepare: (tenant, files, {cancellation}) async {
+            expect(files.containsKey(entry), true);
+            prepared = true;
+            return {
+              '.xiaoqi/dependency-lock.json': utf8.encode('{"schema":1}'),
+            };
+          },
+        );
+        final inspection = await importer.inspect(
+          'alice',
+          'https://github.com/example/$entry',
+        );
+        final candidate = (inspection['candidates'] as List).single as Map;
+        expect(candidate['status'], 'supported');
+        expect(
+          (candidate['components'] as List).single['has_dependencies'],
+          true,
+        );
+        await importer.install('alice', inspection['id'], candidate['id']);
+        expect(prepared, true);
+      }
+    },
+  );
 
   test('standard plugin and multiple standalone candidates are discovered', () {
     final standalone = CapabilityImportService.discover({

@@ -240,6 +240,24 @@ def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], st
 
 
 def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
+    files = list(files)
+    staged = dict(files)
+    executable_files = set()
+    lock_data = staged.get('skill/.xiaoqi/dependency-lock.json')
+    if lock_data is not None:
+        try:
+            lock = json.loads(lock_data)
+            paths = lock.get('executables', [])
+            if not isinstance(paths, list) or len(paths) > len(files):
+                raise ValueError('invalid executable file list')
+            for path in paths:
+                relative = _safe_relative(path)
+                name = 'skill/' + relative
+                if name not in staged:
+                    raise ValueError('executable dependency file is missing')
+                executable_files.add(name)
+        except (ValueError, TypeError, AttributeError) as error:
+            raise RequestError('依赖执行文件记录无效') from error
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w") as archive:
         directories = {"materials", "skill", "skill/scripts", "output", "work", ".home", ".python"}
@@ -259,7 +277,7 @@ def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
             entry = tarfile.TarInfo(name)
             entry.uid = 10001
             entry.gid = 10001
-            entry.mode = 0o644
+            entry.mode = 0o755 if name in executable_files else 0o644
             entry.size = len(data)
             archive.addfile(entry, io.BytesIO(data))
     return output.getvalue()
@@ -489,7 +507,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             "PYTHONPATH": "/workspace/skill/.xiaoqi/python",
             "NODE_PATH": "/workspace/skill/node_modules",
             "npm_config_cache": "/tmp/npm-cache",
-            "PATH": "/workspace/.python/bin:/usr/local/bin:/usr/bin:/bin",
+            "PATH": "/workspace/.python/bin:/usr/local/bin:/usr/bin:/bin:/workspace/skill/.xiaoqi/python/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "0",
             "LANG": "C.UTF-8",

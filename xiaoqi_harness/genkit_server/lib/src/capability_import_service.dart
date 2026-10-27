@@ -677,7 +677,9 @@ class CapabilityImportService {
                 commandError == null &&
                 (IsolatedMcpSpec.npmDependency(config) != null ||
                     scoped.containsKey('package.json') ||
-                    scoped.containsKey('requirements.txt')),
+                    scoped.containsKey('requirements.txt') ||
+                    scoped.containsKey('pyproject.toml') ||
+                    scoped.containsKey('setup.py')),
           });
         }
       } on FormatException {
@@ -801,15 +803,12 @@ class CapabilityImportService {
         safePath(path);
         if (path.startsWith('.xiaoqi/')) issues.add('包含保留的运行环境目录');
       }
-      if (files.containsKey('setup.py') || files.containsKey('Dockerfile'))
-        issues.add('需要自定义构建环境，暂不支持');
       validateDependencies(files);
       if (files.containsKey('pyproject.toml') &&
-          !files.containsKey('requirements.txt')) {
-        warnings.add(
-          '发现 pyproject.toml，但当前安装器只会自动准备 requirements.txt 中的 Python 依赖；'
-          '技能正文和文档处理仍可使用，未声明依赖的脚本可能无法运行。',
-        );
+          utf8
+              .decode(files['pyproject.toml']!)
+              .contains('[project.optional-dependencies]')) {
+        warnings.add('发现 Python 可选依赖组，默认只安装基础依赖；需要可选组的脚本仍须核对其依赖。');
       }
     } catch (e) {
       issues.add(e is FormatException ? e.message : '技能文件格式无效');
@@ -833,7 +832,9 @@ class CapabilityImportService {
       ),
       'has_dependencies':
           files.containsKey('requirements.txt') ||
-          files.containsKey('package.json'),
+          files.containsKey('package.json') ||
+          files.containsKey('pyproject.toml') ||
+          files.containsKey('setup.py'),
       'license': files.keys
           .where((p) => p.toLowerCase().startsWith('license'))
           .toList(),

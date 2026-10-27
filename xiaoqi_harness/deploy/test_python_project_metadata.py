@@ -1,0 +1,66 @@
+"""Test the installer's actual metadata functions without executing build code."""
+import ast
+import pathlib
+import tempfile
+import tomllib
+import unittest
+
+
+SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'genkit_server/bin/prepare_dependencies.py'
+tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
+functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+             and node.name in {'registry_requirements', 'project_metadata'}]
+namespace = {'tomllib': tomllib}
+exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), namespace)
+project_metadata = namespace['project_metadata']
+
+
+class PythonProjectMetadataTests(unittest.TestCase):
+    def metadata(self, content, setup=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root/'pyproject.toml').write_text(content, encoding='utf-8')
+            if setup:
+                (root/'setup.py').write_text("raise RuntimeError('metadata reader must not execute this')")
+            return project_metadata(root)
+
+    def test_packaged_project_keeps_markers_and_optional_groups(self):
+        requirements, groups, install = self.metadata('''
+[build-system]
+requires = ["hatchling>=1"]
+build-backend = "hatchling.build"
+[project]
+name = "fixture"
+version = "1.0"
+dependencies = ["pypdf>=4; python_version >= '3.9'"]
+[project.optional-dependencies]
+pdf = ["Pillow>=11"]
+''')
+        self.assertEqual(requirements, ["pypdf>=4; python_version >= '3.9'"])
+        self.assertEqual(groups, ['pdf'])
+        self.assertTrue(install)
+
+    def test_tool_config_and_optional_only_metadata_are_not_installable_projects(self):
+        self.assertEqual(self.metadata('[tool.ruff]\nline-length=88\n'), ([], [], False))
+        self.assertEqual(self.metadata('[project.optional-dependencies]\npdf=["pypdf>=4"]'), ([], ['pdf'], False))
+
+    def test_setup_presence_is_detected_without_executing_it(self):
+        self.assertEqual(self.metadata('', setup=True), ([], [], True))
+
+    def test_direct_sources_and_malformed_declarations_fail_before_build(self):
+        for content in (
+            '[project]\ndependencies=["pkg @ https://example.com/a.whl"]',
+            '[build-system]\nrequires=["pkg @ file:///host/file"]',
+            '[project.optional-dependencies]\npdf=["pkg @ https://example.com/a.whl"]',
+            '[project]\ndependencies="wrong"',
+            'project="wrong"',
+            'build-system="wrong"',
+            '[project]\ndependencies=["--index-url evil"]',
+            '[broken',
+        ):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                self.metadata(content)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -22,7 +22,8 @@ Future<void> verifyNpmBuild(
     'package.json': jsonEncode({
       'name': 'xiaoqi-build-fixture',
       'version': '1.0.0',
-      'devDependencies': {'esbuild': '0.25.12'},
+      'dependencies': {'esbuild': '0.25.12'},
+      'devDependencies': {'picocolors': '1.1.1'},
       'scripts': {
         'postinstall': 'node scripts/install.cjs',
         'build': 'node scripts/build.cjs',
@@ -53,7 +54,8 @@ const fs = require('node:fs');
 const moduleResult = require('../dist/index.cjs');
 const count = JSON.parse(fs.readFileSync('/workspace/skill/dist/install-count.json'));
 if (count !== 1 || moduleResult.message !== '隔离构建成功') throw new Error('built result changed');
-if (fs.existsSync('/workspace/skill/node_modules/esbuild')) throw new Error('build-only dependency was not pruned');
+if (fs.existsSync('/workspace/skill/node_modules/picocolors')) throw new Error('build-only dependency was not pruned');
+if (!require('esbuild').transformSync('const value: number = 42',{loader:'ts'}).code.includes('42')) throw new Error('installed native dependency cannot execute');
 fs.writeFileSync('/workspace/output/build-result.json',JSON.stringify({message:moduleResult.message,install_count:count}));
 ''',
   };

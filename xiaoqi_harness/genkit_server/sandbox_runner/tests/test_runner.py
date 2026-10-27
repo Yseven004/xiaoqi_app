@@ -215,6 +215,20 @@ class RunnerValidationTests(unittest.TestCase):
         self.assertEqual(command[-2:], arguments)
         self.assertIn("/workspace/skill/scripts/run.js", command)
 
+    def test_dependency_executable_modes_survive_archive_reconstruction(self) -> None:
+        files = [('skill/node_modules/pkg/bin/tool', b'ELF-fixture'), ('skill/readme.txt', b'text'),
+                 ('skill/.xiaoqi/dependency-lock.json', json.dumps({'schema':1,'executables':['node_modules/pkg/bin/tool']}).encode())]
+        with tarfile.open(fileobj=io.BytesIO(server._make_archive(iter(files)))) as archive:
+            executable = archive.getmember('skill/node_modules/pkg/bin/tool')
+            self.assertEqual(executable.mode, 0o755)
+            self.assertEqual(executable.uid, 10001)
+            self.assertEqual(archive.getmember('skill/readme.txt').mode, 0o644)
+
+    def test_dependency_executable_records_cannot_escape_or_name_missing_files(self) -> None:
+        for paths in [['../main.py'], ['/etc/passwd'], ['missing'], 'not-a-list', [42]]:
+            with self.subTest(paths=paths), self.assertRaises(server.RequestError):
+                server._make_archive([('skill/.xiaoqi/dependency-lock.json',json.dumps({'executables':paths}).encode())])
+
     def test_input_manifest_preserves_binary_identity_and_current_paths(self) -> None:
         content = bytes([0, 255, 128, 80, 75, 3, 4])
         files, _, _, _ = server._request_files({
