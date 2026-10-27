@@ -4,7 +4,8 @@ param(
     [string]$InstanceId = 'i-j6cdji1nji415swaliji',
     [string]$Profile = 'xiaoqi-remote-deploy',
     [string]$Endpoint = 'ecs.aliyuncs.com',
-    [string]$PublicHealthUrl = 'https://47-76-60-77.sslip.io/health'
+    [string]$PublicHealthUrl = 'https://47-76-60-77.sslip.io/health',
+    [ValidateSet('full', 'non-image')][string]$VerificationProfile = 'full'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -281,7 +282,8 @@ try {
     # A single short-lived artifact URL, without a GitHub or cloud credential.
     $downloadConfig = 'url = "' + $build.DownloadUrl + '"' + "`n"
     Send-RemoteFile -TargetDir $incomingDir -Name 'download.conf' -Bytes ([Text.Encoding]::UTF8.GetBytes($downloadConfig))
-    $launch = "set -eu; test ! -e '$incomingDir/started'; touch '$incomingDir/started'; nohup bash '$incomingDir/run_release_job.sh' '$releaseId' '$($build.Commit)' '$productRelease' '$contractVersion' </dev/null >/dev/null 2>&1 & echo JOB_STARTED"
+    Write-Host "Live verification profile: $VerificationProfile. Deferred checks are not marked verified."
+    $launch = "set -eu; test ! -e '$incomingDir/started'; touch '$incomingDir/started'; XIAOQI_RELEASE_VERIFICATION_PROFILE='$VerificationProfile' nohup bash '$incomingDir/run_release_job.sh' '$releaseId' '$($build.Commit)' '$productRelease' '$contractVersion' </dev/null >/dev/null 2>&1 & echo JOB_STARTED"
     # Mark ambiguous dispatches as started so finally never removes active inputs.
     $jobStarted = $true
     Invoke-RemoteCommand -Script $launch -TimeoutSeconds 60 | Write-Host

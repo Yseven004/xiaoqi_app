@@ -113,7 +113,7 @@ void main() {
           );
           if (!passed) throw StateError('Intent release gate failed');
         }
-        await capability.main();
+        await capability.main(const []);
         return 'All synthetic intent and capability gates passed';
       } finally {
         store.close();

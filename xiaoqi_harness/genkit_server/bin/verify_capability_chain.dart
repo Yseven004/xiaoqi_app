@@ -9,15 +9,18 @@ import '../lib/src/agent_runtime.dart';
 import '../lib/src/image_service.dart';
 import '../lib/src/release.dart';
 import '../lib/src/store.dart';
+import '../lib/src/release_verification.dart';
 
 /// Live release gate: synthetic data in a temporary store, two image requests
 /// at most. Emits counters and integrity checks, never credentials or user data.
-Future<void> main() async {
+Future<void> main(List<String> arguments) async {
+  final profile = ReleaseVerificationProfile.fromArguments(arguments);
+  stdout.writeln(jsonEncode(profile.report(curated: false)));
   final directory = await Directory.systemTemp.createTemp('capability-live-');
   final store = CloudStore(root: directory.path);
   const tenant = 'capability-release-probe';
   final images = ImageService(store);
-  if (!images.isConfigured)
+  if (profile.requiresImageProvider && !images.isConfigured)
     throw StateError(
       'Live verification requires the configured image provider',
     );
@@ -78,17 +81,7 @@ Future<void> main() async {
   install('card-skill', 'skill', 'probe/skill');
   install('card-plugin', 'plugin', 'probe/plugin', enabled: false);
   try {
-    for (final scenario in [
-      'implicit-skill',
-      'explicit-plugin',
-      'unrelated',
-      'ordinary-answer',
-      'text-only-skill',
-    ]) {
-      final selectedChecks = Platform.environment['XIAOQI_VERIFY_SCENARIOS'];
-      if (selectedChecks != null &&
-          !selectedChecks.split(',').contains(scenario))
-        continue;
+    for (final scenario in profile.capabilityScenarios) {
       final textOnly = scenario == 'text-only-skill';
       final ordinaryAnswer = scenario == 'ordinary-answer';
       final noWorkflow = scenario == 'unrelated' || ordinaryAnswer;
@@ -137,7 +130,10 @@ Future<void> main() async {
                 'current_turn_text': prompt,
                 'network_mode': 'off',
                 'reasoning_level': 'medium',
-                'image_budget': noWorkflow ? 0 : 1,
+                'image_budget':
+                    profile.requiresImageProvider && !noWorkflow && !textOnly
+                    ? 1
+                    : 0,
                 'selected_capabilities': textOnly
                     ? [
                         {

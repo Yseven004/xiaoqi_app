@@ -4,6 +4,12 @@ $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'deploy_current.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
+$verificationParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'VerificationProfile' }
+if ($verificationParameter.DefaultValue.Value -ne 'full') { throw 'Full verification must remain the default.' }
+$validation = $verificationParameter.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' }
+if (($validation.PositionalArguments.Value -join ',') -ne 'full,non-image') { throw 'Unexpected verification profile choices.' }
+$launchAssignment = $ast.Find({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$launch'}, $true)
+if ($launchAssignment.Right.Extent.Text -notmatch 'XIAOQI_RELEASE_VERIFICATION_PROFILE=') { throw 'The selected verification profile is not forwarded to the remote job.' }
 foreach ($name in @('Get-OptionalField', 'Wait-RemoteCommand', 'Invoke-AliyunJson')) {
     $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
     . ([ScriptBlock]::Create($definition.Extent.Text))

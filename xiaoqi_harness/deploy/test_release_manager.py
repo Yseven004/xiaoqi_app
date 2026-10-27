@@ -88,6 +88,8 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse(any(' build ' in ' '+c+' ' for c in calls))
         self.assertTrue(all('--no-build' in c and '--pull never' in c for c in calls if ' up ' in c))
         curated = next(c for c in calls if '/app/bin/verify_official_catalog' in c)
+        self.assertNotIn('--non-image', curated)
+        self.assertNotIn('--non-image', next(c for c in calls if '/app/bin/verify_capability_chain' in c))
         self.assertIn('--network xiaoqi-single-server_default', curated)
         self.assertIn('--network xiaoqi-single-server_sandbox-control', curated)
         self.assertIn('--env SANDBOX_RUNNER_URL=http://xiaoqi-probe-runner-new-release:8090', curated)
@@ -121,6 +123,30 @@ class ManagerTests(unittest.TestCase):
         calls = (self.root/'docker.calls').read_text()
         self.assertIn('rm -f xiaoqi-probe-runner-new-release', calls)
         self.assertNotIn('tag xiaoqi-genkit-server:build-', calls)
+
+    def test_non_image_profile_runs_both_remaining_suites(self):
+        result = self.deploy(XIAOQI_RELEASE_VERIFICATION_PROFILE='non-image')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('VERIFICATION_PROFILE=non-image', result.stdout)
+        calls = (self.root/'docker.calls').read_text().splitlines()
+        probes = [c for c in calls if '/app/bin/verify_capability_chain' in c or '/app/bin/verify_official_catalog' in c]
+        self.assertEqual(len(probes), 2)
+        self.assertTrue(all(c.endswith(' --non-image') for c in probes))
+        self.assertIn('PUBLIC_RELEASE_VERIFIED', result.stdout)
+
+    def test_non_image_failure_still_blocks_activation(self):
+        result = self.deploy(XIAOQI_RELEASE_VERIFICATION_PROFILE='non-image', FAIL_CURATED_PROBE='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
+        calls = (self.root/'docker.calls').read_text()
+        self.assertNotIn(' stop app', calls)
+        self.assertNotIn('tag xiaoqi-genkit-server:build-', calls)
+
+    def test_invalid_verification_profile_stops_before_docker(self):
+        result = self.deploy(XIAOQI_RELEASE_VERIFICATION_PROFILE='skip-all')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root/'docker.calls').exists())
+        self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
 
     def test_failed_curated_probe_preserves_running_release(self):
         result = self.deploy(FAIL_CURATED_PROBE='1')

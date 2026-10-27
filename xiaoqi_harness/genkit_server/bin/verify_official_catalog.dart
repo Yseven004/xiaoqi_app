@@ -11,9 +11,12 @@ import '../lib/src/image_service.dart';
 import '../lib/src/official_catalog.dart';
 import '../lib/src/skill_market.dart';
 import '../lib/src/store.dart';
+import '../lib/src/release_verification.dart';
 
 /// Runs real curated packages against synthetic material in an isolated store.
-Future<void> main() async {
+Future<void> main(List<String> arguments) async {
+  final profile = ReleaseVerificationProfile.fromArguments(arguments);
+  stdout.writeln(jsonEncode(profile.report(curated: true)));
   final root = await Directory.systemTemp.createTemp('curated-release-probe-');
   final store = CloudStore(root: root.path);
   const tenant = 'official-catalog-probe';
@@ -26,7 +29,7 @@ Future<void> main() async {
       '原则：先回忆，再核对；保留修正依据；适度重复。';
   try {
     seedOfficialCatalog(store);
-    for (final id in ['study-notes-studio', 'book-to-skill']) {
+    for (final id in profile.curatedPackages) {
       final publicId = SkillMarket.publicationId('_official-curated', id);
       final publication = store.get('skill-market/$publicId')!;
       final installed = SkillMarket(
