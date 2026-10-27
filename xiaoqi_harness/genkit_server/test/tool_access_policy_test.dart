@@ -29,6 +29,144 @@ class _CatalogConnections extends McpConnectionService {
 }
 
 void main() {
+  test('availability and explicit denial cannot be overridden by a grant', () {
+    expect(
+      ToolAccessPolicy.decide(
+        effect: ToolEffect.send,
+        hasExactUserGrant: true,
+        available: false,
+      ),
+      ToolAccessDecision.unavailable,
+    );
+    expect(
+      ToolAccessPolicy.decide(
+        effect: ToolEffect.send,
+        hasExactUserGrant: true,
+        hasUserDenial: true,
+      ),
+      ToolAccessDecision.deny,
+    );
+    expect(
+      ToolAccessPolicy.decide(effect: ToolEffect.read, hasUserDenial: true),
+      ToolAccessDecision.deny,
+    );
+  });
+
+  test(
+    'approval identity binds all arguments separately from authority and scope',
+    () {
+      String hash(
+        Map<String, dynamic> arguments, {
+        String request = 'turn',
+        Map<String, dynamic> authority = const {
+          'url': 'https://example.com/mcp',
+          'revision': 1,
+        },
+      }) => ToolAccessPolicy.actionHash(
+        connectionId: 'c',
+        tool: 'send',
+        requestIdentity: request,
+        authority: authority,
+        arguments: arguments,
+      );
+      final original = hash({
+        'to': 'a@example.com',
+        'body': {'x': 1, 'y': 2},
+      });
+      expect(
+        hash({
+          'body': {'y': 2, 'x': 1},
+          'to': 'a@example.com',
+        }),
+        original,
+      );
+      expect(
+        hash({
+          'to': 'b@example.com',
+          'body': {'x': 1, 'y': 2},
+        }),
+        isNot(original),
+      );
+      expect(
+        hash({
+          'to': 'a@example.com',
+          'body': {'x': 1, 'y': 2},
+        }, request: 'updated'),
+        isNot(original),
+      );
+      expect(
+        hash(
+          {
+            'to': 'a@example.com',
+            'body': {'x': 1, 'y': 2},
+          },
+          authority: {'url': 'https://other.example/mcp', 'revision': 1},
+        ),
+        isNot(original),
+      );
+      expect(
+        hash(
+          {
+            'to': 'a@example.com',
+            'body': {'x': 1, 'y': 2},
+          },
+          authority: {'url': 'https://example.com/mcp', 'revision': 2},
+        ),
+        isNot(original),
+      );
+      expect(
+        hash({'_turn_identity': 'a'}),
+        isNot(hash({'_turn_identity': 'b'})),
+      );
+      expect(hash({'_authority': 'a'}), isNot(hash({'_authority': 'b'})));
+    },
+  );
+
+  test(
+    'selected connections recheck disablement, configuration revision and tenant',
+    () async {
+      final root = Directory.systemTemp.createTempSync('tool-current-');
+      final store = CloudStore(root: root.path);
+      final service = _CatalogConnections(store);
+      const key = 'mcp/personal/owned';
+      store.put(key, {
+        'id': 'owned',
+        'name': 'Library',
+        'url': 'https://example.com/mcp',
+        'catalog_id': 'library',
+        'status': 'ready',
+      }, null);
+      try {
+        final selected = (await service.selected('personal', ['owned'])).single;
+        expect(service.isCurrent('personal', selected), true);
+        expect(service.isCurrent('other', selected), false);
+        var current = store.get(key)!;
+        store.put(key, {
+          ...current.value,
+          'encrypted_bearer_token': {'changed': true},
+        }, current.revision);
+        expect(service.isCurrent('personal', selected), false);
+        current = store.get(key)!;
+        store.put(key, {...current.value, 'enabled': false}, current.revision);
+        await expectLater(
+          service.selected('personal', ['owned']),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'reason',
+              contains('停用'),
+            ),
+          ),
+        );
+        store.delete(key);
+        expect(service.isCurrent('personal', selected), false);
+      } finally {
+        store.close();
+        root.deleteSync(recursive: true);
+      }
+    },
+  );
+
   test('safe task effects do not require repeated confirmation', () {
     for (final effect in [ToolEffect.read, ToolEffect.workspace]) {
       expect(ToolAccessPolicy.decide(effect: effect), ToolAccessDecision.allow);

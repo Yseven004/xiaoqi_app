@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-27",
+  "scope": "Real Genkit Agent loops with local deterministic model and MCP HTTP fixtures",
+  "productionVerified": false,
+  "cliVersion": "1.44.1",
+  "flow": "verifyToolPermissions",
+  "scenario": "authorization",
+  "flowTraceId": "709421749d918214ff261aff10a3c6da",
+  "flowPassed": true,
+  "cases": [
+    {
+      "scenario": "mcp-approved-repeat",
+      "agentTraceId": "246e901781b8e68389d0f5c249051b6a",
+      "toolSpans": ["cc8b2000816cb3ff", "05a7b37f48210db6"],
+      "assertions": "Two SDK tool calls reuse one explicitly approved operation; one approval event, one actual MCP call and one success reservation"
+    },
+    {
+      "scenario": "mcp-denied",
+      "agentTraceId": "dbea805270bce55e795dd57e450bbdfa",
+      "toolSpans": ["6cc1e9123f58c133", "ab056a7db6856060"],
+      "assertions": "Two attempted SDK calls return denied; only the original approval is shown and no MCP call executes"
+    },
+    {
+      "scenario": "mcp-disabled",
+      "agentTraceId": "4b93ab47acce52db0d216a3f33769b3f",
+      "toolSpans": ["d28e2c9518963a24"],
+      "assertions": "Connection disabled after discovery returns unavailable before any tool call"
+    },
+    {
+      "scenario": "mcp-reconfigured",
+      "agentTraceId": "9bc8f0eb631620b6fc2d2613793d99b6",
+      "toolSpans": ["d4bc6f8556e08636"],
+      "assertions": "Stored credentials changed after discovery invalidate the captured connection revision; no tool call executes"
+    },
+    {
+      "scenario": "mcp-argument-change",
+      "agentTraceId": "fcaf65e2bfb2cc8aac52abe497c4a77b",
+      "toolSpans": ["0936627a3cfa0575", "58b2ae658fd71b97"],
+      "assertions": "Approved destination A executes once; destination B interrupts with a different approval hash and is not executed"
+    }
+  ],
+  "limitations": [
+    "SDK span status OK may represent a denied or interrupted response; assertions distinguish these from an actual remote call",
+    "No paid model, image provider or real third-party account was used",
+    "CLI cleanup exited 1 because wmic.exe is absent; the flow result passed separately",
+    "Subsequent CIM inventory found no surviving Dart verifier or MCP fixture process",
+    "Natural-language user grant mapping, cross-entry network authorization and final deployment remain incomplete"
+  ]
+}

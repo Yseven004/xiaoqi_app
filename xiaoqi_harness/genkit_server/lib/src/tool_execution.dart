@@ -66,8 +66,50 @@ class ToolExecution {
         // A corrected user request starts a new plan, not a monotonic extension
         // of a withdrawn requirement. Old operation evidence remains intact.
         if (prior != null) 'delivery_evidence': <String, dynamic>{},
+        'tool_authorizations': <String, dynamic>{},
+        'tool_authorization_denials': <String, dynamic>{},
       };
     });
+  }
+
+  /// Only the caller handling a matching human resume may record a decision.
+  /// Explicit denials remain in force for this request; a changed user request
+  /// starts a new scope. Prior exact approvals do not grant changed arguments.
+  void recordAuthorization({
+    required String actionHash,
+    required String scopeHash,
+    required bool approved,
+  }) {
+    _update((value) {
+      check('read');
+      final decisions = Map<String, dynamic>.from(
+        value['tool_authorizations'] as Map? ?? const {},
+      );
+      final denials = Map<String, dynamic>.from(
+        value['tool_authorization_denials'] as Map? ?? const {},
+      );
+      if (!decisions.containsKey(actionHash) &&
+          decisions.length >= limits.toolOperations) {
+        throw ExecutionBudgetExceeded('本次任务的操作确认数量已达到上限');
+      }
+      if (decisions[actionHash] != false) decisions[actionHash] = approved;
+      if (!approved) denials[scopeHash] = true;
+      return {
+        ...value,
+        'tool_authorizations': decisions,
+        'tool_authorization_denials': denials,
+      };
+    });
+  }
+
+  bool? authorization({required String actionHash, required String scopeHash}) {
+    check('read');
+    final value = store.get(key)?.value ?? const <String, dynamic>{};
+    final exact = (value['tool_authorizations'] as Map?)?[actionHash];
+    if (exact is bool) return exact;
+    if ((value['tool_authorization_denials'] as Map?)?[scopeHash] == true)
+      return false;
+    return null;
   }
 
   void check(String effect) {

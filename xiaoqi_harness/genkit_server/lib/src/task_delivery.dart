@@ -16,7 +16,7 @@ class TaskDelivery {
   Map<String, dynamic> toJson() => {'plan': plan, 'succeeded': succeeded};
 
   void observe(Map<String, Object?> event) {
-    if (event['type'] == 'tool_succeeded') {
+    if (event['type'] == 'tool_succeeded' && event['reused_result'] != true) {
       final name = event['tool']?.toString() ?? '';
       succeeded.update(name, (count) => count + 1, ifAbsent: () => 1);
     }

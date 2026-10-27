@@ -10,10 +10,116 @@ import 'package:xiaoqi_genkit_server/src/intent_router.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'package:xiaoqi_genkit_server/src/tool_execution.dart';
 import 'package:xiaoqi_genkit_server/src/turn_contract.dart';
+import 'package:xiaoqi_genkit_server/src/execution_limits.dart';
 
 void main() {
   late Directory directory;
   late CloudStore store;
+  test(
+    'authorization survives resume, denies repeated proposals and resets on steering',
+    () {
+      ToolExecution scope(String identity) => ToolExecution(
+        store,
+        'personal',
+        'grants',
+        TurnContract(mode: 'workflow', imageLimit: 0),
+        requestIdentity: identity,
+      )..bind();
+      final first = scope('first');
+      first.recordAuthorization(
+        actionHash: 'approved',
+        scopeHash: 'send',
+        approved: true,
+      );
+      final resumed = scope('first');
+      expect(
+        resumed.authorization(actionHash: 'approved', scopeHash: 'send'),
+        true,
+      );
+      expect(
+        resumed.authorization(actionHash: 'changed-target', scopeHash: 'send'),
+        null,
+      );
+      resumed.recordAuthorization(
+        actionHash: 'denied',
+        scopeHash: 'send',
+        approved: false,
+      );
+      expect(
+        resumed.authorization(actionHash: 'denied', scopeHash: 'send'),
+        false,
+      );
+      expect(
+        resumed.authorization(actionHash: 'changed-target', scopeHash: 'send'),
+        false,
+      );
+      expect(
+        resumed.authorization(actionHash: 'approved', scopeHash: 'send'),
+        true,
+      );
+      resumed.recordAuthorization(
+        actionHash: 'denied',
+        scopeHash: 'send',
+        approved: true,
+      );
+      expect(
+        resumed.authorization(actionHash: 'denied', scopeHash: 'send'),
+        false,
+      );
+      final updated = scope('updated');
+      expect(
+        updated.authorization(actionHash: 'approved', scopeHash: 'send'),
+        null,
+      );
+      expect(
+        () => resumed.authorization(actionHash: 'approved', scopeHash: 'send'),
+        throwsStateError,
+      );
+      final task = store.get('task/personal/grants')!;
+      store.put('task/personal/grants', {
+        ...task.value,
+        'cancel_requested': true,
+      }, task.revision);
+      expect(
+        () => updated.recordAuthorization(
+          actionHash: 'new',
+          scopeHash: 'send',
+          approved: true,
+        ),
+        throwsStateError,
+      );
+    },
+  );
+
+  test('authorization proposal storage has a task resource bound', () {
+    final scope = ToolExecution(
+      store,
+      'personal',
+      'bounded-grants',
+      TurnContract(mode: 'workflow', imageLimit: 0),
+      requestIdentity: 'turn',
+      limits: const ExecutionLimits(toolOperations: 1),
+    )..bind();
+    scope.recordAuthorization(
+      actionHash: 'one',
+      scopeHash: 'send',
+      approved: true,
+    );
+    expect(
+      () => scope.recordAuthorization(
+        actionHash: 'two',
+        scopeHash: 'send',
+        approved: true,
+      ),
+      throwsA(isA<ExecutionBudgetExceeded>()),
+    );
+    expect(
+      (store.get('task/personal/bounded-grants')!.value['tool_authorizations']
+              as Map)
+          .length,
+      1,
+    );
+  });
   test(
     'artifact references use tenant-owned records instead of client paths',
     () {

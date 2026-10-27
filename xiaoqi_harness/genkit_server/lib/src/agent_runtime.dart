@@ -743,34 +743,6 @@ String _compactPrompt(String value) {
   return normalized.length <= 300 ? normalized : normalized.substring(0, 300);
 }
 
-String _mcpApprovalHash(
-  String connectionId,
-  String remoteToolName,
-  Map<String, dynamic> arguments,
-) => sha256
-    .convert(
-      utf8.encode(
-        '$connectionId|$remoteToolName|${jsonEncode(_canonicalJson(arguments))}',
-      ),
-    )
-    .toString();
-
-Object? _canonicalJson(Object? value) {
-  if (value is Map) {
-    final keys = value.keys.map((key) => key.toString()).toList()..sort();
-    return {
-      for (final key in keys)
-        key: _canonicalJson(
-          value.entries
-              .firstWhere((entry) => entry.key.toString() == key)
-              .value,
-        ),
-    };
-  }
-  if (value is List) return value.map(_canonicalJson).toList();
-  return value;
-}
-
 SchemanticType<Map<String, dynamic>> _mcpToolInputSchema(Object? value) {
   if (value is! Map || value['type'] != 'object') {
     return .map(.string(), .dynamicSchema());
@@ -2299,6 +2271,23 @@ class GenkitXiaoqiAgentRuntime
                         )) {
                   throw StateError('插件或所选版本已停用，不能继续调用 MCP');
                 }
+              } else if (!mcpConnectionService.isCurrent(
+                tenantId,
+                connection,
+              )) {
+                onProcessEvent({
+                  'type': 'tool_failed',
+                  'tool': 'MCP · ${connection.name} · $exposedName',
+                  'message': '连接已停用、凭据或配置已变化，请刷新连接状态',
+                });
+                return ToolResult.response(
+                  jsonEncode({
+                    'ok': false,
+                    'status': 'unavailable',
+                    'retryable': false,
+                    'error': '连接已停用、凭据或配置已变化，请刷新连接状态',
+                  }),
+                );
               }
               if (requestIdentity != registeredScopeIdentity) {
                 throw StateError('任务范围已经更新，请重新确认本轮需要的连接器');
@@ -2360,22 +2349,60 @@ class GenkitXiaoqiAgentRuntime
                 );
               }
               activeMcpIds.add(connection.id);
-              final approvalHash = _mcpApprovalHash(
-                connection.id,
-                remoteToolName,
-                {...input, '_turn_identity': requestIdentity},
-              );
               final resumed = context.resumed;
               final effect = connection.isolated != null
                   ? ToolEffect.workspace
                   : mcpConnectionService.effectFor(connection, remoteToolName);
+              final approvalHash = ToolAccessPolicy.actionHash(
+                connectionId: connection.id,
+                tool: remoteToolName,
+                requestIdentity: requestIdentity,
+                arguments: input,
+                authority: {
+                  ...mcpConnectionService.authorizationBinding(connection),
+                  'effect': effect.name,
+                  'schema': rawTool['inputSchema'],
+                },
+              );
+              final scopeHash = ToolAccessPolicy.actionHash(
+                connectionId: connection.id,
+                tool: remoteToolName,
+                requestIdentity: requestIdentity,
+                authority: const {},
+              );
+              if (resumed is Map &&
+                  resumed['approved'] is bool &&
+                  resumed['approval_hash'] == approvalHash) {
+                execution.recordAuthorization(
+                  actionHash: approvalHash,
+                  scopeHash: scopeHash,
+                  approved: resumed['approved'] as bool,
+                );
+              }
+              final authorization = execution.authorization(
+                actionHash: approvalHash,
+                scopeHash: scopeHash,
+              );
               final decision = ToolAccessPolicy.decide(
                 effect: effect,
-                hasExactUserGrant:
-                    resumed is Map &&
-                    resumed['approved'] == true &&
-                    resumed['approval_hash'] == approvalHash,
+                hasExactUserGrant: authorization == true,
+                hasUserDenial: authorization == false,
               );
+              if (decision == ToolAccessDecision.deny) {
+                onProcessEvent({
+                  'type': 'tool_skipped',
+                  'tool': 'MCP · ${connection.name} · $remoteToolName',
+                  'reason': 'user_denied',
+                });
+                return ToolResult.response(
+                  jsonEncode({
+                    'ok': false,
+                    'status': 'denied',
+                    'retryable': false,
+                    'error': '用户已拒绝此操作。不要更换参数重复申请；等待用户更新任务。',
+                  }),
+                );
+              }
               if (decision == ToolAccessDecision.confirm) {
                 onProcessEvent({
                   'type': 'mcp_tool_approval_required',
@@ -2398,6 +2425,7 @@ class GenkitXiaoqiAgentRuntime
                 'capability_name': connection.name,
               });
               try {
+                var invoked = false;
                 final invoke = effect == ToolEffect.read
                     ? execution.query
                     : effect == ToolEffect.workspace
@@ -2411,6 +2439,7 @@ class GenkitXiaoqiAgentRuntime
                     'arguments': input,
                   },
                   invoke: (_) async {
+                    invoked = true;
                     final result = await client
                         .callTool(name: remoteToolName, arguments: input)
                         .timeout(const Duration(seconds: 60));
@@ -2446,9 +2475,10 @@ class GenkitXiaoqiAgentRuntime
                       : 'tool_failed',
                   'tool': displayTool,
                   'capability_name': connection.name,
+                  if (!invoked) 'reused_result': true,
                 });
                 // The model addresses the registered alias, so plan evidence uses it.
-                if (normalized['status'] == 'completed')
+                if (normalized['status'] == 'completed' && invoked)
                   delivery.succeeded.update(
                     alias,
                     (count) => count + 1,

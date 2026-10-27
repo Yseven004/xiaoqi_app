@@ -19,6 +19,11 @@ void main() {
     'mcp-error',
     'mcp-read',
     'mcp-large',
+    'mcp-approved-repeat',
+    'mcp-denied',
+    'mcp-disabled',
+    'mcp-reconfigured',
+    'mcp-argument-change',
   ]) {
     test(
       '$scenario exercises real Genkit discovery, tool loop and delivery gate',
@@ -67,12 +72,23 @@ void main() {
             final catalog = (prompt['skills'] as List).whereType<Map>();
             final connectors = (prompt['connections'] as List).whereType<Map>();
             final proposal = {
-              'mode': const {'mcp-read', 'mcp-large'}.contains(scenario)
+              'mode':
+                  const {
+                    'mcp-read',
+                    'mcp-large',
+                    'mcp-disabled',
+                    'mcp-reconfigured',
+                  }.contains(scenario)
                   ? 'answer'
                   : 'workflow',
               'answer_required': true,
               'image_count':
-                  const {'mcp-read', 'mcp-large'}.contains(scenario) ||
+                  const {
+                        'mcp-read',
+                        'mcp-large',
+                        'mcp-disabled',
+                        'mcp-reconfigured',
+                      }.contains(scenario) ||
                       scenario.startsWith('text-only')
                   ? 0
                   : scenario.startsWith('mcp-')
@@ -143,6 +159,24 @@ void main() {
                 .whereType<String>()
                 .where((name) => name.startsWith('mcp_'))
                 .first;
+            final remoteRefs = messages
+                .expand(
+                  (message) => (message['tool_calls'] as List? ?? const [])
+                      .whereType<Map>(),
+                )
+                .where(
+                  (call) => (call['function'] as Map?)?['name'] == remoteName,
+                )
+                .map((call) => call['id'])
+                .toSet();
+            final remoteResponses = messages
+                .where(
+                  (message) =>
+                      message['role'] == 'tool' &&
+                      (message['name'] == remoteName ||
+                          remoteRefs.contains(message['tool_call_id'])),
+                )
+                .length;
             if (!called('set_task_deliverables')) {
               tool = 'set_task_deliverables';
               input = {
@@ -155,17 +189,30 @@ void main() {
                   {'name': remoteName, 'count': 1},
                 ],
                 'artifacts': [
-                  if (!const {'mcp-read', 'mcp-large'}.contains(scenario))
+                  if (!const {
+                    'mcp-read',
+                    'mcp-large',
+                    'mcp-disabled',
+                    'mcp-reconfigured',
+                  }.contains(scenario))
                     {'media_type': 'image/*', 'count': 1},
                 ],
               };
             } else if (directoryName != null && !called(directoryName)) {
               tool = directoryName;
               input = {'query': 'fetch_card_119'};
-            } else if (!called(remoteName)) {
+            } else if (!called(remoteName) ||
+                (const {
+                      'mcp-approved-repeat',
+                      'mcp-denied',
+                      'mcp-argument-change',
+                    }.contains(scenario) &&
+                    remoteResponses < 2)) {
               tool = remoteName;
               input = large
                   ? {'tool_name': 'fetch_card_119', 'arguments': {}}
+                  : scenario == 'mcp-argument-change'
+                  ? {'destination': remoteResponses == 0 ? 'A' : 'B'}
                   : {};
             }
           } else if (preparing && scenario != 'missing') {
@@ -349,19 +396,60 @@ void main() {
             );
           }
           if (scenario.startsWith('mcp-')) {
+            final blocked = const {
+              'mcp-denied',
+              'mcp-disabled',
+              'mcp-reconfigured',
+            }.contains(scenario);
             expect(
               result['before_approval'],
               const {'mcp-read', 'mcp-large'}.contains(scenario) ? 1 : 0,
             );
-            expect(result['mcp_calls'], 1);
+            expect(result['mcp_calls'], blocked ? 0 : 1);
             if (scenario == 'mcp-large')
               expect(result['called_tools'], ['fetch_card_119']);
-            expect(result['missing'], scenario == 'mcp-error');
-            expect(result['artifacts'], scenario == 'mcp-error' ? 0 : 1);
+            expect(result['missing'], scenario == 'mcp-error' || blocked);
+            expect(
+              result['artifacts'],
+              scenario == 'mcp-error' || blocked ? 0 : 1,
+            );
             expect(
               result['mcp_status'],
-              scenario == 'mcp-error' ? 'failed' : 'completed',
+              scenario == 'mcp-denied'
+                  ? 'skipped'
+                  : scenario == 'mcp-argument-change'
+                  ? 'waiting'
+                  : const {
+                      'mcp-error',
+                      'mcp-disabled',
+                      'mcp-reconfigured',
+                    }.contains(scenario)
+                  ? 'failed'
+                  : 'completed',
             );
+            if (const {
+              'mcp-approved-repeat',
+              'mcp-denied',
+            }.contains(scenario)) {
+              expect(result['approval_events'], 1);
+              expect(
+                result['tool_operation_count'],
+                scenario == 'mcp-denied' ? 0 : 1,
+              );
+              expect(
+                result['maximum_mcp_success_count'],
+                scenario == 'mcp-denied' ? 0 : 1,
+              );
+            }
+            if (scenario == 'mcp-argument-change') {
+              expect(result['approval_events'], 2);
+              expect(result['called_arguments'], [
+                {'destination': 'A'},
+              ]);
+              expect((result['pending_arguments'] as Map)['destination'], 'B');
+              expect(result['pending_hash_changed'], true);
+              expect(result['tool_operation_count'], 1);
+            }
           } else if (scenario == 'missing') {
             expect(result['missing'], isTrue);
             expect(result['generated'], 0);
@@ -433,7 +521,14 @@ void main() {
             if (scenario == 'image-format-repair')
               expect(jsonEncode(requests), contains('图片编码格式尚无可执行保障'));
           }
-          if (scenario != 'missing' && scenario != 'mcp-error') {
+          if (!const {
+            'missing',
+            'mcp-error',
+            'mcp-denied',
+            'mcp-disabled',
+            'mcp-reconfigured',
+            'mcp-argument-change',
+          }.contains(scenario)) {
             final finalRequest = requests.last;
             expect(finalRequest['tool_choice'], 'none');
             expect(finalRequest['tools'], isNotEmpty);

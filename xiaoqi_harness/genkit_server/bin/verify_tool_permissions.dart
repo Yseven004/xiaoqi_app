@@ -27,10 +27,16 @@ void main() {
     fn: (scenario, _) async {
       if (!const {
         'all',
+        'authorization',
         'mcp-read',
         'mcp-large',
         'mcp-success',
         'mcp-error',
+        'mcp-approved-repeat',
+        'mcp-denied',
+        'mcp-disabled',
+        'mcp-reconfigured',
+        'mcp-argument-change',
         'text-only-shell',
         'text-only-search',
       }.contains(scenario)) {
@@ -40,7 +46,12 @@ void main() {
         'test',
         'test/capability_runtime_test.dart',
         '--name',
-        scenario == 'all' ? '^(mcp-|text-only-(shell|search) )' : '^$scenario ',
+        switch (scenario) {
+          'all' => '^(mcp-|text-only-(shell|search) )',
+          'authorization' =>
+            '^mcp-(approved-repeat|denied|disabled|reconfigured|argument-change) ',
+          _ => '^$scenario ',
+        },
         '--reporter',
         'expanded',
       ]);

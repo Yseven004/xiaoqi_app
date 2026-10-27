@@ -54,7 +54,12 @@ class FixtureMcpConnections extends McpConnectionService {
 }
 
 Future<void> main(List<String> args) async {
-  final readOnly = const {'mcp-read', 'mcp-large'}.contains(args.single);
+  final readOnly = const {
+    'mcp-read',
+    'mcp-large',
+    'mcp-disabled',
+    'mcp-reconfigured',
+  }.contains(args.single);
   final toolCount = args.single == 'mcp-large' ? 120 : 1;
   final userText = readOnly ? '请读取 MCP 中已有的图片卡片' : '请用 MCP 生成图片卡片';
   final root = await Directory.systemTemp.createTemp('mcp-runtime-');
@@ -62,6 +67,7 @@ Future<void> main(List<String> args) async {
   final rpc = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   var calls = 0;
   final calledTools = <String>[];
+  final calledArguments = <Map>[];
   final serving = rpc.listen((request) async {
     if (request.method != 'POST') {
       request.response.statusCode = 405;
@@ -110,7 +116,9 @@ Future<void> main(List<String> args) async {
               'annotations': {'readOnlyHint': true},
               'inputSchema': {
                 'type': 'object',
-                'properties': {},
+                'properties': {
+                  'destination': {'type': 'string'},
+                },
                 'additionalProperties': false,
               },
             },
@@ -139,6 +147,19 @@ Future<void> main(List<String> args) async {
     if (body['method'] == 'tools/call') {
       calls++;
       calledTools.add((body['params'] as Map)['name'].toString());
+      calledArguments.add(
+        (body['params'] as Map)['arguments'] as Map? ?? const {},
+      );
+    }
+    if (body['method'] == 'tools/list' &&
+        const {'mcp-disabled', 'mcp-reconfigured'}.contains(args.single)) {
+      final record = store.get('mcp/personal/library')!;
+      store.put('mcp/personal/library', {
+        ...record.value,
+        if (args.single == 'mcp-disabled') 'enabled': false,
+        if (args.single == 'mcp-reconfigured')
+          'encrypted_bearer_token': {'changed': true},
+      }, record.revision);
     }
     request.response.headers.contentType = ContentType.json;
     request.response.write(
@@ -224,7 +245,7 @@ Future<void> main(List<String> args) async {
             messages: first.messages,
             restart: [
               pending!.restart({
-                'approved': true,
+                'approved': args.single != 'mcp-denied',
                 'approval_hash': approval!['approval_hash'],
               }),
             ],
@@ -235,8 +256,25 @@ Future<void> main(List<String> args) async {
     final artifacts =
         store.get('task/personal/turn')!.value['artifacts'] as List;
     final lastMcp = process.rows.where((row) => row['tool'] == 'mcp_tool').last;
+    final task = store.get('task/personal/turn')!.value;
+    final succeeded =
+        (task['delivery_evidence'] as Map?)?['succeeded'] as Map? ?? const {};
+    final mcpSuccesses = succeeded.entries
+        .where((entry) => entry.key.toString().startsWith('mcp_'))
+        .map((entry) => (entry.value as num).toInt())
+        .toList();
+    final pendingAfter =
+        next.messages
+                .expand((message) => message.content)
+                .where(
+                  (part) =>
+                      part.isToolRequest && part.metadata?['interrupt'] is Map,
+                )
+                .lastOrNull
+                ?.metadata?['interrupt']
+            as Map?;
     stdout.writeln(
-      'RESULT:${jsonEncode({'text': next.text, 'missing': next.extensionEvidenceMissing, 'before_approval': beforeApproval, 'mcp_calls': calls, 'called_tools': calledTools, 'artifacts': artifacts.length, 'mcp_status': lastMcp['status'], 'events': events})}',
+      'RESULT:${jsonEncode({'text': next.text, 'missing': next.extensionEvidenceMissing, 'before_approval': beforeApproval, 'mcp_calls': calls, 'called_tools': calledTools, 'artifacts': artifacts.length, 'mcp_status': lastMcp['status'], 'events': events, 'approval_events': events.where((event) => event['type'] == 'mcp_tool_approval_required').length, 'tool_operation_count': (task['scope_operations'] as Map? ?? const {}).length, 'maximum_mcp_success_count': mcpSuccesses.isEmpty ? 0 : mcpSuccesses.reduce((a, b) => a > b ? a : b), 'called_arguments': calledArguments, 'pending_arguments': pendingAfter?['arguments'], 'pending_hash_changed': pendingAfter?['approval_hash'] != approval?['approval_hash']})}',
     );
   } finally {
     await rpc.close(force: true);

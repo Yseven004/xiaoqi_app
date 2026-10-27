@@ -48,6 +48,7 @@ class McpConnectionCredentials {
     required this.bearerToken,
     this.catalogId,
     this.isolated,
+    this.revision,
   });
 
   final String id;
@@ -56,6 +57,7 @@ class McpConnectionCredentials {
   final String? bearerToken;
   final String? catalogId;
   final IsolatedMcpSpec? isolated;
+  final int? revision;
 
   McpServerConfig serverConfig() => McpServerConfig(
     url: url,
@@ -197,18 +199,45 @@ class McpConnectionService {
   static const _uuid = Uuid();
   static final _cipher = AesGcm.with256bits();
 
+  McpCatalogEntry? _policyEntry(McpConnectionCredentials connection) =>
+      catalog()
+          .where(
+            (entry) =>
+                entry.id == connection.catalogId &&
+                entry.status == 'verified' &&
+                entry.url == connection.url,
+          )
+          .firstOrNull;
+
   ToolEffect effectFor(McpConnectionCredentials connection, String tool) {
-    final entry = catalog()
-        .where(
-          (entry) =>
-              entry.id == connection.catalogId &&
-              entry.status == 'verified' &&
-              entry.url == connection.url,
-        )
-        .firstOrNull;
+    final entry = _policyEntry(connection);
     final effect = entry?.toolEffects[tool] ?? ToolEffect.unknown;
     // A remote server cannot claim our isolated task workspace as its own.
     return effect == ToolEffect.workspace ? ToolEffect.unknown : effect;
+  }
+
+  Map<String, dynamic> authorizationBinding(
+    McpConnectionCredentials connection,
+  ) => {
+    'url': connection.url.toString(),
+    'revision': connection.revision,
+    'catalog_id': _policyEntry(connection)?.id,
+    'policy_version': _policyEntry(connection)?.version,
+    if (connection.isolated != null)
+      'capability_version': connection.isolated!.versionId,
+  };
+
+  bool isCurrent(String tenantId, McpConnectionCredentials connection) {
+    final document = store.get(_key(tenantId, connection.id));
+    if (document == null) return false;
+    final value = document.value;
+    return value['enabled'] != false &&
+        value['deleted_at'] == null &&
+        (value['status'] == null || value['status'] == 'ready') &&
+        value['url'] == connection.url.toString() &&
+        value['catalog_id'] == connection.catalogId &&
+        (connection.revision == null ||
+            connection.revision == document.revision);
   }
 
   List<McpCatalogEntry> catalog() {
@@ -714,6 +743,12 @@ class McpConnectionService {
   Future<McpConnectionCredentials> _read(String tenantId, String id) async {
     final document = store.get(_key(tenantId, id));
     if (document == null) throw StateError('MCP 连接器不存在，请刷新后重新选择');
+    if (document.value['enabled'] == false ||
+        document.value['deleted_at'] != null ||
+        (document.value['status'] != null &&
+            document.value['status'] != 'ready')) {
+      throw StateError('MCP 连接器已停用或尚未就绪，请刷新连接状态');
+    }
     final encrypted = document.value['encrypted_bearer_token'];
     final token = encrypted is Map ? await _decrypt(encrypted) : null;
     return McpConnectionCredentials(
@@ -722,6 +757,7 @@ class McpConnectionService {
       url: parseRemoteUrl(document.value['url']?.toString() ?? ''),
       bearerToken: token,
       catalogId: document.value['catalog_id']?.toString(),
+      revision: document.revision,
     );
   }
 
