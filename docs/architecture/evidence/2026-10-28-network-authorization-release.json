@@ -1,0 +1,13 @@
+{
+  "source_commit": "3646fcea74cde2567ad51a21f9ba7b9bba9c2b8f",
+  "build_worktree_commit": "d25236700947be0c96ff097070a239e0b275a399",
+  "source_tree": "281fd7f9cfac6bcb6336be041a9de70e74d1c09d",
+  "source_trees_match": true,
+  "release_id": "2026-10-27-agent-tools-2",
+  "api_contract_version": "24",
+  "ci": {"run": 40543635243, "job": 122328296918, "conclusion": "success", "dart_tests": 280, "runner_tests": 50, "deployment_tests": 28, "real_stdio_gate": true, "network_revocation_and_reauthorization": true, "network_boundaries": true},
+  "deployment": {"id": "20261028-005851-3646fce", "exit_code": 0, "public_health": 200, "public_check_via": "cloud_assistant", "current_health": "healthy", "restore_point": "latest-good", "restore_data": "present", "health_and_data_checks": true, "cleanup": true, "profile": "non-image", "book_to_skill_artifacts": 4, "book_to_skill_integrity": true},
+  "client": {"build_mode": "release", "build_exit_code": 0, "frozen_build_seconds": 416.3, "apk_bytes": 369817076, "apk_sha256": "f8d8eaf9601edc62cce2c74f0fe6ddb4e6b2e6f621fe73847eda8adbb846b9d1", "artifact": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/client-current/app-release.apk", "abi_markers_verified": ["arm64-v8a", "armeabi-v7a", "x86_64"], "analysis_errors": 0, "analysis_warnings": 0, "existing_analysis_infos": 12, "visual_verification": "not_executed", "device_verification": "pending_user"},
+  "deferred_image_checks": {"reason": "deferred_by_user", "verified": false, "checks": ["implicit-skill", "explicit-plugin", "study-notes-studio"]},
+  "whole_goal_complete": false
+}

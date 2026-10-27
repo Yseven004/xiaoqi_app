@@ -1,6 +1,6 @@
 # 单次联网执行授权（API 24）
 
-状态：代码与本地回归完成，待对应提交 CI、发布及客户端验收。完整权限修复目标仍按 P01–P14 台账执行。
+状态：此批代码、对应提交 CI 与服务器发布已完成，匹配客户端已构建，真机验收未执行。完整权限修复目标仍按 P01–P14 台账执行。
 
 ## 范围与现有交互
 
@@ -41,5 +41,6 @@ Genkit 1.0 的 `ToolRequestPart.restart` 和恢复检查以本地锁定 SDK 源�
 - Genkit Dart 1.0：本地 `.agents/skills/developing-genkit-dart/references/agents-human-in-the-loop.md` 及锁定 SDK `schema_extensions.dart`、`ai/generate.dart`。
 - [Flutter AlertDialog 官方文档](https://api.flutter.dev/flutter/material/AlertDialog-class.html)：核对长内容滚动方式（2026-10-28）；仅参考布局机制，不复制示例实现。
 - 按 xiaoqi-ui-workflow 的局部改动路线复用组件；UI/UX 本地库两次检索没有匹配此弹窗的规则，不将泛化条目当作验证证据。
-- 本机已通过完整 279 项回归，随后新增快照版本测试及规范化摘要/确认数量边界，针对性 15 项通过。七组真实 Genkit 循环覆盖临时联网、搜索开启、已安装脚本、拒绝换入口、参数/文件变化和轮询恢复；桥接为本地 fixture，真实 Docker 仍须同提交 CI。
-- 客户端分析无 error/warning，12 项原有 info；编译包仍在 R8 阶段。未执行同状态视觉或真机验证，待用户真机验证。生图继续用户后置，没有调用欠费服务。
+- 本机已通过完整 279 项回归，随后新增快照版本测试及规范化摘要/确认数量边界，针对性 15 项通过。同提交 CI `40543635243`、作业 `122328296918` 完整 280 项、runner 50 项和部署 28 项通过；真实 Docker 的网络撤销/重新授权及原格式/构建/恢复/清理门禁通过。七组 Genkit 循环覆盖临时联网、搜索开启、已安装脚本、拒绝换入口、参数/文件变化和轮询恢复，其中模型与桥接使用本地 fixture。
+- 服务器发布 `20261028-005851-3646fce` 返回成功，公开健康 200、产品版本与 API 24 匹配，健康/数据检查和单个恢复点验证通过。具体证据见 `docs/architecture/evidence/2026-10-28-network-authorization-release.json`。
+- 客户端分析无 error/warning，12 项原有 info。冻结源码的最终 release APK 构建返回 0，三个 ABI 均查到新 release 与确认卡片标记，复制校验一致。构建与发布源码 Git tree 相同。真机：未执行验证，待用户真机验证；没有同状态视觉通过的证据。生图继续用户后置，没有调用欠费服务。
