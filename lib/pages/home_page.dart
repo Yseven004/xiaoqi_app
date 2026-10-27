@@ -3612,20 +3612,16 @@ $materialIndex
             arguments: arguments,
           );
           if (!_isCurrentRequest(generation, conversationId)) return null;
-          turn = allow
-              ? chat.resumeStream(
-                  restart: [
-                    interrupt.restart({
-                      'approved': true,
-                      'approval_hash': input['approval_hash'],
-                    }),
-                  ],
-                )
-              : chat.resumeStream(
-                  respond: [
-                    interrupt.respond({'approved': false}),
-                  ],
-                );
+          // Both decisions must run the server's exact-action handler so a
+          // denial is persisted and cannot trigger another confirmation.
+          turn = chat.resumeStream(
+            restart: [
+              interrupt.restart({
+                'approved': allow,
+                'approval_hash': input['approval_hash'],
+              }),
+            ],
+          );
           continue;
         }
         if (input['type'] != 'network_permission') {
