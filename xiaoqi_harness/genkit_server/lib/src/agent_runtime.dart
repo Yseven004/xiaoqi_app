@@ -24,6 +24,7 @@ import 'task_delivery.dart';
 import 'mcp_connection_service.dart';
 import 'mcp_tool_result.dart';
 import 'mcp_tool_directory.dart';
+import 'sandbox_mcp_transport.dart';
 import 'plugin_dependencies.dart';
 import 'attachment_service.dart';
 import 'turn_contract.dart';
@@ -1575,6 +1576,11 @@ class GenkitXiaoqiAgentRuntime
             (id) => !excludedIds.contains(id),
           ),
         ]);
+    explicitMcpConnections.addAll(
+      pluginDependencies.isolatedConnections.where(
+        (connection) => !excludedIds.contains(connection.id),
+      ),
+    );
     final activeMcpIds = explicitMcpConnections
         .map((connection) => connection.id)
         .toSet();
@@ -2164,6 +2170,7 @@ class GenkitXiaoqiAgentRuntime
     }
 
     final mcpClients = <GenkitMcpClient>[];
+    final isolatedMcpTransports = <SandboxMcpTransport>[];
     final mcpToolNames = <String>[];
     final mcpToolSummary = <String>[];
     final resourceClients = <String, GenkitMcpClient>{};
@@ -2178,7 +2185,38 @@ class GenkitXiaoqiAgentRuntime
         });
         GenkitMcpClient client;
         try {
-          client = await mcpConnectionService.connect(connection);
+          final spec = connection.isolated;
+          if (spec == null) {
+            client = await mcpConnectionService.connect(connection);
+          } else {
+            execution.check('workspace');
+            final transport = await codeExecutor.connectMcp(
+              tenantId: tenantId,
+              taskId: taskId,
+              command: spec.command,
+              environment: spec.environment,
+              files: spec.files,
+              materials: await _scriptMaterials(tenantId, request['materials']),
+              cancellation: cancellation,
+            );
+            isolatedMcpTransports.add(transport);
+            client = createMcpClient(
+              McpClientOptions(
+                name: 'xiaoqi-${connection.id}',
+                serverName: connection.name,
+                mcpServer: McpServerConfig(
+                  transport: transport,
+                  timeout: const Duration(seconds: 20),
+                ),
+              ),
+            );
+            try {
+              await client.ready();
+            } catch (_) {
+              await client.close();
+              rethrow;
+            }
+          }
         } on Object {
           onProcessEvent({
             'type': 'tool_failed',
@@ -2236,6 +2274,22 @@ class GenkitXiaoqiAgentRuntime
             inputSchema: _mcpToolInputSchema(exposedTool['inputSchema']),
             fn: (requestInput, context) async {
               execution.check('read');
+              final isolated = connection.isolated;
+              if (isolated != null) {
+                final record = store
+                    .get('cap/$tenantId/${isolated.capabilityId}')
+                    ?.value;
+                if (record == null ||
+                    record['enabled'] == false ||
+                    record['deleted_at'] != null ||
+                    !(record['versions'] as List? ?? const [])
+                        .whereType<Map>()
+                        .any(
+                          (version) => version['id'] == isolated.versionId,
+                        )) {
+                  throw StateError('插件或所选版本已停用，不能继续调用 MCP');
+                }
+              }
               if (requestIdentity != registeredScopeIdentity) {
                 throw StateError('任务范围已经更新，请重新确认本轮需要的连接器');
               }
@@ -2302,10 +2356,9 @@ class GenkitXiaoqiAgentRuntime
                 {...input, '_turn_identity': requestIdentity},
               );
               final resumed = context.resumed;
-              final effect = mcpConnectionService.effectFor(
-                connection,
-                remoteToolName,
-              );
+              final effect = connection.isolated != null
+                  ? ToolEffect.workspace
+                  : mcpConnectionService.effectFor(connection, remoteToolName);
               final decision = ToolAccessPolicy.decide(
                 effect: effect,
                 hasExactUserGrant:
@@ -2335,7 +2388,8 @@ class GenkitXiaoqiAgentRuntime
                 'capability_name': connection.name,
               });
               try {
-                final invoke = effect == ToolEffect.read
+                final invoke =
+                    effect == ToolEffect.read || effect == ToolEffect.workspace
                     ? execution.query
                     : execution.authorizedExternal;
                 final normalized = await invoke(
@@ -2407,6 +2461,9 @@ class GenkitXiaoqiAgentRuntime
     } on Object {
       for (final client in mcpClients) {
         await client.close();
+      }
+      for (final transport in isolatedMcpTransports) {
+        await codeExecutor.finishMcp(tenantId, taskId, transport);
       }
       rethrow;
     }
@@ -3882,6 +3939,9 @@ class GenkitXiaoqiAgentRuntime
       webSearch.close();
       for (final client in mcpClients) {
         await client.close();
+      }
+      for (final transport in isolatedMcpTransports) {
+        await codeExecutor.finishMcp(tenantId, taskId, transport);
       }
     }
   }

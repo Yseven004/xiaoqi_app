@@ -6,6 +6,7 @@ import 'package:genkit/genkit.dart' show CancellationController;
 import 'package:xiaoqi_genkit_server/src/capability_import_service.dart';
 import 'package:xiaoqi_genkit_server/src/selected_skills.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
+import 'package:xiaoqi_genkit_server/src/plugin_dependencies.dart';
 
 String skill(String name, [String body = 'Explain the user input clearly.']) =>
     '---\nname: $name\ndescription: Useful independent instructions\n---\n$body\n';
@@ -73,6 +74,73 @@ void main() {
           archive({'../secret': 'bad'}),
         ),
         throwsFormatException,
+      );
+    },
+  );
+
+  test(
+    'stdio plugin installs its declared dependency and resolves an owned immutable command',
+    () async {
+      var preparations = 0;
+      final importer = service(
+        {
+          '.claude-plugin/plugin.json': '{"name":"stdio-reference"}',
+          '.mcp.json': jsonEncode({
+            'mcpServers': {
+              'reference': {
+                'command': 'npx',
+                'args': ['-y', '@example/server@2.0.1', '/workspace/output'],
+              },
+            },
+          }),
+        },
+        prepare: (tenant, files, {cancellation}) async {
+          preparations++;
+          expect(tenant, 'alice');
+          expect(
+            (jsonDecode(utf8.decode(files['package.json']!))
+                as Map)['dependencies'],
+            {'@example/server': '2.0.1'},
+          );
+          return {
+            'node_modules/@example/server/package.json': utf8.encode(
+              '{"version":"2.0.1","bin":"dist/index.js"}',
+            ),
+            'node_modules/@example/server/dist/index.js': utf8.encode(
+              '// immutable test dependency',
+            ),
+            '.xiaoqi/dependency-lock.json': utf8.encode('{"schema":1}'),
+          };
+        },
+      );
+      final inspected = await importer.inspect(
+        'alice',
+        'https://github.com/example/stdio',
+      );
+      final candidate = (inspected['candidates'] as List).single as Map;
+      expect(candidate['status'], 'supported');
+      final saved = await importer.install(
+        'alice',
+        inspected['id'],
+        candidate['id'],
+      );
+      final selection = [
+        {
+          'id': saved.value['id'],
+          'version_id': saved.value['current_version_id'],
+        },
+      ];
+      final resolved = PluginDependencies.resolve(store, 'alice', selection);
+      expect(preparations, 1);
+      expect(resolved.unavailable, isEmpty);
+      expect(resolved.isolatedConnections.single.isolated!.command, [
+        'node',
+        '/workspace/skill/node_modules/@example/server/dist/index.js',
+        '/workspace/output',
+      ]);
+      expect(
+        PluginDependencies.resolve(store, 'bob', selection).isolatedConnections,
+        isEmpty,
       );
     },
   );
@@ -149,7 +217,7 @@ void main() {
   );
 
   test(
-    'plugin imports instructions that mention MCP but flags its MCP manifest',
+    'empty MCP declarations do not downgrade healthy plugin instructions',
     () async {
       final importer = service({
         '.claude-plugin/plugin.json':
@@ -165,7 +233,7 @@ void main() {
         'https://github.com/example/plugin',
       );
       final candidate = (inspected['candidates'] as List).single as Map;
-      expect(candidate['status'], 'partial');
+      expect(candidate['status'], 'supported');
       final saved = await importer.install(
         'alice',
         inspected['id'],

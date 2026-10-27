@@ -3,14 +3,47 @@ from __future__ import annotations
 import base64
 import io
 import json
+import socket
 import tarfile
 import unittest
 from unittest.mock import Mock, patch
 
 import server
+from stdio_channel import StdioChannel
 
 
 class RunnerValidationTests(unittest.TestCase):
+    def test_stdio_uses_isolated_container_and_literal_arguments(self):
+        client = Mock()
+        volume = Mock()
+        volume.name = 'xq-code-volume'
+        client.volumes.create.return_value = volume
+        container = Mock()
+        container.put_archive.return_value = True
+        container.attrs = {'State':{'Status':'exited','ExitCode':0,'Running':False}}
+        client.containers.create.return_value = container
+        raw, peer = socket.socketpair()
+        self.addCleanup(peer.close)
+        attached = Mock()
+        attached._sock = raw
+        container.attach_socket.return_value = attached
+        channel = StdioChannel()
+        argv = ['node','/workspace/skill/server.js','literal; $(not-a-host-command)']
+        with patch.object(server, '_get_client', return_value=client), patch.object(server, '_decode_logs', return_value=''), patch.object(server, '_safe_artifacts', return_value=[]):
+            result = server._run_sandbox({'task_id':'stdio-task','command':argv,'environment':{'PLUGIN_SETTING':'value'}}, Mock(), channel)
+        self.assertTrue(result['ok'])
+        options = client.containers.create.call_args.kwargs
+        self.assertEqual(options['command'], argv)
+        self.assertTrue(options['stdin_open'])
+        self.assertEqual(options['network'], 'none')
+        self.assertEqual(options['mem_limit'], '256m')
+        self.assertEqual(options['user'], '10001:10001')
+        self.assertEqual(options['cap_drop'], ['ALL'])
+        self.assertNotIn('SANDBOX_RUNNER_TOKEN', options['environment'])
+        self.assertEqual(options['environment']['PLUGIN_SETTING'], 'value')
+        container.remove.assert_called_once_with(force=True, v=True)
+        volume.remove.assert_called_once_with(force=True)
+
     def test_disable_task_network_only_kills_owned_proxy_for_task(self) -> None:
         client = Mock()
         proxy = Mock()

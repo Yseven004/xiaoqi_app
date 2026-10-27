@@ -20,7 +20,7 @@
 | P04 联网生命周期 | 实施中 | 已阻止临时技能脚本授权写入持久域名列表；统一审批策略与撤销验证未完成 |
 | P05 大型目录 | 实施中 | 已实现完整发现、目录检索和校验原始 schema 的调用网关；240 工具分页单测及 120 工具真实 Genkit 循环通过；生产连接器与更多目录变化/异常场景待验证 |
 | P06 产物复用 | 实施中 | 已增加当前任务产物 ID 选择和二进制字节传递；待版本/路径信息、真实格式编辑及容量边界验收 |
-| P07 stdio MCP | 待实施 | 隔离宿主、安装/启动/协议/清理均待完成 |
+| P07 stdio MCP | 实施中 | 已在独立工作区实现有界双向协议通道与 Genkit 私有传输，测试通过；租约端点、安装/启动、运行入口和端到端清理仍待完成 |
 | P08 Shell | 待实施 | 执行入口、参数、进程树和目标样本待完成 |
 | P09 现有宿主能力适配 | 范围已调整、待验收 | 用户已撤回通用电脑/手机控制及硬件采购；保留现有插件依赖识别、已有宿主映射和真实可用状态验收 |
 | P10 导入/安装/构建 | 待实施 | 组件需求解析、安装和构建适配待完成 |
@@ -77,3 +77,23 @@ Genkit CLI 1.44.1 已可用；`verifyToolPermissions` 验证 flow 的 4 个 MCP 
 Cloud Assistant 诊断调用 `t-hk0717k6j16o0sg`（退出 0）使用同一个不可变候选镜像及独立标签，获得 `status=ready`，并清理诊断容器；随后公开健康检查仍返回旧服务 `2026-10-26-official-learning-1`、contract `23`、`status=ok`。该诊断证明候选宿主启动可行，尚不证明官方技能门禁或生产发布成功。
 
 下一阶段参考样本：官方 `@modelcontextprotocol/server-filesystem@2.0.1`，npm integrity `sha512-K6n1daveB54TybQECAIzSp8DYq014Xfff159OtD1zjB48PONyMcQwyfMPw8jvhZnua/Jd+R/2HcCbTC3YVc3ag==`。2026-10-26 核对[上游变更记录](https://github.com/modelcontextprotocol/servers/blob/main/src/filesystem/CHANGELOG.md)、[路径修复公告](https://github.com/modelcontextprotocol/servers/security/advisories/GHSA-4gxg-m5jx-9j57)及[许可证](https://github.com/modelcontextprotocol/servers/blob/main/LICENSE)：2.0.1 修复路径边界，要求 Node >=24；上游处于 MIT/Apache-2.0 许可过渡，不能简写为全包 MIT。当前仅参考与隔离本地验证，未打包进产品。现有 Genkit MCP 1.0.0 的 `McpServerConfig.transport` 可接自定义 JSON 传输，无需在 API 进程启动不可信命令。本机 Node 24.15.0 下真实 stdio 初始化、14 个工具发现、写入后读取和目录越界拒绝通过；产品 stdio 适配仍未完成。
+
+## 当前发布与后续工作区
+
+提交 `5102acb83ec59e0f23e318a86bb59c80cc17d0eb` 的构建 `40333408755` 成功；作业 `20261026-214547-5102acb` 已通过候选 runner 健康检查，进入真实能力门禁，随后 `generate_image` 的服务商返回 HTTP 403 `AccountOverdueError`，作业退出 255，未进入 `HOLD_WRITES` / `ACTIVATE`。恢复现有生图账户是完成该真实门禁的外部前提，已通知用户；未替换为模拟通过或跳过门禁。
+
+为保持待发布主目录干净，后续 P07 工作在受管理工作区 `C:/Users/20833/.codex/worktrees/agent-stdio-runtime/xiaoqi_app` 进行（起点 `5102acb`）。已增加 Docker attach 的有界双向协议通道和 Genkit 自定义传输；本地 Python 15 项及 Dart 传输用例 1 项通过。新增用例覆盖响应/服务端请求、stderr 分离、截断/超限/非协议输出，以及真实 HTTP 控制连接的凭据隔离、租约清理和取消。runner 租约端点、安装声明、运行时入口与真实 MCP 的端到端隔离运行仍待接入，P07 不能关闭。这些后续代码尚未合入 main、未部署。
+
+补查 `t-hk0717lkntxk4cg`（退出 0）：公开健康仍为 `status=ok`、旧发布 `2026-10-26-official-learning-1`、contract `23`，两类候选标签均无残留容器。后续 stdio 代码静态分析曾发现间接导入 `BytesBuilder` 的弃用警告，改为显式导入 `dart:typed_data` 后 `dart analyze` 无问题。
+
+## 2026-10-27：继续非生图修复
+
+用户明确要求搁置欠费生图服务，不再要求充值，也不再调用生图验收。该项保留为用户要求后置的待验证记录，其余修复继续；不能把后置记录写成已验证通过。
+
+stdio MCP 已接入插件声明解析、安装依赖准备、不可变版本绑定和 Agent 的原生工具/大型目录网关。`npx` 声明在安装时转成 registry 依赖并由已有准备器记录锁定版本；运行时解析安装包的真实 `bin` 文件，直接以 Node 启动，不临时下载包、不执行 API 宿主命令，也不继承 API 进程环境变量。沙箱基线改为 Node 24，以匹配已选官方样本的真实版本要求。
+
+私有 runner 新增任务绑定的 stdio 租约、独立令牌、过期请求拒绝、启动幂等、取消与过期回收；MCP 使用独立单槽位、256 MB / 0.25 CPU 限制，避免闲置连接占住普通代码唯一槽位。此为当前实现基线，尚未完成目标 ECS 资源测量或多连接调度验收。调用前复查插件启用状态和绑定版本；断网工作区操作采用新操作记录，避免相同读取参数命中旧结果。取消后保留已有产物，结束结果待任务存储确认后才清除；同一租约重复保存附件使用稳定 ID，不重复追加文件或交付事件。
+
+本地验证：完整服务端回归 221 项通过；随后新增状态复查与工作区调用调整后，静态分析及 16 项针对性导入/解析/传输测试通过。runner Python 21 项通过，包含真实 HTTP 控制连接、错误令牌拒绝、重复启动、取消与超时释放，以及进程参数/容器隔离配置。Docker 模拟用例只证明配置与清理调用，不冒充实际 Docker 验证。
+
+已增加 `verify_stdio_runtime` 和 CI `run_stdio_gate.sh`：在真实 Docker runner 中安装官方 filesystem MCP 2.0.1，验证工具发现、写入/读取、目录越界拒绝、取消后附件字节与清理。该门禁不调用模型或生图服务，尚待 CI 实际运行；生产部署、实际 Agent stdio 工具循环、异常重连和目标平台验收仍待完成，P07/P13/P14 尚不关闭。

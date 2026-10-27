@@ -7,7 +7,8 @@ RUN dart pub get --no-precompile
 COPY genkit_server/ ./
 RUN dart analyze && dart test --concurrency=1 && dart build cli --target bin/server.dart --output /out \
  && dart build cli --target bin/verify_capability_chain.dart --output /probe \
- && dart build cli --target bin/verify_official_catalog.dart --output /curated-probe
+ && dart build cli --target bin/verify_official_catalog.dart --output /curated-probe \
+ && dart build cli --target bin/verify_stdio_runtime.dart --output /stdio-probe
 
 FROM debian:bookworm-slim
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
@@ -20,6 +21,7 @@ COPY --from=build /out/bundle/ /app/
 COPY --from=build /probe/bundle/bin/verify_capability_chain /app/bin/verify_capability_chain
 COPY --from=build /probe/bundle/lib/ /app/lib/
 COPY --from=build /curated-probe/bundle/bin/verify_official_catalog /app/bin/verify_official_catalog
+COPY --from=build /stdio-probe/bundle/bin/verify_stdio_runtime /app/bin/verify_stdio_runtime
 COPY genkit_server/bin/docker_worker.py /app/docker_worker.py
 COPY genkit_server/bin/prepare_dependencies.py /app/prepare_dependencies.py
 COPY genkit_server/official_catalog/ /app/official_catalog/

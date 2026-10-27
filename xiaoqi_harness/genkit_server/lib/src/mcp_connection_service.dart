@@ -13,6 +13,7 @@ import 'package:uuid/uuid.dart';
 import 'store.dart';
 import 'capability_keywords.dart';
 import 'tool_access_policy.dart';
+import 'isolated_mcp_spec.dart';
 
 Future<List<Map<String, dynamic>>> listAllMcpTools(
   Future<Map<String, dynamic>> Function(String? cursor) readPage,
@@ -46,6 +47,7 @@ class McpConnectionCredentials {
     required this.url,
     required this.bearerToken,
     this.catalogId,
+    this.isolated,
   });
 
   final String id;
@@ -53,6 +55,7 @@ class McpConnectionCredentials {
   final Uri url;
   final String? bearerToken;
   final String? catalogId;
+  final IsolatedMcpSpec? isolated;
 
   McpServerConfig serverConfig() => McpServerConfig(
     url: url,

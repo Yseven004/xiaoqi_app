@@ -1,10 +1,13 @@
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 
 import 'mcp_connection_service.dart';
 import 'store.dart';
+import 'isolated_mcp_spec.dart';
 
 class PluginDependencies {
   final connectionIds = <String>{};
+  final isolatedConnections = <McpConnectionCredentials>[];
   final messages = <String>[];
   final unavailable = <String>[];
 
@@ -79,6 +82,36 @@ class PluginDependencies {
       }
       for (final entry in definitions.entries) {
         final config = entry.value;
+        if (config is Map &&
+            config['command'] is String &&
+            config['url'] == null) {
+          try {
+            final spec = IsolatedMcpSpec.resolve(
+              config,
+              files,
+              capabilityId: selection['id'].toString(),
+              versionId: selection['version_id'].toString(),
+            );
+            final id =
+                'stdio-${sha256.convert(utf8.encode('${selection['id']}/${selection['version_id']}/${entry.key}')).toString().substring(0, 24)}';
+            result.isolatedConnections.add(
+              McpConnectionCredentials(
+                id: id,
+                name: '${record['name']} · ${entry.key}',
+                url: Uri.parse('isolated://workspace/$id'),
+                bearerToken: null,
+                isolated: spec,
+              ),
+            );
+            result.messages.add(
+              '插件 ${record['name']} 的 ${entry.key} 将在任务隔离工作区运行，默认断网',
+            );
+          } on FormatException catch (error) {
+            result.unavailable.add('插件连接 ${entry.key}：${error.message}');
+            result.messages.add('插件连接 ${entry.key}：${error.message}');
+          }
+          continue;
+        }
         if (config is! Map ||
             config['url'] is! String ||
             config['command'] != null) {

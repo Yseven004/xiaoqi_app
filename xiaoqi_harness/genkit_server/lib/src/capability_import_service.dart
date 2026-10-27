@@ -12,6 +12,7 @@ import 'package:genkit/genkit.dart' show CancellationToken;
 
 import 'store.dart';
 import 'plugin_dependencies.dart';
+import 'isolated_mcp_spec.dart';
 
 typedef DependencyPreparer =
     Future<Map<String, List<int>>> Function(
@@ -639,6 +640,19 @@ class CapabilityImportService {
               config['url'] is String &&
               config['command'] == null &&
               Uri.tryParse(config['url'])?.scheme == 'https';
+          final stdio =
+              config is Map &&
+              config['command'] is String &&
+              config['url'] == null;
+          String? commandError;
+          if (stdio) {
+            try {
+              IsolatedMcpSpec.declaredCommand(config);
+              IsolatedMcpSpec.npmDependency(config);
+            } on FormatException catch (error) {
+              commandError = error.message;
+            }
+          }
           components.add({
             'id':
                 'mcp-${sha256.convert(utf8.encode(entry.key)).toString().substring(0, 16)}',
@@ -648,18 +662,27 @@ class CapabilityImportService {
             'description': '插件声明的 MCP 连接器',
             'mcp_server_name': entry.key,
             if (remote) 'url': config['url'],
-            'status': remote ? 'partial' : 'unsupported',
-            'issues': [remote ? '需要绑定当前账号的远程连接' : '需要尚未支持的本地宿主或连接类型'],
-            'has_dependencies': false,
+            'status': remote
+                ? 'partial'
+                : stdio && commandError == null
+                ? 'supported'
+                : 'unsupported',
+            'issues': remote
+                ? ['需要绑定当前账号的远程连接']
+                : stdio && commandError == null
+                ? <String>[]
+                : [commandError ?? '连接声明格式无效'],
+            'has_dependencies':
+                stdio &&
+                commandError == null &&
+                (IsolatedMcpSpec.npmDependency(config) != null ||
+                    scoped.containsKey('package.json') ||
+                    scoped.containsKey('requirements.txt')),
           });
         }
       } on FormatException {
         unsupported.add('插件 MCP 声明格式或路径无效');
       }
-      if ((!standard && manifest['mcpServers'] != null) ||
-          scoped.containsKey('mcp.json') ||
-          scoped.containsKey('.mcp.json'))
-        unsupported.add('MCP 组件需绑定当前账号的兼容远程连接；本地进程需宿主支持');
       for (final type in ['hooks', 'commands', 'agents', 'apps']) {
         if (manifest[type] != null ||
             scoped.keys.any((p) => p.startsWith('$type/')) ||
@@ -853,7 +876,7 @@ class CapabilityImportService {
                 r'^(?:@[a-z0-9_.-]+/)?[a-z0-9_.-]+$',
               ).hasMatch(entry.key.toString()) ||
               !RegExp(
-                r'^[0-9v^~<>=*| .xX+-]+$',
+                r'^[A-Za-z0-9v^~<>=*| .xX+-]+$',
               ).hasMatch(entry.value.toString()))
             throw const FormatException('npm 依赖只支持 registry 包和版本范围');
         }
@@ -1017,7 +1040,24 @@ class CapabilityImportService {
       final components = <Map<String, dynamic>>[];
       for (final raw in (candidate['components'] as List).whereType<Map>()) {
         if (raw['status'] == 'unsupported') continue;
-        final files = subtree(all, raw['root'].toString());
+        final relative = candidate['root'] == raw['root']
+            ? ''
+            : raw['root'].toString().substring(
+                candidate['root'].toString().isEmpty
+                    ? 0
+                    : candidate['root'].toString().length + 1,
+              );
+        var files = subtree(package, relative);
+        if (raw['type'] == 'mcp') {
+          final config = PluginDependencies.declarations(
+            files,
+          )[raw['mcp_server_name']];
+          if (config is Map &&
+              config['command'] is String &&
+              config['url'] == null) {
+            files = IsolatedMcpSpec.installationFiles(config, files);
+          }
+        }
         if (raw['has_dependencies'] == true) {
           if (prepareDependencies == null)
             throw const FormatException('服务器依赖准备服务尚未配置');
@@ -1030,13 +1070,6 @@ class CapabilityImportService {
           );
         }
         cancellation?.throwIfCancelled();
-        final relative = candidate['root'] == raw['root']
-            ? ''
-            : raw['root'].toString().substring(
-                candidate['root'].toString().isEmpty
-                    ? 0
-                    : candidate['root'].toString().length + 1,
-              );
         for (final e in files.entries) {
           package[_join(relative, e.key)] = e.value;
         }

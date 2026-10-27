@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import 'execution_limits.dart';
 import 'store.dart';
+import 'sandbox_mcp_transport.dart';
 
 class NetworkPermissionRequired implements Exception {
   const NetworkPermissionRequired(this.domains, this.purpose);
@@ -128,6 +129,69 @@ class DockerCodeExecutionService {
         Platform.environment['SANDBOX_WORKER_PATH'] ??
         _defaultWorkerPath();
     return File(worker).existsSync();
+  }
+
+  Future<SandboxMcpTransport> connectMcp({
+    required String tenantId,
+    required String taskId,
+    required List<String> command,
+    required Map<String, String> environment,
+    required Map<String, List<int>> files,
+    required List<Map<String, dynamic>> materials,
+    required CancellationToken cancellation,
+  }) async {
+    cancellation.throwIfCancelled();
+    final url = Platform.environment['SANDBOX_RUNNER_URL'];
+    final token = Platform.environment['SANDBOX_RUNNER_TOKEN'];
+    if (url == null || token == null || token.length < 32) {
+      throw StateError('服务器隔离 MCP 宿主未配置');
+    }
+    final inputs = _materialsForNextExecution(
+      tenantId: tenantId,
+      taskId: taskId,
+      materials: materials,
+    );
+    _claimExecution(tenantId, taskId, skillScript: false);
+    return SandboxMcpTransport.connect(
+      runnerUrl: Uri.parse(url),
+      runnerToken: token,
+      request: {
+        'task_id': _runnerTaskId(tenantId, taskId),
+        'command': command,
+        'environment': environment,
+        'authorized_domains': <String>[],
+        'materials': inputs,
+        'skill_files': {
+          for (final entry in files.entries)
+            entry.key: base64Encode(entry.value),
+        },
+      },
+      cancellation: cancellation,
+    );
+  }
+
+  Future<void> finishMcp(
+    String tenantId,
+    String taskId,
+    SandboxMcpTransport transport,
+  ) async {
+    await transport.close();
+    final result = transport.completion;
+    if (result == null) return;
+    await _saveArtifacts(
+      tenantId,
+      taskId,
+      result['artifacts'],
+      operationId: 'mcp:${transport.leaseId}',
+    );
+    await transport.acknowledgeCompletion();
+    _finishSandboxCleanup(
+      tenantId,
+      taskId,
+      result['sandbox_id']?.toString(),
+      result['cleanup_pending'] == true,
+      result['sandbox_id']?.toString(),
+    );
   }
 
   Future<String> execute({
@@ -451,8 +515,9 @@ class DockerCodeExecutionService {
   Future<List<String>> _saveArtifacts(
     String tenantId,
     String taskId,
-    Object? rawArtifacts,
-  ) async {
+    Object? rawArtifacts, {
+    String? operationId,
+  }) async {
     if (rawArtifacts is! List || rawArtifacts.isEmpty) return const [];
     if (rawArtifacts.length > 10) throw StateError('任务最多可返回 10 个产物');
     final pending = <Map<String, dynamic>>[];
@@ -469,7 +534,13 @@ class DockerCodeExecutionService {
       if (total > 20 * 1024 * 1024) {
         throw StateError('本次任务产物总大小超过 20 MB');
       }
-      final id = _uuid.v4().replaceAll('-', '');
+      final id = operationId == null
+          ? _uuid.v4().replaceAll('-', '')
+          : sha256
+                .convert(
+                  utf8.encode('$operationId/$name/${sha256.convert(bytes)}'),
+                )
+                .toString();
       final objectKey = 'tenants/$tenantId/tasks/$taskId/artifacts/$id';
       store.putTaskBlob(objectKey, bytes);
       pending.add({
@@ -488,7 +559,12 @@ class DockerCodeExecutionService {
           .whereType<Map>()
           .map((value) => Map<String, dynamic>.from(value))
           .toList();
-      artifacts.addAll(pending);
+      final knownIds = artifacts.map((artifact) => artifact['id']).toSet();
+      final fresh = pending
+          .where((artifact) => knownIds.add(artifact['id']))
+          .toList();
+      if (fresh.isEmpty) return task;
+      artifacts.addAll(fresh);
       final events = (task['events'] as List? ?? const [])
           .whereType<Map>()
           .map((value) => Map<String, dynamic>.from(value))
@@ -496,7 +572,7 @@ class DockerCodeExecutionService {
       events.add({
         'seq': events.length,
         'type': 'artifacts_ready',
-        'artifacts': [for (final item in pending) _publicArtifact(item)],
+        'artifacts': [for (final item in fresh) _publicArtifact(item)],
         'created_at': _now(),
       });
       return {...task, 'artifacts': artifacts, 'events': events};

@@ -56,6 +56,8 @@ jobs:
             esac
             docker build --platform linux/amd64 --provenance=false -f "$dockerfile" -t "$image:local" "$context" 2>&1 | tee "$RUNNER_TEMP/build-logs/$name.log"
           done
+      - name: Verify isolated stdio MCP without paid services
+        run: bash xiaoqi_harness/deploy/run_stdio_gate.sh
       - name: Export verified release
         run: |
           python3 xiaoqi_harness/deploy/release_artifact.py pack --root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/release" --commit "$GITHUB_SHA"

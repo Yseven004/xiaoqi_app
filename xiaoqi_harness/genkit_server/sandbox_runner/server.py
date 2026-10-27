@@ -21,6 +21,8 @@ from typing import Any, Iterable
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from mcp_sessions import LeaseError, McpSessions
+from stdio_channel import StdioChannel
 
 
 MAX_BODY_BYTES = 100 * 1024 * 1024
@@ -369,11 +371,30 @@ def _decode_logs(container: Any, stream: str) -> str:
     return decoded[-MAX_LOG_BYTES:].decode("utf-8", errors="replace")
 
 
-def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
+def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None) -> dict[str, Any]:
     client = _get_client()
     task_id = str(request.get("task_id") or "")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", task_id):
         raise RequestError("任务 ID 无效")
+    command = None
+    extra_environment = {}
+    if stdio is not None:
+        command = request.get("command")
+        if (not isinstance(command, list) or not 1 <= len(command) <= 64
+                or not command[0]
+                or any(not isinstance(arg, str) or "\x00" in arg or len(arg) > 4096 for arg in command)
+                or sum(len(arg.encode("utf-8")) for arg in command) > 65536):
+            raise RequestError("MCP command must contain separate executable/argument values")
+        extra_environment = request.get("environment", {})
+        reserved = {"HOME", "PATH", "PYTHONPATH", "PYTHONUSERBASE", "NODE_PATH", "DOCKER_HOST", "SANDBOX_RUNNER_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
+        if (not isinstance(extra_environment, dict) or len(extra_environment) > 32
+                or any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", key)
+                       or key.upper() in reserved or not isinstance(value, str) or "\x00" in value or len(value.encode("utf-8")) > 4096
+                       for key, value in extra_environment.items())):
+            raise RequestError("Invalid MCP process environment")
+        request = {**request, "code": "pass", "language": "python"}
+        request.pop("script_path", None)
+        request.pop("arguments", None)
     files, language, arguments, script_paths = _request_files(request)
     domains = _normalize_domains(request.get("authorized_domains"))
     payload = _make_archive(files)
@@ -383,6 +404,7 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
     network = None
     proxy = None
     container = None
+    attached = None
     cleanup_pending = False
     run_error: str | None = None
     sandbox_id: str | None = None
@@ -406,6 +428,9 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
             "PYTHONNOUSERSITE": "0",
             "LANG": "C.UTF-8",
         }
+        environment.update(extra_environment)
+        if stdio is not None and stdio.closed:
+            raise RequestError("MCP startup was cancelled")
         if domains:
             with _network_policy_lock:
                 disabled_until = _disabled_task_networks.get(task_id, 0)
@@ -447,7 +472,8 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
         container = client.containers.create(
             image=SANDBOX_IMAGE,
             name=f"xq-code-{suffix}",
-            command=_command(language, arguments, script_paths),
+            command=command if command is not None else _command(language, arguments, script_paths),
+            stdin_open=stdio is not None,
             working_dir="/workspace/skill" if script_paths else "/workspace/work",
             environment=environment,
             user="10001:10001",
@@ -457,17 +483,22 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
             tmpfs={"/tmp": "rw,nosuid,nodev,size=128m"},
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
-            pids_limit=64,
-            mem_limit="384m",
-            memswap_limit="384m",
-            nano_cpus=500_000_000,
+            pids_limit=32 if stdio is not None else 64,
+            mem_limit="256m" if stdio is not None else "384m",
+            memswap_limit="256m" if stdio is not None else "384m",
+            nano_cpus=250_000_000 if stdio is not None else 500_000_000,
             labels=labels,
             log_config=docker.types.LogConfig(type="json-file", config={"max-size": "1m", "max-file": "1"}),
         )
         sandbox_id = container.id
         if not container.put_archive("/workspace", payload):
             raise RuntimeError("无法准备本次任务的临时工作区")
+        if stdio is not None and stdio.closed:
+            raise RequestError("MCP startup was cancelled")
         container.start()
+        if stdio is not None:
+            attached = container.attach_socket(params={"stdin": True, "stdout": True, "stderr": True, "stream": True, "logs": True})
+            stdio.attach(attached._sock)
         send({"type": "sandbox_started", "sandbox_id": sandbox_id})
         started_at = time.monotonic()
         exit_code: int | None = None
@@ -476,6 +507,13 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
             state = container.attrs.get("State", {})
             if state.get("Status") in {"exited", "dead"}:
                 exit_code = int(state.get("ExitCode", 1))
+                break
+            if stdio is not None and stdio.closed:
+                run_error = stdio.error or "MCP connection closed"
+                try:
+                    container.kill()
+                except DockerException:
+                    pass
                 break
             if time.monotonic() - started_at >= MAX_RUN_SECONDS:
                 run_error = "代码执行超过 120 秒，沙箱已停止"
@@ -494,9 +532,16 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
             stderr = _decode_logs(container, "stderr")
         except DockerException:
             pass
-        if run_error is None:
+        if run_error is None or stdio is not None:
             artifacts = _safe_artifacts(container)
     finally:
+        if stdio is not None:
+            stdio.close()
+        if attached is not None:
+            try:
+                attached.close()
+            except OSError:
+                pass
         for resource, action in ((container, "container"), (proxy, "container"), (network, "network"), (volume, "volume")):
             if resource is None:
                 continue
@@ -528,6 +573,11 @@ def _run_sandbox(request: dict[str, Any], send: Any) -> dict[str, Any]:
         "cleanup_pending": cleanup_pending,
         "sandbox_id": sandbox_id if cleanup_pending else None,
     }
+
+
+# An idle MCP connection must not hold the only ordinary-code slot: a task may
+# call MCP, run helper code, and return to the same MCP process.
+_mcp_sessions = McpSessions(_run_sandbox, threading.BoundedSemaphore(1), lifetime=MAX_RUN_SECONDS)
 
 
 def _wait_for_proxy(proxy: Any) -> bool:
@@ -590,6 +640,9 @@ class RunnerHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_GET(self) -> None:
+        if self.path.startswith("/v1/mcp"):
+            self._handle_mcp("GET")
+            return
         if self.path != "/health":
             self._json_response(404, {"error": "not found"})
             return
@@ -602,6 +655,9 @@ class RunnerHandler(BaseHTTPRequestHandler):
             self._json_response(503, {"status": "unavailable"})
 
     def do_POST(self) -> None:
+        if self.path.startswith("/v1/mcp"):
+            self._handle_mcp("POST")
+            return
         disable_match = re.fullmatch(
             r"/v1/tasks/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/network/off",
             self.path,
@@ -652,6 +708,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 self._send({"type": "result", "ok": False, "error": str(error)[:500], "artifacts": [], "cleanup_pending": False})
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
+
         except Exception:
             try:
                 self._send({"type": "result", "ok": False, "error": "服务器本机 Docker 沙箱执行失败", "artifacts": [], "cleanup_pending": False})
@@ -663,6 +720,71 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 self._finish_stream()
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
+
+    def do_DELETE(self) -> None:
+        self._handle_mcp("DELETE")
+
+    def _handle_mcp(self, method: str) -> None:
+        route = re.fullmatch(r"/v1/mcp(?:/([a-f0-9]{32})(?:/(messages|events|ack))?)?", self.path)
+        if route is None:
+            self._json_response(404, {"error": "not found"})
+            return
+        if not _authorized(self):
+            self._json_response(401, {"error": "unauthorized"})
+            return
+        lease_id, action = route.groups()
+        token = self.headers.get("X-Xiaoqi-Lease-Token", "")
+        try:
+            body = None
+            if method == "POST":
+                length = int(self.headers.get("Content-Length", "-1"))
+                maximum = MAX_BODY_BYTES if lease_id is None else 2 * 1024 * 1024
+                if length < 0 or length > maximum:
+                    self._json_response(413, {"error": "request too large"})
+                    return
+                body = json.loads(self.rfile.read(length))
+                if not isinstance(body, dict):
+                    raise LeaseError("Invalid MCP request")
+            if method == "POST" and lease_id is None:
+                if not isinstance(body.get("lease_token"), str) or not hmac.compare_digest(body["lease_token"], token):
+                    raise LeaseError("Invalid lease token")
+                lease = _mcp_sessions.create(body)
+                if not lease.ready.wait(timeout=15):
+                    lease.stop()
+                    self._json_response(503, {"error": "MCP process startup timed out"})
+                    return
+                if lease.done.is_set():
+                    self._json_response(503, {"error": "MCP process did not start"})
+                    return
+                result = {"ready": True}
+            elif lease_id is not None:
+                lease = _mcp_sessions.get(lease_id, token)
+                if method == "GET" and action == "events":
+                    result = lease.channel.poll()
+                    if lease.done.is_set():
+                        result["completion"] = {key: value for key, value in (lease.result or {}).items()
+                                                if key in {"ok", "error", "cleanup_pending"}}
+                elif method == "POST" and action == "messages":
+                    lease.channel.send(body)
+                    result = {"ok": True}
+                elif method == "DELETE" and action is None:
+                    lease.stop()
+                    result = {"closed": True, "cleanup_pending": not lease.done.wait(timeout=5)}
+                    result["completion"] = lease.result
+                elif method == "POST" and action == "ack" and lease.done.is_set():
+                    lease.discard()
+                    result = {"acknowledged": True}
+                else:
+                    self._json_response(405, {"error": "method not allowed"})
+                    return
+            else:
+                self._json_response(405, {"error": "method not allowed"})
+                return
+            self._json_response(200, result)
+        except (LeaseError, ValueError, UnicodeDecodeError):
+            self._json_response(400, {"error": "Invalid or unavailable MCP lease"})
+        except (RuntimeError, OSError):
+            self._json_response(503, {"error": "MCP process connection unavailable"})
 
 
 def main() -> int:
@@ -682,6 +804,7 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        _mcp_sessions.close()
         server.server_close()
     return 0
 
