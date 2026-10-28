@@ -36,6 +36,8 @@ void main() {
     'mcp-disabled',
     'mcp-reconfigured',
     'mcp-argument-change',
+    'mcp-user-send',
+    'mcp-user-send-change',
   ]) {
     test(
       '$scenario exercises real Genkit discovery, tool loop and delivery gate',
@@ -68,6 +70,35 @@ void main() {
             return;
           }
           providerRequests++;
+          if (serialized.contains('XIAOQI_ORIGINAL_USER_ACTION_V1')) {
+            expect(scenario.startsWith('mcp-user-send'), isTrue);
+            expect(body['tools'] ?? const [], isEmpty);
+            expect(serialized, isNot(contains('Return a real image card')));
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(
+              jsonEncode({
+                'id': 'user-intent',
+                'choices': [
+                  {
+                    'index': 0,
+                    'message': {
+                      'role': 'assistant',
+                      'content': jsonEncode({
+                        'authorized': true,
+                        'instruction': '请用 MCP 生成图片卡片并发送到 A',
+                        'arguments': {'destination': 'A'},
+                        'generated_fields': [],
+                        'generation_instruction': '',
+                      }),
+                    },
+                    'finish_reason': 'stop',
+                  },
+                ],
+              }),
+            );
+            await request.response.close();
+            return;
+          }
           if (serialized.contains('XIAOQI_TURN_INTENT_V1')) {
             final messages = (body['messages'] as List)
                 .whereType<Map>()
@@ -226,6 +257,7 @@ void main() {
                       'mcp-approved-repeat',
                       'mcp-denied',
                       'mcp-argument-change',
+                      'mcp-user-send-change',
                     }.contains(scenario) &&
                     remoteResponses < 2)) {
               tool = remoteName;
@@ -233,8 +265,13 @@ void main() {
                   ? {'tool_name': 'fetch_card_119', 'arguments': {}}
                   : scenario == 'mcp-public-read'
                   ? {'repoName': 'firebase/genkit'}
-                  : scenario == 'mcp-argument-change'
+                  : const {
+                      'mcp-argument-change',
+                      'mcp-user-send-change',
+                    }.contains(scenario)
                   ? {'destination': remoteResponses == 0 ? 'A' : 'B'}
+                  : scenario == 'mcp-user-send'
+                  ? {'destination': 'A'}
                   : {};
             }
           } else if (preparing && scenario != 'missing') {
@@ -481,6 +518,8 @@ void main() {
                     'mcp-slow-read',
                     'mcp-large',
                     'mcp-public-read',
+                    'mcp-user-send',
+                    'mcp-user-send-change',
                   }.contains(scenario)
                   ? 1
                   : 0,
@@ -491,6 +530,19 @@ void main() {
               expect(result['called_arguments'], [
                 {'repoName': 'firebase/genkit'},
               ]);
+            }
+            if (scenario == 'mcp-user-send') {
+              expect(result['approval_events'], 0);
+              expect(result['called_arguments'], [
+                {'destination': 'A'},
+              ]);
+            }
+            if (scenario == 'mcp-user-send-change') {
+              expect(result['approval_events'], 1);
+              expect(result['called_arguments'], [
+                {'destination': 'A'},
+              ]);
+              expect((result['pending_arguments'] as Map)['destination'], 'B');
             }
             expect(result['mcp_calls'], blocked ? 0 : 1);
             if (scenario == 'mcp-large')
@@ -518,7 +570,10 @@ void main() {
               result['mcp_status'],
               scenario == 'mcp-denied'
                   ? 'skipped'
-                  : scenario == 'mcp-argument-change'
+                  : const {
+                      'mcp-argument-change',
+                      'mcp-user-send-change',
+                    }.contains(scenario)
                   ? 'waiting'
                   : const {
                       'mcp-error',
@@ -672,6 +727,7 @@ void main() {
             'mcp-disabled',
             'mcp-reconfigured',
             'mcp-argument-change',
+            'mcp-user-send-change',
           }.contains(scenario)) {
             final finalRequest = requests.last;
             expect(finalRequest['tool_choice'], 'none');

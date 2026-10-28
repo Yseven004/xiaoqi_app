@@ -417,3 +417,29 @@ tests and 302 Dart tests pass; analyzer reports no issues. CI/deployment are pen
 This is concrete progress on P04, not overall completion. Original-request
 authorization (P01), component protocol adapters (P11), restart/recovery and the
 remaining original acceptance items still require implementation/verification.
+
+P04 ordering batch deployed and verified: main f129a40, CI 40660581113/job
+122722314374, release 20261028-165811-f129a40. Real Docker delayed-Off gate,
+302 Dart, 60 runner, 28 deployment checks and image roundtrip pass; server,
+public HTTPS 200, data, cleanup and latest-good restore point verified.
+
+## P01 original-request authorization entry (in progress)
+
+Added deployment-owned per-tool action rules and exact schema binding. A separate
+no-tool inference reads only the captured user request and reviewed rule; actual
+tool arguments are matched afterwards and cannot shape the inferred permission.
+Exact grants include policy/credential/schema identity, scope/cancel rechecks and
+provenance. Cache preserves the first interpretation across resume and new
+authority/rule changes fall back to confirmation. Unknown actions still confirm;
+generation permissions apply only to reviewed write/send content fields, never
+payment/delete targets. Existing exact approval/denial semantics are preserved.
+
+Real local Genkit/mock-provider/mock-MCP scenarios now verify send to A without
+redundant approval, and changed destination B waiting before RPC. The extra
+provider POST participates in existing cumulative task-count assertions. Full
+308-test regression passes after correcting an initially incompatible denial
+precedence change; literal identifier/amount hardening has additional focused
+checks running. See the original-user-action architecture document for limits.
+No real production action rule has been invented, and no external send/image
+provider call was made. CI, server rollout and real-service acceptance remain
+pending; this does not close P01 or the full plan.

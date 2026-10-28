@@ -46,3 +46,13 @@ a revision-1 Off and requires the new script's permitted public request to
 succeed. Existing live revocation, immediate reauthorization, denied domains,
 private addresses, ports and cleanup checks remain. Local Docker is unavailable;
 the new real-container check must pass in CI before deployment.
+
+Release evidence: main `f129a4062e9d3764a9177cd7ee0422086e72af08`, CI
+`40660581113`, job `122722314374` completed successfully: 302 Dart, 60 runner,
+28 deployment checks; Docker JSON explicitly records
+`network_delayed_off_preserves_reauthorization=true`, live revocation and
+immediate reauthorization true, and existing destination boundaries true.
+`IMAGE_ROUNDTRIP_VERIFIED` also passed. Standard deployment completed release
+`20261028-165811-f129a40`, healthy service, public HTTPS 200 via Cloud Assistant,
+data/health checks, cleanup and one latest-good restore point with data.
+No client/device verification was performed; public API remains 24.

@@ -33,6 +33,7 @@ import 'intent_router.dart';
 import 'model_limits.dart';
 import 'history_context.dart';
 import 'tool_execution.dart';
+import 'user_action_authorization.dart';
 import 'network_call_authorization.dart';
 import 'network_resume.dart';
 import 'tool_access_policy.dart';
@@ -2151,6 +2152,64 @@ class GenkitXiaoqiAgentRuntime
         A2uiPlugin(),
       ],
     );
+    final pendingUserIntents = <String, Future<String>>{};
+    Future<UserActionIntent?> originalUserIntent(
+      ToolExecution owner,
+      UserActionRule rule,
+      ToolEffect effect,
+      Map<String, dynamic> authority,
+    ) async {
+      final text = owner.requestText;
+      if (text == null || text.isEmpty) return null;
+      final intentKey = ToolExecution.digest([
+        owner.requestIdentity,
+        text,
+        rule.fingerprint,
+        effect.name,
+        authority,
+      ]);
+      var response = owner.userActionIntent(intentKey);
+      if (response == null) {
+        response = await pendingUserIntents.putIfAbsent(intentKey, () async {
+          try {
+            final result = await ai.generate(
+              model: openAI.model(
+                selection.modelId,
+                namespace: selection.namespace,
+              ),
+              system: UserActionIntent.system,
+              prompt: UserActionIntent.prompt(text, rule, effect),
+              toolNames: const [],
+              maxTurns: 1,
+              outputFormat: 'json',
+              config: OpenAIChatOptions(
+                temperature: 0,
+                maxTokens: 4096,
+                reasoningEffort: selection.namespace == 'deepseek'
+                    ? 'low'
+                    : null,
+              ),
+              cancel: cancellation,
+            );
+            if (result.finishReason == FinishReason.stop &&
+                result.text.length <= 65536) {
+              return result.text;
+            }
+          } on Object {
+            cancellation.throwIfCancelled();
+          }
+          return '{"authorized":false}';
+        });
+        response = owner.saveUserActionIntent(intentKey, response);
+      }
+      return UserActionIntent.parse(
+        response: response,
+        request: text,
+        rule: rule,
+        effect: effect,
+      );
+    }
+
     await loadCatalog(
       ai,
       id: _clarificationCatalogId,
@@ -2271,6 +2330,12 @@ class GenkitXiaoqiAgentRuntime
         try {
           if (!mcpConnectionService.isCurrent(tenantId, connection))
             throw StateError('MCP 连接或绑定版本已失效');
+          execution.saveUserActionIntent(
+            'connection-authority:${connection.id}',
+            ToolExecution.digest(
+              mcpConnectionService.authorizationBinding(connection),
+            ),
+          );
           final spec = connection.isolated;
           if (spec == null) {
             client = await mcpConnectionService.connect(connection);
@@ -2450,6 +2515,7 @@ class GenkitXiaoqiAgentRuntime
                 );
               }
               activeMcpIds.add(connection.id);
+              final callExecution = execution;
               final resumed = context.resumed;
               final effect = connection.isolated != null
                   ? ToolEffect.workspace
@@ -2462,7 +2528,7 @@ class GenkitXiaoqiAgentRuntime
               final approvalHash = ToolAccessPolicy.actionHash(
                 connectionId: connection.id,
                 tool: remoteToolName,
-                requestIdentity: requestIdentity,
+                requestIdentity: callExecution.requestIdentity,
                 arguments: input,
                 authority: {
                   ...mcpConnectionService.authorizationBinding(connection),
@@ -2473,22 +2539,76 @@ class GenkitXiaoqiAgentRuntime
               final scopeHash = ToolAccessPolicy.actionHash(
                 connectionId: connection.id,
                 tool: remoteToolName,
-                requestIdentity: requestIdentity,
+                requestIdentity: callExecution.requestIdentity,
                 authority: const {},
               );
               if (resumed is Map &&
                   resumed['approved'] is bool &&
                   resumed['approval_hash'] == approvalHash) {
-                execution.recordAuthorization(
+                callExecution.recordAuthorization(
                   actionHash: approvalHash,
                   scopeHash: scopeHash,
                   approved: resumed['approved'] as bool,
                 );
               }
-              final authorization = execution.authorization(
+              var authorization = callExecution.authorization(
                 actionHash: approvalHash,
                 scopeHash: scopeHash,
               );
+              if (authorization == null &&
+                  const {
+                    ToolEffect.write,
+                    ToolEffect.send,
+                    ToolEffect.delete,
+                    ToolEffect.payment,
+                  }.contains(effect)) {
+                final rule = mcpConnectionService.userActionFor(
+                  connection,
+                  remoteToolName,
+                  rawTool['inputSchema'],
+                );
+                if (rule != null) {
+                  final authority = mcpConnectionService.authorizationBinding(
+                    connection,
+                  );
+                  final authorityDigest = ToolExecution.digest(authority);
+                  final authorityKey = 'connection-authority:${connection.id}';
+                  final originalAuthority = callExecution.saveUserActionIntent(
+                    authorityKey,
+                    authorityDigest,
+                  );
+                  final intent = originalAuthority != authorityDigest
+                      ? null
+                      : await originalUserIntent(callExecution, rule, effect, {
+                          ...authority,
+                          'tool': remoteToolName,
+                        });
+                  cancellation.throwIfCancelled();
+                  callExecution.check('read');
+                  if (!mcpConnectionService.isCurrent(tenantId, connection) ||
+                      ToolExecution.digest(authority) !=
+                          ToolExecution.digest(
+                            mcpConnectionService.authorizationBinding(
+                              connection,
+                            ),
+                          )) {
+                    throw StateError('操作授权规则或连接已变化，请重新获取工具');
+                  }
+                  if (intent != null) {
+                    callExecution.recordOriginalUserAuthorization(
+                      intent: intent,
+                      arguments: input,
+                      actionHash: approvalHash,
+                      scopeHash: scopeHash,
+                      ruleFingerprint: rule.fingerprint,
+                    );
+                    authorization = callExecution.authorization(
+                      actionHash: approvalHash,
+                      scopeHash: scopeHash,
+                    );
+                  }
+                }
+              }
               final decision = ToolAccessPolicy.decide(
                 effect: effect,
                 hasExactUserGrant: authorization == true,
@@ -2533,10 +2653,10 @@ class GenkitXiaoqiAgentRuntime
               try {
                 var invoked = false;
                 final invoke = effect == ToolEffect.read
-                    ? execution.query
+                    ? callExecution.query
                     : effect == ToolEffect.workspace
-                    ? execution.workspace
-                    : execution.authorizedExternal;
+                    ? callExecution.workspace
+                    : callExecution.authorizedExternal;
                 final normalized = await invoke(
                   slot: '$alias:$approvalHash',
                   arguments: {

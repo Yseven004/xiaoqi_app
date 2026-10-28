@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import 'execution_limits.dart';
 import 'store.dart';
 import 'turn_contract.dart';
+import 'user_action_authorization.dart';
 
 /// Claims scope and budget together in the existing task document.
 class ToolExecution {
@@ -88,6 +89,8 @@ class ToolExecution {
         if (prior != null) 'delivery_evidence': <String, dynamic>{},
         'tool_authorizations': <String, dynamic>{},
         'tool_authorization_denials': <String, dynamic>{},
+        'user_action_intents': <String, dynamic>{},
+        'tool_authorization_sources': <String, dynamic>{},
         'authorized_network_domains': <String>[],
         'requested_network_domains': <String>[],
         'network_purpose': null,
@@ -137,6 +140,71 @@ class ToolExecution {
     if ((value['tool_authorization_denials'] as Map?)?[scopeHash] == true)
       return false;
     return null;
+  }
+
+  String? userActionIntent(String intentKey) {
+    check('read');
+    return (store.get(key)?.value['user_action_intents'] as Map?)?[intentKey]
+        as String?;
+  }
+
+  String saveUserActionIntent(String intentKey, String response) {
+    String? saved;
+    _update((value) {
+      check('read');
+      final intents = Map<String, dynamic>.from(
+        value['user_action_intents'] as Map? ?? const {},
+      );
+      if (!intents.containsKey(intentKey) &&
+          intents.length >= limits.toolOperations * 2) {
+        throw ExecutionBudgetExceeded('本次任务的操作授权识别数量已达到上限');
+      }
+      saved = (intents.putIfAbsent(intentKey, () => response)) as String;
+      return {...value, 'user_action_intents': intents};
+    });
+    return saved!;
+  }
+
+  /// Called only after independent original-request inference and exact matching.
+  /// A user's denial always wins over inferred intent, including concurrent ones.
+  void recordOriginalUserAuthorization({
+    required UserActionIntent intent,
+    required Map<String, dynamic> arguments,
+    required String actionHash,
+    required String scopeHash,
+    required String ruleFingerprint,
+  }) {
+    if (requestText == null ||
+        !intent.isForRequest(requestText!) ||
+        !intent.matches(arguments))
+      return;
+    _update((value) {
+      check('read');
+      final decisions = Map<String, dynamic>.from(
+        value['tool_authorizations'] as Map? ?? const {},
+      );
+      if (decisions[actionHash] == false ||
+          (value['tool_authorization_denials'] as Map?)?[scopeHash] == true)
+        return value;
+      if (!decisions.containsKey(actionHash) &&
+          decisions.length >= limits.toolOperations) {
+        throw ExecutionBudgetExceeded('本次任务的操作确认数量已达到上限');
+      }
+      decisions[actionHash] = true;
+      return {
+        ...value,
+        'tool_authorizations': decisions,
+        'tool_authorization_sources': {
+          ...(value['tool_authorization_sources'] as Map? ?? const {}),
+          actionHash: {
+            'source': 'original_user_request',
+            'request_identity': requestIdentity,
+            'request_digest': digest(requestText!),
+            'rule_fingerprint': ruleFingerprint,
+          },
+        },
+      };
+    });
   }
 
   bool isAuthorizationScopeDenied(String scopeHash) {

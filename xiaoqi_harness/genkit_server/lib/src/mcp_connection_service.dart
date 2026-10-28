@@ -15,6 +15,7 @@ import 'capability_keywords.dart';
 import 'tool_access_policy.dart';
 import 'isolated_mcp_spec.dart';
 import 'trusted_mcp_read_profiles.dart';
+import 'user_action_authorization.dart';
 
 const mcpToolRequestTimeout = Duration(seconds: 60);
 
@@ -97,6 +98,7 @@ class McpCatalogEntry {
     this.reason,
     this.keywords = const [],
     this.toolEffects = const {},
+    this.userActions = const {},
   });
 
   final String id;
@@ -118,6 +120,7 @@ class McpCatalogEntry {
   final String? reason;
   final List<String> keywords;
   final Map<String, ToolEffect> toolEffects;
+  final Map<String, UserActionRule> userActions;
 
   bool get requiresLogin => authMode == 'oauth';
 
@@ -171,6 +174,15 @@ class McpCatalogEntry {
                   .entries)
             entry.key.toString(): ToolEffect.parse(entry.value),
         },
+        userActions: {
+          for (final entry
+              in (raw['user_actions'] is Map
+                      ? raw['user_actions'] as Map
+                      : const {})
+                  .entries)
+            if (UserActionRule.fromJson(entry.value) case final rule?)
+              entry.key.toString(): rule,
+        },
       );
     } on FormatException {
       return null;
@@ -222,6 +234,15 @@ class McpConnectionService {
       connection.bearerToken == null &&
       TrustedMcpReadProfiles.matchesEndpoint(connection.url);
 
+  UserActionRule? userActionFor(
+    McpConnectionCredentials connection,
+    String tool,
+    Object? inputSchema,
+  ) {
+    final rule = _policyEntry(connection)?.userActions[tool];
+    return rule != null && rule.matchesSchema(inputSchema) ? rule : null;
+  }
+
   ToolEffect effectFor(
     McpConnectionCredentials connection,
     String tool, {
@@ -245,6 +266,18 @@ class McpConnectionService {
     'revision': connection.authorizationRevision,
     'catalog_id': _policyEntry(connection)?.id,
     'policy_version': _policyEntry(connection)?.version,
+    'tool_effects': {
+      for (final entry
+          in _policyEntry(connection)?.toolEffects.entries ??
+              const <MapEntry<String, ToolEffect>>[])
+        entry.key: entry.value.name,
+    },
+    'user_action_rules': {
+      for (final entry
+          in _policyEntry(connection)?.userActions.entries ??
+              const <MapEntry<String, UserActionRule>>[])
+        entry.key: entry.value.fingerprint,
+    },
     if (_hasPublicReadProfile(connection)) ...{
       'read_profile_id': TrustedMcpReadProfiles.id,
       'read_profile_version': TrustedMcpReadProfiles.version,

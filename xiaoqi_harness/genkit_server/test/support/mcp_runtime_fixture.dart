@@ -8,6 +8,7 @@ import 'package:xiaoqi_genkit_server/src/mcp_connection_service.dart';
 import 'package:xiaoqi_genkit_server/src/public_agent_process.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'package:xiaoqi_genkit_server/src/tool_access_policy.dart';
+import 'package:xiaoqi_genkit_server/src/user_action_authorization.dart';
 
 class FixtureMcpConnections extends McpConnectionService {
   FixtureMcpConnections(
@@ -15,10 +16,12 @@ class FixtureMcpConnections extends McpConnectionService {
     this.port, {
     this.readOnly = false,
     this.toolCount = 1,
+    this.userAuthorized = false,
   });
   final int port;
   final bool readOnly;
   final int toolCount;
+  final bool userAuthorized;
   @override
   List<McpCatalogEntry> catalog() => [
     McpCatalogEntry(
@@ -31,9 +34,23 @@ class FixtureMcpConnections extends McpConnectionService {
       authMode: 'none',
       status: 'verified',
       toolEffects: {
+        if (userAuthorized) 'make_card': ToolEffect.send,
         if (readOnly && toolCount == 1) 'fetch_card': ToolEffect.read,
         if (readOnly && toolCount > 1)
           for (var i = 0; i < toolCount; i++) 'fetch_card_$i': ToolEffect.read,
+      },
+      userActions: {
+        if (userAuthorized)
+          'make_card': const UserActionRule(
+            description: 'Generate and send an image card to the destination',
+            inputSchema: {
+              'type': 'object',
+              'properties': {
+                'destination': {'type': 'string'},
+              },
+              'additionalProperties': false,
+            },
+          ),
       },
     ),
   ];
@@ -57,6 +74,7 @@ class FixtureMcpConnections extends McpConnectionService {
 }
 
 Future<void> main(List<String> args) async {
+  final userAuthorized = args.single.startsWith('mcp-user-send');
   final publicRead = args.single == 'mcp-public-read';
   final readOnly = const {
     'mcp-read',
@@ -67,7 +85,11 @@ Future<void> main(List<String> args) async {
     'mcp-reconfigured',
   }.contains(args.single);
   final toolCount = args.single == 'mcp-large' ? 120 : 1;
-  final userText = readOnly ? '请读取 MCP 中已有的图片卡片' : '请用 MCP 生成图片卡片';
+  final userText = userAuthorized
+      ? '请用 MCP 生成图片卡片并发送到 A'
+      : readOnly
+      ? '请读取 MCP 中已有的图片卡片'
+      : '请用 MCP 生成图片卡片';
   final root = await Directory.systemTemp.createTemp('mcp-runtime-');
   final store = CloudStore(root: root.path);
   final rpc = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -208,6 +230,7 @@ Future<void> main(List<String> args) async {
       rpc.port,
       readOnly: readOnly,
       toolCount: toolCount,
+      userAuthorized: userAuthorized,
     ),
   );
   final request = <String, dynamic>{
@@ -256,13 +279,14 @@ Future<void> main(List<String> args) async {
           ),
         )
         .toList();
-    if (!readOnly && pendingRequests.isEmpty)
+    if (!readOnly && !userAuthorized && pendingRequests.isEmpty)
       throw StateError('Expected an MCP approval interrupt');
-    if (readOnly && pendingRequests.isNotEmpty)
+    if ((readOnly || args.single == 'mcp-user-send') &&
+        pendingRequests.isNotEmpty)
       throw StateError('Read-only MCP unexpectedly required confirmation');
     final pending = pendingRequests.lastOrNull;
     final approval = pending?.metadata?['interrupt'] as Map?;
-    final next = readOnly
+    final next = readOnly || userAuthorized
         ? first
         : await runtime.runAgentTurn(
             tenantId: 'personal',
