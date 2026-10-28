@@ -2518,7 +2518,7 @@ class GenkitXiaoqiAgentRuntime
           final command = pluginCommands.command(id);
           final originalCommandText = owner.requestText?.trimLeft() ?? '';
           final userInvocation = RegExp(
-            '^/${RegExp.escape('${entry!['plugin_name']}:${entry['name']}')}(?=\\s|\$)',
+            '^/${RegExp.escape('${pluginCommands.namespace(id)}:${entry!['name']}')}(?=\\s|\$)',
           ).firstMatch(originalCommandText);
           if (command.userOnly &&
               entry['explicit_component'] != true &&

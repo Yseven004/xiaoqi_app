@@ -67,7 +67,7 @@ Future<void> main(List<String> args) async {
   final scopeScenario = scenario.startsWith('scope-');
   final commandScenario =
       scenario.startsWith('text-only-plugin-command') ||
-      scenario == 'text-only-network-command';
+      scenario.startsWith('text-only-network-command');
   final userOnlyCommand = scenario == 'text-only-plugin-command-user-only';
   final textOnly = scenario.startsWith('text-only');
   final taskText = scenario.startsWith('text-only-plugin-command-direct')
@@ -114,7 +114,7 @@ elif r.get('action'):
  print(json.dumps({'ok':True}))
 else:
  assert r['authorized_domains'] == ['example.com']
- if '$scenario' == 'text-only-network-command':
+ if '$scenario'.startswith('text-only-network-command'):
   assert r['script_path'] == 'scripts/check.py'
   assert r['arguments'] == ['literal; \$(not-a-host-command)']
  counter=pathlib.Path(${jsonEncode(networkCounter.path)})
@@ -195,6 +195,7 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
   store.put('task/personal/turn', {'artifacts': []}, null);
   if (commandScenario) {
     store.putImmutable('packages/commands', {
+      '.claude-plugin/plugin.json': utf8.encode('{"name":"example"}'),
       'commands/greet.md': utf8.encode(
         '---\ndescription: Read a greeting reference\n${userOnlyCommand ? 'disable-model-invocation: true\n' : ''}---\nPLUGIN_COMMAND_BODY: Read references/greeting.md. First=\$0 second=\$1 all=\$ARGUMENTS',
       ),
@@ -206,7 +207,9 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
     store.put('cap/personal/commands', {
       'id': 'commands',
       'kind': 'plugin',
-      'name': 'example',
+      'name': scenario == 'text-only-plugin-command-direct-renamed-changed'
+          ? 'Renamed display label'
+          : 'example',
       'origin': 'upload',
       'enabled': true,
       'current_version_id': 'v1',
@@ -390,6 +393,14 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
         metadata: part.metadata,
       );
       final permission = part.metadata!['interrupt'] as Map;
+      if (scenario == 'text-only-network-command-renamed') {
+        final plugin = store.get('cap/personal/commands')!;
+        store.put('cap/personal/commands', {
+          ...plugin.value,
+          'name': 'Renamed while awaiting approval',
+          'description': 'Updated display description',
+        }, plugin.revision);
+      }
       final restart = pending.restart({
         'approved': scenario != 'text-only-network-denied',
         'domains': permission['domains'],

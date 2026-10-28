@@ -338,6 +338,149 @@ print(json.dumps({'type':'result','ok':True,'stdout':'','stderr':'','cleanup_pen
   );
 
   test(
+    'dependency installation recovers the original build across restarts without replay',
+    () async {
+      final archive = Archive()
+        ..add(
+          ArchiveFile.string('.xiaoqi/dependency-lock.json', '{"schema":1}'),
+        )
+        ..add(
+          ArchiveFile.string(
+            '.xiaoqi/built/dist/index.cjs',
+            'module.exports=42;',
+          ),
+        );
+      final encoded = base64Encode(ZipEncoder().encode(archive));
+      final original = File('${directory.path}/install-original.json');
+      final ready = File('${directory.path}/install-ready');
+      final ack = File('${directory.path}/install-ack');
+      File(
+        '${directory.path}/prepare_dependencies.py',
+      ).writeAsStringSync('# trusted installer');
+      worker.writeAsStringSync('''
+import json,pathlib,sys
+r=json.loads(sys.stdin.readline())
+original=pathlib.Path(${jsonEncode(original.path)})
+if r.get('action') == 'network_token':
+ print(json.dumps({'ok':True,'network_token':'123456789.${'a' * 64}'}))
+elif r.get('action') == 'execution_result':
+ first=json.loads(original.read_text())
+ assert r['execution_id'] == first['execution_id']
+ complete=pathlib.Path(${jsonEncode(ready.path)}).exists()
+ failed=complete and pathlib.Path(${jsonEncode(ready.path)}).read_text() == 'fail'
+ result={'ok':not failed,'stderr':'original build failure diagnostic' if failed else '', 'execution_id':first['execution_id'],'cleanup_pending':False,'artifacts':[{'name':'dependencies.zip','base64':'$encoded','media_type':'application/zip'}]}
+ print(json.dumps({'ok':True,'finished':complete,'completion':result if complete else None}))
+elif r.get('action') == 'ack_execution':
+ ack=pathlib.Path(${jsonEncode(ack.path)})
+ acknowledged=ack.exists()
+ ack.write_text('ack')
+ print(json.dumps({'ok':acknowledged,'acknowledged':acknowledged,'cleanup_pending':False}))
+elif r.get('action'):
+ print(json.dumps({'ok':True}))
+else:
+ assert not original.exists(), 'dependency build was replayed'
+ original.write_text(json.dumps(r))
+''');
+      DockerCodeExecutionService service() => DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      final source = {
+        'package.json': utf8.encode('{}'),
+        'source.js': utf8.encode('// source'),
+      };
+      final firstAttempt = expectLater(
+        service().prepareDependencies('personal', source),
+        throwsA(isA<SandboxExecutionError>()),
+      );
+      await expectLater(
+        service().prepareDependencies('personal', source),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'concurrent preparation',
+            contains('正在准备'),
+          ),
+        ),
+      );
+      await firstAttempt;
+      final pending = store.list('task/personal/install-').single;
+      final firstRequest = original.readAsStringSync();
+      store.put(pending.$1, {
+        ...pending.$2.value,
+        'dependency_source_digest': 'different-source',
+      }, pending.$2.revision);
+      await expectLater(
+        service().prepareDependencies('personal', source),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'source binding',
+            contains('来源不匹配'),
+          ),
+        ),
+      );
+      final rejected = store.get(pending.$1)!;
+      expect(rejected.value['dependency_source_digest'], 'different-source');
+      store.put(pending.$1, pending.$2.value, rejected.revision);
+      store.close();
+      store = CloudStore(root: directory.path);
+      await expectLater(
+        service().prepareDependencies('personal', source),
+        throwsStateError,
+      );
+      expect(store.list('task/personal/install-').single.$1, pending.$1);
+      expect(original.readAsStringSync(), firstRequest);
+      ready.writeAsStringSync('ready');
+      final recovered = await service().prepareDependencies(
+        'personal',
+        Map.fromEntries(source.entries.toList().reversed),
+      );
+      expect(utf8.decode(recovered['dist/index.cjs']!), 'module.exports=42;');
+      final saved = store.get(pending.$1)!.value;
+      expect(saved['code_execution_runs'], 1);
+      expect(saved['artifacts'], hasLength(1));
+      expect(
+        (saved['code_execution_operations'] as Map)
+            .values
+            .single['ack_pending'],
+        true,
+      );
+      final acknowledged = await service().prepareDependencies(
+        'personal',
+        source,
+      );
+      expect(acknowledged.keys, contains('dist/index.cjs'));
+      expect(store.get(pending.$1), isNull);
+      expect(original.readAsStringSync(), firstRequest);
+      original.deleteSync();
+      ready.deleteSync();
+      ack.deleteSync();
+      await expectLater(
+        service().prepareDependencies('personal', source),
+        throwsA(isA<SandboxExecutionError>()),
+      );
+      final failedRequest = original.readAsStringSync();
+      ready.writeAsStringSync('fail');
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await expectLater(
+          service().prepareDependencies('personal', source),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'original failure diagnostics',
+              contains('original build failure diagnostic'),
+            ),
+          ),
+        );
+        expect(original.readAsStringSync(), failedRequest);
+        expect(store.get(pending.$1) == null, attempt == 1);
+      }
+    },
+  );
+
+  test(
     'prepared build output cannot overwrite reserved runtime or alias dependencies',
     () async {
       for (final entries in [

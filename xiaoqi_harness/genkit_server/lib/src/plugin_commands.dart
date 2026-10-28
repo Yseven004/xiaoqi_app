@@ -353,8 +353,49 @@ class SelectedPluginCommands {
   final entries = <String, Map<String, dynamic>>{};
   final _packages = <String, Map<String, List<int>>>{};
 
-  String fingerprint(String alias) =>
-      sha256.convert(utf8.encode(jsonEncode(entries[alias]))).toString();
+  String fingerprint(String alias) {
+    final entry = entries[alias];
+    if (entry == null) throw StateError('命令不在本次选择的插件中');
+    return sha256
+        .convert(
+          utf8.encode(
+            jsonEncode({
+              for (final key in [
+                'parent_id',
+                'version_id',
+                'component_id',
+                'root',
+                'source_path',
+                'artifact_key',
+              ])
+                key: entry[key],
+            }),
+          ),
+        )
+        .toString();
+  }
+
+  String namespace(String alias) {
+    final package = files(alias);
+    // Same manifest order as installation; display-name edits never rename a
+    // declared command namespace. Manually created records may lack a manifest.
+    for (final path in [
+      'plugin.json',
+      '.claude-plugin/plugin.json',
+      '.codex-plugin/plugin.json',
+    ]) {
+      final bytes = package[path];
+      if (bytes == null) continue;
+      final manifest = jsonDecode(utf8.decode(bytes));
+      if (manifest is! Map ||
+          manifest['name'] is! String ||
+          (manifest['name'] as String).trim().isEmpty) {
+        throw const FormatException('插件命令名称空间声明无效');
+      }
+      return manifest['name'] as String;
+    }
+    return entries[alias]!['plugin_name'].toString();
+  }
 
   Map<String, List<int>> files(String alias) {
     final entry = entries[alias];

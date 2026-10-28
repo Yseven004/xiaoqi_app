@@ -53,6 +53,7 @@ class DockerCodeExecutionService {
   final Uri? _runnerUrl;
   final String? _runnerToken;
   final _uuid = const Uuid();
+  static final _dependencyPreparations = <String>{};
 
   /// Keep the terminal error, not only the progress output before it.
   static String failureDetails(Object error) {
@@ -71,7 +72,24 @@ class DockerCodeExecutionService {
     Map<String, List<int>> files, {
     CancellationToken? cancellation,
   }) async {
-    final taskId = 'install-${_uuid.v4()}';
+    cancellation?.throwIfCancelled();
+    final source = {
+      for (final entry in files.entries) entry.key: List<int>.of(entry.value),
+    };
+    final paths = source.keys.toList()..sort();
+    final digest = sha256
+        .convert(
+          utf8.encode(
+            jsonEncode([
+              for (final path in paths)
+                [path, sha256.convert(source[path]!).toString()],
+            ]),
+          ),
+        )
+        .toString();
+    // Keep the identity across HTTP retries and API restarts. Unknown builds
+    // must recover their original result instead of executing lifecycle hooks again.
+    final taskId = 'install-$digest';
     final key = 'task/$tenant/$taskId';
     final worker =
         _workerPath ??
@@ -81,28 +99,75 @@ class DockerCodeExecutionService {
       '${File(worker).parent.path}/prepare_dependencies.py',
     );
     if (!installer.existsSync()) throw StateError('服务器缺少依赖准备程序');
-    store.put(key, {
-      'id': taskId,
-      'status': 'preparing_dependencies',
-      'events': [],
-      'artifacts': [],
-    }, null);
+    final activeKey = '${store.root.absolute.path}/$key';
+    if (!_dependencyPreparations.add(activeKey)) {
+      throw StateError('相同来源的依赖正在准备，请稍后查询原安装');
+    }
+    var ownsPreparation = false;
     try {
-      await execute(
-        tenantId: tenant,
-        taskId: taskId,
-        code: await installer.readAsString(),
-        language: 'python',
-        authorizedDomains: [
-          'pypi.org',
-          'files.pythonhosted.org',
-          'registry.npmjs.org',
-        ],
-        materials: [],
-        // Build hooks need their own source files, not API-host paths or data.
-        skillFiles: files,
-        cancellation: cancellation ?? CancellationController().token,
-      );
+      final previous = store.get(key);
+      if (previous == null) {
+        store.put(key, {
+          'id': taskId,
+          'status': 'preparing_dependencies',
+          'dependency_source_digest': digest,
+          'events': [],
+          'artifacts': [],
+        }, null);
+        ownsPreparation = true;
+      } else {
+        if (previous.value['dependency_source_digest'] != digest ||
+            previous.value['status'] != 'preparing_dependencies') {
+          throw StateError('依赖准备记录与原始来源不匹配，不能复用或覆盖');
+        }
+        ownsPreparation = true;
+        await recoverExecutions(tenantId: tenant, taskId: taskId);
+      }
+      cancellation?.throwIfCancelled();
+      final operations =
+          store.get(key)!.value['code_execution_operations'] as Map? ??
+          const {};
+      if (operations.isNotEmpty) {
+        if (operations.values.any(
+          (operation) =>
+              operation is! Map || operation['status'] != 'persisted',
+        )) {
+          throw StateError('依赖准备结果尚未确认，已保留原执行，请稍后重试安装以查询结果；不会重复运行构建脚本');
+        }
+        final failed = operations.entries
+            .where((operation) => (operation.value as Map)['ok'] != true)
+            .firstOrNull;
+        if (failed != null) {
+          final result =
+              jsonDecode(
+                    utf8.decode(
+                      store.getObject(
+                        'tenants/$tenant/tasks/$taskId/executions/${failed.key}/result.json',
+                      ),
+                    ),
+                  )
+                  as Map;
+          throw StateError(
+            '原依赖准备执行失败：${failureDetails(StateError(_executionText(result, const [])))}',
+          );
+        }
+      } else {
+        await execute(
+          tenantId: tenant,
+          taskId: taskId,
+          code: await installer.readAsString(),
+          language: 'python',
+          authorizedDomains: [
+            'pypi.org',
+            'files.pythonhosted.org',
+            'registry.npmjs.org',
+          ],
+          materials: [],
+          // Build hooks need their own source files, not API-host paths or data.
+          skillFiles: source,
+          cancellation: cancellation ?? CancellationController().token,
+        );
+      }
       final artifacts = store.get(key)!.value['artifacts'] as List;
       final artifact = artifacts
           .whereType<Map>()
@@ -138,10 +203,29 @@ class DockerCodeExecutionService {
       }
       if (!prepared.containsKey('.xiaoqi/dependency-lock.json'))
         throw StateError('依赖锁定记录缺失');
+      cancellation?.throwIfCancelled();
       return prepared;
     } finally {
-      store.deleteObjectsPrefix('tenants/$tenant/tasks/$taskId/');
-      store.delete(key);
+      try {
+        final task = store.get(key)?.value;
+        final operations =
+            task?['code_execution_operations'] as Map? ?? const {};
+        final pending =
+            task?['sandbox_cleanup_pending'] == true ||
+            operations.values.any(
+              (operation) =>
+                  operation is! Map ||
+                  operation['status'] != 'persisted' ||
+                  operation['ack_pending'] == true ||
+                  operation['cleanup_pending'] == true,
+            );
+        if (ownsPreparation && !pending) {
+          store.deleteObjectsPrefix('tenants/$tenant/tasks/$taskId/');
+          store.delete(key);
+        }
+      } finally {
+        _dependencyPreparations.remove(activeKey);
+      }
     }
   }
 

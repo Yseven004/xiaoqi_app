@@ -72,20 +72,20 @@ GitHub 构建状态 GET 遇到短暂传输/超时/特定临时服务错误时最
 
 | 项 | 状态 | 当前证据与剩余工作 |
 | --- | --- | --- |
-| P01 MCP 按动作授权 | 实施中 | 已实现可信效果策略、任务内批准/拒绝保存、完整参数与连接版本绑定、调用前状态复查；本地真实 Agent 授权循环通过；自然语言已有授权映射、跨入口统一及目标账号验收未完成 |
+| P01 MCP 按动作授权 | 实施中 | 可信效果策略、完整参数/连接绑定、提交前复查及独立原始人类指令映射框架已上线；尚无虚构的真实写服务规则，跨入口统一及目标账号验收未完成 |
 | P02 工具并存 | 实施中 | 显式技能、stdio MCP 与 Shell 在同一实际 Agent/Docker 任务中验证通过；其余代表插件组合与目标平台验收仍待完成 |
-| P03 意图与发现分离 | 实施中 | 已保留账号内技能目录及显式连接、开放任务工作区和资料读取；待分类遗漏及取消回归 |
-| P04 联网生命周期 | 实施中 | 精确调用授权、拒绝、原请求恢复及任务绑定短期凭据已通过 CI 并上线 API 24；快速模式切换和控制结果恢复等遗留项仍待完成 |
+| P03 意图与发现分离 | 实施中 | 目录发现、工作区/资料读取、用户撤回旧要求及回答阶段改任务后的重新准备已上线；连接健康变化后的实时目录刷新及更广分类/取消验收仍待完成 |
+| P04 联网生命周期 | 实施中 | 精确动作授权、原请求恢复、任务短期凭据及模式 revision 顺序保护已上线；运行中撤权的更广能力边界和共享代理验收仍待完成 |
 | P05 大型目录 | 实施中 | 已实现完整发现、目录检索和校验原始 schema 的调用网关；240 工具分页单测及 120 工具真实 Genkit 循环通过；生产连接器与更多目录变化/异常场景待验证 |
 | P06 产物复用 | 实施中 | 真实 Docker 中 XLSX/DOCX/PDF/PNG 多步编辑、同名新旧版本与跨任务隔离通过；资源读取入口、容量边界和目标平台全流程仍待验收 |
-| P07 stdio MCP | 实施中 | 租约、插件安装与 Agent 接入已实现；真实 Docker 官方样本及 Agent 混合调用循环通过；重连和目标 ECS 资源验收仍待完成 |
+| P07 stdio MCP | 实施中 | 官方样本混合调用、事件游标、原租约回收及独立于普通脚本的 MCP 心跳寿命已上线；runner 重启后持久化租约/RPC 恢复、重连和目标 ECS 资源验收仍待完成 |
 | P08 Shell | 实施中 | 通用 Shell、已安装脚本、字面 argv 与 MCP 文件接力均已验证；Docker 后台子进程资源清理通过；目标 ECS 资源及客户端验收待完成 |
 | P09 现有宿主能力适配 | 实施中 | 用户已撤回通用电脑/手机控制及硬件采购；技能/插件版本及文件局部不可用已通过真实 Agent 循环，健康组件继续交付；已有宿主映射和更广依赖状态验收仍待完成 |
-| P10 导入/安装/构建 | 实施中 | npm 根包/依赖生命周期、构建与离线交付，pyproject/setup、源/依赖执行位和 Node CLI 已经真实门禁并上线；历史包权限迁移、较长/组合构建和安装结果未知恢复仍待完成 |
-| P11 插件组件 | 待实施 | hooks/commands/agents/apps/extensions 目标协议与宿主适配待完成 |
+| P10 导入/安装/构建 | 实施中 | npm/Python 构建、离线交付、执行位和 Node CLI 已上线；安装未知结果的原执行恢复本地验证中；历史包权限迁移、较长/组合构建仍待完成 |
+| P11 插件组件 | 实施中 | Markdown commands 的安装/旧包重索引、发现、参数展开、资源读取和脚本闭环已上线，重命名后的绑定修复本地通过；其余必要 hooks/agents/apps/extensions 目标协议与宿主适配待完成 |
 | P12 预算与计数 | 实施中 | 已修正累计次数、失败计数与恢复，工具调用不再由计划次数硬阻断；当前服务端资源预算待代表任务测量和全入口统一 |
-| P13 运行生命周期 | 实施中 | 普通执行日志、取消/断线/runner 恢复与清理已通过真实门禁；范围/版本复查、联网精确授权和成功去重已上线；MCP 重连、恢复结果关联及全生命周期验收未完成 |
-| P14 最终验证/部署 | 实施中 | 非生图阶段版本已部署并经健康/数据/真实技能门禁验证；剩余修复、生图后置项及客户端/真机验收未完成 |
+| P13 运行生命周期 | 实施中 | 普通执行恢复/清理、结果关联原授权操作、请求范围复查和预算计数已上线；安装恢复本地验证中；原 RPC/输入快照连续性、MCP 重连及全生命周期验收未完成 |
+| P14 最终验证/部署 | 实施中 | 非生图阶段版本已部署并经健康/数据/真实容器门禁验证；剩余修复及客户端/真机验收未完成，真实生图按用户明确要求后置，不等待充值 |
 
 ## 首批改动
 
@@ -502,4 +502,42 @@ Final local regression completes 326 tests with analyzer clean. Ordinary code
 after withdrawal has no stale skill files and records one runner execution;
 late answer-stage scope advancement withholds the obsolete answer, automatically
 prepares the new code task and preserves task-wide provider counts. CI and
-deployment are pending; overall P01–P14 remains open.
+deployment were pending at that checkpoint. This batch is now deployed as
+20261028-210026-a982aef (main a982aef4b7b86dd9bfe464a0528ac3cc6a164aa0).
+CI 40692493105/job 122830632421 passed 326 Dart, 60 runner and 28 deployment
+tests, actual Docker protocol gates and image export/import verification.
+The deployment controller exited 0; current service health, data/restore-point
+checks and public HTTPS 200 passed. Client/device verification remains separate;
+overall P01–P14 remains open.
+
+## P11 command authority identity (local validation in progress)
+
+Display name, description and selection mode no longer invalidate an unchanged
+immutable command approval. Direct invocation recognition now uses the package
+manifest namespace, preserving original-argument validation after a display
+rename. Eleven focused tests pass, including real Genkit interrupt/resume with
+one script execution and rejected argument mutation after rename; analyzer is
+clean. Full regression and deployment remain pending. Details and limits:
+docs/architecture/2026-10-28-command-binding-identity.md.
+
+## P10/P13 dependency installation recovery (local validation in progress)
+
+Confirmed and fixed unconditional deletion of the dependency-build execution
+journal after a lost stream. Preparation now binds a source-byte snapshot to a
+stable tenant-scoped task, queries the original execution on install retry,
+retains unknown/acknowledgement/cleanup state and refuses duplicate submission.
+Concurrent attempts in the single running API process are excluded across
+service instances. Successful results still require the existing ZIP path,
+size and lock checks; recovered failures retain original diagnostics and cannot
+be accepted as success because a ZIP was returned. Local execution-service and
+combined dependency/command checks pass; final broad regression, CI Docker gates
+and deployment remain pending. Details: docs/architecture/
+2026-10-28-dependency-install-recovery.md. Longer/combined builds, component
+protocols and the original full-plan acceptance requirements remain open.
+
+Combined local validation: 329-test broad regression passes. The final
+strengthened execution/command suite passes 35 checks and analyzer is clean;
+12 focused dependency/actual Genkit command scenarios also pass. The next
+coherent release contains both P11 binding and P10/P13 install recovery fixes.
+CI and standard non-image deployment are required before reporting these fixes
+as deployed. The prior request-scope release is independently verified above.

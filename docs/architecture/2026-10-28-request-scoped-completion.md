@@ -82,3 +82,15 @@ changes, original pending RPC/input snapshots, wider restart recovery and the
 remaining protocol/client acceptance matrix retain their original scope. New
 task completion must still be demonstrated with actual tool results, and real
 provider interpretation/client-device behavior is separate from local fixtures.
+
+Deployment evidence: main a982aef4b7b86dd9bfe464a0528ac3cc6a164aa0,
+GitHub Actions 40692493105/job 122830632421 completed successfully. CI passes
+326 Dart tests, 60 runner tests and 28 deployment tests, the actual Docker stdio
+and command/script loop gates, and IMAGE_ROUNDTRIP_VERIFIED. Standard non-image
+deployment completed with controller exit 0 as 20261028-210026-a982aef.
+The service is healthy, public HTTPS returns 200 through the same-endpoint
+Cloud Assistant verification, and latest-good plus its data restore point are
+present. Deployment log: primary checkout .codex-artifacts/deploy/
+20261028-210026-a982aef.log. This records server deployment and verification;
+real client/device effectiveness remains unverified. Paid image cases remain
+explicitly deferred by the user.

@@ -20,6 +20,8 @@ void main() {
     'text-only-plugin-command-direct',
     'text-only-plugin-command-direct-changed',
     'text-only-network-command',
+    'text-only-network-command-renamed',
+    'text-only-plugin-command-direct-renamed-changed',
     'text-only-workspace-retry',
     'text-only-shell',
     'text-only-search',
@@ -243,7 +245,7 @@ void main() {
             }
           } else if (preparing &&
               (scenario.startsWith('text-only-plugin-command') ||
-                  scenario == 'text-only-network-command')) {
+                  scenario.startsWith('text-only-network-command'))) {
             if (!called('set_task_deliverables')) {
               tool = 'set_task_deliverables';
               input = {
@@ -255,7 +257,7 @@ void main() {
                     'search_plugin_commands',
                     'run_plugin_command',
                     'read_plugin_command_resource',
-                    if (scenario == 'text-only-network-command')
+                    if (scenario.startsWith('text-only-network-command'))
                       'execute_skill_script',
                   ])
                     {'name': name, 'count': 1},
@@ -271,8 +273,7 @@ void main() {
                 'command_id': RegExp(
                   r'command-[a-f0-9]{24}',
                 ).firstMatch(serialized)!.group(0),
-                'arguments':
-                    scenario == 'text-only-plugin-command-direct-changed'
+                'arguments': scenario.endsWith('changed')
                     ? '"hello world" B'
                     : '"hello world" A',
               };
@@ -284,7 +285,7 @@ void main() {
                 ).firstMatch(serialized)!.group(0),
                 'path': 'references/greeting.md',
               };
-            } else if (scenario == 'text-only-network-command' &&
+            } else if (scenario.startsWith('text-only-network-command') &&
                 !called('execute_skill_script')) {
               tool = 'execute_skill_script';
               input = {
@@ -761,6 +762,7 @@ void main() {
             if (const {
               'text-only-plugin-command-user-only',
               'text-only-plugin-command-direct-changed',
+              'text-only-plugin-command-direct-renamed-changed',
             }.contains(scenario)) {
               expect(result['missing'], isTrue);
               expect(result['active'], isEmpty);
@@ -829,7 +831,7 @@ void main() {
             expect(result['active'], hasLength(1));
             expect(result['text'], contains('纯文字'));
             if (scenario.startsWith('text-only-plugin-command') ||
-                scenario == 'text-only-network-command') {
+                scenario.startsWith('text-only-network-command')) {
               expect(
                 jsonEncode(result['events']),
                 contains('run_plugin_command'),

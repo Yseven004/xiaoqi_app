@@ -143,6 +143,25 @@ void main() {
           PluginCommand.profileVersion,
         );
         expect(selected.command(alias).render('Ada'), contains('for Ada'));
+        final binding = selected.fingerprint(alias);
+        final named = store.get('cap/alice/$id')!;
+        store.put('cap/alice/$id', {
+          ...named.value,
+          'name': 'Renamed display label',
+          'description': 'Updated description',
+        }, named.revision);
+        final renamed = SelectedPluginCommands(store, 'alice', refs);
+        expect(renamed.entries.keys.single, alias);
+        expect(renamed.fingerprint(alias), binding);
+        expect(renamed.namespace(alias), 'example');
+        final discovered = SelectedPluginCommands(
+          store,
+          'alice',
+          [],
+          discover: true,
+        );
+        expect(discovered.fingerprint(alias), binding);
+        expect(discovered.namespace(alias), 'example');
         expect(
           utf8.decode(selected.files(alias)['references/greeting.md']!),
           'Greeting reference',
