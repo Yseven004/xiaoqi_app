@@ -346,6 +346,38 @@ class ToolExecution {
     uncertainLegacySlots: uncertainLegacySlots,
   );
 
+  /// One reservation per original SDK delegation request, including resumes.
+  /// Actual child tool calls and model requests keep their existing budgets.
+  String beginDelegation(String invocation, String binding) {
+    check('workspace');
+    final id = operationIdentity('delegation', invocation);
+    _update((value) {
+      check('workspace');
+      final operations = Map<String, dynamic>.from(
+        value['scope_operations'] as Map? ?? const {},
+      );
+      final prior = operations[id];
+      if (prior is Map) {
+        if (prior['arguments_hash'] != binding)
+          throw StateError('子 Agent 调用绑定已变化，不能恢复原调用');
+        return value;
+      }
+      if (taskToolOperationsUsed(value) >= limits.toolOperations)
+        throw ExecutionBudgetExceeded('本次任务的操作数量预算已用完');
+      operations[id] = {
+        'request_identity': requestIdentity,
+        'effect': 'delegation',
+        'arguments_hash': binding,
+        'status': 'not_submitted',
+      };
+      return {...value, 'scope_operations': operations};
+    });
+    return id;
+  }
+
+  void checkpointDelegation(String id, String status) =>
+      _finish(id, status, {'phase': status});
+
   /// Code attempts reserve their budget in DockerCodeExecutionService. This
   /// entry supplies effect identity/result reuse without charging twice.
   Future<Map<String, dynamic>> authorizedCode({

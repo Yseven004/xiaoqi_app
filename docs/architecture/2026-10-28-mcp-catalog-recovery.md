@@ -81,3 +81,12 @@ parameters in opposite map orders and confirms one actual effect, one approval
 and one budget charge. External journals use the canonical action identity for
 both their slot and argument digest. Full exact-commit CI remains the rollout
 gate; the earlier broad run is not recorded as an all-green final run.
+
+Final CI/rollout: main 93b5367a5edfe84993899dd04406e565c04d1bf9,
+Actions 40708334415/job 122886423240 passes all 342 Dart, 60 runner and 28
+deployment tests, actual Docker protocol gates and image roundtrip. Standard
+non-image deployment 20261028-224107-93b5367 exits 0. Service health, data and
+latest-good restore-point checks pass; public HTTPS returns 200 through the same
+endpoint checked by Cloud Assistant. API contract remains 24. Primary log:
+.codex-artifacts/deploy/20261028-224107-93b5367.log. Server deployed and verified;
+client/device acceptance and remaining full-plan work are separate.

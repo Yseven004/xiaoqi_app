@@ -575,3 +575,23 @@ name does not collide with the gateway and reordered arguments still reuse one
 external effect/approval/budget charge. The original broad run remains recorded
 as 340 passed plus the repaired fixture failure; exact-commit full CI is required
 before activating this release. Prior command/install release remains healthy.
+
+The MCP catalog/effect-identity release is now deployed and verified as
+20261028-224107-93b5367, main 93b5367a5edfe84993899dd04406e565c04d1bf9.
+Exact-commit CI 40708334415/job 122886423240 passes all 342 Dart, 60 runner
+and 28 deployment tests plus real Docker gates and image roundtrip. The standard
+non-image controller exited 0; service/data/restore-point checks and same-endpoint
+public HTTPS 200 pass. Client/device and remaining P01–P14 work stay open.
+
+## P11 agent source/session core (draft; runtime entry not yet connected)
+
+Added source parsing, a shared immutable component registry, and a private native
+Genkit child-session bridge. Consecutive child approvals survive a database and
+registry rebuild, completed pendingOutput calls are not shown/restarted, and
+original scope/version/task binding, cancellation, unknown-result protection
+and budgets are preserved. Twenty-five focused checks/analyzer pass; seven
+actual Genkit command loops also pass after extracting the shared registry.
+The importer/runtime still reports agents unavailable; this draft has not been
+published as an executable agent feature. Required runtime/tool-policy/resource/
+completion wiring and acceptance are detailed in docs/architecture/
+2026-10-28-plugin-agent-adapter.md. No new client flow or paid provider is added.
