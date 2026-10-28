@@ -67,7 +67,16 @@ else:
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
     if (failure != null) throw failure!;
-    await executor.disableNetwork(tenantId: tenant, taskId: task);
+    final beforeOff = store.get(key)!;
+    store.put(key, {
+      ...beforeOff.value,
+      'network_policy_revision': 1,
+    }, beforeOff.revision);
+    await executor.disableNetwork(
+      tenantId: tenant,
+      taskId: task,
+      networkRevision: 1,
+    );
     await observed;
     if (failure != null) throw failure!;
   } finally {
@@ -76,7 +85,46 @@ else:
   }
   // No sleep or "enable runner" operation: a fresh authorized call must work
   // immediately, while the unit/queue tests prove old tokens stay revoked.
+  final beforeOn = store.get(key)!;
+  store.put(key, {
+    ...beforeOn.value,
+    'network_policy_revision': 2,
+  }, beforeOn.revision);
   await run(allowedAndDenied);
+  // Reproduce delivery reordering against a real running Docker proxy: a
+  // previous off reaches the runner after the newly authorized proxy starts.
+  final previousSandbox = store.get(key)?.value['sandbox_id'];
+  final freshCancellation = CancellationController();
+  Object? freshFailure;
+  final fresh =
+      run(
+        'import time\ntime.sleep(5)\n$allowedAndDenied',
+        cancellation: freshCancellation.token,
+      ).catchError((Object error) {
+        freshFailure = error;
+      });
+  try {
+    final deadline = DateTime.now().add(const Duration(seconds: 20));
+    while (freshFailure == null) {
+      final sandbox = store.get(key)?.value['sandbox_id'];
+      if (sandbox != null && sandbox != previousSandbox) break;
+      if (DateTime.now().isAfter(deadline)) {
+        throw StateError('Reauthorized network fixture did not start');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    if (freshFailure != null) throw freshFailure!;
+    await executor.disableNetwork(
+      tenantId: tenant,
+      taskId: task,
+      networkRevision: 1,
+    );
+    await fresh;
+    if (freshFailure != null) throw freshFailure!;
+  } finally {
+    freshCancellation.cancel();
+    await fresh;
+  }
   if (store.get(key)?.value['sandbox_cleanup_pending'] != false) {
     throw StateError('Network fixture cleanup was not confirmed');
   }

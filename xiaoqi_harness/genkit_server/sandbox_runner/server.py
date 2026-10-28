@@ -57,40 +57,52 @@ _slots = threading.BoundedSemaphore(1)
 _executions = Executions(db_path=os.environ.get('XIAOQI_EXECUTION_DB'))
 _network_policy_lock = threading.Lock()
 _network_token_key = os.urandom(32)
-_revoked_task_networks: dict[str, tuple[int, float]] = {}
+_revoked_task_networks: dict[str, tuple[int, int, float]] = {}
 NETWORK_TOKEN_SECONDS = MAX_RUN_SECONDS + 180
 
 
-def _network_token(task_id: str) -> str:
+def _network_revision(value: Any) -> int:
+    if type(value) is not int or not 0 <= value <= 9007199254740991:
+        raise RequestError('Invalid network policy revision')
+    return value
+
+
+def _network_token(task_id: str, revision: int = 0) -> str:
+    revision = _network_revision(revision)
     issued = str(time.monotonic_ns())
-    signature = hmac.digest(_network_token_key, f'{task_id}:{issued}'.encode(), 'sha256').hex()
+    signature = hmac.digest(_network_token_key, f'{task_id}:{revision}:{issued}'.encode(), 'sha256').hex()
     return f'{issued}.{signature}'
 
 
-def _network_token_is_current(task_id: str, token: Any) -> bool:
+def _network_token_is_current(task_id: str, token: Any, revision: int = 0) -> bool:
+    revision = _network_revision(revision)
     if not isinstance(token, str) or not re.fullmatch(r'[0-9]{1,20}\.[a-f0-9]{64}', token):
         return False
     issued, signature = token.split('.')
-    expected = hmac.digest(_network_token_key, f'{task_id}:{issued}'.encode(), 'sha256').hex()
+    expected = hmac.digest(_network_token_key, f'{task_id}:{revision}:{issued}'.encode(), 'sha256').hex()
     age = time.monotonic_ns() - int(issued)
     if not hmac.compare_digest(signature, expected) or not 0 <= age <= NETWORK_TOKEN_SECONDS * 1_000_000_000:
         return False
     # Caller holds _network_policy_lock when creating a proxy, so revocation
     # cannot slip between this check and proxy startup.
     revoked = _revoked_task_networks.get(task_id)
-    return revoked is None or int(issued) > revoked[0]
+    return revoked is None or revision > revoked[0] or (
+        revision == revoked[0] and int(issued) > revoked[1])
 
 
-def _disable_task_network(task_id: str) -> dict[str, Any]:
+def _disable_task_network(task_id: str, revision: int = 0) -> dict[str, Any]:
+    revision = _network_revision(revision)
     client = _get_client()
     with _network_policy_lock:
         # Invalidate requests already prepared/queued, without blocking a newly
         # authorized call after the user turns networking back on.
         expires_at = time.monotonic() + NETWORK_TOKEN_SECONDS
-        for old_task_id, (_, old_expiry) in list(_revoked_task_networks.items()):
+        for old_task_id, (_, _, old_expiry) in list(_revoked_task_networks.items()):
             if old_expiry <= time.monotonic():
                 _revoked_task_networks.pop(old_task_id, None)
-        _revoked_task_networks[task_id] = (time.monotonic_ns(), expires_at)
+        previous = _revoked_task_networks.get(task_id)
+        if previous is None or revision >= previous[0]:
+            _revoked_task_networks[task_id] = (revision, time.monotonic_ns(), expires_at)
         proxies = client.containers.list(
             all=True,
             filters={
@@ -108,6 +120,10 @@ def _disable_task_network(task_id: str) -> dict[str, Any]:
             try:
                 proxy.reload()
             except NotFound:
+                continue
+            labels = proxy.attrs.get('Config', {}).get('Labels', {}) or {}
+            proxy_revision = int(labels.get('com.xiaoqi.network-revision', '0'))
+            if proxy_revision > revision:
                 continue
             if proxy.attrs.get("State", {}).get("Running"):
                 proxy.kill()
@@ -530,7 +546,8 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             raise RequestError("MCP startup was cancelled")
         if domains:
             with _network_policy_lock:
-                if not _network_token_is_current(task_id, request.get('network_token')):
+                network_revision = _network_revision(request.get('network_revision', 0))
+                if not _network_token_is_current(task_id, request.get('network_token'), network_revision):
                     raise RequestError('联网授权已撤销或过期，请按当前任务权限重新调用')
                 else:
                     network = _create_task_network(client, f"xq-code-net-{suffix}", labels)
@@ -547,7 +564,8 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
                         pids_limit=32,
                         mem_limit="64m",
                         nano_cpus=100_000_000,
-                        labels={**labels, "com.xiaoqi.role": "network-proxy"},
+                        labels={**labels, "com.xiaoqi.role": "network-proxy",
+                                "com.xiaoqi.network-revision": str(network_revision)},
                         log_config=docker.types.LogConfig(type="json-file", config={"max-size": "64k", "max-file": "1"}),
                     )
                     network.connect(proxy, aliases=["sandbox-proxy"])
@@ -834,9 +852,12 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 self._json_response(400, {"error": "task ID does not match request path"})
                 return
             try:
-                result = (_disable_task_network(task_id) if disable_match.group(2) == 'off'
-                          else {'ok': True, 'network_token': _network_token(task_id)})
+                revision = _network_revision(request.get('network_revision'))
+                result = (_disable_task_network(task_id, revision) if disable_match.group(2) == 'off'
+                          else {'ok': True, 'network_token': _network_token(task_id, revision)})
                 self._json_response(200, result)
+            except ValueError as error:
+                self._json_response(400, {'error': str(error)})
             except (DockerException, RuntimeError) as error:
                 self._json_response(503, {"error": str(error)[:300]})
             return

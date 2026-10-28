@@ -399,3 +399,21 @@ main `e42f35e426907eb7a64c4a728186a2bc52fb9c03` 的 CI `40506855943` 在 runner 
 最终发布记录：main `3646fcea74cde2567ad51a21f9ba7b9bba9c2b8f` 的 CI `40543635243`、作业 `122328296918` 全部成功，280 项 Dart、50 项 runner、28 项部署检查和真实隔离门禁通过。标准入口发布 `20261028-005851-3646fce` 退出 0，公开 HTTPS 经 Cloud Assistant 验证 200，产品版本/API 24 匹配；当前服务 healthy、唯一 latest-good 恢复点及数据备份存在，健康/数据验证和清理通过。三项非生图检查及 BookToSkill 4 个完整产物通过；三项生图仍是用户后置、verified=false。日志在原主目录 `.codex-artifacts/deploy/20261028-005851-3646fce.log`。本批服务器已部署并验证。
 
 首轮 APK 构建成功但期间修改过卡片代码，未作为交付；冻结提交后再次 release 构建成功（416.3 秒），没有修改全局内存限制。未采集逐 Gradle 任务的缓存命中，不把耗时缩短当作具体缓存效果的验收证据。最终包位于原主目录 `.codex-artifacts/client-current/app-release.apk`，369817076 字节，SHA256 `f8d8eaf9601edc62cce2c74f0fe6ddb4e6b2e6f621fe73847eda8adbb846b9d1`；复制前后校验一致，三个 ABI 均找到新版本和参数卡片字串。构建工作区 d252367 与发布 main 3646fce 的 Git tree 均为 `281fd7f9cfac6bcb6336be041a9de70e74d1c09d`。发布与构建证据见 `docs/architecture/evidence/2026-10-28-network-authorization-release.json`。匹配客户端已准备，旧接口版本将按既有单版本规则停止正常调用；真机未执行验证，待用户真机验证。总目标仍进行中。
+## 2026-10-28 P04 control ordering follow-up
+
+MCP lifetime batch is now deployed and verified as `20261028-155305-67dd90c`;
+CI `40652916724` confirms 126-second live MCP, ordinary code deadline, 301 Dart,
+58 runner, 28 deployment checks and image roundtrip. See the lifetime document
+for exact release evidence; this does not close restart/multi-connection work.
+
+P04 mode ordering now uses a persisted per-task policy revision, signed into
+runner tokens and attached to proxy labels. Delayed Off only revokes its own or
+older authorization generations. A lower revision cannot replace a higher
+revocation watermark. Added API concurrent Off/On, bridge propagation, runner
+HTTP/signature/ordering tests and a real Docker delayed-Off check. 60 runner
+tests and 302 Dart tests pass; analyzer reports no issues. CI/deployment are pending. See
+`docs/architecture/2026-10-28-network-policy-ordering.md`.
+
+This is concrete progress on P04, not overall completion. Original-request
+authorization (P01), component protocol adapters (P11), restart/recovery and the
+remaining original acceptance items still require implementation/verification.

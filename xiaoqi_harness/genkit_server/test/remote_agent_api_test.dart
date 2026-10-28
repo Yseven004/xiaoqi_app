@@ -38,6 +38,9 @@ class _StreamingRuntime
   Completer<void>? pauseBeforeReturn;
   Completer<void>? turnStarted;
   final disabledNetworkTasks = <String>[];
+  final disabledNetworkRevisions = <int>[];
+  Completer<void>? networkDisableStarted;
+  Completer<void>? finishNetworkDisable;
   final preparationEvents = <Map<String, Object?>>[];
   bool failAfterPreparation = false;
 
@@ -45,9 +48,13 @@ class _StreamingRuntime
   Future<void> disableTaskNetwork({
     required String tenantId,
     required String taskId,
+    required int networkRevision,
   }) async {
     expect(tenantId, 'personal');
     disabledNetworkTasks.add(taskId);
+    disabledNetworkRevisions.add(networkRevision);
+    networkDisableStarted?.complete();
+    await finishNetworkDisable?.future;
   }
 
   @override
@@ -647,8 +654,58 @@ void main() {
       expect(body['mode'], 'off');
       expect(body['network_revoked'], isTrue);
       expect(runtime.disabledNetworkTasks, [taskId]);
+      expect(runtime.disabledNetworkRevisions, [1]);
       expect(store.get('task/personal/$taskId')!.value['network_mode'], 'off');
     } finally {
+      client.close(force: true);
+      runtime.pauseBeforeReturn!.complete();
+      await streamDone;
+      await turn.response;
+    }
+  });
+
+  test('captures off revision before a concurrent on changes the task', () async {
+    const taskId = 'network-mode-reordered';
+    runtime.pauseBeforeReturn = Completer<void>();
+    runtime.turnStarted = Completer<void>();
+    runtime.networkDisableStarted = Completer<void>();
+    runtime.finishNetworkDisable = Completer<void>();
+    final turn = ownerAgent.chat().sendStream(
+      message: userMessage('搜索', taskId),
+    );
+    final streamDone = turn.stream.drain<void>();
+    await runtime.turnStarted!.future;
+    final client = HttpClient();
+    Future<int> setMode(String mode) async {
+      final request = await client.postUrl(
+        Uri.parse(
+          'http://127.0.0.1:${server.port}/v1/agent/tasks/$taskId/network-mode',
+        ),
+      );
+      request.headers
+        ..contentType = ContentType.json
+        ..set('x-xiaoqi-contract', apiContractVersion)
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken');
+      request.write(jsonEncode({'mode': mode}));
+      final response = await request.close();
+      await response.drain<void>();
+      return response.statusCode;
+    }
+
+    try {
+      final off = setMode('off');
+      await runtime.networkDisableStarted!.future;
+      expect(await setMode('on'), 200);
+      final task = store.get('task/personal/$taskId')!.value;
+      expect(task['network_mode'], 'on');
+      expect(task['network_policy_revision'], 2);
+      expect(runtime.disabledNetworkRevisions, [1]);
+      runtime.finishNetworkDisable!.complete();
+      expect(await off, 200);
+      expect(store.get('task/personal/$taskId')!.value['network_mode'], 'on');
+    } finally {
+      if (!runtime.finishNetworkDisable!.isCompleted)
+        runtime.finishNetworkDisable!.complete();
       client.close(force: true);
       runtime.pauseBeforeReturn!.complete();
       await streamDone;

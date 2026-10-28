@@ -294,6 +294,7 @@ PY
         'source_executable_permissions_roundtrip': true,
         'npm_cli_entrypoint_offline': true,
         'network_live_revocation_and_immediate_reauthorization': true,
+        'network_delayed_off_preserves_reauthorization': true,
         'network_exact_host_port_and_private_destination_boundaries': true,
       }),
     );

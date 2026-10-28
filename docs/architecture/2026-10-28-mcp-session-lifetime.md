@@ -19,3 +19,14 @@ The real Docker gate now holds the official filesystem MCP connection for 125 se
 During that same wait, an independent ordinary Python script sleeps beyond its deadline. The gate requires its original 120-second timeout error and confirmed cleanup, while the MCP call still succeeds. The two checks run concurrently using their existing separate capacities; this is not a second two-minute wait. The gate cancels and awaits the script on early failure before closing its task store.
 
 The public API remains 24 and no client rebuild or hardware purchase is needed. Rollback restores the prior runner image and its former lifetime policy; task data and private lease checkpoints are preserved. Durable lease state across runner restart, general multi-host scheduling and other plan items are not closed by this lifetime change.
+
+Published and deployed as main `67dd90c408862927c0907961b5f50defb88b3fce`,
+release `20261028-155305-67dd90c`. CI run `40652916724`, job `122696998021`
+completed successfully: 301 Dart, 58 runner and 28 deployment checks; the real
+Docker JSON records `active_mcp_survives_code_timeout=true`,
+`ordinary_script_deadline_enforced=true`, `active_mcp_observed_seconds=126`.
+The image export/import gate reports `IMAGE_ROUNDTRIP_VERIFIED`.
+Deployment completed health/data checks, resumed traffic and cleanup, then
+reported public HTTPS 200 through Cloud Assistant, healthy current release and
+one `latest-good` restore point with data. Client/device verification is separate
+and was not performed. Complete P01–P14 remains open.

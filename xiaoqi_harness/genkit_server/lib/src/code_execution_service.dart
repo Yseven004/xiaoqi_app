@@ -328,10 +328,16 @@ class DockerCodeExecutionService {
       throw const FormatException('不支持的代码语言');
     }
     String? networkToken;
+    final networkRevision =
+        (store.get('task/$tenantId/$taskId')?.value['network_policy_revision']
+                    as num? ??
+                0)
+            .toInt();
     if (authorizedDomains.isNotEmpty) {
       final grant = await _runnerControlResult({
         'action': 'network_token',
         'task_id': _runnerTaskId(tenantId, taskId),
+        'network_revision': networkRevision,
       });
       networkToken = grant['network_token'] as String?;
       if (networkToken == null ||
@@ -447,6 +453,7 @@ class DockerCodeExecutionService {
         'language': language,
         'authorized_domains': authorizedDomains,
         if (networkToken != null) 'network_token': networkToken,
+        if (networkToken != null) 'network_revision': networkRevision,
         'materials': executionMaterials,
         'skill_files': {
           for (final entry in skillFiles.entries)
@@ -571,9 +578,11 @@ class DockerCodeExecutionService {
   Future<void> disableNetwork({
     required String tenantId,
     required String taskId,
+    required int networkRevision,
   }) => _runnerControl({
     'action': 'disable_network',
     'task_id': _runnerTaskId(tenantId, taskId),
+    'network_revision': networkRevision,
   });
 
   Future<void> _runnerControl(

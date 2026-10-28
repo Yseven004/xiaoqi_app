@@ -159,6 +159,39 @@ class RunnerValidationTests(unittest.TestCase):
         with patch.object(server.time, 'monotonic_ns', return_value=issued + (server.NETWORK_TOKEN_SECONDS + 1) * 1_000_000_000):
             self.assertFalse(server._network_token_is_current(task_id, new_token))
 
+    def test_delayed_off_preserves_new_revision_and_cannot_lower_revocation(self):
+        task_id = 'network-control-reordered'
+        old = server._network_token(task_id, 0)
+        fresh = server._network_token(task_id, 2)
+        client = Mock()
+        proxies = []
+        for revision in (0, 2):
+            proxy = Mock()
+            proxy.name = f'xq-code-proxy-revision-{revision}'
+            proxy.attrs = {'State': {'Running': True}, 'Config': {
+                'Labels': {'com.xiaoqi.network-revision': str(revision)}}}
+            proxies.append(proxy)
+        client.containers.list.return_value = proxies
+        with patch.object(server, '_get_client', return_value=client):
+            result = server._disable_task_network(task_id, 1)
+            self.assertEqual(result['terminated_proxies'], 1)
+            proxies[0].kill.assert_called_once_with()
+            proxies[1].kill.assert_not_called()
+            self.assertFalse(server._network_token_is_current(task_id, old, 0))
+            self.assertTrue(server._network_token_is_current(task_id, fresh, 2))
+            # Revision is cryptographically bound: changing it cannot lift a ban.
+            self.assertFalse(server._network_token_is_current(task_id, old, 2))
+            server._disable_task_network(task_id, 3)
+            proxies[1].kill.assert_called_once_with()
+            server._disable_task_network(task_id, 1)
+            self.assertFalse(server._network_token_is_current(
+                task_id, server._network_token(task_id, 2), 2))
+
+    def test_network_revision_rejects_untrusted_types(self):
+        for revision in (None, True, -1, 1.5, '2', 9007199254740992):
+            with self.subTest(revision=revision), self.assertRaises(server.RequestError):
+                server._network_token('bad-network-revision', revision)
+
     def test_fresh_network_token_actually_starts_proxy_after_revocation(self):
         task_id = 'fresh-network-task'
         client = Mock()

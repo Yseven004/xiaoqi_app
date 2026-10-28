@@ -20,11 +20,11 @@ class NetworkControlTests(unittest.TestCase):
             thread = threading.Thread(target=http.serve_forever, daemon=True)
             thread.start()
             try:
-                def control(action):
+                def control(action, revision):
                     suffix = 'token' if action == 'network_token' else 'off'
                     request = urllib.request.Request(
                         f'http://127.0.0.1:{http.server_port}/v1/tasks/network-control-task/network/{suffix}',
-                        data=json.dumps({'task_id': 'network-control-task'}).encode(),
+                        data=json.dumps({'task_id': 'network-control-task', 'network_revision': revision}).encode(),
                         headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
                         method='POST')
                     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -32,12 +32,16 @@ class NetworkControlTests(unittest.TestCase):
                         self.assertEqual(response.status, 200)
                         return json.load(response)
 
-                old = control('network_token')['network_token']
+                old = control('network_token', 0)['network_token']
                 self.assertTrue(server._network_token_is_current('network-control-task', old))
-                self.assertTrue(control('disable_network')['ok'])
+                self.assertTrue(control('disable_network', 1)['ok'])
                 self.assertFalse(server._network_token_is_current('network-control-task', old))
-                fresh = control('network_token')['network_token']
-                self.assertTrue(server._network_token_is_current('network-control-task', fresh))
+                fresh = control('network_token', 2)['network_token']
+                self.assertTrue(server._network_token_is_current('network-control-task', fresh, 2))
+                self.assertTrue(control('disable_network', 1)['ok'])
+                self.assertTrue(server._network_token_is_current('network-control-task', fresh, 2))
+                self.assertTrue(control('disable_network', 3)['ok'])
+                self.assertFalse(server._network_token_is_current('network-control-task', fresh, 2))
                 self.assertNotEqual(old, fresh)
                 self.assertFalse(server._network_token_is_current('other-task', fresh))
             finally:

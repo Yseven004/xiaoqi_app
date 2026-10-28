@@ -805,6 +805,7 @@ abstract interface class XiaoqiTaskNetworkController {
   Future<void> disableTaskNetwork({
     required String tenantId,
     required String taskId,
+    required int networkRevision,
   });
 }
 
@@ -1406,7 +1407,12 @@ class GenkitXiaoqiAgentRuntime
   Future<void> disableTaskNetwork({
     required String tenantId,
     required String taskId,
-  }) => codeExecutor.disableNetwork(tenantId: tenantId, taskId: taskId);
+    required int networkRevision,
+  }) => codeExecutor.disableNetwork(
+    tenantId: tenantId,
+    taskId: taskId,
+    networkRevision: networkRevision,
+  );
 
   @override
   Future<String> run({

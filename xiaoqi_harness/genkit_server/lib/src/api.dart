@@ -2496,10 +2496,19 @@ class XiaoqiApi {
       if (!const {'queued', 'running'}.contains(current.value['status'])) {
         return _error('任务已结束，无法修改联网模式', 409);
       }
-      _mutateTask(
+      final updated = _mutateTask(
         key,
-        (value) => {...value, 'network_mode': mode, 'updated_at': _now()},
+        (value) => {
+          ...value,
+          'network_mode': mode,
+          'network_policy_revision':
+              (value['network_policy_revision'] as num? ?? 0).toInt() + 1,
+          'updated_at': _now(),
+        },
       );
+      if (updated == null) return _error('Agent 任务不存在', 404);
+      final networkRevision = (updated.value['network_policy_revision'] as num)
+          .toInt();
       _appendEvent(key, {'type': 'network_mode', 'mode': mode});
       if (mode == 'off') {
         final controller = runtime;
@@ -2519,6 +2528,7 @@ class XiaoqiApi {
           await (controller as XiaoqiTaskNetworkController).disableTaskNetwork(
             tenantId: device.tenant,
             taskId: taskId,
+            networkRevision: networkRevision,
           );
         } on Object {
           _appendEvent(key, {

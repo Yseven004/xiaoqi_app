@@ -70,6 +70,7 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
 import json,sys
 r=json.loads(sys.stdin.readline())
 if r.get('action') == 'network_token':
+ assert r['network_revision'] == 4
  print(json.dumps({'type':'result','ok':True,'network_token':'$token'}))
 elif r.get('action'):
  print(json.dumps({'type':'result','ok':True}))
@@ -92,6 +93,11 @@ else:
         requestIdentity: 'network-budget',
         limits: const ExecutionLimits(toolOperations: 1),
       )..bind();
+      final task = store.get('task/personal/task-code')!;
+      store.put('task/personal/task-code', {
+        ...task.value,
+        'network_policy_revision': 4,
+      }, task.revision);
       final grant = NetworkCallAuthorization(
         execution: execution,
         domains: ['example.com'],
@@ -123,6 +129,7 @@ else:
       expect(await grant.execute(invoke), output);
       final sent = jsonDecode(captured.readAsStringSync()) as Map;
       expect(sent['network_token'], token);
+      expect(sent['network_revision'], 4);
       expect(sent['authorized_domains'], ['example.com']);
       expect(checks, 3);
       expect(
@@ -1098,6 +1105,7 @@ import json
 import sys
 request = json.loads(sys.stdin.readline())
 assert request["action"] == "disable_network"
+assert request['network_revision'] == 7
 assert len(request["task_id"]) == 64
 print(json.dumps({"type": "result", "ok": True, "network": "off"}), flush=True)
 ''');
@@ -1107,7 +1115,11 @@ print(json.dumps({"type": "result", "ok": True, "network": "off"}), flush=True)
       workerPath: worker.path,
     );
 
-    await service.disableNetwork(tenantId: 'personal', taskId: 'task-code');
+    await service.disableNetwork(
+      tenantId: 'personal',
+      taskId: 'task-code',
+      networkRevision: 7,
+    );
   });
   test(
     'an unrelated scope identity never submits code to the runner',
