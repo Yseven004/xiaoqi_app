@@ -76,15 +76,15 @@ GitHub 构建状态 GET 遇到短暂传输/超时/特定临时服务错误时最
 | P02 工具并存 | 实施中 | 显式技能、stdio MCP 与 Shell 在同一实际 Agent/Docker 任务中验证通过；其余代表插件组合与目标平台验收仍待完成 |
 | P03 意图与发现分离 | 实施中 | 目录发现、工作区/资料读取、用户撤回旧要求及回答阶段改任务后的重新准备已上线；连接健康变化后的实时目录刷新及更广分类/取消验收仍待完成 |
 | P04 联网生命周期 | 实施中 | 精确动作授权、原请求恢复、任务短期凭据及模式 revision 顺序保护已上线；运行中撤权的更广能力边界和共享代理验收仍待完成 |
-| P05 大型目录 | 实施中 | 已实现完整发现、目录检索和校验原始 schema 的调用网关；240 工具分页单测及 120 工具真实 Genkit 循环通过；生产连接器与更多目录变化/异常场景待验证 |
+| P05 大型目录 | 实施中 | 完整目录、检索及 schema 网关已上线；本批补目录通知/刷新、分页失败后整页重读、小目录的动态网关及调用前定义复查，121 工具及跨入口实际 Genkit 用例通过，最终检查/CI/部署中 |
 | P06 产物复用 | 实施中 | 真实 Docker 中 XLSX/DOCX/PDF/PNG 多步编辑、同名新旧版本与跨任务隔离通过；资源读取入口、容量边界和目标平台全流程仍待验收 |
 | P07 stdio MCP | 实施中 | 官方样本混合调用、事件游标、原租约回收及独立于普通脚本的 MCP 心跳寿命已上线；runner 重启后持久化租约/RPC 恢复、重连和目标 ECS 资源验收仍待完成 |
 | P08 Shell | 实施中 | 通用 Shell、已安装脚本、字面 argv 与 MCP 文件接力均已验证；Docker 后台子进程资源清理通过；目标 ECS 资源及客户端验收待完成 |
 | P09 现有宿主能力适配 | 实施中 | 用户已撤回通用电脑/手机控制及硬件采购；技能/插件版本及文件局部不可用已通过真实 Agent 循环，健康组件继续交付；已有宿主映射和更广依赖状态验收仍待完成 |
-| P10 导入/安装/构建 | 实施中 | npm/Python 构建、离线交付、执行位和 Node CLI 已上线；安装未知结果的原执行恢复本地验证中；历史包权限迁移、较长/组合构建仍待完成 |
-| P11 插件组件 | 实施中 | Markdown commands 的安装/旧包重索引、发现、参数展开、资源读取和脚本闭环已上线，重命名后的绑定修复本地通过；其余必要 hooks/agents/apps/extensions 目标协议与宿主适配待完成 |
+| P10 导入/安装/构建 | 实施中 | npm/Python 构建、离线交付、执行位、Node CLI 及安装未知结果的原执行恢复均已上线；历史包权限迁移、较长/组合构建仍待完成 |
+| P11 插件组件 | 实施中 | Markdown commands 的安装/旧包重索引、发现、参数展开、资源读取、脚本闭环及重命名后的绑定修复已上线；其余必要 hooks/agents/apps/extensions 目标协议与宿主适配待完成 |
 | P12 预算与计数 | 实施中 | 已修正累计次数、失败计数与恢复，工具调用不再由计划次数硬阻断；当前服务端资源预算待代表任务测量和全入口统一 |
-| P13 运行生命周期 | 实施中 | 普通执行恢复/清理、结果关联原授权操作、请求范围复查和预算计数已上线；安装恢复本地验证中；原 RPC/输入快照连续性、MCP 重连及全生命周期验收未完成 |
+| P13 运行生命周期 | 实施中 | 执行恢复/清理、原授权关联、范围复查、计数及安装恢复已上线；本批补 MCP 跨入口去重和真实未知状态，原 RPC/输入快照连续性、MCP 重连及全生命周期验收未完成 |
 | P14 最终验证/部署 | 实施中 | 非生图阶段版本已部署并经健康/数据/真实容器门禁验证；剩余修复及客户端/真机验收未完成，真实生图按用户明确要求后置，不等待充值 |
 
 ## 首批改动
@@ -541,3 +541,37 @@ strengthened execution/command suite passes 35 checks and analyzer is clean;
 coherent release contains both P11 binding and P10/P13 install recovery fixes.
 CI and standard non-image deployment are required before reporting these fixes
 as deployed. The prior request-scope release is independently verified above.
+
+The combined command/install release is now deployed and verified as
+20261028-214438-eefc860, main eefc86087f47f336e5529b1371494901a6c2cf8d.
+CI 40699178053/job 122854008882 passes 329 Dart, 60 runner and 28 deployment
+tests, actual Docker packaging/stdio/command gates and image roundtrip. The
+standard non-image controller exited 0; service/data/restore-point checks and
+same-endpoint public HTTPS 200 pass. Client/device acceptance remains separate.
+
+## P05/P13 live catalog and shared external effect identity (local validation)
+
+SDK notifications now invalidate the application directory; complete snapshots
+are refreshed, failed continuation pages restart once without retaining partial
+old tools, malformed/ambiguous definitions fail inside the connector boundary,
+and small catalogs gain a collision-free directory gateway. Current schemas and
+definitions are checked before confirmation/submission. External action journals
+are independent of aliases and preserve successful/unknown legacy records and
+their original budget charge. Response loss is reported as unconfirmed, not as
+a token failure, and no effect is replayed through a different alias. Read and
+workspace operations remain fresh. Details, original protocol references and
+acceptance limits: docs/architecture/2026-10-28-mcp-catalog-recovery.md.
+
+Seventeen initial directory/connection tests, 22 directory/actual Genkit checks,
+and 15 strengthened alias/unknown/legacy checks pass. A broad run passes 340
+tests and identifies one old pagination fixture with no inputSchema; that fixture
+is corrected to conform to the protocol and final targeted checks are running.
+The final commit's full CI and standard deployment are still required. No new
+client flow/API contract, general computer control or paid image call is added.
+
+Final targeted checks pass 32 tests and analyzer is clean after correcting the
+old pagination fixture. Additional actual Genkit runs verify a native call_tool
+name does not collide with the gateway and reordered arguments still reuse one
+external effect/approval/budget charge. The original broad run remains recorded
+as 340 passed plus the repaired fixture failure; exact-commit full CI is required
+before activating this release. Prior command/install release remains healthy.

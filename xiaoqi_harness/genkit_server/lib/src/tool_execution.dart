@@ -8,6 +8,11 @@ import 'store.dart';
 import 'turn_contract.dart';
 import 'user_action_authorization.dart';
 
+/// A previous effect has no confirmed outcome; changing aliases cannot replay it.
+class UnconfirmedToolOperation extends StateError {
+  UnconfirmedToolOperation(super.message);
+}
+
 /// Claims scope and budget together in the existing task document.
 class ToolExecution {
   ToolExecution(
@@ -329,12 +334,16 @@ class ToolExecution {
     required String slot,
     required Map<String, dynamic> arguments,
     required Future<Map<String, dynamic>> Function(String id) invoke,
+    List<String> legacySlots = const [],
+    List<String> uncertainLegacySlots = const [],
   }) => _operation(
     effect: 'external',
     slot: slot,
     arguments: arguments,
     limit: limits.toolOperations,
     invoke: invoke,
+    legacySlots: legacySlots,
+    uncertainLegacySlots: uncertainLegacySlots,
   );
 
   /// Code attempts reserve their budget in DockerCodeExecutionService. This
@@ -362,6 +371,8 @@ class ToolExecution {
     required Future<Map<String, dynamic>> Function(String) invoke,
     bool codeBudget = false,
     bool Function(Object error)? effectsPossible,
+    List<String> legacySlots = const [],
+    List<String> uncertainLegacySlots = const [],
   }) async {
     check(effect);
     final operationId = operationIdentity(effect, slot);
@@ -373,6 +384,32 @@ class ToolExecution {
         value['scope_operations'] as Map? ?? const {},
       );
       final previous = operations[operationId] as Map?;
+      // Exact legacy slots are derived by trusted callers from the same
+      // canonical action/authority binding. Keep their original journal and
+      // budget charge; changing an alias must not replay an unknown effect.
+      if (previous == null && legacySlots.isNotEmpty) {
+        final legacy = [
+          for (final legacySlot in legacySlots)
+            if (operations[operationIdentity(effect, legacySlot)] is Map)
+              operations[operationIdentity(effect, legacySlot)] as Map,
+        ];
+        if (legacy.any(
+          (record) =>
+              !const {'succeeded', 'not_submitted'}.contains(record['status']),
+        )) {
+          throw UnconfirmedToolOperation('原入口操作正在处理或结果未知，不能通过其他入口重复提交');
+        }
+        final completed = legacy
+            .where(
+              (record) =>
+                  record['status'] == 'succeeded' && record['result'] is Map,
+            )
+            .firstOrNull;
+        if (completed != null) {
+          cached = Map<String, dynamic>.from(completed['result'] as Map);
+          return value;
+        }
+      }
       if (previous != null) {
         if (previous['arguments_hash'] != hash)
           throw StateError('同一操作的参数已经变化，请明确重新生成');
@@ -383,8 +420,20 @@ class ToolExecution {
           return value;
         }
         if (previous['status'] != 'not_submitted') {
-          throw StateError('操作正在处理或结果未知，不能重复提交');
+          throw UnconfirmedToolOperation('操作正在处理或结果未知，不能重复提交');
         }
+      }
+      if (uncertainLegacySlots.any((legacySlot) {
+        final record = operations[operationIdentity(effect, legacySlot)];
+        return record is Map &&
+            !const {'succeeded', 'not_submitted'}.contains(record['status']);
+      })) {
+        // Old journals kept only parameter hashes. If a connector's old
+        // uncertain action cannot be matched exactly, do not infer that a
+        // changed schema or reordered input makes it a new external effect.
+        throw UnconfirmedToolOperation(
+          '此连接的原操作结果未知，旧记录无法确认是否为独立操作；请先查询原结果或明确更新任务，不能换入口重跑',
+        );
       }
       final reserved = effect != 'image'
           ? taskToolOperationsUsed(value)

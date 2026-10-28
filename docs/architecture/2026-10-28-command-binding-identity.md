@@ -32,3 +32,12 @@ dependency recovery work. The final strengthened execution/command tests pass
 35 checks and analyzer reports no issues. The 12 combined dependency/actual
 Genkit command scenarios also pass, including literal script argument checks
 in the renamed-command worker. CI and deployment remain pending.
+
+Rollout completed: main eefc86087f47f336e5529b1371494901a6c2cf8d,
+Actions 40699178053/job 122854008882 succeeded with 329 Dart, 60 runner and
+28 deployment tests, real Docker stdio/command gates and image roundtrip.
+Standard non-image deployment 20261028-214438-eefc860 exited 0; current service,
+data and latest-good restore point checks passed, and public HTTPS returned 200
+through the same endpoint checked by Cloud Assistant. API contract remains 24.
+Primary deployment log: .codex-artifacts/deploy/20261028-214438-eefc860.log.
+Server deployed and verified; client/device acceptance is separate.

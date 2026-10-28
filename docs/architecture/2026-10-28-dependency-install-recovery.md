@@ -47,3 +47,13 @@ rejected with their original diagnostic; the journal is retained while the
 first acknowledgement fails, then removed after acknowledgement succeeds.
 A mismatched stored source marker is rejected without deleting the record.
 CI and server deployment are pending; local tests do not prove rollout.
+
+Rollout completed: main eefc86087f47f336e5529b1371494901a6c2cf8d,
+Actions 40699178053/job 122854008882 passed 329 Dart, 60 runner and 28
+deployment tests, actual Docker packaging/stdio/command gates and the image
+export/import roundtrip. Standard non-image deployment completed as
+20261028-214438-eefc860 with controller exit 0. Current health, data and
+latest-good restore-point checks pass, with public HTTPS 200 via Cloud Assistant
+against the same public endpoint. API contract remains 24. Deployment log in
+the primary checkout: .codex-artifacts/deploy/20261028-214438-eefc860.log.
+Server deployed and verified; this does not substitute for client/device tests.

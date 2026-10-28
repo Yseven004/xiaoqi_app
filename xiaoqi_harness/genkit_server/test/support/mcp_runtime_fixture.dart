@@ -55,13 +55,17 @@ class FixtureMcpConnections extends McpConnectionService {
     ),
   ];
   @override
-  Future<GenkitMcpClient> connect(McpConnectionCredentials connection) async {
+  Future<GenkitMcpClient> connect(
+    McpConnectionCredentials connection, {
+    McpNotificationHandler? notificationHandler,
+  }) async {
     if (connection.id == 'unavailable')
       throw StateError('private-connection-diagnostic');
     final client = createMcpClient(
       McpClientOptions(
         name: 'fixture',
         serverName: 'fixture',
+        notificationHandler: notificationHandler,
         mcpServer: McpServerConfig(
           url: Uri.parse('http://127.0.0.1:$port/mcp'),
           timeout: connection.serverConfig().timeout,
@@ -81,10 +85,16 @@ Future<void> main(List<String> args) async {
     'mcp-slow-read',
     'mcp-public-read',
     'mcp-large',
+    'mcp-large-refresh',
     'mcp-disabled',
     'mcp-reconfigured',
   }.contains(args.single);
-  final toolCount = args.single == 'mcp-large' ? 120 : 1;
+  final refreshCatalog = args.single == 'mcp-large-refresh';
+  final toolCount = refreshCatalog
+      ? 121
+      : args.single == 'mcp-large'
+      ? 120
+      : 1;
   final userText = userAuthorized
       ? '请用 MCP 生成图片卡片并发送到 A'
       : readOnly
@@ -94,6 +104,7 @@ Future<void> main(List<String> args) async {
   final store = CloudStore(root: root.path);
   final rpc = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   var calls = 0;
+  var catalogReads = 0;
   final calledTools = <String>[];
   final calledArguments = <Map>[];
   final serving = rpc.listen((request) async {
@@ -127,6 +138,7 @@ Future<void> main(List<String> args) async {
     }
     if (body['method'] == 'tools/call' && args.single == 'mcp-slow-read')
       await Future<void>.delayed(const Duration(seconds: 16));
+    if (body['method'] == 'tools/list') catalogReads++;
     final result = switch (body['method']) {
       'initialize' => {
         'protocolVersion': '2025-11-25',
@@ -135,9 +147,15 @@ Future<void> main(List<String> args) async {
       },
       'tools/list' => {
         'tools': [
-          for (var i = 0; i < toolCount; i++)
+          for (
+            var i = 0;
+            i < toolCount - (refreshCatalog && catalogReads == 1 ? 1 : 0);
+            i++
+          )
             {
-              'name': toolCount > 1
+              'name': args.single == 'mcp-name-collision'
+                  ? 'call_tool'
+                  : toolCount > 1
                   ? 'fetch_card_$i'
                   : publicRead
                   ? 'read_wiki_structure'
@@ -153,8 +171,11 @@ Future<void> main(List<String> args) async {
                     'repoName': {'type': 'string'}
                   else
                     'destination': {'type': 'string'},
+                  if (args.single == 'mcp-alias-repeat')
+                    'tag': {'type': 'string'},
                 },
                 if (publicRead) 'required': ['repoName'],
+                if (refreshCatalog && i == 120) 'required': ['destination'],
                 'additionalProperties': false,
               },
             },
@@ -186,6 +207,12 @@ Future<void> main(List<String> args) async {
       calledArguments.add(
         (body['params'] as Map)['arguments'] as Map? ?? const {},
       );
+      if (args.single == 'mcp-alias-unknown') {
+        // The external effect happened, but its response was lost.
+        request.response.statusCode = 503;
+        await request.response.close();
+        return;
+      }
     }
     if (body['method'] == 'tools/list' &&
         const {'mcp-disabled', 'mcp-reconfigured'}.contains(args.single)) {

@@ -22,24 +22,59 @@ const mcpToolRequestTimeout = Duration(seconds: 60);
 Future<List<Map<String, dynamic>>> listAllMcpTools(
   Future<Map<String, dynamic>> Function(String? cursor) readPage,
 ) async {
+  for (var attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await _readMcpToolPages(readPage);
+    } on _McpCatalogChanged {
+      if (attempt == 1) throw StateError('MCP 工具目录分页不稳定，请重新读取目录');
+    }
+  }
+  throw StateError('MCP 工具目录读取失败');
+}
+
+class _McpCatalogChanged implements Exception {}
+
+Future<List<Map<String, dynamic>>> _readMcpToolPages(
+  Future<Map<String, dynamic>> Function(String? cursor) readPage,
+) async {
   final tools = <Map<String, dynamic>>[];
   final seen = <String>{};
+  final names = <String>{};
   var catalogBytes = 0;
   String? cursor;
   for (var pageNumber = 0; pageNumber < 100; pageNumber++) {
-    final page = await readPage(cursor).timeout(const Duration(seconds: 20));
-    final pageTools = (page['tools'] as List? ?? const [])
-        .whereType<Map>()
-        .map((tool) => Map<String, dynamic>.from(tool))
-        .toList();
+    Map<String, dynamic> page;
+    try {
+      page = await readPage(cursor).timeout(const Duration(seconds: 20));
+    } on Object {
+      if (cursor != null) throw _McpCatalogChanged();
+      rethrow;
+    }
+    final rawTools = page['tools'];
+    if (rawTools is! List) throw const FormatException('MCP 工具目录 tools 必须为数组');
+    final pageTools = <Map<String, dynamic>>[];
+    for (final raw in rawTools) {
+      if (raw is! Map ||
+          raw['name'] is! String ||
+          raw['inputSchema'] is! Map ||
+          (raw['name'] as String).trim().isEmpty ||
+          raw['name'] != (raw['name'] as String).trim()) {
+        throw const FormatException('MCP 工具目录包含无效工具定义');
+      }
+      if (!names.add(raw['name'] as String)) throw _McpCatalogChanged();
+      pageTools.add(Map<String, dynamic>.from(raw));
+    }
     catalogBytes += utf8.encode(jsonEncode(pageTools)).length;
     if (catalogBytes > 16 * 1024 * 1024) {
       throw StateError('MCP 工具目录超过服务端 16 MB 资源预算');
     }
     tools.addAll(pageTools);
-    cursor = page['nextCursor']?.toString();
+    final next = page['nextCursor'];
+    if (next != null && next is! String)
+      throw const FormatException('MCP 分页标记必须为字符串');
+    cursor = next as String?;
     if (cursor == null || cursor.isEmpty) return tools;
-    if (!seen.add(cursor)) throw StateError('MCP 工具目录返回重复分页标记');
+    if (!seen.add(cursor)) throw _McpCatalogChanged();
   }
   throw StateError('MCP 工具目录分页超过限制');
 }
@@ -779,12 +814,16 @@ class McpConnectionService {
       '<main><h1>$title</h1><p>$message</p>'
       '<a href="xiaoqi://mcp/oauth?status=complete">返回小栖</a></main>';
 
-  Future<GenkitMcpClient> connect(McpConnectionCredentials connection) async {
+  Future<GenkitMcpClient> connect(
+    McpConnectionCredentials connection, {
+    McpNotificationHandler? notificationHandler,
+  }) async {
     await _checkPublicEndpoint(connection.url);
     final client = createMcpClient(
       McpClientOptions(
         name: 'xiaoqi-${connection.id}',
         serverName: connection.name,
+        notificationHandler: notificationHandler,
         mcpServer: connection.serverConfig(),
       ),
     );

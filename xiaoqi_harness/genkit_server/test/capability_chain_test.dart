@@ -31,13 +31,19 @@ void main() {
       (cursor) async => cursor == null
           ? {
               'tools': [
-                {'name': 'first'},
+                {
+                  'name': 'first',
+                  'inputSchema': {'type': 'object'},
+                },
               ],
               'nextCursor': 'second',
             }
           : {
               'tools': [
-                {'name': 'last'},
+                {
+                  'name': 'last',
+                  'inputSchema': {'type': 'object'},
+                },
               ],
             },
     );

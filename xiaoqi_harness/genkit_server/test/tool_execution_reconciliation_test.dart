@@ -26,6 +26,147 @@ void main() {
   });
 
   test(
+    'external alias migration reuses a completed original without another budget charge',
+    () async {
+      final scope = execution('original');
+      var effects = 0;
+      await scope.authorizedExternal(
+        slot: 'old-native:canonical-action',
+        arguments: {'a': 1, 'b': 2},
+        invoke: (_) async {
+          effects++;
+          return {'ok': true, 'receipt': 'original'};
+        },
+      );
+      final recovered = await scope.authorizedExternal(
+        slot: 'current-canonical-action',
+        arguments: {'b': 2, 'a': 1},
+        legacySlots: ['old-native:canonical-action'],
+        invoke: (_) async {
+          effects++;
+          return {};
+        },
+      );
+      expect(recovered['receipt'], 'original');
+      expect(effects, 1);
+      expect(
+        store.get('task/tenant/task')!.value['scope_operations'],
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'an unknown original blocks another alias even beside a completed legacy call',
+    () async {
+      final scope = execution('original');
+      await scope.authorizedExternal(
+        slot: 'old-completed',
+        arguments: {},
+        invoke: (_) async => {'ok': true},
+      );
+      await expectLater(
+        scope.authorizedExternal(
+          slot: 'old-unknown',
+          arguments: {},
+          invoke: (_) async => throw StateError('lost response'),
+        ),
+        throwsStateError,
+      );
+      var submitted = false;
+      await expectLater(
+        scope.authorizedExternal(
+          slot: 'new-alias',
+          arguments: {},
+          legacySlots: ['old-completed', 'old-unknown'],
+          invoke: (_) async {
+            submitted = true;
+            return {};
+          },
+        ),
+        throwsStateError,
+      );
+      expect(submitted, false);
+      expect(
+        store.get('task/tenant/task')!.value['scope_operations'],
+        hasLength(2),
+      );
+      final next = execution('new-user-request');
+      await next.authorizedExternal(
+        slot: 'new-alias',
+        arguments: {},
+        legacySlots: ['old-completed', 'old-unknown'],
+        invoke: (_) async {
+          submitted = true;
+          return {'ok': true};
+        },
+      );
+      expect(submitted, true);
+    },
+  );
+
+  test(
+    'unattributed legacy uncertainty cannot be bypassed with changed parameters',
+    () async {
+      final scope = execution('original');
+      await expectLater(
+        scope.authorizedExternal(
+          slot: 'legacy-gateway:old-grant',
+          arguments: {'destination': 'A'},
+          invoke: (_) async => throw StateError('lost response'),
+        ),
+        throwsStateError,
+      );
+      var calls = 0;
+      await expectLater(
+        scope.authorizedExternal(
+          slot: 'new-canonical',
+          arguments: {'destination': 'B'},
+          uncertainLegacySlots: ['legacy-gateway:old-grant'],
+          invoke: (_) async {
+            calls++;
+            return {};
+          },
+        ),
+        throwsA(isA<UnconfirmedToolOperation>()),
+      );
+      expect(calls, 0);
+      expect(
+        store.get('task/tenant/task')!.value['scope_operations'],
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'a completed unrelated legacy action does not block or substitute a new effect',
+    () async {
+      final scope = execution('original');
+      await scope.authorizedExternal(
+        slot: 'legacy',
+        arguments: {'destination': 'A'},
+        invoke: (_) async => {'receipt': 'A'},
+      );
+      var calls = 0;
+      final result = await scope.authorizedExternal(
+        slot: 'new',
+        arguments: {'destination': 'B'},
+        uncertainLegacySlots: ['legacy'],
+        invoke: (_) async {
+          calls++;
+          return {'receipt': 'B'};
+        },
+      );
+      expect(calls, 1);
+      expect(result['receipt'], 'B');
+      expect(
+        store.get('task/tenant/task')!.value['scope_operations'],
+        hasLength(2),
+      );
+    },
+  );
+
+  test(
     'a late transport error preserves the confirmed bound operation result',
     () async {
       final scope = execution('original');

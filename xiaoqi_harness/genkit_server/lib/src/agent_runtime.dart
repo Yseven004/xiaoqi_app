@@ -2787,6 +2787,12 @@ class GenkitXiaoqiAgentRuntime
           'connection_name': connection.name,
         });
         GenkitMcpClient client;
+        LiveMcpToolDirectory? liveDirectory;
+        void catalogNotification(String method, Map<String, dynamic> _) {
+          if (method == 'notifications/tools/list_changed')
+            liveDirectory?.invalidate();
+        }
+
         try {
           if (!mcpConnectionService.isCurrent(tenantId, connection))
             throw StateError('MCP 连接或绑定版本已失效');
@@ -2798,7 +2804,10 @@ class GenkitXiaoqiAgentRuntime
           );
           final spec = connection.isolated;
           if (spec == null) {
-            client = await mcpConnectionService.connect(connection);
+            client = await mcpConnectionService.connect(
+              connection,
+              notificationHandler: catalogNotification,
+            );
           } else {
             final startupExecution = execution;
             startupExecution.check('workspace');
@@ -2825,6 +2834,7 @@ class GenkitXiaoqiAgentRuntime
               McpClientOptions(
                 name: 'xiaoqi-${connection.id}',
                 serverName: connection.name,
+                notificationHandler: catalogNotification,
                 mcpServer: McpServerConfig(
                   transport: transport,
                   timeout: mcpToolRequestTimeout,
@@ -2859,10 +2869,12 @@ class GenkitXiaoqiAgentRuntime
         resourceClients[connection.id] = client;
         resourceUris[connection.id] = {};
         List<Map<String, dynamic>> remoteTools;
+        final live = LiveMcpToolDirectory(
+          () => listAllMcpTools((cursor) => client.listTools(cursor: cursor)),
+        );
+        liveDirectory = live;
         try {
-          remoteTools = await listAllMcpTools(
-            (cursor) => client.listTools(cursor: cursor),
-          );
+          remoteTools = (await live.load()).tools.toList();
         } on Object {
           cancellation.throwIfCancelled();
           if (activeMcpIds.contains(connection.id)) {
@@ -2881,28 +2893,36 @@ class GenkitXiaoqiAgentRuntime
           mcpToolSummary.add('- ${connection.name}：目录发现失败，本轮不可用');
           continue;
         }
-        final directory = McpToolDirectory(remoteTools);
-        final useGateway = mcpToolNames.length + remoteTools.length > 48;
-        final exposedTools = useGateway
-            ? McpToolDirectory.gatewayTools()
-            : directory.tools;
+        final gatewayOnly = mcpToolNames.length + remoteTools.length + 2 > 48;
+        final exposedTools = [
+          if (!gatewayOnly)
+            for (final tool in remoteTools) (tool: tool, gateway: false),
+          for (final tool in McpToolDirectory.gatewayTools())
+            (tool: tool, gateway: true),
+        ];
         onProcessEvent({
           'type': 'mcp_connection_ready',
           'connection_name': connection.name,
         });
         final summaryNames = <String>[];
-        for (final exposedTool in exposedTools) {
+        String aliasFor(String name, {bool catalog = false}) =>
+            'mcp_${catalog ? 'catalog_' : ''}${sha256.convert(utf8.encode(connection.id)).toString().substring(0, 8)}_'
+            '${sha256.convert(utf8.encode(name)).toString().substring(0, 12)}';
+        for (final exposed in exposedTools) {
+          final exposedTool = exposed.tool;
+          final useGateway = exposed.gateway;
           final exposedName = exposedTool['name']?.toString().trim() ?? '';
           if (exposedName.isEmpty) continue;
-          final alias =
-              'mcp_${sha256.convert(utf8.encode(connection.id)).toString().substring(0, 8)}_'
-              '${sha256.convert(utf8.encode(exposedName)).toString().substring(0, 12)}';
+          final alias = aliasFor(
+            exposedName,
+            catalog: useGateway && !gatewayOnly,
+          );
           final exposedDescription =
               exposedTool['description']?.toString().trim() ?? '';
           ai.defineTool<Map<String, dynamic>, String>(
             name: alias,
             description:
-                '远程 MCP 连接器“${connection.name}”提供的工具“$exposedName”。'
+                '${useGateway ? '连接器“${connection.name}”的本地目录工具' : '远程 MCP 连接器“${connection.name}”提供的工具'}“$exposedName”。'
                 '${exposedDescription.isEmpty ? '' : ' $exposedDescription'} '
                 '按本轮用户授权执行；需要确认时会展示具体目标和参数。',
             inputSchema: _mcpToolInputSchema(exposedTool['inputSchema']),
@@ -2925,6 +2945,35 @@ class GenkitXiaoqiAgentRuntime
               }
               if (requestIdentity != registeredScopeIdentity) {
                 throw StateError('任务范围已经更新，请重新确认本轮需要的连接器');
+              }
+              McpToolDirectory directory;
+              try {
+                directory = await live.load(force: useGateway);
+              } on Object {
+                cancellation.throwIfCancelled();
+                onProcessEvent({
+                  'type': 'tool_failed',
+                  'tool': 'MCP · ${connection.name} · 读取工具目录',
+                });
+                return ToolResult.response(
+                  jsonEncode({
+                    'ok': false,
+                    'status': 'catalog_unavailable',
+                    'retryable': true,
+                    'error': '工具目录读取失败，请重新检索目录；未调用目标工具',
+                  }),
+                );
+              }
+              execution.check('read');
+              if (!mcpConnectionService.isCurrent(tenantId, connection)) {
+                return ToolResult.response(
+                  jsonEncode({
+                    'ok': false,
+                    'status': 'unavailable',
+                    'retryable': false,
+                    'error': '连接已变化，请刷新连接状态',
+                  }),
+                );
               }
               if (useGateway && exposedName == 'search_tools') {
                 final displayTool = 'MCP · ${connection.name} · 查询工具目录';
@@ -2960,8 +3009,13 @@ class GenkitXiaoqiAgentRuntime
                   ? directory.lookup(
                       requestInput['tool_name']?.toString() ?? '',
                     )
-                  : exposedTool;
+                  : directory.lookup(exposedName);
               if (rawTool == null) {
+                onProcessEvent({
+                  'type': 'tool_skipped',
+                  'tool': 'MCP · ${connection.name} · $exposedName',
+                  'reason': 'tool_not_found',
+                });
                 return ToolResult.response(
                   jsonEncode({'ok': false, 'error': '工具不在当前连接器目录中，请先检索目录'}),
                 );
@@ -2970,11 +3024,24 @@ class GenkitXiaoqiAgentRuntime
                   ? Map<String, dynamic>.from(requestInput['arguments'] as Map)
                   : requestInput;
               final remoteToolName = rawTool['name'].toString();
+              String definitionHash(Map<String, dynamic> definition) =>
+                  ToolAccessPolicy.actionHash(
+                    connectionId: connection.id,
+                    tool: remoteToolName,
+                    requestIdentity: 'mcp-tool-definition',
+                    arguments: definition,
+                    authority: const {},
+                  );
+              final toolDefinitionHash = definitionHash(rawTool);
               final description = rawTool['description']?.toString() ?? '';
-              if (useGateway &&
-                  (await _mcpToolInputSchema(
-                    rawTool['inputSchema'],
-                  ).validate(input)).isNotEmpty) {
+              if ((await _mcpToolInputSchema(
+                rawTool['inputSchema'],
+              ).validate(input)).isNotEmpty) {
+                onProcessEvent({
+                  'type': 'tool_skipped',
+                  'tool': 'MCP · ${connection.name} · $remoteToolName',
+                  'reason': 'invalid_arguments',
+                });
                 return ToolResult.response(
                   jsonEncode({
                     'ok': false,
@@ -3097,6 +3164,45 @@ class GenkitXiaoqiAgentRuntime
                   }),
                 );
               }
+              try {
+                final latest = await live.load(force: true);
+                final current = latest.lookup(remoteToolName);
+                callExecution.check('read');
+                if (live.stale ||
+                    !mcpConnectionService.isCurrent(tenantId, connection) ||
+                    current == null ||
+                    definitionHash(current) != toolDefinitionHash) {
+                  onProcessEvent({
+                    'type': 'tool_skipped',
+                    'tool': 'MCP · ${connection.name} · $remoteToolName',
+                    'reason': 'catalog_changed',
+                  });
+                  return ToolResult.response(
+                    jsonEncode({
+                      'ok': false,
+                      'status': 'catalog_changed',
+                      'retryable': true,
+                      'error': '工具定义或连接已变化，请重新检索目录并按当前定义调用；未提交目标操作',
+                    }),
+                  );
+                }
+              } on Object {
+                cancellation.throwIfCancelled();
+                callExecution.check('read');
+                onProcessEvent({
+                  'type': 'tool_failed',
+                  'tool': 'MCP · ${connection.name} · $remoteToolName',
+                  'reason': 'catalog_unavailable',
+                });
+                return ToolResult.response(
+                  jsonEncode({
+                    'ok': false,
+                    'status': 'catalog_unavailable',
+                    'retryable': true,
+                    'error': '调用前无法确认当前工具定义，请重新检索目录；未提交目标操作',
+                  }),
+                );
+              }
               if (decision == ToolAccessDecision.confirm) {
                 onProcessEvent({
                   'type': 'mcp_tool_approval_required',
@@ -3118,20 +3224,70 @@ class GenkitXiaoqiAgentRuntime
                 'tool': displayTool,
                 'capability_name': connection.name,
               });
+              var invoked = false;
               try {
-                var invoked = false;
+                Future<Map<String, dynamic>> invokeExternal({
+                  required String slot,
+                  required Map<String, dynamic> arguments,
+                  required Future<Map<String, dynamic>> Function(String id)
+                  invoke,
+                }) => callExecution.authorizedExternal(
+                  slot: slot,
+                  arguments: arguments,
+                  invoke: invoke,
+                  legacySlots: [
+                    for (final oldAlias in {
+                      aliasFor(remoteToolName),
+                      aliasFor('call_tool'),
+                    })
+                      '$oldAlias:$approvalHash',
+                  ],
+                  uncertainLegacySlots: [
+                    for (final oldAlias in {
+                      aliasFor(remoteToolName),
+                      aliasFor('call_tool'),
+                    })
+                      for (final action
+                          in (store
+                                          .get(callExecution.key)
+                                          ?.value['tool_authorizations']
+                                      as Map? ??
+                                  const {})
+                              .keys
+                              .whereType<String>())
+                        '$oldAlias:$action',
+                  ],
+                );
                 final invoke = effect == ToolEffect.read
                     ? callExecution.query
                     : effect == ToolEffect.workspace
                     ? callExecution.workspace
-                    : callExecution.authorizedExternal;
+                    : invokeExternal;
+                final externalAction = ToolAccessPolicy.actionHash(
+                  connectionId: connection.id,
+                  tool: remoteToolName,
+                  requestIdentity: callExecution.requestIdentity,
+                  arguments: input,
+                  authority: const {},
+                );
                 final normalized = await invoke(
-                  slot: '$alias:$approvalHash',
-                  arguments: {
-                    'connection': connection.id,
-                    'tool': remoteToolName,
-                    'arguments': input,
-                  },
+                  // An exact external action has one execution journal even
+                  // when reached via a native alias, gateway or refreshed schema.
+                  // Approval still binds the current definition independently.
+                  slot:
+                      effect == ToolEffect.read ||
+                          effect == ToolEffect.workspace
+                      ? '$alias:$approvalHash'
+                      : externalAction,
+                  arguments:
+                      effect == ToolEffect.read ||
+                          effect == ToolEffect.workspace
+                      ? {
+                          'connection': connection.id,
+                          'tool': remoteToolName,
+                          'arguments': input,
+                        }
+                      : {'canonical_action': externalAction},
                   invoke: (_) async {
                     invoked = true;
                     final result = await client
@@ -3180,16 +3336,35 @@ class GenkitXiaoqiAgentRuntime
                   );
                 persistDelivery();
                 return ToolResult.response(jsonEncode(normalized));
-              } on Object {
+              } on Object catch (error) {
                 if (cancellation.isCancelled) rethrow;
+                if (error is ExecutionBudgetExceeded) rethrow;
+                final uncertain = invoked || error is UnconfirmedToolOperation;
+                final status = effect == ToolEffect.read
+                    ? 'read_failed'
+                    : uncertain
+                    ? effect == ToolEffect.workspace
+                          ? 'workspace_result_unknown'
+                          : 'external_result_unknown'
+                    : 'not_submitted';
+                final message = effect == ToolEffect.read
+                    ? '远程读取失败，可重试读取或检查连接状态'
+                    : uncertain
+                    ? '操作结果尚未确认，请先查询原结果或检查任务产物；不要换入口重复提交'
+                    : '目标操作未提交，请检查当前任务范围、参数或连接状态';
                 onProcessEvent({
                   'type': 'tool_failed',
                   'tool': displayTool,
                   'capability_name': connection.name,
-                  'message': '远程 MCP 工具执行失败，请检查令牌或服务状态',
+                  'message': message,
                 });
                 return ToolResult.response(
-                  jsonEncode({'error': '远程 MCP 工具执行失败，请检查令牌或服务状态'}),
+                  jsonEncode({
+                    'ok': false,
+                    'status': status,
+                    'retryable': effect == ToolEffect.read,
+                    'error': message,
+                  }),
                 );
               }
             },

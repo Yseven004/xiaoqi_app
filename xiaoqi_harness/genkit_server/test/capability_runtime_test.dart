@@ -43,7 +43,11 @@ void main() {
     'mcp-slow-read',
     'mcp-public-read',
     'mcp-large',
+    'mcp-large-refresh',
     'mcp-approved-repeat',
+    'mcp-alias-repeat',
+    'mcp-alias-unknown',
+    'mcp-name-collision',
     'mcp-denied',
     'mcp-disabled',
     'mcp-reconfigured',
@@ -135,6 +139,7 @@ void main() {
                     'mcp-slow-read',
                     'mcp-public-read',
                     'mcp-large',
+                    'mcp-large-refresh',
                     'mcp-disabled',
                     'mcp-reconfigured',
                   }.contains(scenario)
@@ -147,6 +152,7 @@ void main() {
                         'mcp-slow-read',
                         'mcp-public-read',
                         'mcp-large',
+                        'mcp-large-refresh',
                         'mcp-disabled',
                         'mcp-reconfigured',
                       }.contains(scenario) ||
@@ -300,7 +306,7 @@ void main() {
               };
             }
           } else if (preparing && scenario.startsWith('mcp-')) {
-            final large = scenario == 'mcp-large';
+            final large = scenario.startsWith('mcp-large');
             final directoryName = large
                 ? tools.firstWhere(
                         (tool) => tool['function']['description']
@@ -309,7 +315,7 @@ void main() {
                       )['function']['name']
                       as String
                 : null;
-            final remoteName = tools
+            final nativeName = tools
                 .where(
                   (tool) =>
                       !large ||
@@ -321,6 +327,17 @@ void main() {
                 .whereType<String>()
                 .where((name) => name.startsWith('mcp_'))
                 .first;
+            final gatewayName = scenario.startsWith('mcp-alias-')
+                ? tools.firstWhere(
+                        (tool) => tool['function']['description']
+                            .toString()
+                            .contains('“call_tool”'),
+                      )['function']['name']
+                      as String
+                : null;
+            final remoteName = gatewayName != null && called(nativeName)
+                ? gatewayName
+                : nativeName;
             final remoteRefs = messages
                 .expand(
                   (message) => (message['tool_calls'] as List? ?? const [])
@@ -356,6 +373,7 @@ void main() {
                     'mcp-slow-read',
                     'mcp-public-read',
                     'mcp-large',
+                    'mcp-large-refresh',
                     'mcp-disabled',
                     'mcp-reconfigured',
                   }.contains(scenario))
@@ -364,8 +382,13 @@ void main() {
               };
             } else if (directoryName != null && !called(directoryName)) {
               tool = directoryName;
-              input = {'query': 'fetch_card_119'};
+              input = {
+                'query': scenario == 'mcp-large-refresh'
+                    ? 'fetch_card_120'
+                    : 'fetch_card_119',
+              };
             } else if (!called(remoteName) ||
+                (scenario == 'mcp-large-refresh' && remoteResponses < 2) ||
                 (const {
                       'mcp-approved-repeat',
                       'mcp-denied',
@@ -374,8 +397,25 @@ void main() {
                     }.contains(scenario) &&
                     remoteResponses < 2)) {
               tool = remoteName;
-              input = large
-                  ? {'tool_name': 'fetch_card_119', 'arguments': {}}
+              input = gatewayName != null && called(nativeName)
+                  ? {
+                      'tool_name': 'make_card',
+                      'arguments': scenario == 'mcp-alias-repeat'
+                          ? {'tag': 'same', 'destination': 'A'}
+                          : {},
+                    }
+                  : large
+                  ? {
+                      'tool_name': scenario == 'mcp-large-refresh'
+                          ? 'fetch_card_120'
+                          : 'fetch_card_119',
+                      'arguments':
+                          scenario == 'mcp-large-refresh' && remoteResponses > 0
+                          ? {'destination': 'A'}
+                          : {},
+                    }
+                  : scenario == 'mcp-alias-repeat'
+                  ? {'destination': 'A', 'tag': 'same'}
                   : scenario == 'mcp-public-read'
                   ? {'repoName': 'firebase/genkit'}
                   : const {
@@ -623,6 +663,19 @@ void main() {
             return;
           }
           if (scenario.startsWith('mcp-')) {
+            if (scenario == 'mcp-alias-unknown') {
+              expect(result['mcp_calls'], 1);
+              expect(result['approval_events'], 1);
+              expect(result['tool_operation_count'], 1);
+              expect(result['maximum_mcp_success_count'], 0);
+              expect(result['missing'], true);
+              expect(result['artifacts'], 0);
+              expect(
+                jsonEncode(requests).contains('external_result_unknown'),
+                true,
+              );
+              return;
+            }
             final blocked = const {
               'mcp-denied',
               'mcp-disabled',
@@ -634,6 +687,7 @@ void main() {
                     'mcp-read',
                     'mcp-slow-read',
                     'mcp-large',
+                    'mcp-large-refresh',
                     'mcp-public-read',
                     'mcp-user-send',
                     'mcp-user-send-change',
@@ -647,6 +701,10 @@ void main() {
               expect(result['called_arguments'], [
                 {'repoName': 'firebase/genkit'},
               ]);
+            }
+            if (scenario == 'mcp-name-collision') {
+              expect(result['called_tools'], ['call_tool']);
+              expect(result['approval_events'], 1);
             }
             if (scenario == 'mcp-user-send') {
               expect(result['approval_events'], 0);
@@ -664,6 +722,40 @@ void main() {
             expect(result['mcp_calls'], blocked ? 0 : 1);
             if (scenario == 'mcp-large')
               expect(result['called_tools'], ['fetch_card_119']);
+            if (scenario == 'mcp-large-refresh') {
+              expect(result['called_tools'], ['fetch_card_120']);
+              expect(result['called_arguments'], [
+                {'destination': 'A'},
+              ]);
+              expect(result['approval_events'], 0);
+              expect(jsonEncode(requests), contains('fetch_card_120'));
+              expect(jsonEncode(requests), contains('参数不符合目标工具 schema'));
+            }
+            if (scenario == 'mcp-alias-repeat') {
+              expect(result['mcp_calls'], 1);
+              expect(result['called_arguments'], [
+                {'destination': 'A', 'tag': 'same'},
+              ]);
+              expect(result['approval_events'], 1);
+              expect(result['tool_operation_count'], 1);
+              expect(result['maximum_mcp_success_count'], 1);
+              final actualCalls = requests
+                  .expand(
+                    (request) => (request['messages'] as List).whereType<Map>(),
+                  )
+                  .expand(
+                    (message) => (message['tool_calls'] as List? ?? const [])
+                        .whereType<Map>(),
+                  );
+              expect(
+                actualCalls.any(
+                  (call) => call['function']['name'].toString().startsWith(
+                    'mcp_catalog_',
+                  ),
+                ),
+                true,
+              );
+            }
             expect(
               result['missing'],
               scenario == 'mcp-error' ||

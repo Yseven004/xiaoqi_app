@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 /// Keeps the complete discovered catalog outside the model's tool definitions.
 /// Large connectors expose bounded search plus a schema-validated call gateway.
 class McpToolDirectory {
@@ -85,4 +87,51 @@ class McpToolDirectory {
       },
     },
   ];
+}
+
+/// Publishes only a complete catalog read unaffected by list-change events.
+/// Failed refreshes leave the old snapshot inaccessible until recovery succeeds.
+class LiveMcpToolDirectory {
+  LiveMcpToolDirectory(this.readTools);
+
+  final Future<List<Map<String, dynamic>>> Function() readTools;
+  McpToolDirectory? _current;
+  Future<McpToolDirectory>? _loading;
+  var _generation = 0;
+  var _loadedGeneration = -1;
+  var revision = 0;
+  String? _contents;
+
+  bool get stale => _loadedGeneration != _generation;
+  void invalidate() => _generation++;
+
+  Future<McpToolDirectory> load({bool force = false}) async {
+    final loading = _loading;
+    if (loading != null) return await loading;
+    if (!force && !stale && _current != null) return _current!;
+    // A failed forced read must not make the previous snapshot look current.
+    invalidate();
+    final pending = _reload();
+    _loading = pending;
+    try {
+      return await pending;
+    } finally {
+      _loading = null;
+    }
+  }
+
+  Future<McpToolDirectory> _reload() async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final generation = _generation;
+      final next = McpToolDirectory(await readTools());
+      if (generation != _generation) continue;
+      final contents = jsonEncode(next.tools.toList());
+      if (contents != _contents) revision++;
+      _contents = contents;
+      _current = next;
+      _loadedGeneration = generation;
+      return next;
+    }
+    throw StateError('MCP 工具目录在读取时持续变化，请重新检索');
+  }
 }
