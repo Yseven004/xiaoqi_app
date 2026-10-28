@@ -11,11 +11,19 @@ class SelectedPluginComponents {
     required this.componentType,
     required Map Function(CloudStore, String, String, Map) refreshVersion,
     bool discover = false,
+    bool discoverSiblingComponents = false,
     Iterable<String> excludedIds = const [],
   }) {
     final references = (selections is List ? selections : const [])
         .whereType<Map>()
         .toList();
+    if (discover && discoverSiblingComponents) {
+      references.addAll([
+        for (final reference in [...references])
+          if (reference['component_id'] != null)
+            {'id': reference['id'], 'version_id': reference['version_id']},
+      ]);
+    }
     final selected = references.map((r) => r['id']).toSet();
     if (discover) {
       for (final (_, document) in store.list('cap/$tenant/', limit: 500)) {
@@ -77,7 +85,9 @@ class SelectedPluginComponents {
           'plugin_name': record['name'],
           'user_only': component['user_only'] == true,
           'has_scripts': component['has_scripts'] == true,
-          'explicit_component': selection['component_id'] == component['id'],
+          'explicit_component':
+              entries[alias]?['explicit_component'] == true ||
+              selection['component_id'] == component['id'],
         };
       }
     }

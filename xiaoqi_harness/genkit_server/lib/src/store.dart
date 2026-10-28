@@ -164,6 +164,7 @@ class CloudStore {
       _writeObject(key, bytes, immutable: false);
 
   List<int> getObject(String key) => _objectFile(key).readAsBytesSync();
+  Stream<List<int>> readObjectChunks(String key) => _objectFile(key).openRead();
 
   void deleteImmutable(String key) {
     _objectFile(key).deleteSyncSafe();

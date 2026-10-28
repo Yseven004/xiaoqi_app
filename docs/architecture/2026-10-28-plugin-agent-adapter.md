@@ -1,7 +1,10 @@
-# Plugin agent adapter — draft, not a released capability
+# Plugin agent adapter — runtime integration, pending release
 
-The importer/task runtime do not yet register agents as supported. This draft
-adds source profiles and the private SDK session core, not a completed P11.
+The importer now discovers and reindexes Agent definitions from immutable plugin
+versions. The task runtime registers directory, delegation and resource tools,
+instantiates actual SDK child agents, and keeps loaded versus completed source
+bindings separate. This integration is local until full checks and standard
+deployment succeed. It does not close the whole P11 or P01–P14 plan.
 
 Genkit 1.0.0 agents middleware cannot propagate resumable child interrupts.
 The core uses the actual SDK Agent/chat/session API instead, preserving child
@@ -41,21 +44,46 @@ wrapped by TaskModelClient: two consecutive approvals across database/registry
 rebuild, one effect each, denial, task stop, scope/version/task mismatch, unknown
 state, one reservation and provider-budget exhaustion without effect replay.
 
-Required next steps before publication:
+Runtime integration (2026-10-29):
 
-1. Register/import/reindex agent components from the same immutable package and
-   instantiate the shared registry with agent type; syntax alone is not readiness.
-2. Add directory/delegation/resource runtime entry points and current-scope
-   completion/active-capability/source/script bindings. Original human text,
-   HTTP client, cancellation and budgets remain owned by the parent task.
-3. Install child model/tool middleware that checks scope and live source
-   revocation, filters parent-authorized tools and maps permission modes. Do not
-   map Write to arbitrary Shell/Python; use narrow scoped material/artifact IO.
-   Unavailable explicit models and host fields need per-agent dependency states.
-4. Use server-owned invocation ancestry plus original SDK refs; resume exact
-   child requests. Child text stays out of public final streaming; child tools
-   must not rewrite the parent's delivery plan. Keep parent artifact validation.
-5. Verify real parent/child loops, budgets, approval, cancellation, revocation,
-   resource/script bindings and recovery, then full CI and standard deployment.
+- `search_plugin_agents`, `run_plugin_agent`, `read_plugin_agent_resource` expose
+  actual delegation, with original SDK invocation refs, bound source fingerprints
+  and server-owned ancestry. Sibling discovery retains the selected version.
+  A child cannot rewrite the parent's delivery plan or stream public final text.
+- Source tool allow/deny lists narrow the available parent tools. Read/Write/Edit
+  map to task artifact IO, never arbitrary code execution. Existing files require
+  an exact latest version for writes/edits and retain earlier versions. Reads
+  validate tenant/task ownership, hash, byte count and UTF-8 before returning text.
+  Unicode pagination is bounded; these helpers do not expose API-host paths.
+- Nested children inherit read-only and dontAsk restrictions. `bypassPermissions`
+  never grants permissions: it suppresses new prompts for unauthorized actions.
+  Plan mode additionally checks the authoritative MCP effect at invocation.
+- Live source checks accompany native tool execution through asynchronous zones.
+  Every existing ToolExecution checkpoint revalidates source authority after
+  waits; nested checks compose without sharing mutable callbacks across tasks.
+- Child SDK stop text alone is insufficient for success: unresolved tool errors,
+  denials and unknown results prevent a completed delegation. Parent completion
+  still requires the actual bound tool/file evidence and explicit Agent execution.
+- Local actual-runtime fixtures cover writing a verified file, nested delegation,
+  provider-invented forbidden writes, original MCP approval across runtime rebuild,
+  denial/dontAsk, disabling a pending source, plan-mode non-read MCP rejection,
+  and Agent-owned script network approval/resume with one runner execution and
+  temporary network authority cleared afterward.
+  All provider traffic and MCP effects in these tests are local fixtures.
+
+Known remaining adapter work (not silently treated as successful): explicit model
+names require the configured model rather than a silent provider substitution;
+nonempty skills/mcpServers/hooks/memory/isolation and background mode report setup
+issues pending their host adapters. Glob currently provides prefix-based task-file
+listing, and Grep provides bounded source/material reads, without claiming CLI
+pattern/search parity. Script-bearing Agent bindings use the existing isolated
+runner and original pinned package. The script acceptance fixture exercises the
+actual harness protocol with a local Python worker; it makes no external request.
+
+Validation before release: the broad local run passes 367 tests. The final source
+authority changes, registry checks and script fixture then pass 34 targeted tests;
+full server analysis reports no issues. The exact final commit still requires full
+CI (including runner/deployment and Docker gates) and standard deployment. No
+device/client acceptance or full-plan completion is implied.
 
 Hooks/apps/extensions and remaining P01–P14 requirements retain their full scope.

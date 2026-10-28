@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:genkit/genkit.dart';
 import 'package:genkit/experimental.dart';
 
@@ -25,12 +26,13 @@ class PluginAgentSessions {
     required String task,
     required CancellationToken cancellation,
     Map<String, dynamic>? resumed,
+    Map<String, dynamic> context = const {},
   }) async {
     cancellation.throwIfCancelled();
     owner.check('workspace');
     if (invocation.isEmpty || task.trim().isEmpty)
       throw const FormatException('子 Agent 调用身份和任务不能为空');
-    final binding = ToolExecution.digest([definitionBinding, task]);
+    final binding = ToolExecution.digest([definitionBinding, task, context]);
     final key =
         'private_plugin_agent/${owner.tenantId}/${owner.taskId}/${ToolExecution.digest([owner.requestIdentity, invocation])}';
     final activeKey = '${store.root.absolute.path}/$key';
@@ -115,17 +117,17 @@ class PluginAgentSessions {
         'phase': 'active',
       }, saved.revision);
       owner.checkpointDelegation(operation, 'running');
-      final context = {'xiaoqi_plugin_agent_invocation': key};
+      final childContext = {...context, 'xiaoqi_plugin_agent_invocation': key};
       final turn = restarts == null
           ? chat.sendStream(
               text: task,
               cancel: childCancellation.token,
-              context: context,
+              context: childContext,
             )
           : chat.resumeStream(
               restart: restarts,
               cancel: childCancellation.token,
-              context: context,
+              context: childContext,
             );
       await for (final _ in turn.stream) {
         cancellation.throwIfCancelled();
@@ -145,9 +147,11 @@ class PluginAgentSessions {
       final interrupted =
           response.finishReason == AgentFinishReason.interrupted &&
           interrupts.isNotEmpty;
+      final toolFailures = _toolFailures(chat.messages);
       final completed =
           response.finishReason == AgentFinishReason.stop &&
-          response.text.trim().isNotEmpty;
+          response.text.trim().isNotEmpty &&
+          toolFailures.isEmpty;
       final result = {
         'ok': completed,
         'status': interrupted
@@ -156,7 +160,8 @@ class PluginAgentSessions {
             ? 'completed'
             : 'failed',
         'finish_reason': response.finishReason.value,
-        if (completed) 'text': response.text,
+        if (response.text.isNotEmpty) 'text': response.text,
+        if (toolFailures.isNotEmpty) 'tool_failures': toolFailures,
         if (!interrupted && !completed) 'error': '子 Agent 未完成任务，请检查任务执行记录',
       };
       final snapshot =
@@ -207,5 +212,55 @@ class PluginAgentSessions {
       unregister();
       _active.remove(activeKey);
     }
+  }
+
+  static List<String> _toolFailures(List<Message> messages) {
+    final latest = <String, bool>{};
+    final hard = <String>{};
+    for (final part in messages.expand((message) => message.content)) {
+      if (!part.isToolResponse) continue;
+      final response = part.toolResponse!;
+      Object? output = response.output;
+      if (output is String) {
+        try {
+          output = jsonDecode(output);
+        } on FormatException {
+          continue;
+        }
+      }
+      if (output is! Map) {
+        latest[response.name] = false;
+        continue;
+      }
+      final status = output['status'];
+      final failed =
+          output['ok'] == false ||
+          output['isError'] == true ||
+          const {
+            'failed',
+            'denied',
+            'external_result_unknown',
+            'workspace_result_unknown',
+            'catalog_unavailable',
+            'catalog_changed',
+            'not_submitted',
+            'unavailable',
+          }.contains(status) ||
+          (output['error'] != null &&
+              status != 'completed' &&
+              output['ok'] != true);
+      latest[response.name] = failed;
+      if (const {
+        'denied',
+        'external_result_unknown',
+        'workspace_result_unknown',
+      }.contains(status))
+        hard.add(response.name);
+    }
+    return {
+      ...hard,
+      for (final entry in latest.entries)
+        if (entry.value) entry.key,
+    }.toList();
   }
 }

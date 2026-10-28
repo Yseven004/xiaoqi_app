@@ -595,3 +595,23 @@ The importer/runtime still reports agents unavailable; this draft has not been
 published as an executable agent feature. Required runtime/tool-policy/resource/
 completion wiring and acceptance are detailed in docs/architecture/
 2026-10-28-plugin-agent-adapter.md. No new client flow or paid provider is added.
+
+## P11 actual Agent runtime integration (2026-10-29; pending release)
+
+The local runtime now registers Agent search/delegation/resource tools and
+instantiates private native SDK child sessions. Source permissions narrow parent
+tools; scoped versioned text-file IO implements Read/Write/Edit without granting
+Shell. Nested permissions, live asynchronous source revocation and original
+approval/scope/budget bindings remain enforced. Loaded and successfully completed
+Agent evidence are separate. Six actual runtime fixtures pass (write, nested,
+plan, approval/rebuild, denial, dontAsk); full regression and additional source/MCP
+revocation cases are running. No paid image service is called. This is unfinished
+release work, and remaining host profiles, script acceptance, hooks/apps/extensions
+and the rest of P01–P14 retain their original completion requirements.
+
+The runtime integration now also passes pending-source disable and plan-mode
+non-read MCP cases. A dedicated Agent-owned script/network fixture survives the
+original approval across runtime reconstruction, records exactly one runner
+execution and clears temporary network grants. Broad local regression passes 367;
+the final authority/registry/script changes pass 34 targeted checks and full server
+analysis. Exact-commit CI and standard deployment are the next release gates.

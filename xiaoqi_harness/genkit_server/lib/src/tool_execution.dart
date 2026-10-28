@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -15,6 +16,27 @@ class UnconfirmedToolOperation extends StateError {
 
 /// Claims scope and budget together in the existing task document.
 class ToolExecution {
+  static final _authorityCheckKey = Object();
+
+  /// The live plugin source remains authoritative through asynchronous native
+  /// tool work. Nested delegates inherit checks; concurrent tasks do not share
+  /// mutable callbacks or broaden each other's authority.
+  static Future<T> withAuthorityCheck<T>(
+    void Function() check,
+    Future<T> Function() action,
+  ) {
+    final inherited = Zone.current[_authorityCheckKey] as void Function()?;
+    return runZoned(
+      action,
+      zoneValues: {
+        _authorityCheckKey: () {
+          inherited?.call();
+          check();
+        },
+      },
+    );
+  }
+
   ToolExecution(
     this.store,
     this.tenantId,
@@ -97,6 +119,8 @@ class ToolExecution {
         'user_action_intents': <String, dynamic>{},
         'tool_authorization_sources': <String, dynamic>{},
         'loaded_plugin_commands': <String, dynamic>{},
+        'loaded_plugin_agents': <String, dynamic>{},
+        'completed_plugin_agents': <String, dynamic>{},
         'authorized_network_domains': <String>[],
         'requested_network_domains': <String>[],
         'network_purpose': null,
@@ -148,7 +172,16 @@ class ToolExecution {
     return null;
   }
 
-  Map<String, dynamic> get loadedPluginCommandBindings {
+  Map<String, dynamic> get loadedPluginCommandBindings =>
+      _componentBindings('loaded_plugin_commands');
+
+  Map<String, dynamic> get loadedPluginAgentBindings =>
+      _componentBindings('loaded_plugin_agents');
+
+  Map<String, dynamic> get completedPluginAgentBindings =>
+      _componentBindings('completed_plugin_agents');
+
+  Map<String, dynamic> _componentBindings(String field) {
     final value = store.get(key)?.value ?? const <String, dynamic>{};
     if ((value['steering_instructions'] as List? ?? const [])
         .whereType<Map>()
@@ -159,22 +192,36 @@ class ToolExecution {
     }
     check('read');
     return Map<String, dynamic>.from(
-      store.get(key)?.value['loaded_plugin_commands'] as Map? ?? const {},
+      store.get(key)?.value[field] as Map? ?? const {},
     );
   }
 
   void recordLoadedPluginCommand(String alias, String fingerprint) {
+    _recordComponentBinding('loaded_plugin_commands', alias, fingerprint);
+  }
+
+  void recordPluginAgent(
+    String alias,
+    String fingerprint, {
+    bool completed = false,
+  }) {
+    _recordComponentBinding('loaded_plugin_agents', alias, fingerprint);
+    if (completed)
+      _recordComponentBinding('completed_plugin_agents', alias, fingerprint);
+  }
+
+  void _recordComponentBinding(String field, String alias, String fingerprint) {
     _update((value) {
       check('read');
       final loaded = Map<String, dynamic>.from(
-        value['loaded_plugin_commands'] as Map? ?? const {},
+        value[field] as Map? ?? const {},
       );
       if (!loaded.containsKey(alias) &&
           loaded.length >= limits.toolOperations) {
-        throw ExecutionBudgetExceeded('本次任务的插件命令加载数量达到上限');
+        throw ExecutionBudgetExceeded('本次任务的插件组件加载数量达到上限');
       }
       loaded[alias] = fingerprint;
-      return {...value, 'loaded_plugin_commands': loaded};
+      return {...value, field: loaded};
     });
   }
 
@@ -251,6 +298,7 @@ class ToolExecution {
   }
 
   void check(String effect) {
+    (Zone.current[_authorityCheckKey] as void Function()?)?.call();
     final value = store.get(key)?.value ?? const <String, dynamic>{};
     if (value['cancel_requested'] == true ||
         const {'cancelled', 'stopped'}.contains(value['status'])) {

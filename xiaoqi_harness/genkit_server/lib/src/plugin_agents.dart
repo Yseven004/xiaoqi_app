@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:yaml/yaml.dart';
 import 'capability_import_service.dart';
+import 'plugin_components.dart';
+import 'store.dart';
 
 /// Parsed source profile only. Registration/runtime support is decided by the
 /// host adapter; declarations never grant tools, networking or permissions.
@@ -18,6 +20,95 @@ class PluginAgentDefinition {
   List<String> get disallowedTools =>
       (metadata['disallowedTools'] as List? ?? const []).cast<String>();
   int? get maxTurns => metadata['maxTurns'] as int?;
+
+  static Map refreshVersion(
+    CloudStore store,
+    String tenant,
+    String id,
+    Map version,
+  ) {
+    if (version['plugin_agent_profile'] == profileVersion) return version;
+    final key = 'cap/$tenant/$id';
+    final initial = store.get(key)?.value;
+    if (initial == null) return version;
+    final compatibility = initial['compatibility'];
+    final knownNoAgents =
+        initial['current_version_id'] == version['id'] &&
+        compatibility is Map &&
+        compatibility['warnings'] is List &&
+        !(compatibility['warnings'] as List).any(
+          (warning) => warning.toString().startsWith('agents '),
+        ) &&
+        !(compatibility['components'] as List? ?? const [])
+            .whereType<Map>()
+            .any((component) => component['type'] == 'agent');
+    Map? candidate;
+    if (!knownNoAgents) {
+      candidate =
+          CapabilityImportService.discover(
+                store.getImmutable(version['artifact_key'].toString()),
+                '',
+              )
+              .where(
+                (candidate) =>
+                    candidate['kind'] == 'plugin' && candidate['root'] == '',
+              )
+              .firstOrNull;
+    }
+    final agents = (candidate?['components'] as List? ?? const [])
+        .whereType<Map>()
+        .where(
+          (component) =>
+              component['type'] == 'agent' &&
+              component['status'] != 'unsupported',
+        )
+        .toList();
+    for (var attempt = 0; attempt < 8; attempt++) {
+      final current = store.get(key);
+      if (current == null ||
+          current.value['enabled'] == false ||
+          current.value['deleted_at'] != null)
+        return version;
+      final versions = (current.value['versions'] as List? ?? const [])
+          .whereType<Map>()
+          .toList();
+      final bound = versions
+          .where(
+            (candidate) =>
+                candidate['id'] == version['id'] &&
+                candidate['artifact_key'] == version['artifact_key'],
+          )
+          .firstOrNull;
+      if (bound == null) return version;
+      if (bound['plugin_agent_profile'] == profileVersion) return bound;
+      final updated = {
+        ...bound,
+        'plugin_agent_profile': profileVersion,
+        'components': [
+          for (final component
+              in (bound['components'] as List? ?? const []).whereType<Map>())
+            if (component['type'] != 'agent') component,
+          ...agents,
+        ],
+      };
+      try {
+        store.put(key, {
+          ...current.value,
+          'versions': [
+            for (final candidate in versions)
+              if (identical(candidate, bound)) updated else candidate,
+          ],
+          if (candidate != null &&
+              current.value['current_version_id'] == version['id'])
+            'compatibility': candidate,
+        }, current.revision);
+        return updated;
+      } on RevisionConflict {
+        continue;
+      }
+    }
+    throw StateError('Agent 元数据更新冲突，请重新读取插件');
+  }
 
   static PluginAgentDefinition parse(String path, List<int> bytes) {
     if (bytes.length > 128 * 1024)
@@ -148,5 +239,31 @@ class PluginAgentDefinition {
         'setup.py',
       ].any(files.containsKey),
     };
+  }
+}
+
+class SelectedPluginAgents extends SelectedPluginComponents {
+  SelectedPluginAgents(
+    CloudStore store,
+    String tenant,
+    Object? selections, {
+    bool discover = false,
+    Iterable<String> excludedIds = const [],
+  }) : super(
+         store,
+         tenant,
+         selections,
+         componentType: 'agent',
+         refreshVersion: PluginAgentDefinition.refreshVersion,
+         discover: discover,
+         discoverSiblingComponents: true,
+         excludedIds: excludedIds,
+       );
+  PluginAgentDefinition definition(String alias) {
+    final entry = entries[alias];
+    if (entry == null) throw StateError('Agent 不在本次可用插件中');
+    final bytes = files(alias)[entry['source_path']];
+    if (bytes == null) throw StateError('Agent 定义文件缺失');
+    return PluginAgentDefinition.parse(entry['source_path'].toString(), bytes);
   }
 }

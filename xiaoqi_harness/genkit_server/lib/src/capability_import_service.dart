@@ -14,6 +14,7 @@ import 'store.dart';
 import 'plugin_dependencies.dart';
 import 'isolated_mcp_spec.dart';
 import 'plugin_commands.dart';
+import 'plugin_agents.dart';
 
 typedef DependencyPreparer =
     Future<Map<String, List<int>>> Function(
@@ -757,7 +758,12 @@ class CapabilityImportService {
       } on Object {
         unsupported.add('commands 声明路径或命令目录不可用');
       }
-      for (final type in ['hooks', 'agents', 'apps']) {
+      try {
+        components.addAll(PluginAgentDefinition.inspect(files, root, manifest));
+      } on Object {
+        unsupported.add('agents 声明路径或定义目录不可用');
+      }
+      for (final type in ['hooks', 'apps']) {
         if (manifest[type] != null ||
             scoped.keys.any((p) => p.startsWith('$type/')) ||
             (type == 'apps' && scoped.containsKey('.app.json')))
@@ -1171,6 +1177,8 @@ class CapabilityImportService {
           'components': components,
           if (candidate['kind'] == 'plugin')
             'plugin_command_profile': PluginCommand.profileVersion,
+          if (candidate['kind'] == 'plugin')
+            'plugin_agent_profile': PluginAgentDefinition.profileVersion,
         });
       final saved = store.put(key, {
         'schema_version': 2,

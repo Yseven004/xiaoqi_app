@@ -101,7 +101,19 @@ void main() {
             context.resumed['approved'] is bool) {
           if (context.resumed['approved'] == true)
             effects.update(target, (count) => count + 1, ifAbsent: () => 1);
-          return .response('handled $target');
+          return .response(
+            context.resumed['approved'] == true
+                ? jsonEncode({
+                    'ok': true,
+                    'status': 'completed',
+                    'target': target,
+                  })
+                : jsonEncode({
+                    'ok': false,
+                    'status': 'denied',
+                    'target': target,
+                  }),
+          );
         }
         return .interrupt({
           'type': 'mcp_tool_approval',
@@ -215,7 +227,11 @@ void main() {
     () async {
       final agent = child();
       final scope = owner();
-      final binding = ToolExecution.digest(['immutable-v1', 'task']);
+      final binding = ToolExecution.digest([
+        'immutable-v1',
+        'task',
+        <String, dynamic>{},
+      ]);
       scope.beginDelegation('call', binding);
       final key =
           'private_plugin_agent/tenant/task/${ToolExecution.digest([scope.requestIdentity, 'call'])}';
@@ -264,7 +280,8 @@ void main() {
         'approved': false,
         'approval_hash': 'approve-B',
       });
-      expect(result.result['ok'], true);
+      expect(result.result['ok'], false);
+      expect(result.result['tool_failures'], contains('child_action'));
       expect(effects, {'A': 1});
       expect(taskToolOperationsUsed(store.get('task/tenant/task')!.value), 1);
       expect(
