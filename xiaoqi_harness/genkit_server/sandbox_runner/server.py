@@ -36,6 +36,7 @@ MAX_ARTIFACT_TOTAL_BYTES = 20 * 1024 * 1024
 MAX_ARTIFACTS = 10
 MAX_LOG_BYTES = 1024 * 1024
 MAX_RUN_SECONDS = 120
+MAX_MCP_LIFETIME_SECONDS = 4 * 60 * 60
 MAX_DOMAINS = 10
 MAX_SCRIPT_ARGUMENTS = 32
 OWNER_LABEL = os.environ.get("XIAOQI_SANDBOX_OWNER_LABEL", "com.xiaoqi.local-sandbox")
@@ -619,7 +620,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
                 except DockerException:
                     pass
                 break
-            if time.monotonic() - started_at >= MAX_RUN_SECONDS:
+            if stdio is None and time.monotonic() - started_at >= MAX_RUN_SECONDS:
                 run_error = "代码执行超过 120 秒，沙箱已停止"
                 try:
                     container.kill()
@@ -698,7 +699,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
 
 # An idle MCP connection must not hold the only ordinary-code slot: a task may
 # call MCP, run helper code, and return to the same MCP process.
-_mcp_sessions = McpSessions(_run_sandbox, threading.BoundedSemaphore(1), lifetime=MAX_RUN_SECONDS)
+_mcp_sessions = McpSessions(_run_sandbox, threading.BoundedSemaphore(1), lifetime=MAX_RUN_SECONDS, max_lifetime=MAX_MCP_LIFETIME_SECONDS)
 
 
 def _wait_for_proxy(proxy: Any) -> bool:
@@ -963,8 +964,10 @@ class RunnerHandler(BaseHTTPRequestHandler):
                         result = {"artifacts":lease.channel.exporter()}
                     else:
                         raise RuntimeError("MCP workspace is not ready")
+                    lease.heartbeat()
                 elif method == "POST" and action == "messages":
                     lease.channel.send(body)
+                    lease.heartbeat()
                     result = {"ok": True}
                 elif method == "DELETE" and action is None:
                     lease.stop()

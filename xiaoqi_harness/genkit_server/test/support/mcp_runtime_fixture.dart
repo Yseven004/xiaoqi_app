@@ -47,6 +47,7 @@ class FixtureMcpConnections extends McpConnectionService {
         serverName: 'fixture',
         mcpServer: McpServerConfig(
           url: Uri.parse('http://127.0.0.1:$port/mcp'),
+          timeout: connection.serverConfig().timeout,
         ),
       ),
     );
@@ -59,6 +60,7 @@ Future<void> main(List<String> args) async {
   final publicRead = args.single == 'mcp-public-read';
   final readOnly = const {
     'mcp-read',
+    'mcp-slow-read',
     'mcp-public-read',
     'mcp-large',
     'mcp-disabled',
@@ -101,6 +103,8 @@ Future<void> main(List<String> args) async {
       await request.response.close();
       return;
     }
+    if (body['method'] == 'tools/call' && args.single == 'mcp-slow-read')
+      await Future<void>.delayed(const Duration(seconds: 16));
     final result = switch (body['method']) {
       'initialize' => {
         'protocolVersion': '2025-11-25',

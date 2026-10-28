@@ -84,6 +84,7 @@ class McpLeaseTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 1)
 
     def test_real_http_control_authentication_protocol_and_cleanup(self):
+        clock = self.use_fake_clock()
         with patch.object(server, '_mcp_sessions', self.registry), patch.object(server, 'RUNNER_TOKEN', 'r'*40):
             http = ThreadingHTTPServer(('127.0.0.1', 0), server.RunnerHandler)
             serving = threading.Thread(target=http.serve_forever, daemon=True)
@@ -101,14 +102,22 @@ class McpLeaseTests(unittest.TestCase):
                 error.exception.close()
                 self.assertEqual(self.requests,[])
                 self.assertTrue(request('POST','/v1/mcp',self.request)['ready'])
+                clock[0] = 50
                 with self.assertRaises(urllib.error.HTTPError) as error:
                     request('POST','/v1/mcp/'+'a'*32+'/messages',{'jsonrpc':'2.0','id':1,'method':'tools/list'},token='c'*64)
                 error.exception.close()
+                self.assertEqual(self.registry.get('a'*32, 'b'*64).last_activity, 0)
+                clock[0] = 60
                 request('POST','/v1/mcp/'+'a'*32+'/messages',{'jsonrpc':'2.0','id':1,'method':'tools/list'})
+                self.assertEqual(self.registry.get('a'*32, 'b'*64).last_activity, 60)
+                clock[0] = 90
                 events = request('GET','/v1/mcp/'+'a'*32+'/events')
+                self.assertEqual(self.registry.get('a'*32, 'b'*64).last_activity, 90)
                 self.assertEqual(events['messages'],[{'jsonrpc':'2.0','id':1,'result':{'ok':True}}])
                 self.assertEqual(request('GET','/v1/mcp/'+'a'*32+'/events'), events)
+                clock[0] = 100
                 self.assertEqual(request('GET','/v1/mcp/'+'a'*32+'/artifacts')['artifacts'],[{'name':'sample.txt','base64':'aGVsbG8='}])
+                self.assertEqual(self.registry.get('a'*32, 'b'*64).last_activity, 100)
                 closed = request('DELETE','/v1/mcp/'+'a'*32)
                 self.assertTrue(closed['closed'])
                 self.assertFalse(closed['cleanup_pending'])
@@ -135,3 +144,91 @@ class McpLeaseTests(unittest.TestCase):
         self.assertTrue(lease.done.wait(timeout=3))
         self.assertTrue(self.slots.acquire(blocking=False))
         self.slots.release()
+
+    def use_fake_clock(self):
+        elapsed = [0.0]
+        wall = time.time()
+        self.registry._clock = lambda: elapsed[0]
+        self.registry._wall_clock = lambda: wall + elapsed[0]
+        return elapsed
+
+    def test_active_event_polling_survives_original_creation_deadline(self):
+        clock = self.use_fake_clock()
+        lease = self.registry.create(self.request)
+        self.assertTrue(lease.ready.wait(timeout=2))
+        for seconds in (60, 120, 180, 240):
+            clock[0] = seconds
+            self.assertEqual(lease.poll_events(0, timeout=0)['messages'], [])
+            self.registry._sweep_once()
+            self.assertFalse(lease.channel.closed)
+        self.assertEqual(len(self.requests), 1)
+
+    def test_missing_heartbeat_expires_from_last_valid_activity(self):
+        clock = self.use_fake_clock()
+        lease = self.registry.create(self.request)
+        self.assertTrue(lease.ready.wait(timeout=2))
+        clock[0] = 100
+        lease.poll_events(0, timeout=0)
+        clock[0] = 219
+        with self.assertRaises(LeaseError):
+            self.registry.get('a'*32, 'wrong-token')
+        with self.assertRaises(LeaseError):
+            lease.poll_events(99, timeout=0)
+        self.registry._sweep_once()
+        self.assertFalse(lease.channel.closed)
+        clock[0] = 220
+        self.registry._sweep_once()
+        self.assertTrue(lease.done.wait(timeout=2))
+        self.assertEqual(lease.channel.error, 'MCP lease heartbeat expired')
+        self.assertTrue(self.slots.acquire(blocking=False))
+        self.slots.release()
+
+    def test_heartbeats_do_not_extend_absolute_session_budget(self):
+        clock = self.use_fake_clock()
+        self.registry._max_lifetime = 300
+        lease = self.registry.create(self.request)
+        self.assertTrue(lease.ready.wait(timeout=2))
+        for seconds in (60, 120, 180, 240):
+            clock[0] = seconds
+            lease.poll_events(0, timeout=0)
+            self.registry._sweep_once()
+            self.assertFalse(lease.channel.closed)
+        clock[0] = 300
+        lease.poll_events(0, timeout=0)
+        self.registry._sweep_once()
+        self.assertTrue(lease.done.wait(timeout=2))
+        self.assertEqual(lease.channel.error, 'MCP session time budget exhausted')
+
+    def test_long_session_retention_starts_at_completion(self):
+        clock = self.use_fake_clock()
+        lease = self.registry.create(self.request)
+        self.assertTrue(lease.ready.wait(timeout=2))
+        clock[0] = 1000
+        lease.heartbeat()
+        lease.stop()
+        self.assertTrue(lease.done.wait(timeout=2))
+        clock[0] = 1119
+        self.registry._sweep_once()
+        self.assertIs(self.registry.get('a'*32, 'b'*64), lease)
+        self.assertEqual(lease.result['artifacts'][0]['name'], 'sample.txt')
+        clock[0] = 1120
+        self.registry._sweep_once()
+        with self.assertRaises(LeaseError):
+            self.registry.get('a'*32, 'b'*64)
+
+    def test_retention_never_prunes_a_still_valid_startup_replay_guard(self):
+        clock = self.use_fake_clock()
+        issued = int(self.registry._wall_clock()) + 30
+        request = {**self.request, 'issued_at': issued}
+        lease = self.registry.create(request)
+        self.assertTrue(lease.ready.wait(timeout=2))
+        lease.stop()
+        self.assertTrue(lease.done.wait(timeout=2))
+        clock[0] = 120
+        self.registry._sweep_once()
+        self.assertIs(self.registry.get('a'*32, 'b'*64), lease)
+        clock[0] = 151
+        self.registry._sweep_once()
+        with self.assertRaises(LeaseError):
+            self.registry.create(request)
+        self.assertEqual(len(self.requests), 1)

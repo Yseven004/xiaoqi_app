@@ -316,5 +316,38 @@ class RunnerValidationTests(unittest.TestCase):
             })
 
 
+    def test_mcp_connection_does_not_inherit_the_script_deadline(self):
+        for mcp in (False, True):
+            with self.subTest(mcp=mcp):
+                client, volume, container = Mock(), Mock(), Mock()
+                volume.name = 'timeout-fixture-volume'
+                client.volumes.create.return_value = volume
+                client.containers.create.return_value = container
+                container.put_archive.return_value = True
+                states = iter(['running', 'exited'])
+                def reload():
+                    state = next(states, 'exited')
+                    container.attrs = {'State': {'Status': state, 'Running': state == 'running', 'ExitCode': 0}}
+                container.reload.side_effect = reload
+                channel = StdioChannel() if mcp else None
+                if channel is not None:
+                    channel.attach = Mock()
+                send = Mock()
+                request = {'task_id':'deadline-fixture','code':'pass','language':'python',
+                           'command':['node','/workspace/skill/server.js']}
+                with (patch.object(server, '_get_client', return_value=client),
+                      patch.object(server, '_decode_logs', return_value=''),
+                      patch.object(server, '_safe_artifacts', return_value=[]),
+                      patch.object(server, 'MAX_RUN_SECONDS', 0),
+                      patch.object(server.time, 'sleep')):
+                    result = server._run_sandbox(request, send, stdio=channel)
+                self.assertEqual(result['ok'], mcp)
+                if not mcp:
+                    self.assertIn('120', result['error'])
+                    container.kill.assert_called_once()
+                else:
+                    self.assertTrue(any(call.args[0].get('type') == 'heartbeat' for call in send.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()

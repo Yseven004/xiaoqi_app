@@ -57,6 +57,9 @@ Future<void> main() async {
       ),
     );
     var tools = 0;
+    final activeSession = Stopwatch()..start();
+    CancellationController? deadlineCancellation;
+    Future<Object?>? deadlineResult;
     try {
       await client.ready();
       tools = ((await client.listTools())['tools'] as List).length;
@@ -85,6 +88,53 @@ Future<void> main() async {
           'Official filesystem roundtrip or directory boundary failed',
         );
       }
+      // Real-clock regression: the old script/lease deadlines killed even a
+      // healthy MCP connection at 120 seconds. Event polling must renew it.
+      const deadlineTask = 'ordinary-script-deadline';
+      store.put('task/$tenant/$deadlineTask', {
+        'status': 'running',
+        'artifacts': [],
+        'events': [],
+      }, null);
+      deadlineCancellation = CancellationController();
+      deadlineResult = executor
+          .execute(
+            tenantId: tenant,
+            taskId: deadlineTask,
+            code:
+                'import time\ntime.sleep(130)\nprint("unexpected completion")',
+            language: 'python',
+            authorizedDomains: [],
+            materials: [],
+            skillFiles: {},
+            cancellation: deadlineCancellation.token,
+          )
+          .then<Object?>((_) => null, onError: (Object error) => error);
+      stdout.writeln(
+        jsonEncode({'checkpoint': 'active-mcp-session', 'wait_seconds': 125}),
+      );
+      await Future<void>.delayed(const Duration(seconds: 125));
+      final afterDeadline = await client.callTool(
+        name: 'read_text_file',
+        arguments: {'path': '/workspace/output/roundtrip.txt'},
+      );
+      if (afterDeadline['isError'] == true ||
+          !jsonEncode(afterDeadline).contains('isolated-stdio-roundtrip'))
+        throw StateError(
+          'Active MCP connection did not survive the script deadline',
+        );
+      activeSession.stop();
+      final deadlineError = await deadlineResult;
+      if (deadlineError is! SandboxExecutionError ||
+          !deadlineError.message.toString().contains('120'))
+        throw StateError(
+          'Ordinary script deadline was not enforced independently of MCP lifetime',
+        );
+      if (store
+              .get('task/$tenant/$deadlineTask')!
+              .value['sandbox_cleanup_pending'] ==
+          true)
+        throw StateError('Timed out script cleanup did not finish');
       await executor.snapshotMcp(tenant, task, transport);
       if ((store.get('task/$tenant/$task')!.value['artifacts'] as List)
               .length !=
@@ -95,6 +145,8 @@ Future<void> main() async {
       }
       cancellation.cancel();
     } finally {
+      deadlineCancellation?.cancel();
+      await deadlineResult;
       await client.close();
       await executor.finishMcp(tenant, task, transport);
     }
@@ -221,6 +273,9 @@ PY
         'directory_boundary': true,
         'artifact_integrity': true,
         'cancel_cleanup': true,
+        'active_mcp_survives_code_timeout': true,
+        'ordinary_script_deadline_enforced': true,
+        'active_mcp_observed_seconds': activeSession.elapsed.inSeconds,
         'shell_literal_argv': true,
         'mcp_to_shell_file_handoff': true,
         'agent_mcp_shell_loop': true,

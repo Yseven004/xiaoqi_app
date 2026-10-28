@@ -17,11 +17,16 @@ class LeaseError(ValueError):
 
 
 class McpLease:
-    def __init__(self, request: dict[str, Any], run: Callable, slots: Any):
+    def __init__(self, request: dict[str, Any], run: Callable, slots: Any, clock: Callable = time.monotonic):
         self.token = request["lease_token"]
         self.task_id = request["task_id"]
+        self.issued_at = request["issued_at"]
         self.fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
-        self.created = time.monotonic()
+        self._clock = clock
+        self.created = clock()
+        self.last_activity = self.created
+        self.finished_at: float | None = None
+        self._activity_lock = threading.Lock()
         self.channel = StdioChannel()
         self.ready = threading.Event()
         self.done = threading.Event()
@@ -47,12 +52,30 @@ class McpLease:
             self.result = {"ok": False, "error": "Isolated MCP process failed", "artifacts": []}
         finally:
             self.channel.close()
-            self.ready.set()
-            self.done.set()
+            with self._activity_lock:
+                self.finished_at = self._clock()
             slots.release()
+            self.done.set()
+            self.ready.set()
 
     def stop(self):
         self.channel.close()
+
+    def heartbeat(self):
+        with self._activity_lock:
+            if not self.channel.closed:
+                self.last_activity = self._clock()
+
+    def expire(self, now: float, idle_seconds: float, max_lifetime: float):
+        # Renewal and expiry share one lock: a fresh heartbeat cannot be killed
+        # by an expiry decision made before it arrived.
+        with self._activity_lock:
+            if self.done.is_set() or self.channel.closed:
+                return
+            if now - self.created >= max_lifetime:
+                self.channel.close("MCP session time budget exhausted")
+            elif now - self.last_activity >= idle_seconds:
+                self.channel.close("MCP lease heartbeat expired")
 
     def poll_events(self, cursor: int, timeout: float = 15) -> dict[str, Any]:
         """Acknowledge only on the next request; a lost HTTP response is replayable."""
@@ -60,9 +83,11 @@ class McpLease:
             raise LeaseError("Invalid event cursor")
         with self._events_lock:
             if self._event_batch is not None and cursor == self._event_sequence - 1:
+                self.heartbeat()
                 return self._event_batch
             if cursor != self._event_sequence:
                 raise LeaseError("Invalid event cursor")
+            self.heartbeat()
             self._event_batch = None
             self._event_bytes = 0
             result = self.channel.poll(timeout=timeout)
@@ -91,10 +116,14 @@ class McpLease:
 
 
 class McpSessions:
-    def __init__(self, run: Callable, slots: Any, lifetime: float = 120):
+    def __init__(self, run: Callable, slots: Any, lifetime: float = 120, *, max_lifetime: float = 4 * 60 * 60, retention: float = 120, clock: Callable = time.monotonic, wall_clock: Callable = time.time):
         self._run = run
         self._slots = slots
         self._lifetime = lifetime
+        self._max_lifetime = max_lifetime
+        self._retention = retention
+        self._clock = clock
+        self._wall_clock = wall_clock
         self._lock = threading.Lock()
         self._leases: dict[str, McpLease] = {}
         self._closed = threading.Event()
@@ -105,7 +134,7 @@ class McpSessions:
         token = request.get("lease_token", "")
         task_id = request.get("task_id", "")
         issued_at = request.get("issued_at")
-        if type(issued_at) is not int or not -30 <= time.time() - issued_at <= 120:
+        if type(issued_at) is not int or not -30 <= self._wall_clock() - issued_at <= 120:
             raise LeaseError("MCP startup request has expired")
         if not isinstance(lease_id, str) or not re.fullmatch(r"[a-f0-9]{32}", lease_id):
             raise LeaseError("Invalid lease ID")
@@ -122,12 +151,13 @@ class McpSessions:
                 if not hmac.compare_digest(prior.token, token) or prior.fingerprint != digest:
                     raise LeaseError("Lease already belongs to another request")
                 # Includes completed/cancelled leases: no automatic process replay.
+                prior.heartbeat()
                 return prior
             if (len(self._leases) >= 1024 or sum(lease.payload_bytes for lease in self._leases.values()) >= 32 * 1024 * 1024
                     or not self._slots.acquire(blocking=False)):
                 raise LeaseError("Runner MCP capacity is exhausted")
             try:
-                lease = McpLease(request, self._run, self._slots)
+                lease = McpLease(request, self._run, self._slots, self._clock)
                 self._leases[lease_id] = lease
                 lease.start()
             except Exception:
@@ -148,15 +178,21 @@ class McpSessions:
 
     def _sweep(self):
         while not self._closed.wait(1):
-            with self._lock:
-                expired = [lease for lease in self._leases.values()
-                           if time.monotonic() - lease.created > self._lifetime]
-                for key, lease in list(self._leases.items()):
-                    if lease.done.is_set() and time.monotonic() - lease.created > self._lifetime + 120:
-                        del self._leases[key]
-                # Startup timestamps prevent replay even after pruning tombstones.
-            for lease in expired:
-                lease.stop()
+            self._sweep_once()
+
+    def _sweep_once(self):
+        now = self._clock()
+        wall_now = self._wall_clock()
+        with self._lock:
+            leases = list(self._leases.values())
+            for key, lease in list(self._leases.items()):
+                if (lease.done.is_set() and lease.finished_at is not None
+                        and now - lease.finished_at >= self._retention
+                        and wall_now - lease.issued_at > 120):
+                    del self._leases[key]
+            # Startup timestamps still prevent replay after pruning tombstones.
+        for lease in leases:
+            lease.expire(now, self._lifetime, self._max_lifetime)
 
     def close(self):
         self._closed.set()

@@ -103,7 +103,9 @@ class StdioChannel:
                 except queue.Empty:
                     break
 
-    def close(self) -> None:
+    def close(self, reason: str | None = None) -> None:
+        if reason is not None and not self.closed and self._error is None:
+            self._error = reason
         self._closed.set()
         self._wake_poll()
         if self._socket is not None:

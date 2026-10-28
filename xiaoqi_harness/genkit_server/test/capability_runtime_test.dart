@@ -28,6 +28,7 @@ void main() {
     'mcp-partial-startup',
     'mcp-error',
     'mcp-read',
+    'mcp-slow-read',
     'mcp-public-read',
     'mcp-large',
     'mcp-approved-repeat',
@@ -88,6 +89,7 @@ void main() {
               'mode':
                   const {
                     'mcp-read',
+                    'mcp-slow-read',
                     'mcp-public-read',
                     'mcp-large',
                     'mcp-disabled',
@@ -99,6 +101,7 @@ void main() {
               'image_count':
                   const {
                         'mcp-read',
+                        'mcp-slow-read',
                         'mcp-public-read',
                         'mcp-large',
                         'mcp-disabled',
@@ -206,6 +209,7 @@ void main() {
                 'artifacts': [
                   if (!const {
                     'mcp-read',
+                    'mcp-slow-read',
                     'mcp-public-read',
                     'mcp-large',
                     'mcp-disabled',
@@ -474,6 +478,7 @@ void main() {
               result['before_approval'],
               const {
                     'mcp-read',
+                    'mcp-slow-read',
                     'mcp-large',
                     'mcp-public-read',
                   }.contains(scenario)

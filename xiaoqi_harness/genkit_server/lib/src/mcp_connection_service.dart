@@ -16,6 +16,8 @@ import 'tool_access_policy.dart';
 import 'isolated_mcp_spec.dart';
 import 'trusted_mcp_read_profiles.dart';
 
+const mcpToolRequestTimeout = Duration(seconds: 60);
+
 Future<List<Map<String, dynamic>>> listAllMcpTools(
   Future<Map<String, dynamic>> Function(String? cursor) readPage,
 ) async {
@@ -70,7 +72,7 @@ class McpConnectionCredentials {
     headers: bearerToken == null
         ? null
         : {'Authorization': 'Bearer $bearerToken'},
-    timeout: const Duration(seconds: 15),
+    timeout: mcpToolRequestTimeout,
   );
 }
 

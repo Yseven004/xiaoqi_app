@@ -1,0 +1,20 @@
+{
+  "main_commit": "2dfd3fd4797671b1da98d4a9430bb8f4f683bf04",
+  "deployment_id": "20261028-072719-2dfd3fd",
+  "ci_run_id": 40602204687,
+  "ci_job_id": 122532854275,
+  "ci_checks": {"dart_tests": 300, "runner_tests": 52, "deployment_tests": 28, "real_isolation_gate": true, "runner_restart_gate": true, "image_roundtrip": true},
+  "controller_exit": 0,
+  "current_health": "healthy",
+  "public_https_status": 200,
+  "public_https_check_location": "Cloud Assistant; local Windows TLS failed",
+  "product": "2026-10-27-agent-tools-2",
+  "api_contract": 24,
+  "health_data_and_cleanup": "passed",
+  "restore_point": "latest-good",
+  "restore_data": "present",
+  "verification_profile": "non-image",
+  "live_image_checks": "deferred by user",
+  "device_verification": "not performed",
+  "log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261028-072719-2dfd3fd.log"
+}

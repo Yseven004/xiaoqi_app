@@ -2296,12 +2296,12 @@ class GenkitXiaoqiAgentRuntime
                 serverName: connection.name,
                 mcpServer: McpServerConfig(
                   transport: transport,
-                  timeout: const Duration(seconds: 20),
+                  timeout: mcpToolRequestTimeout,
                 ),
               ),
             );
             try {
-              await client.ready();
+              await client.ready().timeout(const Duration(seconds: 20));
             } catch (_) {
               await client.close();
               rethrow;
@@ -2542,7 +2542,7 @@ class GenkitXiaoqiAgentRuntime
                     invoked = true;
                     final result = await client
                         .callTool(name: remoteToolName, arguments: input)
-                        .timeout(const Duration(seconds: 60));
+                        .timeout(mcpToolRequestTimeout);
                     cancellation.throwIfCancelled();
                     final isolatedTransport = isolatedMcpById[connection.id];
                     if (isolatedTransport != null) {
