@@ -7,9 +7,11 @@ import 'isolated_mcp_spec.dart';
 
 class PluginDependencies {
   final connectionIds = <String>{};
+  final connectionParents = <String, Set<String>>{};
   final isolatedConnections = <McpConnectionCredentials>[];
   final messages = <String>[];
   final unavailable = <String>[];
+  final failures = <Map<String, String>>[];
 
   static Map<String, dynamic> declarations(Map<String, List<int>> files) {
     final result = <String, dynamic>{};
@@ -66,6 +68,17 @@ class PluginDependencies {
           record['enabled'] == false ||
           record['deleted_at'] != null)
         continue;
+      void addUnavailable(String message, {String component = 'plugin'}) {
+        result.unavailable.add(message);
+        result.failures.add({
+          'parent_id': selection['id'].toString(),
+          'version_id': selection['version_id'].toString(),
+          'component': component,
+          'name': record['name']?.toString() ?? '插件',
+          'message': message,
+        });
+      }
+
       final versions = record['versions'];
       final version = (versions is List ? versions : const [])
           .whereType<Map>()
@@ -73,7 +86,7 @@ class PluginDependencies {
           .firstOrNull;
       if (version == null) {
         result.messages.add('插件 ${record['name']} 的所选版本已失效，请重新选择');
-        result.unavailable.add('插件所选版本已失效');
+        addUnavailable('插件所选版本已失效', component: 'version');
         continue;
       }
       Map<String, List<int>> files;
@@ -83,7 +96,7 @@ class PluginDependencies {
         definitions = declarations(files);
       } on Object {
         result.messages.add('插件 ${record['name']} 的文件或连接声明不可用，请重新安装或选择');
-        result.unavailable.add('插件文件或连接声明不可用');
+        addUnavailable('插件文件或连接声明不可用', component: 'files');
         continue;
       }
       for (final entry in definitions.entries) {
@@ -109,11 +122,17 @@ class PluginDependencies {
                 isolated: spec,
               ),
             );
+            result.connectionParents
+                .putIfAbsent(id, () => <String>{})
+                .add(selection['id'].toString());
             result.messages.add(
               '插件 ${record['name']} 的 ${entry.key} 将在任务隔离工作区运行，默认断网',
             );
           } on FormatException catch (error) {
-            result.unavailable.add('插件连接 ${entry.key}：${error.message}');
+            addUnavailable(
+              '插件连接 ${entry.key}：${error.message}',
+              component: entry.key,
+            );
             result.messages.add('插件连接 ${entry.key}：${error.message}');
           }
           continue;
@@ -121,7 +140,7 @@ class PluginDependencies {
         if (config is! Map ||
             config['url'] is! String ||
             config['command'] != null) {
-          result.unavailable.add('插件连接 ${entry.key} 需要尚未支持的本地宿主');
+          addUnavailable('插件连接 ${entry.key} 需要尚未支持的本地宿主', component: entry.key);
           result.messages.add(
             '插件 ${record['name']} 的 ${entry.key} 需要尚未支持的本地宿主',
           );
@@ -131,7 +150,7 @@ class PluginDependencies {
         try {
           url = McpConnectionService.parseRemoteUrl(config['url'] as String);
         } on FormatException {
-          result.unavailable.add('插件连接 ${entry.key} 尚未配置有效地址');
+          addUnavailable('插件连接 ${entry.key} 尚未配置有效地址', component: entry.key);
           result.messages.add(
             '插件 ${record['name']} 的 ${entry.key} 需要先配置有效的远程连接',
           );
@@ -146,12 +165,15 @@ class PluginDependencies {
             )
             .firstOrNull;
         if (owned == null) {
-          result.unavailable.add('插件连接 ${entry.key} 尚未绑定账号连接');
+          addUnavailable('插件连接 ${entry.key} 尚未绑定账号连接', component: entry.key);
           result.messages.add(
             '插件 ${record['name']} 的 MCP 依赖 ${entry.key} 尚未连接，请先在 MCP 连接器中完成设置；不得假称该依赖已执行',
           );
         } else {
           result.connectionIds.add(owned.$2.value['id'].toString());
+          result.connectionParents
+              .putIfAbsent(owned.$2.value['id'].toString(), () => <String>{})
+              .add(selection['id'].toString());
           result.messages.add(
             '插件 ${record['name']} 的 ${entry.key} 已绑定账号连接，调用仍需通过权限检查',
           );

@@ -64,6 +64,7 @@ Future<void> main(List<String> args) async {
   final store = CloudStore(root: directory.path);
   final images = FixtureImages(store);
   final scenario = args.single;
+  final scopeScenario = scenario.startsWith('scope-');
   final commandScenario =
       scenario.startsWith('text-only-plugin-command') ||
       scenario == 'text-only-network-command';
@@ -81,6 +82,27 @@ Future<void> main(List<String> args) async {
   DockerCodeExecutionService? codeExecutor;
   final networkScenario = scenario.startsWith('text-only-network-');
   final networkCounter = File('${directory.path}/network-executions');
+  if (const {
+    'scope-withdraw-code',
+    'scope-reprepare-code',
+  }.contains(scenario)) {
+    final worker = File('${directory.path}/ordinary_worker.py');
+    worker.writeAsStringSync(r'''
+import json,sys
+r=json.loads(sys.stdin.readline())
+assert r['language'] == 'python'
+assert r['authorized_domains'] == []
+assert r['skill_files'] == {}
+print(json.dumps({'type':'result','ok':True,'stdout':'ordinary-code-4','artifacts':[],'cleanup_pending':False}))
+''');
+    codeExecutor = DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable:
+          Platform.environment['XIAOQI_TEST_PYTHON'] ??
+          (Platform.isWindows ? 'python' : 'python3'),
+    );
+  }
   if (networkScenario) {
     final worker = File('${directory.path}/network_worker.py');
     worker.writeAsStringSync('''
@@ -209,7 +231,7 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
       ],
     }, null);
   }
-  if (scenario == 'explicit-partial') {
+  if (scenario == 'explicit-partial' || scopeScenario) {
     store.put('cap/personal/unavailable', {
       'id': 'unavailable',
       'name': 'Unavailable plugin',
@@ -221,7 +243,52 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
       ],
     }, null);
   }
+  if (scopeScenario) {
+    final task = store.get('task/personal/turn')!;
+    store.put('task/personal/turn', {
+      ...task.value,
+      'steering_instructions': [
+        {
+          'message_id': 'correction-1',
+          'sequence': 1,
+          'status': 'received',
+          'content': scenario == 'scope-keep-unavailable'
+              ? '继续用所选技能和不可用插件完成原来的两页图片任务'
+              : scenario == 'scope-withdraw-code'
+              ? '撤回扩展任务，不使用任何扩展，只执行普通代码 print(2+2) 并纯文字报告结果'
+              : '不用任何扩展了，撤回原任务，只用纯文字回答这段话',
+        },
+      ],
+    }, task.revision);
+  }
   final events = <Map<String, Object?>>[];
+  final legacyText = <String>[];
+  void event(Map<String, Object?> value) {
+    events.add(value);
+    if (const {
+          'scope-withdraw-followup',
+          'scope-reprepare-code',
+        }.contains(scenario) &&
+        value['type'] == 'steering_applied' &&
+        value['sequence'] == 1) {
+      final task = store.get('task/personal/turn')!;
+      store.put('task/personal/turn', {
+        ...task.value,
+        'steering_instructions': [
+          ...task.value['steering_instructions'] as List,
+          {
+            'message_id': 'correction-2',
+            'sequence': 2,
+            'status': 'received',
+            'content': scenario == 'scope-reprepare-code'
+                ? '撤回扩展，只执行普通代码 print(2+2) 并报告结果，标记 LATE_ORDINARY_CODE'
+                : '再简短一点',
+          },
+        ],
+      }, task.revision);
+    }
+  }
+
   final telemetry =
       (Platform.environment['GENKIT_TELEMETRY_SERVER'] ?? '').isEmpty
       ? null
@@ -246,7 +313,7 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
           ? []
           : [
               {'id': 'notes', 'version_id': 'v1'},
-              if (scenario == 'explicit-partial')
+              if (scenario == 'explicit-partial' || scopeScenario)
                 {'id': 'unavailable', 'version_id': 'v1'},
             ],
       'messages': [
@@ -303,7 +370,8 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
         {'role': 'user', 'content': taskText},
       ]),
       onChunk: (_) {},
-      onProcessEvent: events.add,
+      onProcessEvent: event,
+      onLegacyDelta: legacyText.add,
       cancellation: CancellationController().token,
     );
     var result = first;
@@ -343,12 +411,13 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
         messages: first.messages,
         restart: [restart],
         onChunk: (_) {},
-        onProcessEvent: events.add,
+        onProcessEvent: event,
+        onLegacyDelta: legacyText.add,
         cancellation: CancellationController().token,
       );
     }
     stdout.writeln(
-      'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'operation_count': (store.get('task/personal/turn')!.value['scope_operations'] as Map? ?? const {}).length, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length, if (networkScenario) 'network_before_approval': beforeApproval, if (networkScenario) 'network_runs': networkCounter.existsSync() ? int.parse(networkCounter.readAsStringSync()) : 0, if (networkScenario) 'network_grants': store.get('task/personal/turn')!.value['authorized_network_domains'], if (networkScenario) 'network_interrupted': result.finishReason == AgentFinishReason.interrupted})}',
+      'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'legacy_text': legacyText.join(), 'code_runs': store.get('task/personal/turn')!.value['code_execution_runs'] ?? 0, 'operation_count': (store.get('task/personal/turn')!.value['scope_operations'] as Map? ?? const {}).length, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length, if (networkScenario) 'network_before_approval': beforeApproval, if (networkScenario) 'network_runs': networkCounter.existsSync() ? int.parse(networkCounter.readAsStringSync()) : 0, if (networkScenario) 'network_grants': store.get('task/personal/turn')!.value['authorized_network_domains'], if (networkScenario) 'network_interrupted': result.finishReason == AgentFinishReason.interrupted})}',
     );
   } finally {
     stdout.writeln(

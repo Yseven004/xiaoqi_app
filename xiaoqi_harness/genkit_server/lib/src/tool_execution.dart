@@ -144,6 +144,14 @@ class ToolExecution {
   }
 
   Map<String, dynamic> get loadedPluginCommandBindings {
+    final value = store.get(key)?.value ?? const <String, dynamic>{};
+    if ((value['steering_instructions'] as List? ?? const [])
+        .whereType<Map>()
+        .any((i) => (i['sequence'] as num? ?? 0) > steeringSequence)) {
+      // Restore no old load permission while a correction awaits the steering
+      // middleware. This metadata read must not prevent that middleware running.
+      return const {};
+    }
     check('read');
     return Map<String, dynamic>.from(
       store.get(key)?.value['loaded_plugin_commands'] as Map? ?? const {},

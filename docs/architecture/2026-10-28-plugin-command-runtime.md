@@ -80,8 +80,17 @@ actual selected test files completed with exit 0. Final static analysis passes.
 The real Docker stdio gate now also loads a plugin command and invokes its Python
 script with literal argv, checks the resulting file's bytes and verifies no
 shell-substitution file was created. MCP and Shell checks remain in that same
-task. This gate is pending CI; local Docker is unavailable. CI, deployment,
-client/device verification and real-service effectiveness are separate evidence.
+task. CI executed this gate successfully; local Docker is unavailable.
+Client/device verification and real-service effectiveness remain separate.
+
+Released as main `4e682a08da3648632160ada7ba9c732980db68df`, CI `40674011008`,
+job `122767667897`: 318 Dart, 60 runner and 28 deployment checks pass. The real
+Docker JSON records `plugin_command_script_loop=true`, existing MCP/Shell and
+network boundaries pass, and `IMAGE_ROUNDTRIP_VERIFIED` succeeds. Deployment
+`20261028-184101-4e682a0` completed with controller exit 0: healthy service,
+public HTTPS 200 via Cloud Assistant, verified data/cleanup and one latest-good
+restore point with data. This is deployment evidence for this command profile,
+not completion of all P11 protocols or real-client acceptance.
 
 Remaining P11 scope is explicit: dynamic shell substitutions, forked/context or
 model-specific commands, command-level host hooks, other host directories,

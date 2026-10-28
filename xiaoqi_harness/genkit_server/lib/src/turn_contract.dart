@@ -10,6 +10,7 @@ class TurnContract {
     this.answerRequired = false,
     this.skillIds = const [],
     this.connectionIds = const [],
+    this.withdrawnRequirementIds = const [],
     this.targetArtifactId,
     this.clarification,
   });
@@ -19,6 +20,7 @@ class TurnContract {
   final bool answerRequired;
   final List<String> skillIds;
   final List<String> connectionIds;
+  final List<String> withdrawnRequirementIds;
   final String? targetArtifactId;
   final String? clarification;
 
@@ -30,6 +32,9 @@ class TurnContract {
     connectionIds: (value['connection_ids'] as List? ?? const [])
         .cast<String>(),
     targetArtifactId: value['target_artifact_id'] as String?,
+    withdrawnRequirementIds:
+        (value['withdrawn_requirement_ids'] as List? ?? const [])
+            .cast<String>(),
     clarification: value['clarification'] as String?,
   );
 
@@ -46,6 +51,7 @@ class TurnContract {
     'answer_required': answerRequired,
     'skill_ids': skillIds,
     'connection_ids': connectionIds,
+    'withdrawn_requirement_ids': withdrawnRequirementIds,
     if (targetArtifactId != null) 'target_artifact_id': targetArtifactId,
     if (clarification != null) 'clarification': clarification,
   };
@@ -68,6 +74,10 @@ class TurnContract {
           ],
         },
         'image_count': {'type': 'integer', 'minimum': 0, 'maximum': 12},
+        'withdrawn_requirement_ids': {
+          'type': 'array',
+          'items': {'type': 'string'},
+        },
         'answer_required': {'type': 'boolean'},
         'skill_ids': {
           'type': 'array',
@@ -104,6 +114,7 @@ class TurnContract {
     String text, {
     required Set<String> skills,
     required Set<String> connections,
+    Set<String> requirements = const {},
   }) async {
     final match = RegExp(r'\{[\s\S]*\}').firstMatch(text);
     final decoded = jsonDecode(match?.group(0) ?? text);
@@ -129,6 +140,12 @@ class TurnContract {
       answerRequired: value['answer_required'] as bool,
       skillIds: allowed('skill_ids', skills),
       connectionIds: allowed('connection_ids', connections),
+      withdrawnRequirementIds:
+          (value['withdrawn_requirement_ids'] as List? ?? const [])
+              .cast<String>()
+              .where(requirements.contains)
+              .toSet()
+              .toList(),
       targetArtifactId: value['target_artifact_id'] as String?,
       clarification: value['clarification'] as String?,
     );
@@ -161,6 +178,7 @@ class TurnContract {
               : imageLimit),
     skillIds: skillIds,
     connectionIds: connectionIds,
+    withdrawnRequirementIds: withdrawnRequirementIds,
     targetArtifactId: targetArtifactId,
     clarification: clarification,
   );

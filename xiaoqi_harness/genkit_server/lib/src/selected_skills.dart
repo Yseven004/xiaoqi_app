@@ -34,7 +34,7 @@ class SelectedSkills {
         _select(id, versionId, componentId, allowUnavailable: allowUnavailable);
       } on Object {
         if (!allowUnavailable) rethrow;
-        _unavailable(id);
+        _unavailable(id, versionId: versionId);
       }
     }
     if (entries.length > 32)
@@ -113,7 +113,11 @@ class SelectedSkills {
         try {
           _metadata(entry);
         } on Object {
-          _unavailable(id, componentId: component['id'].toString());
+          _unavailable(
+            id,
+            componentId: component['id'].toString(),
+            versionId: versionId,
+          );
           continue;
         }
       }
@@ -129,10 +133,11 @@ class SelectedSkills {
   final unavailableSelections = <Map<String, String>>[];
   final _packages = <String, Map<String, List<int>>>{};
 
-  void _unavailable(String id, {String? componentId}) {
+  void _unavailable(String id, {String? componentId, String? versionId}) {
     final record = store.get('cap/$tenant/$id')?.value;
     unavailableSelections.add({
       'id': id,
+      if (versionId != null) 'version_id': versionId,
       if (componentId != null) 'component_id': componentId,
       'name': record?['name']?.toString() ?? '所选扩展',
       'message': '所选扩展版本、组件或文件不可用，请刷新后重新选择',

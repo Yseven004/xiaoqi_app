@@ -473,3 +473,33 @@ reindex now recovers commands from those same immutable package bytes and marks
 the version's runtime metadata profile; it preserves version/artifact identity,
 other components and user data. 32 final import/command/process checks pass,
 including this upgrade; no uninstall or source-repository update is required.
+
+Command batch deployed and verified as 20261028-184101-4e682a0 (main 4e682a0,
+CI 40674011008/job 122767667897). 318 Dart, 60 runner, 28 deployment checks,
+actual plugin-command/script Docker gate and image roundtrip pass. Server,
+public HTTPS 200, data, cleanup and latest-good restore data verified. Remaining
+P11 protocols and client acceptance are not closed by that release.
+
+## P03/P13 request-scoped completion requirements (in progress)
+
+Replaced permanent old failure lists with current human-request completion
+conditions. Requirement identities bind selections/components/versions and
+connector parents. The no-tool router can withdraw only listed conditions based
+on human instructions; tool failures do not delete requirements. New scope
+loading/plan validation and ordinary-code implicit capability selection no
+longer force a withdrawn skill. Pending steering no longer fails command-load
+restoration before the correction can run.
+
+Late answer-stage workflow corrections now withhold/discard the old answer,
+clean up old preparation resources and automatically prepare the new task under
+the same model budget, without replaying old SDK resume inputs. Five targeted
+Genkit loops pass, including one ordinary code execution and no stale streamed
+answer; initial 324-test regression passes, final broad regression underway.
+See the request-scoped completion document for evidence, state/rollback details
+and the remaining P03/P13 acceptance items. Public API/UI contract is unchanged.
+
+Final local regression completes 326 tests with analyzer clean. Ordinary code
+after withdrawal has no stale skill files and records one runner execution;
+late answer-stage scope advancement withholds the obsolete answer, automatically
+prepares the new code task and preserves task-wide provider counts. CI and
+deployment are pending; overall P01–P14 remains open.

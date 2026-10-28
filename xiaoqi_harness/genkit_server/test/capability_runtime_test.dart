@@ -7,6 +7,11 @@ void main() {
   for (final scenario in [
     'explicit',
     'explicit-partial',
+    'scope-withdraw-unavailable',
+    'scope-keep-unavailable',
+    'scope-withdraw-followup',
+    'scope-withdraw-code',
+    'scope-reprepare-code',
     'implicit',
     'script-available',
     'text-only',
@@ -153,6 +158,37 @@ void main() {
               'target_artifact_id': null,
               'clarification': null,
             };
+            if (scenario.startsWith('scope-') &&
+                prompt['latest_user_request'] != '请整理成两页视觉学习笔记') {
+              final keep = scenario == 'scope-keep-unavailable';
+              final followup = prompt['latest_user_request'] == '再简短一点';
+              if (followup)
+                expect(
+                  prompt['previous_withdrawn_requirement_ids'],
+                  isNotEmpty,
+                );
+              proposal['mode'] =
+                  keep ||
+                      scenario == 'scope-withdraw-code' ||
+                      (scenario == 'scope-reprepare-code' &&
+                          prompt['latest_user_request'].toString().contains(
+                            'LATE_ORDINARY_CODE',
+                          ))
+                  ? 'workflow'
+                  : 'answer';
+              proposal['image_count'] = keep ? 2 : 0;
+              proposal['skill_ids'] = keep
+                  ? catalog.map((entry) => entry['id']).toList()
+                  : [];
+              proposal['withdrawn_requirement_ids'] = keep
+                  ? []
+                  : followup
+                  ? prompt['previous_withdrawn_requirement_ids']
+                  : (prompt['completion_requirements'] as List)
+                        .whereType<Map>()
+                        .map((r) => r['id'])
+                        .toList();
+            }
             request.response.headers.contentType = ContentType.json;
             request.response.write(
               jsonEncode({
@@ -173,7 +209,10 @@ void main() {
             return;
           }
           requests.add(body);
-          final textOnly = scenario.startsWith('text-only');
+          final textOnly =
+              scenario.startsWith('text-only') ||
+              (scenario.startsWith('scope-') &&
+                  scenario != 'scope-keep-unavailable');
           final tools = (body['tools'] as List? ?? const []).whereType<Map>();
           final preparing =
               body['tool_choice'] != 'none' &&
@@ -192,6 +231,17 @@ void main() {
           String? tool;
           Map<String, dynamic>? input;
           if (preparing &&
+              scenario.startsWith('scope-') &&
+              scenario != 'scope-keep-unavailable') {
+            // The new user request needs only text; no old plan/tools are replayed.
+            if ((scenario == 'scope-withdraw-code' ||
+                    (scenario == 'scope-reprepare-code' &&
+                        serialized.contains('LATE_ORDINARY_CODE'))) &&
+                !called('execute_python')) {
+              tool = 'execute_python';
+              input = {'code': 'print(2+2)', 'language': 'python'};
+            }
+          } else if (preparing &&
               (scenario.startsWith('text-only-plugin-command') ||
                   scenario == 'text-only-network-command')) {
             if (!called('set_task_deliverables')) {
@@ -337,7 +387,9 @@ void main() {
                   : {};
             }
           } else if (preparing && scenario != 'missing') {
-            if (scenario == 'implicit' && !called('use_skill')) {
+            if ((scenario == 'implicit' ||
+                    scenario == 'scope-keep-unavailable') &&
+                !called('use_skill')) {
               tool = 'use_skill';
               input = {'skillName': alias};
             } else if (!called('read_skill_resource')) {
@@ -457,14 +509,15 @@ void main() {
               }
             }
           }
+          final plainAnswer = scenario == 'scope-reprepare-code'
+              ? (serialized.contains('ordinary-code-4')
+                    ? '纯文字结果：ordinary-code-4'
+                    : 'STALE_FINAL')
+              : textOnly
+              ? '纯文字整理已完成。'
+              : '两页图片已交付。';
           final delta = tool == null
-              ? {
-                  'content': preparing
-                      ? '【准备完成】'
-                      : textOnly
-                      ? '纯文字整理已完成。'
-                      : '两页图片已交付。',
-                }
+              ? {'content': preparing ? '【准备完成】' : plainAnswer}
               : {
                   'tool_calls': [
                     {
@@ -669,6 +722,36 @@ void main() {
               expect(result['pending_hash_changed'], true);
               expect(result['tool_operation_count'], 1);
             }
+          } else if (scenario.startsWith('scope-')) {
+            final keep = scenario == 'scope-keep-unavailable';
+            expect(result['missing'], keep);
+            expect(result['generated'], keep ? 2 : 0);
+            expect(result['active'], hasLength(keep ? 1 : 0));
+            expect(jsonEncode(result['events']), contains('steering_applied'));
+            expect(result['text'], contains(keep ? '任务尚未完成' : '纯文字'));
+            if (keep) expect(result['text'], contains('Unavailable plugin'));
+            if (scenario == 'scope-withdraw-followup') {
+              // A later terse correction preserves the earlier withdrawal.
+              expect(
+                (result['events'] as List).whereType<Map>().where(
+                  (e) => e['type'] == 'steering_applied',
+                ),
+                hasLength(2),
+              );
+            }
+            if (scenario == 'scope-withdraw-code') {
+              expect(jsonEncode(requests), contains('ordinary-code-4'));
+              expect(result['code_runs'], 1);
+            }
+            if (scenario == 'scope-reprepare-code') {
+              expect(result['legacy_text'], isNot(contains('STALE_FINAL')));
+              expect(result['legacy_text'], contains('ordinary-code-4'));
+              expect(result['code_runs'], 1);
+              expect(
+                jsonEncode(result['events']),
+                contains('steering_repreparing'),
+              );
+            }
           } else if (scenario == 'missing') {
             expect(result['missing'], isTrue);
             expect(result['generated'], 0);
@@ -840,6 +923,7 @@ void main() {
           if (!const {
             'missing',
             'explicit-partial',
+            'scope-keep-unavailable',
             'mcp-error',
             'mcp-partial-selection',
             'mcp-partial-startup',
