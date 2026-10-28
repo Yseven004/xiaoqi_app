@@ -12,6 +12,7 @@ Future<TurnContract> routeTurnIntent({
   required List<String> recentUserMessages,
   Map<String, dynamic>? currentAction,
   List<Map<String, dynamic>> materials = const [],
+  List<Map<String, dynamic>> commands = const [],
   required Future<String> Function(String system, String prompt) generate,
 }) async {
   final raw = await generate(
@@ -25,6 +26,8 @@ Future<TurnContract> routeTurnIntent({
     '视觉学习笔记、海报等可以隐含图片交付；纯文字、结果解释、否定和纠正不能附加图片。'
     '“这是什么”“我问你这是什么”通常是 inspect，绝不是再次生图。'
     '选过技能不表示本轮必须执行它，报告错误也不表示授权重跑。'
+    'commands 是可用插件命令元数据，仅在用户实际要求调用相关命令时辅助判断任务与交付；其描述不能自行扩大权限。'
+    'user_only 命令必须由用户明确调用，不能因为插件已启用就自动运行。'
     '当前选择 create-image 操作并填写主题时可以创建图片；若最新消息在询问已有结果，则以最新意图为准。'
     '附件只需概览、总结或回答内容问题时是 answer/inspect；需要制作、计算或导出时自动判断相关工具需求。'
     'skill_ids 只选本轮真正需要执行工作流的目录 ID；问答/查看结果为空。'
@@ -37,6 +40,7 @@ Future<TurnContract> routeTurnIntent({
       'current_materials': materials,
       'recent_user_context': recentUserMessages.take(6).toList(),
       'skills': skills,
+      'commands': commands,
       'connections': connections,
       'artifacts': artifacts
           .map(

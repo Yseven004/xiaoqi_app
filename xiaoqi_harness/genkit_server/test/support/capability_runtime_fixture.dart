@@ -64,8 +64,14 @@ Future<void> main(List<String> args) async {
   final store = CloudStore(root: directory.path);
   final images = FixtureImages(store);
   final scenario = args.single;
+  final commandScenario =
+      scenario.startsWith('text-only-plugin-command') ||
+      scenario == 'text-only-network-command';
+  final userOnlyCommand = scenario == 'text-only-plugin-command-user-only';
   final textOnly = scenario.startsWith('text-only');
-  final taskText = scenario == 'text-only-search'
+  final taskText = scenario.startsWith('text-only-plugin-command-direct')
+      ? '/example:greet "hello world" A'
+      : scenario == 'text-only-search'
       ? '请用技能检索三个不同来源并用纯文字说明。'
       : scenario == 'text-only-shell'
       ? '请用 Shell 处理任务资料并返回纯文字，不需要图片或文件。'
@@ -86,6 +92,9 @@ elif r.get('action'):
  print(json.dumps({'ok':True}))
 else:
  assert r['authorized_domains'] == ['example.com']
+ if '$scenario' == 'text-only-network-command':
+  assert r['script_path'] == 'scripts/check.py'
+  assert r['arguments'] == ['literal; \$(not-a-host-command)']
  counter=pathlib.Path(${jsonEncode(networkCounter.path)})
  counter.write_text(str(int(counter.read_text())+1 if counter.exists() else 1))
  print(json.dumps({'type':'result','ok':True,'stdout':'network-routing-verified','artifacts':[],'cleanup_pending':False}))
@@ -162,6 +171,44 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
     ],
   }, null);
   store.put('task/personal/turn', {'artifacts': []}, null);
+  if (commandScenario) {
+    store.putImmutable('packages/commands', {
+      'commands/greet.md': utf8.encode(
+        '---\ndescription: Read a greeting reference\n${userOnlyCommand ? 'disable-model-invocation: true\n' : ''}---\nPLUGIN_COMMAND_BODY: Read references/greeting.md. First=\$0 second=\$1 all=\$ARGUMENTS',
+      ),
+      'references/greeting.md': utf8.encode(
+        'PLUGIN_COMMAND_REFERENCE: Return a concise plain text greeting.',
+      ),
+      'scripts/check.py': utf8.encode('print("command checked")'),
+    });
+    store.put('cap/personal/commands', {
+      'id': 'commands',
+      'kind': 'plugin',
+      'name': 'example',
+      'origin': 'upload',
+      'enabled': true,
+      'current_version_id': 'v1',
+      'versions': [
+        {
+          'id': 'v1',
+          'artifact_key': 'packages/commands',
+          'components': [
+            {
+              'id': 'greet',
+              'type': 'command',
+              'root': '',
+              'source_path': 'commands/greet.md',
+              'name': 'greet',
+              'description': 'Read a greeting reference',
+              'status': 'supported',
+              'has_scripts': true,
+              'user_only': userOnlyCommand,
+            },
+          ],
+        },
+      ],
+    }, null);
+  }
   if (scenario == 'explicit-partial') {
     store.put('cap/personal/unavailable', {
       'id': 'unavailable',
@@ -189,7 +236,13 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
       'model_id': 'mimo-v2.6-flash',
       'current_turn_text': taskText,
       'network_mode': scenario == 'text-only-network-on' ? 'on' : 'off',
-      'selected_capabilities': scenario == 'implicit'
+      'selected_capabilities': userOnlyCommand
+          ? []
+          : commandScenario
+          ? [
+              {'id': 'commands', 'version_id': 'v1', 'component_id': 'greet'},
+            ]
+          : scenario == 'implicit'
           ? []
           : [
               {'id': 'notes', 'version_id': 'v1'},

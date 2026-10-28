@@ -91,6 +91,7 @@ class ToolExecution {
         'tool_authorization_denials': <String, dynamic>{},
         'user_action_intents': <String, dynamic>{},
         'tool_authorization_sources': <String, dynamic>{},
+        'loaded_plugin_commands': <String, dynamic>{},
         'authorized_network_domains': <String>[],
         'requested_network_domains': <String>[],
         'network_purpose': null,
@@ -140,6 +141,28 @@ class ToolExecution {
     if ((value['tool_authorization_denials'] as Map?)?[scopeHash] == true)
       return false;
     return null;
+  }
+
+  Map<String, dynamic> get loadedPluginCommandBindings {
+    check('read');
+    return Map<String, dynamic>.from(
+      store.get(key)?.value['loaded_plugin_commands'] as Map? ?? const {},
+    );
+  }
+
+  void recordLoadedPluginCommand(String alias, String fingerprint) {
+    _update((value) {
+      check('read');
+      final loaded = Map<String, dynamic>.from(
+        value['loaded_plugin_commands'] as Map? ?? const {},
+      );
+      if (!loaded.containsKey(alias) &&
+          loaded.length >= limits.toolOperations) {
+        throw ExecutionBudgetExceeded('本次任务的插件命令加载数量达到上限');
+      }
+      loaded[alias] = fingerprint;
+      return {...value, 'loaded_plugin_commands': loaded};
+    });
   }
 
   String? userActionIntent(String intentKey) {

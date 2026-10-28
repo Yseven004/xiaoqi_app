@@ -34,6 +34,8 @@ import 'model_limits.dart';
 import 'history_context.dart';
 import 'tool_execution.dart';
 import 'user_action_authorization.dart';
+import 'plugin_commands.dart';
+import 'capability_import_service.dart';
 import 'network_call_authorization.dart';
 import 'network_resume.dart';
 import 'tool_access_policy.dart';
@@ -869,6 +871,7 @@ class GenkitXiaoqiAgentRuntime
     required String text,
     required Map<String, dynamic> request,
     required SelectedSkills skills,
+    List<Map<String, dynamic>> commands = const [],
     required List<Map<String, dynamic>> connections,
     required List<Message> messages,
     required CancellationToken cancellation,
@@ -916,6 +919,7 @@ class GenkitXiaoqiAgentRuntime
     try {
       return (await routeTurnIntent(
         text: text,
+        commands: commands,
         currentAction:
             request['capability'] is Map &&
                 (request['capability'] as Map)['type'] == 'action'
@@ -1632,6 +1636,14 @@ class GenkitXiaoqiAgentRuntime
       tenantId,
       request['selected_capabilities'],
     );
+    final pluginCommands = SelectedPluginCommands(
+      store,
+      tenantId,
+      request['selected_capabilities'],
+      discover: true,
+      excludedIds: (request['excluded_capability_ids'] as List? ?? const [])
+          .map((v) => v.toString()),
+    );
     final excludedIds =
         (request['excluded_capability_ids'] as List? ?? const [])
             .map((value) => value.toString())
@@ -1680,6 +1692,19 @@ class GenkitXiaoqiAgentRuntime
         text: latestUserText,
         request: request,
         skills: selectedSkills,
+        commands: pluginCommands.entries.values
+            .take(128)
+            .map(
+              (e) => <String, dynamic>{
+                'id': e['id'],
+                'name': e['name'],
+                'description': e['description'],
+                'plugin': e['plugin_name'],
+                'user_only': e['user_only'],
+                'user_preferred': e['explicit_component'] == true,
+              },
+            )
+            .toList(),
         connections: selectedMcpConnections
             .map((c) => <String, dynamic>{'id': c.id, 'name': c.name})
             .toList(),
@@ -1739,16 +1764,18 @@ class GenkitXiaoqiAgentRuntime
       );
     }
     final skillSelected = selectedSkills.explicitIds.isNotEmpty;
-    final skillScriptsAvailable = selectedSkills.entries.values.any(
-      (entry) => selectedSkills
-          .files(entry)
-          .keys
-          .any(
-            (path) => RegExp(
-              r'^scripts/.+\.(?:py|js|mjs|cjs|ts|mts|sh|bash)$',
-            ).hasMatch(path),
-          ),
-    );
+    final skillScriptsAvailable =
+        pluginCommands.entries.values.any((e) => e['has_scripts'] == true) ||
+        selectedSkills.entries.values.any(
+          (entry) => selectedSkills
+              .files(entry)
+              .keys
+              .any(
+                (path) => RegExp(
+                  r'^scripts/.+\.(?:py|js|mjs|cjs|ts|mts|sh|bash)$',
+                ).hasMatch(path),
+              ),
+        );
     final extensionSelected =
         turnContract.executesWorkflow &&
         (request['selected_capabilities'] as List? ?? const []).isNotEmpty;
@@ -1968,6 +1995,7 @@ class GenkitXiaoqiAgentRuntime
         turnContract.imageLimit == 1 &&
         !answerBeforeImage &&
         (!skillsAvailable || imageGenerationSelected) &&
+        pluginCommands.entries.isEmpty &&
         !extensionSelected &&
         selectedMcpConnections.isEmpty) {
       cancellation.throwIfCancelled();
@@ -2067,6 +2095,7 @@ class GenkitXiaoqiAgentRuntime
         taskMaterials.isNotEmpty &&
         !extensionSelected &&
         !skillsAvailable &&
+        pluginCommands.entries.isEmpty &&
         selectedMcpConnections.isEmpty &&
         !shouldGenerateImage &&
         respond?.isNotEmpty != true &&
@@ -2214,6 +2243,280 @@ class GenkitXiaoqiAgentRuntime
       ai,
       id: _clarificationCatalogId,
       catalog: _clarificationCatalog,
+    );
+
+    final loadedPluginCommands = <String>{};
+    for (final entry in execution.loadedPluginCommandBindings.entries) {
+      if (pluginCommands.entries.containsKey(entry.key) &&
+          pluginCommands.fingerprint(entry.key) == entry.value) {
+        try {
+          pluginCommands.command(entry.key);
+          loadedPluginCommands.add(entry.key);
+        } on Object {
+          /* Stale bindings are not execution evidence. */
+        }
+      }
+    }
+    final commandSelectionScope = requestIdentity;
+    Map<String, String> executionCapability(Map<String, dynamic> input) {
+      final id = input['skill_id']?.toString() ?? '';
+      final command = pluginCommands.entries[id];
+      if (command == null) return selectedSkills.resolve(input);
+      pluginCommands.command(id);
+      return {
+        for (final field in [
+          'id',
+          'parent_id',
+          'version_id',
+          'component_id',
+          'root',
+          'artifact_key',
+          'name',
+        ])
+          field: command[field].toString(),
+        'component_type': 'command',
+      };
+    }
+
+    bool capabilityLoaded(Map<String, String> reference) =>
+        loadedSkills.contains(reference['id']) ||
+        loadedPluginCommands.contains(reference['id']);
+    Map<String, List<int>> executionFiles(Map<String, String> reference) =>
+        reference['component_type'] == 'command'
+        ? pluginCommands.files(reference['id']!)
+        : selectedSkills.files(reference);
+    String executionCapabilityName(Map<String, String>? reference) =>
+        reference?['component_type'] == 'command'
+        ? reference!['name']!
+        : _stagedSkillName(reference, stagedSkills.entries);
+    ai.defineTool<Map<String, dynamic>, String>(
+      name: 'search_plugin_commands',
+      description: '检索当前账号已启用的插件命令；返回稳定命令 ID、名称及说明。命令是任务说明，不授予额外权限。',
+      inputSchema: _objectToolSchema(const {
+        'query': {'type': 'string'},
+        'offset': {'type': 'integer', 'minimum': 0},
+      }, required: const []),
+      fn: (input, context) async {
+        final owner = execution;
+        final query = input['query']?.toString().toLowerCase() ?? '';
+        final offset = (input['offset'] as num? ?? 0).toInt();
+        onProcessEvent({
+          'type': 'tool_started',
+          'tool': 'search_plugin_commands',
+        });
+        final result = await owner.query(
+          slot: 'plugin-command-search',
+          arguments: input,
+          invoke: (_) async {
+            final matches = pluginCommands.entries.values
+                .where(
+                  (e) => '${e['name']} ${e['description']} ${e['plugin_name']}'
+                      .toLowerCase()
+                      .contains(query),
+                )
+                .toList();
+            final page = matches.skip(offset).take(50).toList();
+            return {
+              'commands': [
+                for (final entry in page)
+                  {
+                    'command_id': entry['id'],
+                    'name': entry['name'],
+                    'plugin': entry['plugin_name'],
+                    'user_only': entry['user_only'],
+                    'description': entry['description'],
+                  },
+              ],
+              if (offset + page.length < matches.length)
+                'next_offset': offset + page.length,
+            };
+          },
+        );
+        cancellation.throwIfCancelled();
+        owner.check('read');
+        onProcessEvent({
+          'type': 'tool_succeeded',
+          'tool': 'search_plugin_commands',
+        });
+        return ToolResult.response(jsonEncode(result));
+      },
+    );
+    ai.defineTool<Map<String, dynamic>, String>(
+      name: 'run_plugin_command',
+      description:
+          '加载并展开插件 Markdown 命令及参数，随后按返回说明使用本轮真实工具完成任务。加载不代表命令要求的工作已完成。',
+      inputSchema: _objectToolSchema(
+        const {
+          'command_id': {'type': 'string'},
+          'arguments': {'type': 'string', 'maxLength': 16384},
+        },
+        required: const ['command_id', 'arguments'],
+      ),
+      fn: (input, context) async {
+        final owner = execution;
+        cancellation.throwIfCancelled();
+        owner.check('workspace');
+        final id = input['command_id'].toString();
+        final arguments = input['arguments'].toString();
+        final entry = pluginCommands.entries[id];
+        try {
+          final command = pluginCommands.command(id);
+          final originalCommandText = owner.requestText?.trimLeft() ?? '';
+          final userInvocation = RegExp(
+            '^/${RegExp.escape('${entry!['plugin_name']}:${entry['name']}')}(?=\\s|\$)',
+          ).firstMatch(originalCommandText);
+          if (command.userOnly &&
+              entry['explicit_component'] != true &&
+              userInvocation == null) {
+            onProcessEvent({
+              'type': 'tool_skipped',
+              'tool': 'run_plugin_command',
+              'reason': 'user_only_command',
+              'message': '此命令需要用户明确调用',
+            });
+            return ToolResult.response(
+              jsonEncode({'ok': false, 'error': '此命令只允许用户明确调用，请用户输入 /插件名:命令名'}),
+            );
+          }
+          if (userInvocation != null &&
+              arguments !=
+                  originalCommandText
+                      .substring(userInvocation.end)
+                      .trimLeft()) {
+            onProcessEvent({
+              'type': 'tool_skipped',
+              'tool': 'run_plugin_command',
+              'reason': 'arguments_changed',
+              'message': '命令参数与用户原始调用不一致',
+            });
+            return ToolResult.response(
+              jsonEncode({
+                'ok': false,
+                'retryable': false,
+                'error': '命令参数与用户原始调用不一致，请保留原始参数',
+              }),
+            );
+          }
+          final instructions = command.render(
+            arguments,
+            pluginRoot: 'plugin-command://$id',
+          );
+          var invoked = false;
+          onProcessEvent({
+            'type': 'tool_started',
+            'tool': 'run_plugin_command',
+            'capability_name': entry['name'],
+          });
+          final result = await owner.workspace(
+            slot: 'plugin-command:$id:${ToolExecution.digest(arguments)}',
+            arguments: {
+              'command_id': id,
+              'version_id': entry['version_id'],
+              'arguments': arguments,
+            },
+            invoke: (_) async {
+              invoked = true;
+              return {
+                'ok': true,
+                'instructions': instructions,
+                'command_id': id,
+                'resources': pluginCommands.files(id).keys.take(200).toList(),
+                'resources_truncated': pluginCommands.files(id).length > 200,
+                'resource_tool': 'read_plugin_command_resource',
+                'execution_capability': {'skill_id': id},
+                if (entry['has_scripts'] == true && codeExecutor.isConfigured)
+                  'execution_instruction':
+                      '需要执行插件 scripts/ 下脚本时使用 execute_skill_script，并携带此 skill_id；临时联网仍需要精确域名、用途及本次动作授权。',
+              };
+            },
+          );
+          cancellation.throwIfCancelled();
+          owner.check('workspace');
+          owner.recordLoadedPluginCommand(id, pluginCommands.fingerprint(id));
+          loadedPluginCommands.add(id);
+          onProcessEvent({
+            'type': 'tool_succeeded',
+            'tool': 'run_plugin_command',
+            'capability_name': entry['name'],
+            'capability_id': entry['parent_id'],
+            if (!invoked) 'reused_result': true,
+            'component_id': entry['component_id'],
+            'version_id': entry['version_id'],
+          });
+          return ToolResult.response(jsonEncode(result));
+        } on Object {
+          cancellation.throwIfCancelled();
+          onProcessEvent({
+            'type': 'tool_failed',
+            'tool': 'run_plugin_command',
+            'message': '插件命令不可用，请检查版本、参数或命令调用方式',
+          });
+          return ToolResult.response(
+            jsonEncode({'ok': false, 'error': '插件命令不可用，请检查版本、参数或命令调用方式'}),
+          );
+        }
+      },
+    );
+    ai.defineTool<Map<String, dynamic>, String>(
+      name: 'read_plugin_command_resource',
+      description:
+          '读取已成功加载命令所属插件内的文本资源；path 为插件内相对路径或该命令返回的 plugin-command URI。',
+      inputSchema: _objectToolSchema(
+        const {
+          'command_id': {'type': 'string'},
+          'path': {'type': 'string'},
+        },
+        required: const ['command_id', 'path'],
+      ),
+      fn: (input, context) async {
+        final owner = execution;
+        owner.check('read');
+        final id = input['command_id'].toString();
+        if (!loadedPluginCommands.contains(id)) {
+          onProcessEvent({
+            'type': 'tool_failed',
+            'tool': 'read_plugin_command_resource',
+            'message': '本轮插件命令尚未加载',
+          });
+          return ToolResult.response(
+            jsonEncode({'ok': false, 'error': '请先加载本轮插件命令'}),
+          );
+        }
+        try {
+          final path = CapabilityImportService.safePath(
+            input['path'].toString().replaceFirst('plugin-command://$id/', ''),
+          );
+          final bytes = pluginCommands.files(id)[path];
+          if (bytes == null || bytes.length > 128 * 1024)
+            throw const FormatException('资源不存在或超过文本读取限制');
+          onProcessEvent({
+            'type': 'tool_started',
+            'tool': 'read_plugin_command_resource',
+          });
+          final result = await owner.query(
+            slot: 'plugin-command-resource:$id:$path',
+            arguments: {'path': path},
+            invoke: (_) async => {'ok': true, 'content': utf8.decode(bytes)},
+          );
+          cancellation.throwIfCancelled();
+          owner.check('read');
+          onProcessEvent({
+            'type': 'tool_succeeded',
+            'tool': 'read_plugin_command_resource',
+          });
+          return ToolResult.response(jsonEncode(result));
+        } on Object {
+          cancellation.throwIfCancelled();
+          onProcessEvent({
+            'type': 'tool_failed',
+            'tool': 'read_plugin_command_resource',
+            'message': '命令资源不存在、非文本或路径无效',
+          });
+          return ToolResult.response(
+            jsonEncode({'ok': false, 'error': '命令资源不存在、非文本或路径无效'}),
+          );
+        }
+      },
     );
 
     // Only connect installed MCP services when their catalog description
@@ -2937,10 +3240,9 @@ class GenkitXiaoqiAgentRuntime
           final skillId = input['skill_id']?.toString().trim() ?? '';
           final skillReference =
               skillId.isNotEmpty || selectedSkills.explicitIds.length == 1
-              ? selectedSkills.resolve(input)
+              ? executionCapability(input)
               : null;
-          if (skillReference != null &&
-              !loadedSkills.contains(skillReference['id'])) {
+          if (skillReference != null && !capabilityLoaded(skillReference)) {
             return ToolResult.response(
               jsonEncode({
                 'ok': false,
@@ -2979,11 +3281,11 @@ class GenkitXiaoqiAgentRuntime
             );
           }
           final skillName = temporaryNetwork
-              ? _stagedSkillName(skillReference, stagedSkills.entries)
+              ? executionCapabilityName(skillReference)
               : null;
           final skillFiles = skillReference == null
               ? <String, List<int>>{}
-              : selectedSkills.files(skillReference);
+              : executionFiles(skillReference);
           onProcessEvent({
             'type': 'tool_started',
             'tool': toolName,
@@ -3059,7 +3361,7 @@ class GenkitXiaoqiAgentRuntime
                       networkMode) {
                     throw StateError('任务联网模式已变更，请按当前权限重新调用');
                   }
-                  if (skillReference != null) selectedSkills.resolve(input);
+                  if (skillReference != null) executionCapability(input);
                   if (requestedDomains.isNotEmpty &&
                       (grant.decide() != ToolAccessDecision.allow ||
                           codeExecutor.inputFingerprint(
@@ -3157,10 +3459,9 @@ class GenkitXiaoqiAgentRuntime
           final skillId = input['skill_id']?.toString().trim() ?? '';
           final hasSelectedSkill = selectedSkills.explicitIds.isNotEmpty;
           final skillReference = skillId.isNotEmpty || hasSelectedSkill
-              ? selectedSkills.resolve(input)
+              ? executionCapability(input)
               : null;
-          if (skillReference != null &&
-              !loadedSkills.contains(skillReference['id'])) {
+          if (skillReference != null && !capabilityLoaded(skillReference)) {
             return ToolResult.response(
               jsonEncode({
                 'ok': false,
@@ -3184,7 +3485,7 @@ class GenkitXiaoqiAgentRuntime
             );
           }
           final skillName = temporaryNetwork
-              ? _stagedSkillName(skillReference, stagedSkills.entries)
+              ? executionCapabilityName(skillReference)
               : null;
           onProcessEvent({
             'type': 'tool_started',
@@ -3387,11 +3688,11 @@ class GenkitXiaoqiAgentRuntime
             input['script_path']?.toString() ?? '',
             input['language']?.toString() ?? '',
           );
-          final skillReference = selectedSkills.resolve(input);
-          if (!loadedSkills.contains(skillReference['id']))
+          final skillReference = executionCapability(input);
+          if (!capabilityLoaded(skillReference))
             throw StateError('请先 use_skill 读取技能全文，再执行脚本');
           executingSkill = skillReference;
-          final skillFiles = selectedSkills.files(skillReference);
+          final skillFiles = executionFiles(skillReference);
           final networkMode = _taskNetworkMode(
             tenantId,
             taskId,
@@ -3416,10 +3717,7 @@ class GenkitXiaoqiAgentRuntime
           if (temporaryNetwork && purpose.isEmpty) {
             throw const FormatException('技能脚本申请临时联网时必须说明用途');
           }
-          final skillName = _stagedSkillName(
-            skillReference,
-            stagedSkills.entries,
-          );
+          final skillName = executionCapabilityName(skillReference);
           final scriptBytes = skillFiles[scriptPath];
           if (scriptBytes == null) throw StateError('脚本不在当前技能版本中');
           final rawArguments = input['arguments'];
@@ -3515,7 +3813,7 @@ class GenkitXiaoqiAgentRuntime
                     networkMode) {
                   throw StateError('任务联网模式已变更，请按当前权限重新调用');
                 }
-                selectedSkills.resolve(input);
+                executionCapability(input);
                 if (requestedDomains.isNotEmpty &&
                     (grant.decide() != ToolAccessDecision.allow ||
                         codeExecutor.inputFingerprint(
@@ -3639,26 +3937,45 @@ class GenkitXiaoqiAgentRuntime
       taskId,
       request['network_mode'],
     );
-    final toolNames = [
-      ...agentToolNamesForRequest(
-        contract: turnContract,
-        // Mixed requests are completed in two deterministic phases below:
-        // answer text first, then generate the supplemental image. Keeping the
-        // image tool out of this model turn prevents it from running first.
-        imageGenerationAvailable: imageToolAvailable && !appendImageAfterText,
-        codeExecutionAvailable: codeExecutor.isConfigured,
-        webSearchAvailable: searchAvailable,
-        capabilitySelected: skillSelected,
-        skillsAvailable: skillsAvailable,
-        materialsAvailable: taskMaterials.isNotEmpty,
-      ),
-      ...mcpToolNames,
-      if (resourceClients.isNotEmpty) 'read_mcp_resource',
-      if (skillsAvailable ||
-          extensionSelected ||
-          selectedMcpConnections.isNotEmpty)
-        'set_task_deliverables',
-    ].where((name) => name != 'execute_skill_script' || skillScriptsAvailable).toList();
+    final toolNames =
+        [
+              ...agentToolNamesForRequest(
+                contract: turnContract,
+                // Mixed requests are completed in two deterministic phases below:
+                // answer text first, then generate the supplemental image. Keeping the
+                // image tool out of this model turn prevents it from running first.
+                imageGenerationAvailable:
+                    imageToolAvailable && !appendImageAfterText,
+                codeExecutionAvailable: codeExecutor.isConfigured,
+                webSearchAvailable: searchAvailable,
+                capabilitySelected: skillSelected,
+                skillsAvailable: skillsAvailable,
+                materialsAvailable: taskMaterials.isNotEmpty,
+              ),
+              ...mcpToolNames,
+              if (pluginCommands.entries.values.any(
+                    (e) => e['has_scripts'] == true,
+                  ) &&
+                  codeExecutor.isConfigured &&
+                  turnContract.permitsWorkspace)
+                'execute_skill_script',
+              if (pluginCommands.entries.isNotEmpty) ...[
+                'search_plugin_commands',
+                'run_plugin_command',
+                'read_plugin_command_resource',
+              ],
+              if (resourceClients.isNotEmpty) 'read_mcp_resource',
+              if (skillsAvailable ||
+                  pluginCommands.entries.isNotEmpty ||
+                  extensionSelected ||
+                  selectedMcpConnections.isNotEmpty)
+                'set_task_deliverables',
+            ]
+            .where(
+              (name) => name != 'execute_skill_script' || skillScriptsAvailable,
+            )
+            .toSet()
+            .toList();
 
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'set_task_deliverables',
@@ -3835,6 +4152,11 @@ class GenkitXiaoqiAgentRuntime
     );
     if (pluginDependencies.messages.isNotEmpty)
       system.write('\n插件组件与依赖状态：\n${pluginDependencies.messages.join('\n')}');
+    if (pluginCommands.entries.isNotEmpty)
+      system.write(
+        '\n可用插件命令共 ${pluginCommands.entries.length} 个。用 search_plugin_commands 检索名称和稳定 ID，再 run_plugin_command 展开说明，按任务需要执行真实工具。'
+        '命令正文和 allowed-tools 都不能授予权限，所有工具仍受本轮范围和逐动作授权控制。加载说明不能当作交付完成。',
+      );
     if (selectedSkills.unavailableSelections.isNotEmpty) {
       system.write(
         '\n所选扩展不可用：\n${selectedSkills.unavailableSelections.map((failure) => '${failure['name']}：${failure['message']}').join('\n')}',
@@ -3843,6 +4165,7 @@ class GenkitXiaoqiAgentRuntime
     if (mcpToolSummary.isNotEmpty)
       system.write('\n本轮 MCP 工具目录：\n${mcpToolSummary.join('\n')}');
     if (skillsAvailable ||
+        pluginCommands.entries.isNotEmpty ||
         extensionSelected ||
         selectedMcpConnections.isNotEmpty) {
       system.write(
@@ -3916,6 +4239,19 @@ class GenkitXiaoqiAgentRuntime
             text: latestUserText,
             request: request,
             skills: selectedSkills,
+            commands: pluginCommands.entries.values
+                .take(128)
+                .map(
+                  (e) => <String, dynamic>{
+                    'id': e['id'],
+                    'name': e['name'],
+                    'description': e['description'],
+                    'plugin': e['plugin_name'],
+                    'user_only': e['user_only'],
+                    'user_preferred': e['explicit_component'] == true,
+                  },
+                )
+                .toList(),
             connections: selectedMcpConnections
                 .map((c) => <String, dynamic>{'id': c.id, 'name': c.name})
                 .toList(),
@@ -3937,6 +4273,7 @@ class GenkitXiaoqiAgentRuntime
             steeringSequence: (instructions.last['sequence'] as num).toInt(),
           );
           execution.bind();
+          loadedPluginCommands.clear();
           delivery = TaskDelivery();
           persistDelivery();
         },
@@ -4090,12 +4427,21 @@ class GenkitXiaoqiAgentRuntime
         final missing = delivery.missing(
           planRequired:
               loadedSkills.isNotEmpty ||
+              loadedPluginCommands.isNotEmpty ||
               extensionSelected ||
               selectedMcpConnections.isNotEmpty,
           loadedSkills: loadedSkills,
           artifacts: artifacts,
         );
         missing.addAll(unavailableMcp);
+        if (requestIdentity == commandSelectionScope) {
+          for (final entry in pluginCommands.entries.values) {
+            if (entry['explicit_component'] == true &&
+                !loadedPluginCommands.contains(entry['id'])) {
+              missing.add('明确选中的插件命令尚未加载执行：${entry['name']}');
+            }
+          }
+        }
         missing.addAll(
           selectedSkills.unavailableSelections.map(
             (failure) => '${failure['name']}：${failure['message']}',
@@ -4140,6 +4486,18 @@ class GenkitXiaoqiAgentRuntime
       final activeCapabilities = loadedSkills
           .map(selectedSkills.reference)
           .toList();
+      activeCapabilities.addAll(
+        loadedPluginCommands.map((id) {
+          final entry = pluginCommands.entries[id]!;
+          return <String, dynamic>{
+            'id': entry['parent_id'],
+            'version_id': entry['version_id'],
+            'component_id': entry['component_id'],
+            'name': entry['name'],
+            'type': 'plugin',
+          };
+        }),
+      );
       final unmet = missingDelivery();
       if (response.finishReason != AgentFinishReason.interrupted &&
           unmet.isNotEmpty) {

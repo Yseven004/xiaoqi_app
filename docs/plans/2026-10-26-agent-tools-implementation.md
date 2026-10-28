@@ -443,3 +443,33 @@ checks running. See the original-user-action architecture document for limits.
 No real production action rule has been invented, and no external send/image
 provider call was made. CI, server rollout and real-service acceptance remain
 pending; this does not close P01 or the full plan.
+
+P01 reviewed original-request entry deployed and verified as
+20261028-173225-d5d48b5 (main d5d48b5, CI 40664994173/job 122737129620).
+309 Dart, 60 runner, 28 deployment checks and image roundtrip pass; healthy
+server, public HTTPS 200, data, cleanup and latest-good restore data verified.
+Unknown-service production rules, other tool paths and full P01 remain open.
+
+## P11 Markdown command adapter (in progress)
+
+Import/install now preserves command components and source paths; runtime provides
+paginated discovery, single-pass quoted argument expansion, user-only/direct
+invocation checks, scoped resource reads and execution through existing isolated
+script tools. Command loading cannot satisfy required downstream tool work by
+itself. Exact network approval survives resume through verified private load
+fingerprints, while scope changes clear those records. Existing process rows
+carry command labels and active component/version provenance.
+
+315 full Dart tests and the later five-case command integration matrix pass;
+static analysis clean. Real Docker command-to-script/argv/artifact gate added and
+pending CI/deployment. See the plugin-command runtime document for references,
+rollback and exact limits. Dynamic/forked commands, hooks/agents/apps/extensions,
+dependency-heavy representative packages and client copy/target verification
+remain in the original full scope; this batch does not close P11 or the goal.
+
+Recheck caught and fixed existing-install coverage: old stored versions have no
+command components because the previous importer discarded them. Lazy CAS
+reindex now recovers commands from those same immutable package bytes and marks
+the version's runtime metadata profile; it preserves version/artifact identity,
+other components and user data. 32 final import/command/process checks pass,
+including this upgrade; no uninstall or source-repository update is required.

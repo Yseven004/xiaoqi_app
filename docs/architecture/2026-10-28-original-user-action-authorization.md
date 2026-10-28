@@ -66,3 +66,13 @@ denial, persistent first intent and scope reset. No real external sends or paid
 image calls are made. A complete 308-test regression and a later 20-test focused
 authorization/scope run pass. Final connection-authority checks, CI, rollout and
 real-service effectiveness remain separate evidence, recorded when terminal.
+
+Release evidence: main `d5d48b553c6b6d2aa44d8514710f5f01d32c5494`, CI
+`40664994173`, job `122737129620` completed successfully: 309 Dart, 60 runner,
+28 deployment checks and image roundtrip. CI executes both original-user send
+and changed-destination mock-MCP cases. Standard non-image deployment completed
+`20261028-173225-d5d48b5`, controller exit 0, healthy current server, public HTTPS
+200 through Cloud Assistant, data/health verification and cleanup, one latest-good
+restore point with data. This proves deployment of the reviewed-rule mechanism,
+not real third-party send/payment effectiveness or all of P01. Production rules
+for unknown services are not fabricated. No device verification was performed.

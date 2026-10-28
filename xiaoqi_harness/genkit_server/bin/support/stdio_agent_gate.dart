@@ -16,7 +16,7 @@ Future<void> verifyStdioAgent(
   Map<String, List<int>> installedFiles,
 ) async {
   const task = 'agent-mcp-shell';
-  const text = '使用文件插件写入文件，再运行 Shell 核对并生成结果文件。';
+  const text = '使用文件插件写入文件，运行 Shell 核对，再调用插件命令脚本生成结果文件。';
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 40443);
   final serving = server.listen((request) async {
     try {
@@ -73,15 +73,18 @@ Future<void> verifyStdioAgent(
         if (!called('set_task_deliverables')) {
           name = 'set_task_deliverables';
           input = {
-            'steps': ['写入文件', '核对文件', '执行 Shell 接力'],
+            'steps': ['写入文件', '核对文件', '执行 Shell 接力', '调用插件命令及脚本'],
             'skill_ids': [skill],
             'tools': [
               {'name': write, 'count': 1},
               {'name': read, 'count': 1},
               {'name': 'execute_shell', 'count': 1},
+              {'name': 'search_plugin_commands', 'count': 1},
+              {'name': 'run_plugin_command', 'count': 1},
+              {'name': 'execute_skill_script', 'count': 1},
             ],
             'artifacts': [
-              {'media_type': 'text/plain', 'count': 2},
+              {'media_type': 'text/plain', 'count': 3},
             ],
           };
         } else if (!called(write)) {
@@ -106,6 +109,27 @@ PY
 printf '%s' "$1" > /workspace/output/agent-helper.txt
 ''',
             'arguments': ['agent-shell-verified'],
+          };
+        } else if (!called('search_plugin_commands')) {
+          name = 'search_plugin_commands';
+          input = {'query': 'verify-command'};
+        } else if (!called('run_plugin_command')) {
+          name = 'run_plugin_command';
+          input = {
+            'command_id': RegExp(
+              r'command-[a-f0-9]{24}',
+            ).firstMatch(serialized)!.group(0),
+            'arguments': 'Verify script handoff',
+          };
+        } else if (!called('execute_skill_script')) {
+          name = 'execute_skill_script';
+          input = {
+            'skill_id': RegExp(
+              r'command-[a-f0-9]{24}',
+            ).firstMatch(serialized)!.group(0),
+            'script_path': 'scripts/verify-command.py',
+            'language': 'python',
+            'arguments': [r'command; $(touch /workspace/output/unwanted)'],
           };
         }
       }
@@ -154,6 +178,14 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
   });
   store.putImmutable('verification/stdio-plugin', {
     ...installedFiles,
+    'commands/verify.md': utf8.encode(
+      '---\ndescription: Verify a literal command script handoff\n---\nRun scripts/verify-command.py using execute_skill_script. \$ARGUMENTS',
+    ),
+    'scripts/verify-command.py': utf8.encode(r'''
+import pathlib,sys
+assert sys.argv[1:] == ['command; $(touch /workspace/output/unwanted)']
+pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-script-verified')
+'''),
     'SKILL.md': utf8.encode(
       '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n',
     ),
@@ -194,6 +226,16 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
         'id': 'v1',
         'artifact_key': 'verification/stdio-plugin',
         'components': [
+          {
+            'id': 'command',
+            'type': 'command',
+            'root': '',
+            'source_path': 'commands/verify.md',
+            'name': 'verify-command',
+            'description': 'Verify a literal command script handoff',
+            'status': 'supported',
+            'has_scripts': true,
+          },
           {
             'id': 'filesystem',
             'type': 'mcp',
@@ -259,6 +301,7 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
     for (final expected in {
       'agent.txt': 'agent-mcp-payload',
       'agent-helper.txt': 'agent-shell-verified',
+      'plugin-command.txt': 'plugin-command-script-verified',
     }.entries) {
       final item = artifacts
           .where((artifact) => artifact['name'] == expected.key)
@@ -271,6 +314,18 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
           event['type'] == 'tool_succeeded' && event['tool'] == 'execute_shell',
     )) {
       throw StateError('Agent did not execute the Shell helper');
+    }
+    if (artifacts.any((a) => a['name'] == 'unwanted') ||
+        !events.any(
+          (event) =>
+              event['type'] == 'tool_succeeded' &&
+              event['tool'] == 'execute_skill_script',
+        ) ||
+        result.activeCapabilities?.any((c) => c['component_id'] == 'command') !=
+            true) {
+      throw StateError(
+        'Plugin command/script lifecycle or literal argv failed',
+      );
     }
   } finally {
     await server.close(force: true);

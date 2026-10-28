@@ -280,6 +280,7 @@ PY
         'mcp_to_shell_file_handoff': true,
         'agent_mcp_shell_loop': true,
         'explicit_skill_mcp_shell_loop': true,
+        'plugin_command_script_loop': true,
         'failed_script_partial_artifacts': true,
         'running_code_cancel_cleanup': true,
         'disconnected_code_result_recovery': true,

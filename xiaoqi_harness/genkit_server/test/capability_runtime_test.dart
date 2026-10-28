@@ -10,6 +10,11 @@ void main() {
     'implicit',
     'script-available',
     'text-only',
+    'text-only-plugin-command',
+    'text-only-plugin-command-user-only',
+    'text-only-plugin-command-direct',
+    'text-only-plugin-command-direct-changed',
+    'text-only-network-command',
     'text-only-workspace-retry',
     'text-only-shell',
     'text-only-search',
@@ -186,7 +191,64 @@ void main() {
           bool called(String name) => serialized.contains('"name":"$name"');
           String? tool;
           Map<String, dynamic>? input;
-          if (preparing && scenario.startsWith('mcp-')) {
+          if (preparing &&
+              (scenario.startsWith('text-only-plugin-command') ||
+                  scenario == 'text-only-network-command')) {
+            if (!called('set_task_deliverables')) {
+              tool = 'set_task_deliverables';
+              input = {
+                'steps': ['Load plugin command', 'Read its reference'],
+                'skill_ids': [],
+                'no_skill_reason': 'This task uses the selected plugin command',
+                'tools': [
+                  for (final name in [
+                    'search_plugin_commands',
+                    'run_plugin_command',
+                    'read_plugin_command_resource',
+                    if (scenario == 'text-only-network-command')
+                      'execute_skill_script',
+                  ])
+                    {'name': name, 'count': 1},
+                ],
+                'artifacts': [],
+              };
+            } else if (!called('search_plugin_commands')) {
+              tool = 'search_plugin_commands';
+              input = {'query': 'greet'};
+            } else if (!called('run_plugin_command')) {
+              tool = 'run_plugin_command';
+              input = {
+                'command_id': RegExp(
+                  r'command-[a-f0-9]{24}',
+                ).firstMatch(serialized)!.group(0),
+                'arguments':
+                    scenario == 'text-only-plugin-command-direct-changed'
+                    ? '"hello world" B'
+                    : '"hello world" A',
+              };
+            } else if (!called('read_plugin_command_resource')) {
+              tool = 'read_plugin_command_resource';
+              input = {
+                'command_id': RegExp(
+                  r'command-[a-f0-9]{24}',
+                ).firstMatch(serialized)!.group(0),
+                'path': 'references/greeting.md',
+              };
+            } else if (scenario == 'text-only-network-command' &&
+                !called('execute_skill_script')) {
+              tool = 'execute_skill_script';
+              input = {
+                'skill_id': RegExp(
+                  r'command-[a-f0-9]{24}',
+                ).firstMatch(serialized)!.group(0),
+                'script_path': 'scripts/check.py',
+                'language': 'python',
+                'arguments': [r'literal; $(not-a-host-command)'],
+                'domains': ['example.com'],
+                'purpose': 'Fetch command task data',
+              };
+            }
+          } else if (preparing && scenario.startsWith('mcp-')) {
             final large = scenario == 'mcp-large';
             final directoryName = large
                 ? tools.firstWhere(
@@ -493,6 +555,7 @@ void main() {
             expect(
               firstToolNames.contains('execute_skill_script'),
               scenario == 'script-available' ||
+                  scenario.startsWith('text-only-plugin-command') ||
                   scenario.startsWith('text-only-network-'),
               reason:
                   'Only advertise installed script execution when real scripts exist',
@@ -612,6 +675,39 @@ void main() {
             expect(result['text'], contains('任务尚未完成'));
             expect(requests, hasLength(3));
           } else if (scenario.startsWith('text-only')) {
+            if (const {
+              'text-only-plugin-command-user-only',
+              'text-only-plugin-command-direct-changed',
+            }.contains(scenario)) {
+              expect(result['missing'], isTrue);
+              expect(result['active'], isEmpty);
+              expect(result['generated'], 0);
+              expect(
+                (result['events'] as List).whereType<Map>().any(
+                  (e) =>
+                      e['type'] == 'tool_skipped' &&
+                      e['tool'] == 'run_plugin_command',
+                ),
+                isTrue,
+              );
+              expect(
+                jsonEncode(requests),
+                contains(
+                  scenario == 'text-only-plugin-command-user-only'
+                      ? '此命令只允许用户明确调用'
+                      : '命令参数与用户原始调用不一致',
+                ),
+              );
+              expect(
+                (result['events'] as List).whereType<Map>().where(
+                  (e) =>
+                      e['type'] == 'tool_succeeded' &&
+                      e['tool'] == 'run_plugin_command',
+                ),
+                isEmpty,
+              );
+              return;
+            }
             if (scenario.startsWith('text-only-network-')) {
               expect(result['network_before_approval'], 0);
               expect(result['network_grants'], isEmpty);
@@ -649,14 +745,38 @@ void main() {
             expect(result['artifacts'], 0);
             expect(result['active'], hasLength(1));
             expect(result['text'], contains('纯文字'));
-            expect(
-              jsonEncode(result['events']),
-              contains('read_skill_resource'),
-            );
-            expect(
-              jsonEncode(requests.first['messages']),
-              contains('TEXT_ONLY'),
-            );
+            if (scenario.startsWith('text-only-plugin-command') ||
+                scenario == 'text-only-network-command') {
+              expect(
+                jsonEncode(result['events']),
+                contains('run_plugin_command'),
+              );
+              expect(
+                jsonEncode(result['events']),
+                contains('read_plugin_command_resource'),
+              );
+              expect(
+                jsonEncode(requests),
+                contains('PLUGIN_COMMAND_REFERENCE'),
+              );
+              expect(
+                jsonEncode(requests),
+                contains('First=hello world second=A'),
+              );
+              expect(
+                (result['active'] as List).single['component_id'],
+                'greet',
+              );
+            } else {
+              expect(
+                jsonEncode(result['events']),
+                contains('read_skill_resource'),
+              );
+              expect(
+                jsonEncode(requests.first['messages']),
+                contains('TEXT_ONLY'),
+              );
+            }
             // The provider is configured, but this turn does not permit images.
             expect(
               jsonEncode(requests.first['tools']),

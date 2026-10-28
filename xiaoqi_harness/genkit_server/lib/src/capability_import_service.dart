@@ -13,6 +13,7 @@ import 'package:genkit/genkit.dart' show CancellationToken;
 import 'store.dart';
 import 'plugin_dependencies.dart';
 import 'isolated_mcp_spec.dart';
+import 'plugin_commands.dart';
 
 typedef DependencyPreparer =
     Future<Map<String, List<int>>> Function(
@@ -751,7 +752,12 @@ class CapabilityImportService {
       } on FormatException {
         unsupported.add('插件 MCP 声明格式或路径无效');
       }
-      for (final type in ['hooks', 'commands', 'agents', 'apps']) {
+      try {
+        components.addAll(PluginCommand.inspect(files, root, manifest));
+      } on Object {
+        unsupported.add('commands 声明路径或命令目录不可用');
+      }
+      for (final type in ['hooks', 'agents', 'apps']) {
         if (manifest[type] != null ||
             scoped.keys.any((p) => p.startsWith('$type/')) ||
             (type == 'apps' && scoped.containsKey('.app.json')))
@@ -1163,6 +1169,8 @@ class CapabilityImportService {
           'created_at': now,
           'artifact_key': artifact,
           'components': components,
+          if (candidate['kind'] == 'plugin')
+            'plugin_command_profile': PluginCommand.profileVersion,
         });
       final saved = store.put(key, {
         'schema_version': 2,
