@@ -821,3 +821,13 @@ acceptance remain open. See
 docs/architecture/2026-10-29-plugin-hook-execution-foundation.md for exact evidence
 and required integration. No real image-provider call or device purchase is
 part of this batch.
+
+P11 follow-up connects independent root command-hook states and pre/post/failure
+tool events to the parent and delegated Agent. Schema/authorization revalidation
+uses changed arguments; existing MCP confirmation is reused without repeating
+the original hook on resume. Final local checks include 64 focused tests and
+four real-SDK root-hook scenarios (the complete 17-scenario Agent suite also
+passed before the final matching refinement). Real Docker gates are added but
+not yet claimed passed here. Hook support remains partial: other lifecycle and
+handler mappings, readonly/async/defer semantics and complete recovery acceptance
+remain open. See docs/architecture/2026-10-29-plugin-hook-tool-dispatch.md.

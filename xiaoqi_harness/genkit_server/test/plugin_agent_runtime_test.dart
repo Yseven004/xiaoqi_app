@@ -17,12 +17,17 @@ void main() {
     'disabled',
     'readonly',
     'script-network',
+    'root-hook-rewrite',
+    'root-hook-deny',
+    'root-hook-invalid',
+    'root-hook-approval',
   ]) {
     test(
       'real runtime agent $scenario preserves task tools, budget and completion evidence',
       () async {
         var providerCalls = 0;
         final scriptNetwork = scenario.endsWith('script-network');
+        final rootHooks = scenario.startsWith('root-hook-');
         final childToolSets = <Set<String>>[];
         final mcp = const {
           'approval',
@@ -31,6 +36,7 @@ void main() {
           'dontask',
           'disabled',
           'readonly',
+          'root-hook-approval',
         }.contains(scenario);
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final serving = server.listen((request) async {
@@ -136,7 +142,7 @@ void main() {
                       as String;
               if (!called(remote)) {
                 tool = remote;
-                input = {};
+                input = rootHooks ? {'recipient': 'original'} : {};
               }
             } else if (scenario == 'nested' &&
                 system.contains('AGENT_RUNTIME_WRITER')) {
@@ -273,6 +279,7 @@ void main() {
             final approved = const {
               'approval',
               'ignored-plugin-fields-approval',
+              'root-hook-approval',
             }.contains(scenario);
             expect(value['external_calls'], approved ? 1 : 0);
             expect(value['completed'], approved ? 1 : 0);
@@ -281,10 +288,42 @@ void main() {
             expect(value['contents'], isEmpty);
             expect(value['completed'], 0);
             expect(value['missing'], isTrue);
+          } else if (rootHooks) {
+            expect(
+              value['contents'],
+              scenario == 'root-hook-rewrite'
+                  ? ['verified rewritten output']
+                  : isEmpty,
+            );
+            expect(value['missing'], scenario != 'root-hook-rewrite');
           } else {
             expect(value['contents'], ['verified child output']);
             expect(value['completed'], scenario == 'nested' ? 2 : 1);
             expect(value['missing'], isFalse);
+          }
+          if (rootHooks) {
+            expect(value['code_runs'], scenario == 'root-hook-deny' ? 1 : 2);
+            final hooks = (value['hook_runs'] as List)
+                .whereType<Map>()
+                .toList();
+            expect(
+              hooks.where((h) => h['hook_event_name'] == 'PreToolUse'),
+              hasLength(1),
+            );
+            expect(
+              hooks.where(
+                (h) =>
+                    h['hook_event_name'] ==
+                    (scenario == 'root-hook-invalid'
+                        ? 'PostToolUseFailure'
+                        : 'PostToolUse'),
+              ),
+              hasLength(scenario == 'root-hook-deny' ? 0 : 1),
+            );
+            if (scenario == 'root-hook-approval') {
+              expect(hooks.last['tool_input'], {'recipient': 'changed'});
+              expect(value['before_approval'], 0);
+            }
           }
         } finally {
           await serving.cancel();

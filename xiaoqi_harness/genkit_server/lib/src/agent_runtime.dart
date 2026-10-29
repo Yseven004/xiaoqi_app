@@ -39,6 +39,11 @@ import 'plugin_agents.dart';
 import 'plugin_agent_policy.dart';
 import 'plugin_agent_session.dart';
 import 'plugin_agent_skills.dart';
+import 'plugin_hook_catalog.dart';
+import 'plugin_hook_command.dart';
+import 'plugin_hook_middleware.dart';
+import 'plugin_hook_output.dart';
+import 'plugin_hook_runner.dart';
 import 'task_text_files.dart';
 import 'scope_requirements.dart';
 import 'capability_import_service.dart';
@@ -1635,6 +1640,22 @@ class GenkitXiaoqiAgentRuntime
       );
     }
 
+    final hookSelections = [
+      ...(request['selected_capabilities'] as List? ?? const []),
+      if (respond?.isNotEmpty == true || restart?.isNotEmpty == true)
+        ...((store
+                    .get('task/$tenantId/$taskId')
+                    ?.value['task_active_capabilities']
+                as List?) ??
+            const []),
+    ];
+    final pluginHooks = SelectedPluginHooks(
+      store,
+      tenantId,
+      hookSelections,
+      excludedIds: (request['excluded_capability_ids'] as List? ?? const [])
+          .map((id) => id.toString()),
+    );
     final selectedSkills = SelectedSkills(
       store,
       tenantId,
@@ -3078,6 +3099,8 @@ class GenkitXiaoqiAgentRuntime
     final isolatedMcpTransports = <SandboxMcpTransport>[];
     final isolatedMcpById = <String, SandboxMcpTransport>{};
     final mcpToolNames = <String>[];
+    final hookMcpTools =
+        <String, PluginHookTool Function(Map<String, dynamic>)>{};
     final mcpToolSummary = <String>[
       for (final failure in unavailableMcp) '- $failure；本轮不可用',
     ];
@@ -3234,6 +3257,27 @@ class GenkitXiaoqiAgentRuntime
           );
           final exposedDescription =
               exposedTool['description']?.toString().trim() ?? '';
+          if (!useGateway || exposedName == 'call_tool') {
+            hookMcpTools[alias] = (input) {
+              final remote = useGateway
+                  ? input['tool_name']?.toString() ?? ''
+                  : exposedName;
+              final arguments = useGateway
+                  ? input['arguments'] as Map? ?? const {}
+                  : input;
+              return PluginHookTool(
+                'mcp__${connection.name.split(' · ').last}__$remote',
+                Map<String, dynamic>.from(arguments),
+                (updated) => useGateway
+                    ? {
+                        ...input,
+                        'arguments': {...arguments, ...updated},
+                      }
+                    : {...input, ...updated},
+                canAsk: true,
+              );
+            };
+          }
           ai.defineTool<Map<String, dynamic>, String>(
             name: alias,
             description:
@@ -3475,11 +3519,14 @@ class GenkitXiaoqiAgentRuntime
                   }
                 }
               }
-              final decision = ToolAccessPolicy.decide(
-                effect: effect,
-                hasExactUserGrant: authorization == true,
-                hasUserDenial: authorization == false,
-              );
+              final decision =
+                  PluginHookControl.asksPermission && authorization == null
+                  ? ToolAccessDecision.confirm
+                  : ToolAccessPolicy.decide(
+                      effect: effect,
+                      hasExactUserGrant: authorization == true,
+                      hasUserDenial: authorization == false,
+                    );
               if (decision == ToolAccessDecision.deny) {
                 onProcessEvent({
                   'type': 'tool_skipped',
@@ -3649,6 +3696,14 @@ class GenkitXiaoqiAgentRuntime
                       : {'canonical_action': externalAction},
                   invoke: (_) async {
                     invoked = true;
+                    if (PluginHookControl.asksPermission &&
+                        callExecution.authorization(
+                              actionHash: approvalHash,
+                              scopeHash: scopeHash,
+                            ) !=
+                            true) {
+                      throw StateError('hook 要求的操作授权已失效，未提交目标工具');
+                    }
                     final result = await client
                         .callTool(name: remoteToolName, arguments: input)
                         .timeout(mcpToolRequestTimeout);
@@ -5123,6 +5178,127 @@ class GenkitXiaoqiAgentRuntime
               .map((part) => part['ref'])
               .whereType<String>()
               .toSet();
+    List<String> activeHookAliases() {
+      if (!turnContract.executesWorkflow) return const [];
+      final loadedSources = [
+        ...loadedSkills
+            .map((id) => selectedSkills.entries[id])
+            .whereType<Map>(),
+        ...loadedPluginCommands
+            .map((id) => pluginCommands.entries[id])
+            .whereType<Map>(),
+        ...loadedPluginAgents
+            .map((id) => pluginAgents.entries[id])
+            .whereType<Map>(),
+      ];
+      return [
+        for (final entry in pluginHooks.entries.entries)
+          if (!excludedIds.contains(entry.value['parent_id']) &&
+              (!scopeRequirements.contains(
+                    parentRequirement(entry.value['parent_id'].toString()),
+                  ) ||
+                  scopeRequirements.required(
+                    turnContract,
+                    parentRequirement(entry.value['parent_id'].toString()),
+                  )) &&
+              (hookSelections.whereType<Map>().any(
+                    (selection) =>
+                        selection['id'] == entry.value['parent_id'] &&
+                        selection['version_id'] == entry.value['version_id'],
+                  ) ||
+                  loadedSources.any(
+                    (source) =>
+                        source['parent_id'] == entry.value['parent_id'] &&
+                        source['version_id'] == entry.value['version_id'] &&
+                        source['artifact_key'] == entry.value['artifact_key'],
+                  )))
+            entry.key,
+      ];
+    }
+
+    bool hookMatches(String alias, PluginHookTool tool) =>
+        PluginHookCommand.trivialMatch(
+          pluginHooks.definition(alias).matcher,
+          tool.name,
+        ) !=
+        false;
+
+    void checkHookSources(PluginHookTool tool) {
+      for (final alias in activeHookAliases()) {
+        if (hookMatches(alias, tool)) pluginHooks.files(alias);
+      }
+    }
+
+    final hookControl = PluginHookControl();
+    final hooks = ai.defineGenerateMiddleware<void>(
+      name: 'xiaoqi_plugin_hooks_$taskId',
+      create: (_, _) => PluginHookMiddleware(
+        execution: () => execution,
+        control: hookControl,
+        hasHooks: (tool) =>
+            activeHookAliases().any((alias) => hookMatches(alias, tool)),
+        validateInput: (name, input) async {
+          final tool = await ai.registry.lookupAction(.tool, name);
+          return tool != null &&
+              (tool.inputSchema == null ||
+                  (await tool.inputSchema!.validate(input)).isEmpty);
+        },
+        checkSources: checkHookSources,
+        describe: (name, input) =>
+            hookMcpTools[name.split('/').last]?.call(input) ??
+            PluginHookTool.native(name, input),
+        dispatch: (event, invocation, input) async {
+          final results = <PluginHookOutput>[];
+          final owner = execution;
+          for (final alias in activeHookAliases()) {
+            final hook = pluginHooks.definition(alias);
+            if (hook.event != event ||
+                PluginHookCommand.trivialMatch(
+                      hook.matcher,
+                      input['tool_name'].toString(),
+                    ) ==
+                    false)
+              continue;
+            final entry = pluginHooks.entries[alias]!;
+            onProcessEvent({
+              'type': 'tool_started',
+              'tool': 'plugin_hook',
+              'capability_name': entry['plugin_name'],
+              'hook_event': event,
+            });
+            final result = await PluginHookRunner(codeExecutor).run(
+              execution: owner,
+              hook: hook,
+              sourceBinding: pluginHooks.fingerprint(alias),
+              invocation: invocation,
+              input: {...input, 'hook_event_name': event},
+              matchValue: input['tool_name'].toString(),
+              sourceFiles: () => pluginHooks.files(alias),
+              cancellation: cancellation,
+              materials: await _scriptMaterials(tenantId, request['materials']),
+            );
+            if (result != null) results.add(result);
+            onProcessEvent({
+              'type': result == null
+                  ? 'tool_skipped'
+                  : result.error == null
+                  ? 'tool_succeeded'
+                  : 'tool_failed',
+              'tool': 'plugin_hook',
+              'capability_name': entry['plugin_name'],
+              'hook_event': event,
+              if (result == null) 'reason': 'hook_matcher_not_matched',
+              if (result?.systemMessage != null)
+                'message': result!.systemMessage,
+              if (result?.error != null) 'message': result!.error,
+            });
+            if (result?.preventAction == true || result?.stopProcessing == true)
+              break;
+          }
+          return results;
+        },
+      ),
+    );
     final historyScope = ai.defineGenerateMiddleware<void>(
       name: 'xiaoqi_history_scope_$taskId',
       create: (_, _) => _HistoryScopeMiddleware(historicalSkillRefs),
@@ -5204,7 +5380,7 @@ class GenkitXiaoqiAgentRuntime
             '\n插件 Agent 定义（任务指引）：\n${definition.render('plugin-agent://$id')}'
             '${policy.notes.isEmpty ? '' : '\n插件宿主兼容说明：\n${policy.notes.join('\n')}'}'
             '${preload.instructions}',
-        use: [guard()],
+        use: [guard(), hooks()],
       );
       owner.recordPluginAgent(id, fingerprint);
       loadedPluginAgents.add(id);
@@ -5266,6 +5442,7 @@ class GenkitXiaoqiAgentRuntime
         preparationPresentation(),
         historyScope(),
         steering(),
+        hooks(),
         if (skillsAvailable) skillToolRecovery(),
         if (skillsAvailable) skills(skillPaths: [stagedSkills.directory.path]),
         a2ui(catalog: _clarificationCatalogId, validate: 'strict'),

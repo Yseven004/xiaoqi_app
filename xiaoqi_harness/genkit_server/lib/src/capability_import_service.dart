@@ -15,6 +15,7 @@ import 'plugin_dependencies.dart';
 import 'isolated_mcp_spec.dart';
 import 'plugin_commands.dart';
 import 'plugin_agents.dart';
+import 'plugin_hook_catalog.dart';
 
 typedef DependencyPreparer =
     Future<Map<String, List<int>>> Function(
@@ -763,7 +764,12 @@ class CapabilityImportService {
       } on Object {
         unsupported.add('agents 声明路径或定义目录不可用');
       }
-      for (final type in ['hooks', 'apps']) {
+      try {
+        components.addAll(PluginHookCatalog.inspect(scoped, root));
+      } on Object {
+        unsupported.add('hooks 声明路径或配置无效');
+      }
+      for (final type in ['apps']) {
         if (manifest[type] != null ||
             scoped.keys.any((p) => p.startsWith('$type/')) ||
             (type == 'apps' && scoped.containsKey('.app.json')))
@@ -1116,6 +1122,7 @@ class CapabilityImportService {
       final all = store.getImmutable(inspection['artifact_key'].toString());
       final package = subtree(all, candidate['root'].toString());
       final components = <Map<String, dynamic>>[];
+      final preparedDependencyRoots = <String>{};
       for (final raw in (candidate['components'] as List).whereType<Map>()) {
         if (raw['status'] == 'unsupported') continue;
         final relative = candidate['root'] == raw['root']
@@ -1136,7 +1143,9 @@ class CapabilityImportService {
             files = IsolatedMcpSpec.installationFiles(config, files);
           }
         }
-        if (raw['has_dependencies'] == true) {
+        if (raw['has_dependencies'] == true &&
+            (raw['type'] != 'hook' ||
+                !preparedDependencyRoots.contains(relative))) {
           if (prepareDependencies == null)
             throw const FormatException('服务器依赖准备服务尚未配置');
           files.addAll(
@@ -1146,6 +1155,7 @@ class CapabilityImportService {
               cancellation: cancellation,
             ),
           );
+          preparedDependencyRoots.add(relative);
         }
         cancellation?.throwIfCancelled();
         for (final e in files.entries) {
@@ -1179,6 +1189,8 @@ class CapabilityImportService {
             'plugin_command_profile': PluginCommand.profileVersion,
           if (candidate['kind'] == 'plugin')
             'plugin_agent_profile': PluginAgentDefinition.profileVersion,
+          if (candidate['kind'] == 'plugin')
+            'plugin_hook_profile': PluginHookCatalog.profileVersion,
         });
       final saved = store.put(key, {
         'schema_version': 2,

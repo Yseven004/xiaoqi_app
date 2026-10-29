@@ -15,6 +15,7 @@ Future<void> verifyStdioAgent(
   String tenant,
   Map<String, List<int>> installedFiles, {
   bool mixedDeclarations = false,
+  bool rootHooks = false,
 }) async {
   const task = 'agent-mcp-shell';
   const text = '使用文件插件写入文件，运行 Shell 核对，再调用插件命令脚本生成结果文件。';
@@ -199,6 +200,45 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
     'SKILL.md': utf8.encode(
       '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n',
     ),
+    if (rootHooks)
+      'hooks/hooks.json': utf8.encode(
+        jsonEncode({
+          'hooks': {
+            for (final event in ['PreToolUse', 'PostToolUse'])
+              event: [
+                {
+                  'matcher': r'^Bash$',
+                  'hooks': [
+                    {
+                      'type': 'command',
+                      'command':
+                          'python3 "\$CLAUDE_PLUGIN_ROOT/hooks/${event == 'PreToolUse' ? 'pre' : 'post'}.py"',
+                    },
+                  ],
+                },
+              ],
+          },
+        }),
+      ),
+    if (rootHooks)
+      'hooks/pre.py': utf8.encode(r'''
+import json,sys
+value=json.load(sys.stdin)
+assert value['hook_event_name']=='PreToolUse' and value['tool_name']=='Bash'
+command=value['tool_input']['command']
+assert 'agent-shell-verified' in command
+print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','updatedInput':{
+ 'command':command+'\nprintf "hook-shell-verified" > /workspace/output/hook-verified.txt\n'
+}}}))
+'''),
+    if (rootHooks)
+      'hooks/post.py': utf8.encode(r'''
+import json,sys
+value=json.load(sys.stdin)
+assert value['hook_event_name']=='PostToolUse' and value['tool_name']=='Bash'
+assert 'hook-verified.txt' in str(value['tool_response'])
+print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'hook-post-verified'}}))
+'''),
     '.mcp.json': utf8.encode(
       jsonEncode({
         'mcpServers': mixedDeclarations ? {} : {'filesystem': serverConfig},
@@ -325,12 +365,28 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
       'agent.txt': 'agent-mcp-payload',
       'agent-helper.txt': 'agent-shell-verified',
       'plugin-command.txt': 'plugin-command-script-verified',
+      if (rootHooks) 'hook-verified.txt': 'hook-shell-verified',
     }.entries) {
       final item = artifacts
           .where((artifact) => artifact['name'] == expected.key)
           .single;
       if (utf8.decode(store.getObject(item['object_key'])) != expected.value)
         throw StateError('Agent artifact integrity failed');
+    }
+    if (rootHooks &&
+        ((store.get('task/$tenant/$task')!.value['code_execution_runs'] != 4) ||
+            events
+                    .where(
+                      (e) =>
+                          e['type'] == 'tool_succeeded' &&
+                          e['tool'] == 'plugin_hook',
+                    )
+                    .length !=
+                2 ||
+            artifacts.length != 4)) {
+      throw StateError(
+        'Real Agent hook execution, budget or protocol artifact boundary failed',
+      );
     }
     if (!events.any(
       (event) =>

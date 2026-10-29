@@ -12,6 +12,8 @@ Future<void> main(List<String> args) async {
   final root = await Directory.systemTemp.createTemp('plugin-agent-runtime-');
   final store = CloudStore(root: root.path);
   final scenario = args.single;
+  final rootHooks = scenario.startsWith('root-hook-');
+  final hookCounter = File('${root.path}/hook-count.json');
   final scriptNetwork = scenario.endsWith('script-network');
   final preloadSkill =
       scenario == 'preload' || scenario == 'preload-script-network';
@@ -42,6 +44,46 @@ else:
           (Platform.isWindows ? 'python' : 'python3'),
     );
   }
+  if (rootHooks) {
+    final worker = File('${root.path}/hook_worker.py');
+    worker.writeAsStringSync('''
+import json,pathlib,sys
+r=json.loads(sys.stdin.readline())
+if r.get('action'):
+ assert r['action'] != 'network_token'
+ print(json.dumps({'ok':True,'acknowledged':True}))
+else:
+ assert r['authorized_domains'] == [] and r['language'] == 'javascript'
+ assert 'hooks/hooks.json' in r['skill_files']
+ line=r['code'].splitlines()[0]
+ spec=json.loads(json.loads(line.split('JSON.parse(',1)[1].rsplit(');',1)[0]))
+ i=spec['input']; event=i['hook_event_name']
+ assert i['cwd']=='/workspace/work' and i['tool_use_id']
+ counter=pathlib.Path(${jsonEncode(hookCounter.path)})
+ records=json.loads(counter.read_text()) if counter.exists() else []
+ records.append(i); counter.write_text(json.dumps(records))
+ specific={'hookEventName':event}
+ if event=='PreToolUse':
+  if ${jsonEncode(scenario)} == 'root-hook-deny': specific['permissionDecision']='deny'
+  elif ${jsonEncode(scenario)} == 'root-hook-approval':
+   assert i['tool_input']=={'recipient':'original'}
+   specific.update({'permissionDecision':'ask','updatedInput':{'recipient':'changed'}})
+  else:
+   assert i['tool_input']=={'file_path':'report.txt','content':'verified child output'}
+   specific['updatedInput']={'content': 7 if ${jsonEncode(scenario)} == 'root-hook-invalid' else 'verified rewritten output'}
+ else: specific['additionalContext']='ROOT_HOOK_OBSERVED_RESULT'
+ output={'hookSpecificOutput':specific}
+ envelope={'xiaoqi_hook_command_v1':{'matched':True,'timed_out':False,'exit_code':0,'stdout':json.dumps(output),'stderr':''}}
+ print(json.dumps({'type':'result','ok':True,'execution_id':r['execution_id'],'stdout':json.dumps(envelope),'artifacts':[],'cleanup_pending':False}))
+''');
+    codeExecutor = DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable:
+          Platform.environment['XIAOQI_TEST_PYTHON'] ??
+          (Platform.isWindows ? 'python' : 'python3'),
+    );
+  }
   final toolHeader = scriptNetwork
       ? 'tools: [Read, Bash]\n'
       : 'tools: [Read, Write, Agent]\n';
@@ -52,6 +94,7 @@ else:
     'dontask',
     'disabled',
     'readonly',
+    'root-hook-approval',
   }.contains(scenario);
   final rpc = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   var calls = 0;
@@ -83,13 +126,24 @@ else:
               'description': 'Execute approved fixture effect',
               'inputSchema': {
                 'type': 'object',
-                'properties': {},
+                'properties': rootHooks
+                    ? {
+                        'recipient': {'type': 'string'},
+                      }
+                    : {},
+                if (rootHooks) 'required': ['recipient'],
                 'additionalProperties': false,
               },
             },
           ],
         };
       case 'tools/call':
+        if (rootHooks &&
+            body['params']['arguments']['recipient'] != 'changed') {
+          throw StateError(
+            'hook rewritten recipient was not authorized/executed',
+          );
+        }
         calls++;
         value = {
           'content': [
@@ -116,6 +170,28 @@ else:
   });
   final files = <String, List<int>>{
     '.claude-plugin/plugin.json': utf8.encode('{"name":"agent-fixture"}'),
+    if (rootHooks)
+      'hooks/hooks.json': utf8.encode(
+        jsonEncode({
+          'hooks': {
+            for (final event in [
+              'PreToolUse',
+              'PostToolUse',
+              'PostToolUseFailure',
+            ])
+              event: [
+                {
+                  'matcher': scenario == 'root-hook-approval'
+                      ? r'^mcp__Library__make_card$'
+                      : r'^Write$',
+                  'hooks': [
+                    {'type': 'command', 'command': 'fixture-hook'},
+                  ],
+                },
+              ],
+          },
+        }),
+      ),
     'agents/writer.md': utf8.encode(
       '---\nname: writer\ndescription: Write task notes\n${mcp ? '' : toolHeader}${preloadSkill ? 'skills: [note]\n' : ''}${scenario == 'plan' || scenario == 'readonly'
           ? 'permissionMode: plan\n'
@@ -286,7 +362,9 @@ else:
         'external_calls': calls,
         'before_approval': beforeApproval,
         'script_runs': scriptCounter.existsSync() ? int.parse(scriptCounter.readAsStringSync()) : 0,
+        'code_runs': task['code_execution_runs'],
         'network_grants': task['authorized_network_domains'],
+        if (rootHooks) 'hook_runs': hookCounter.existsSync() ? jsonDecode(hookCounter.readAsStringSync()) : [],
         'events': events,
       })}',
     );

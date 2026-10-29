@@ -14,6 +14,7 @@ class PluginHookOutput {
     this.updatedInput,
     this.updatedToolOutput,
     this.hasUpdatedToolOutput = false,
+    this.mcpOnlyOutput = false,
     this.error,
   });
 
@@ -22,6 +23,7 @@ class PluginHookOutput {
   final Map<String, dynamic>? updatedInput;
   final Object? updatedToolOutput;
   final bool hasUpdatedToolOutput;
+  final bool mcpOnlyOutput;
 
   static const maxOutputBytes = 128 * 1024;
   static const _blockable = {
@@ -188,6 +190,9 @@ class PluginHookOutput {
           event == 'PostToolUse' &&
           (specific.containsKey('updatedToolOutput') ||
               specific.containsKey('updatedMCPToolOutput')),
+      mcpOnlyOutput:
+          !specific.containsKey('updatedToolOutput') &&
+          specific.containsKey('updatedMCPToolOutput'),
       updatedToolOutput: _freeze(
         specific.containsKey('updatedToolOutput')
             ? specific['updatedToolOutput']

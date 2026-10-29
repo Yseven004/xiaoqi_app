@@ -8,6 +8,30 @@ import 'plugin_hook_output.dart';
 class PluginHookCommand {
   static const resultKey = 'xiaoqi_hook_command_v1';
 
+  /// Exact/substring alternatives need no untrusted API-host regexp or runner.
+  /// Return null for real regex syntax so it stays in the bounded worker.
+  static bool? trivialMatch(String? pattern, String value) {
+    if (pattern == null || pattern.isEmpty || pattern == '*') return true;
+    if (const ['\n', '\r', '\u2028', '\u2029'].any(value.contains)) return null;
+    final alternatives = <bool>[];
+    for (var part in pattern.split('|')) {
+      final start = part.startsWith('^'), end = part.endsWith(r'$');
+      if (start) part = part.substring(1);
+      if (end) part = part.substring(0, part.length - 1);
+      if (!RegExp(r'^[A-Za-z0-9_:/-]+$').hasMatch(part)) return null;
+      alternatives.add(
+        start && end
+            ? value == part
+            : start
+            ? value.startsWith(part)
+            : end
+            ? value.endsWith(part)
+            : value.contains(part),
+      );
+    }
+    return alternatives.any((match) => match);
+  }
+
   static String? unsupported(PluginHook hook) {
     if (hook.type != 'command') return '不是 command hook';
     if (hook.config['async'] == true || hook.config['asyncRewake'] == true) {

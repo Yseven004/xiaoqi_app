@@ -38,6 +38,8 @@ class PluginHookRunner {
     }
 
     check();
+    if (PluginHookCommand.trivialMatch(hook.matcher, matchValue) == false)
+      return null;
     if (sourceBinding.isEmpty || invocation.isEmpty) {
       throw StateError('hook 必须绑定原始来源及事件调用');
     }
@@ -92,9 +94,20 @@ class PluginHookRunner {
     check();
     // execute() adds artifact descriptions after stdout. The launcher emits
     // one envelope line; source command stdout/stderr are JSON-escaped inside.
-    final output = PluginHookCommand.result(
-      (result['output'] as String).split('\n').first,
-    );
+    final Map<String, dynamic> output;
+    try {
+      output = PluginHookCommand.result(
+        (result['output'] as String).split('\n').first,
+      );
+    } on FormatException {
+      return PluginHookOutput.parse(
+        event: hook.event,
+        exitCode: null,
+        stdout: '',
+        stderr: 'hook 执行未返回有效协议结果',
+        failureBlocks: hook.config['onFailure'] == 'block',
+      );
+    }
     if (output['matched'] == false && output['stderr'] == '') return null;
     return PluginHookOutput.parse(
       event: hook.event,
