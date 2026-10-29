@@ -384,10 +384,50 @@ class RunnerValidationTests(unittest.TestCase):
                     result = server._run_sandbox(request, send, stdio=channel)
                 self.assertEqual(result['ok'], mcp)
                 if not mcp:
-                    self.assertIn('120', result['error'])
+                    self.assertIn('0 秒', result['error'])
                     container.kill.assert_called_once()
                 else:
                     self.assertTrue(any(call.args[0].get('type') == 'heartbeat' for call in send.call_args_list))
+
+    def test_dependency_build_uses_a_total_deadline_without_widening_ordinary_code(self):
+        for profile, elapsed, success in [('code', 121, False), ('dependency_build', 121, True), ('dependency_build', 601, False)]:
+            with self.subTest(profile=profile, elapsed=elapsed):
+                client, container, volume = Mock(), Mock(), Mock()
+                volume.name = 'budget-fixture'
+                client.volumes.create.return_value = volume
+                client.containers.create.return_value = container
+                container.put_archive.return_value = True
+                states = iter(['running', 'exited'])
+                def reload():
+                    state = next(states, 'exited')
+                    container.attrs = {'State': {'Status': state, 'Running': state == 'running', 'ExitCode': 0}}
+                container.reload.side_effect = reload
+                partial = [{'name': 'partial.txt', 'base64': 'aGVsbG8='}]
+                with (patch.object(server, '_get_client', return_value=client),
+                      patch.object(server, '_decode_logs', return_value=''),
+                      patch.object(server, '_safe_artifacts', return_value=partial),
+                      patch.object(server.time, 'monotonic', side_effect=[0, elapsed]),
+                      patch.object(server.time, 'sleep')):
+                    result = server._run_sandbox({'task_id': 'budget-test', 'language': 'python',
+                        'code': 'pass', 'execution_profile': profile}, Mock())
+                self.assertEqual(result['ok'], success)
+                self.assertEqual(result['artifacts'], partial)
+                self.assertEqual(container.kill.call_count, 0 if success else 1)
+                options = client.containers.create.call_args.kwargs
+                self.assertEqual(options['mem_limit'], '384m')
+                self.assertEqual(options['user'], '10001:10001')
+                self.assertEqual(options['cap_drop'], ['ALL'])
+                self.assertTrue(options['read_only'])
+                container.remove.assert_called_once_with(force=True, v=True)
+
+    def test_invalid_or_misapplied_build_profile_creates_no_resources(self):
+        invalid = [None, 600, [], 'unlimited', 'dependency_build']
+        with patch.object(server, '_get_client') as client:
+            for profile in invalid:
+                with self.subTest(profile=profile), self.assertRaises(server.RequestError):
+                    server._run_sandbox({'task_id': 'profile-test', 'language': 'shell',
+                        'code': 'true', 'execution_profile': profile}, Mock())
+            client.assert_not_called()
 
 
 if __name__ == "__main__":

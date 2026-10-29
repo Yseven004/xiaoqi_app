@@ -38,6 +38,7 @@ MAX_ARTIFACT_TOTAL_BYTES = 20 * 1024 * 1024
 MAX_ARTIFACTS = 10
 MAX_LOG_BYTES = 1024 * 1024
 MAX_RUN_SECONDS = 120
+MAX_BUILD_SECONDS = 600
 MAX_MCP_LIFETIME_SECONDS = 4 * 60 * 60
 MAX_DOMAINS = 10
 MAX_SCRIPT_ARGUMENTS = 32
@@ -505,7 +506,19 @@ def _decode_logs(container: Any, stream: str) -> str:
     return decoded[-MAX_LOG_BYTES:].decode("utf-8", errors="replace")
 
 
+def _execution_run_seconds(request: dict[str, Any], stdio: StdioChannel | None = None) -> int:
+    profile = request.get('execution_profile', 'code')
+    if not isinstance(profile, str) or profile not in {'code', 'dependency_build'}:
+        raise RequestError('Invalid sandbox execution profile')
+    if profile == 'dependency_build':
+        if stdio is not None or request.get('language') != 'python' or 'script_path' in request or 'command' in request:
+            raise RequestError('Dependency build profile requires the trusted Python installer')
+        return MAX_BUILD_SECONDS
+    return MAX_RUN_SECONDS
+
+
 def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None, cancellation: threading.Event | None = None, checkpoint: Any = None) -> dict[str, Any]:
+    run_seconds = _execution_run_seconds(request, stdio)
     if stdio is not None and checkpoint is None:
         checkpoint = stdio.checkpoint
     if cancellation is not None and cancellation.is_set():
@@ -679,8 +692,8 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
                 except DockerException:
                     pass
                 break
-            if stdio is None and time.monotonic() - started_at >= MAX_RUN_SECONDS:
-                run_error = "代码执行超过 120 秒，沙箱已停止"
+            if stdio is None and time.monotonic() - started_at >= run_seconds:
+                run_error = f"{'依赖构建' if request.get('execution_profile') == 'dependency_build' else '代码执行'}超过 {run_seconds} 秒，沙箱已停止"
                 try:
                     container.kill()
                 except DockerException:

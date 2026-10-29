@@ -1288,7 +1288,8 @@ class CapabilityCloudSync {
     );
     final id = started['id'].toString();
     onJob?.call(id);
-    for (var attempt = 0; attempt < 240; attempt++) {
+    final elapsed = Stopwatch()..start();
+    while (elapsed.elapsed < const Duration(minutes: 15)) {
       await Future<void>.delayed(const Duration(seconds: 2));
       final result = _checked(
         await _client

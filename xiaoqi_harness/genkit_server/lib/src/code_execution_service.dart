@@ -11,6 +11,17 @@ import 'execution_limits.dart';
 import 'store.dart';
 import 'sandbox_mcp_transport.dart';
 
+enum SandboxExecutionProfile {
+  code('code', 120),
+  dependencyBuild('dependency_build', 600);
+
+  const SandboxExecutionProfile(this.wireName, this.runSeconds);
+  final String wireName;
+  final int runSeconds;
+  Duration get bridgeDeadline => Duration(seconds: 180 + runSeconds + 30);
+  Duration get apiDeadline => bridgeDeadline + const Duration(seconds: 20);
+}
+
 class NetworkPermissionRequired implements Exception {
   const NetworkPermissionRequired(
     this.domains,
@@ -166,6 +177,7 @@ class DockerCodeExecutionService {
           // Build hooks need their own source files, not API-host paths or data.
           skillFiles: source,
           cancellation: cancellation ?? CancellationController().token,
+          profile: SandboxExecutionProfile.dependencyBuild,
         );
       }
       final artifacts = store.get(key)!.value['artifacts'] as List;
@@ -396,9 +408,17 @@ class DockerCodeExecutionService {
     List<String>? artifactIds,
     void Function()? beforeSubmit,
     String? scopeOperationId,
+    SandboxExecutionProfile profile = SandboxExecutionProfile.code,
   }) async {
     cancellation.throwIfCancelled();
     beforeSubmit?.call();
+    if (profile == SandboxExecutionProfile.dependencyBuild) {
+      final preparation = store.get('task/$tenantId/$taskId')?.value;
+      if (!RegExp(r'^install-[a-f0-9]{64}$').hasMatch(taskId) ||
+          preparation?['status'] != 'preparing_dependencies' ||
+          preparation?['dependency_source_digest'] != taskId.substring(8))
+        throw StateError('依赖构建必须绑定原始安装准备记录');
+    }
     if (scriptPath == null &&
         (code.trim().isEmpty || utf8.encode(code).length > 64 * 1024)) {
       throw const FormatException('代码不能为空且不能超过 64 KB');
@@ -535,6 +555,7 @@ class DockerCodeExecutionService {
             ? code
             : '# Installed entry is staged in skill_files',
         'language': language,
+        'execution_profile': profile.wireName,
         'authorized_domains': authorizedDomains,
         if (networkToken != null) 'network_token': networkToken,
         if (networkToken != null) 'network_revision': networkRevision,
@@ -557,10 +578,12 @@ class DockerCodeExecutionService {
       process.stdin.writeln(jsonEncode(request));
       await process.stdin.close();
       await process.exitCode.timeout(
-        const Duration(minutes: 4),
+        profile.apiDeadline,
         onTimeout: () {
           process.kill(ProcessSignal.sigterm);
-          throw TimeoutException('Docker 沙箱执行超过 4 分钟');
+          throw TimeoutException(
+            'Docker 沙箱执行及回收超过 ${profile.apiDeadline.inSeconds} 秒',
+          );
         },
       );
       await stdoutDone.future.timeout(const Duration(seconds: 10));

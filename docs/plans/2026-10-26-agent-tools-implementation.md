@@ -82,7 +82,7 @@ GitHub 构建状态 GET 遇到短暂传输/超时/特定临时服务错误时最
 | P08 Shell | 实施中 | 通用 Shell、已安装脚本、字面 argv 与 MCP 文件接力均已验证；Docker 后台子进程资源清理通过；目标 ECS 资源及客户端验收待完成 |
 | P09 现有宿主能力适配 | 实施中 | 用户已撤回通用电脑/手机控制及硬件采购；技能/插件版本及文件局部不可用已通过真实 Agent 循环，健康组件继续交付；已有宿主映射和更广依赖状态验收仍待完成 |
 | P10 导入/安装/构建 | 实施中 | npm/Python 构建、离线交付、执行位、Node CLI 及安装未知结果的原执行恢复均已上线；历史包权限迁移、较长/组合构建仍待完成 |
-| P11 插件组件 | 实施中 | Markdown commands 与 Agent 的发现/版本绑定、真实子会话、窄文件工具、审批恢复、嵌套权限及脚本联网链路已上线；进阶 Agent 宿主字段、动态/分叉命令、必要 hooks/apps/extensions 目标协议适配仍待完成 |
+| P11 插件组件 | 实施中 | Markdown commands 与 Agent 的发现/版本绑定、真实子会话、窄文件工具、审批恢复、嵌套权限、技能预加载及脚本联网链路已上线；其他进阶宿主字段、动态/分叉命令、必要 hooks/apps/extensions 目标协议适配仍待完成 |
 | P12 预算与计数 | 实施中 | 已修正累计次数、失败计数与恢复，工具调用不再由计划次数硬阻断；当前服务端资源预算待代表任务测量和全入口统一 |
 | P13 运行生命周期 | 实施中 | 执行恢复/清理、原授权关联、范围复查、计数、安装恢复与 MCP runner 重启后的原调用连续性已上线；API 进程退出后的待返回 RPC 关联及更广全生命周期验收仍待完成 |
 | P14 最终验证/部署 | 实施中 | 非生图阶段版本已部署并经健康/数据/真实容器门禁验证；剩余修复及客户端/真机验收未完成，真实生图按用户明确要求后置，不等待充值 |
@@ -707,3 +707,18 @@ skill identity. Focused checks pass; fixed-source acceptance and exact-commit
 CI/deployment remain pending. See
 docs/architecture/2026-10-29-agent-skill-preload.md. Other original P01–P14 work
 remains open; neither release closes the goal.
+
+The Agent skill preload/source-revocation batch is now deployed and verified as
+20261029-125645-2485148, main 24851482b00a68692958c851852fd7073b9ca562.
+CI 40820526175/job 123271684411 passes all 397 Dart, 82 runner and 28 deployment
+checks, real stdio/restart gates, clean resources and image roundtrip. Standard
+non-image deployment exits 0 with healthy service/data/restore point and public
+HTTPS 200 via Cloud Assistant. Product/API remain 2026-10-27-agent-tools-2/24.
+
+P10 shared build budgets are implemented locally: bounded installer execution and
+one remaining-phase budget, aligned API/worker/client deadlines, unchanged normal
+code/isolation/resource caps and original result recovery. Local execution/import,
+runner, deployment and Flutter contract checks pass; the combined over-120-second
+Docker build, rebuilt-client artifact and exact-commit CI/deployment are pending.
+See docs/architecture/2026-10-29-install-build-budget.md. Historical executable
+metadata recovery and the remaining full-plan tasks are not closed by this work.

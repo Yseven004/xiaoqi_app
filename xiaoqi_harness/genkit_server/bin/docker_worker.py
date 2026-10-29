@@ -68,8 +68,13 @@ def main() -> int:
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    profile = request.get('execution_profile', 'code')
+    if not isinstance(profile, str) or profile not in {'code', 'dependency_build'}:
+        _emit({'type': 'result', 'ok': False, 'error': 'Invalid sandbox execution profile'})
+        return 1
+    execution_timeout = 180 + (600 if profile == 'dependency_build' else 120) + 30
     try:
-        with opener.open(outgoing, timeout=5 if execution_action is not None or network_token else 30 if disable_network else 270) as response:
+        with opener.open(outgoing, timeout=5 if execution_action is not None or network_token else 30 if disable_network else execution_timeout) as response:
             if control:
                 try:
                     raw = response.read(32 * 1024 * 1024 + 1)

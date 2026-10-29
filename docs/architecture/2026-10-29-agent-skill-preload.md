@@ -1,4 +1,4 @@
-# P11 Agent skill preloading — implemented locally, not released
+# P11 Agent skill preloading — deployed and verified
 
 Original gap: PluginAgentPolicy rejected any nonempty `skills` list.
 SelectedSkills skipped an explicitly selected Agent component and discovery excluded
@@ -48,6 +48,18 @@ full static analysis reporting no issues. Earlier full local runs are not final
 acceptance: the parallel run had a 30-second child-process timeout and the serial
 run overlapped subsequent source edits. Full-suite acceptance is required on the
 immutable CI commit before deployment. No failed local run is counted as passing.
+
+Release evidence: main 24851482b00a68692958c851852fd7073b9ca562, CI
+40820526175/job 123271684411 completed success. All 397 Dart, 82 runner and
+28 deployment checks pass, including the real MCP restart gate, standard stdio
+runtime gate, resource cleanup and image export/import roundtrip. Production
+release 20261029-125645-2485148 completed the standard non-image controller with
+exit 0. Runtime/data/current-health checks and the one latest-good restore point
+pass; public HTTPS health is 200 through Cloud Assistant after local Windows TLS
+verification failed. Product/API remain 2026-10-27-agent-tools-2/24. Log:
+`C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261029-125645-2485148.log`.
+No device/client or paid-image success, broader P11 completion or goal completion
+is implied by this release.
 
 Reference inspected 2026-10-29:
 [Anthropic subagent frontmatter and skill loading](https://code.claude.com/docs/en/sub-agents#preload-skills-into-subagents).

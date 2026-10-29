@@ -268,6 +268,7 @@ PY
     await verifyBinaryArtifacts(store, executor, tenant);
     await verifyNpmBuild(store, executor, tenant);
     await verifyPythonBuild(store, executor, tenant);
+    await verifyCombinedBuild(store, executor, tenant);
     await verifyNetworkLifecycle(store, executor, tenant);
     stdout.writeln(
       jsonEncode({
@@ -296,6 +297,7 @@ PY
         'npm_built_skill_offline_delivery': true,
         'npm_failed_build_preserves_installed_version': true,
         'pyproject_and_setup_build': true,
+        'combined_python_npm_build_over_script_deadline': true,
         'python_built_skill_offline_delivery': true,
         'source_executable_permissions_roundtrip': true,
         'npm_cli_entrypoint_offline': true,

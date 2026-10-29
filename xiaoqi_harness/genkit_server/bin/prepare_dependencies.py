@@ -6,9 +6,17 @@ import shutil
 import shlex
 import subprocess
 import tempfile
+import time
 import tomllib
 import urllib.parse
 import zipfile
+
+
+def run_dependency_command(command, **kwargs):
+    remaining = _build_deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('Dependency build time budget exhausted')
+    return subprocess.run(command, check=True, timeout=remaining, **kwargs)
 
 
 def registry_requirements(values):
@@ -65,6 +73,7 @@ def npm_bin_shim(folder, path):
 
 source = pathlib.Path('/workspace/skill')
 output = pathlib.Path('/workspace/output/dependencies.zip')
+_build_deadline = time.monotonic() + 570  # Reserve 30 seconds for runner export/cleanup.
 with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
     root = pathlib.Path(temp)
     lock = {'schema': 1, 'python': [], 'npm': {}}
@@ -86,11 +95,10 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
         if (source / 'requirements.txt').exists():
             requested += ['-r', str(source / 'requirements.txt')]
         requested += [str(python_project)] if python_project is not None else requirements
-        subprocess.run(['python3', '-m', 'pip', 'install', '--disable-pip-version-check',
+        run_dependency_command(['python3', '-m', 'pip', 'install', '--disable-pip-version-check',
                         '--no-input', '--only-binary=:all:', '--ignore-installed', '--use-pep517',
                         '--index-url', 'https://pypi.org/simple', '--report', str(root / 'pip.json'),
-                        '--target', str(root / 'python'), *requested],
-                       check=True, timeout=85)
+                        '--target', str(root / 'python'), *requested])
         for item in json.loads((root / 'pip.json').read_text())['install']:
             download = item['download_info']
             if python_project is not None and download.get('dir_info') is not None and download.get('url') == python_project.as_uri():
@@ -119,14 +127,14 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
         normalized.setdefault('scripts', {})
         (target / 'package.json').write_text(json.dumps(normalized))
         common = ['--ignore-scripts', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org']
-        subprocess.run(['npm', 'install', '--package-lock-only', *common], cwd=target, check=True, timeout=40)
+        run_dependency_command(['npm', 'install', '--package-lock-only', *common], cwd=target)
         npm_lock = json.loads((target / 'package-lock.json').read_text())
         for name, value in npm_lock['packages'].items():
             if not name:
                 continue
             if not value.get('resolved', '').startswith('https://registry.npmjs.org/') or not value.get('integrity', '').startswith('sha512-'):
                 raise ValueError('npm dependency must have registry origin and SHA512 integrity')
-        subprocess.run(['npm', 'ci', *common], cwd=target, check=True, timeout=40)
+        run_dependency_command(['npm', 'ci', *common], cwd=target)
         # Newer npm versions use a per-package script policy. Derive it from
         # verified resolved identities, rather than bypassing all script policy.
         normalized['allowScripts'] = {
@@ -135,13 +143,12 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
             if name and value.get('hasInstallScript')
         }
         (target / 'package.json').write_text(json.dumps(normalized))
-        subprocess.run(['npm', 'rebuild', '--offline', '--ignore-scripts=false', '--foreground-scripts',
-                        '--no-audit', '--no-fund'], cwd=target, check=True, timeout=60)
+        run_dependency_command(['npm', 'rebuild', '--offline', '--ignore-scripts=false', '--foreground-scripts',
+                        '--no-audit', '--no-fund'], cwd=target)
         if 'build' in normalized['scripts']:
-            subprocess.run(['npm', 'run', 'build', '--offline', '--ignore-scripts=false'],
-                           cwd=target, check=True, timeout=60)
-        subprocess.run(['npm', 'prune', '--omit=dev', '--ignore-scripts', '--offline', '--no-audit', '--no-fund'],
-                       cwd=target, check=True, timeout=30)
+            run_dependency_command(['npm', 'run', 'build', '--offline', '--ignore-scripts=false'], cwd=target)
+        run_dependency_command(['npm', 'prune', '--omit=dev', '--ignore-scripts', '--offline', '--no-audit', '--no-fund'],
+                       cwd=target)
         lock['npm'] = npm_lock
     total = 0
     executable_files = []

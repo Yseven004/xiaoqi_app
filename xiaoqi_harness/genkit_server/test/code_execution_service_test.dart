@@ -62,6 +62,34 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   });
 
   test(
+    'ordinary tasks cannot request the installer execution budget',
+    () async {
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'pass',
+          language: 'python',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+          profile: SandboxExecutionProfile.dependencyBuild,
+        ),
+        throwsStateError,
+      );
+      final task = store.get('task/personal/task-code')!.value;
+      expect(task['code_execution_runs'] ?? 0, 0);
+      expect(task['artifacts'], isEmpty);
+    },
+  );
+
+  test(
     'network execution carries private runner token and rechecks after grant',
     () async {
       final captured = File('${directory.path}/network-request.json');
@@ -306,6 +334,7 @@ if request.get('action') == 'network_token':
 if request.get('action'):
  print(json.dumps({'acknowledged':True,'cleanup_pending':False})); sys.exit(0)
 assert 'scripts/build.cjs' in request['skill_files']
+assert request['execution_profile'] == 'dependency_build'
 print(json.dumps({'type':'result','ok':True,'stdout':'','stderr':'','cleanup_pending':False,'artifacts':[{'name':'dependencies.zip','media_type':'application/zip','base64':'$encoded'}]}),flush=True)
 ''');
     return DockerCodeExecutionService(

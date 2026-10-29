@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:genkit/genkit.dart';
@@ -6,6 +7,114 @@ import 'package:xiaoqi_genkit_server/src/capability_import_service.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/selected_skills.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
+
+Future<void> verifyCombinedBuild(
+  CloudStore store,
+  DockerCodeExecutionService executor,
+  String tenant,
+) async {
+  final importer = CapabilityImportService(
+    store,
+    prepareDependencies: executor.prepareDependencies,
+  );
+  final sources = <String, String>{
+    'SKILL.md':
+        '---\nname: combined-build\ndescription: Use a long combined Python and npm build\n---\nRun scripts/use.py.\n',
+    'pyproject.toml': '''[build-system]
+requires=["setuptools==80.9.0"]
+build-backend="setuptools.build_meta"
+[project]
+name="xiaoqi-combined-fixture"
+version="1.0.0"
+[tool.setuptools]
+py-modules=["combo_module"]
+''',
+    'combo_module.py': 'message="combined-python-module"\n',
+    'package.json': jsonEncode({
+      'name': 'xiaoqi-combined-fixture',
+      'version': '1.0.0',
+      'scripts': {'build': 'node scripts/slow-build.cjs'},
+    }),
+    'scripts/slow-build.cjs': r'''
+const fs=require('node:fs');
+if(process.getuid()===0 || fs.existsSync('/var/run/docker.sock')) throw new Error('build escaped isolation');
+for(const name of ['MIMO_API_KEY','DEEPSEEK_API_KEY','SANDBOX_RUNNER_TOKEN'])
+ if(process.env[name]) throw new Error('host credential reached build');
+const started=performance.now();
+setTimeout(()=>{fs.mkdirSync('dist',{recursive:true});
+ fs.writeFileSync('dist/combined.json',JSON.stringify({built:true,elapsed_ms:performance.now()-started}));
+},125000);
+''',
+    'scripts/use.py': r'''
+import combo_module,json,pathlib
+assert '/.xiaoqi/python/' in combo_module.__file__,combo_module.__file__
+build=json.loads(pathlib.Path('/workspace/skill/dist/combined.json').read_text())
+assert build['built'] and build['elapsed_ms']>=125000
+pathlib.Path('/workspace/output/combined.json').write_text(json.dumps({'python':combo_module.message,'node':build['built']}))
+''',
+  };
+  final archive = Archive();
+  for (final entry in sources.entries) {
+    archive.add(ArchiveFile.string(entry.key, entry.value));
+  }
+  final inspection = await importer.inspectUpload(
+    tenant,
+    'combined-build.zip',
+    ZipEncoder().encode(archive),
+  );
+  final candidate = (inspection['candidates'] as List).single as Map;
+  if (candidate['status'] != 'supported')
+    throw StateError('Combined build rejected by inspection');
+  stdout.writeln(
+    jsonEncode({'checkpoint': 'combined-build', 'minimum_build_seconds': 125}),
+  );
+  final installed = await importer.install(
+    tenant,
+    inspection['id'],
+    candidate['id'],
+  );
+  final selected = SelectedSkills(store, tenant, [
+    {
+      'id': installed.value['id'],
+      'version_id': installed.value['current_version_id'],
+    },
+  ]);
+  final files = selected.files(selected.entries.values.single);
+  final lock =
+      jsonDecode(utf8.decode(files['.xiaoqi/dependency-lock.json']!)) as Map;
+  if (!(lock['python'] as List).whereType<Map>().any(
+        (entry) => entry['source'] == 'local_project',
+      ) ||
+      (lock['npm'] as Map).isEmpty ||
+      !files.containsKey('dist/combined.json'))
+    throw StateError(
+      'Combined build did not preserve both installation phases',
+    );
+  const task = 'installed-combined-build';
+  store.put('task/$tenant/$task', {
+    'status': 'running',
+    'artifacts': [],
+    'events': [],
+  }, null);
+  await executor.execute(
+    tenantId: tenant,
+    taskId: task,
+    code: '# installed combined build',
+    language: 'python',
+    scriptPath: 'scripts/use.py',
+    authorizedDomains: [],
+    materials: [],
+    skillFiles: files,
+    cancellation: CancellationController().token,
+  );
+  final artifact =
+      (store.get('task/$tenant/$task')!.value['artifacts'] as List).single
+          as Map;
+  final result =
+      jsonDecode(utf8.decode(store.getObject(artifact['object_key']))) as Map;
+  if (result['python'] != 'combined-python-module' || result['node'] != true)
+    throw StateError('Combined built skill could not execute offline');
+}
 
 Future<void> verifyPythonBuild(
   CloudStore store,
