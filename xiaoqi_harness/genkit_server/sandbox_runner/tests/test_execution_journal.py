@@ -196,6 +196,32 @@ class JournalTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_restart_preserves_hook_protocol_and_normal_output_limit(self):
+        protocol = json.dumps({'xiaoqi_hook_command_v1': {
+            'stdout': '\x00' * 120000, 'exit_code': 2}})
+        for profile in ('code', 'plugin_hook'):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as root:
+                registry = Executions(db_path=str(Path(root) / 'journal.sqlite'))
+                request = self.request()
+                registry.claim(request)
+                container = Mock()
+                container.id = 'recover-protocol'
+                container.labels = {'com.xiaoqi.execution-profile': profile}
+                container.attrs = {'State': {'Running': False}}
+                client = Mock()
+                client.containers.list.return_value = [container]
+                try:
+                    with (patch.object(server, '_executions', registry),
+                          patch.object(server, '_safe_artifacts', return_value=[]),
+                          patch.object(server, '_decode_logs', return_value=protocol)):
+                        server._recover_interrupted_executions(client)
+                    stdout = registry.read(request)['completion']['stdout']
+                    self.assertEqual(stdout, protocol if profile == 'plugin_hook' else protocol[-40000:])
+                    if profile == 'plugin_hook':
+                        self.assertEqual(json.loads(stdout)['xiaoqi_hook_command_v1']['exit_code'], 2)
+                finally:
+                    registry.close()
+
     def test_failed_checkpoint_stops_process_but_retains_workspace(self):
         client = Mock()
         volume = Mock()

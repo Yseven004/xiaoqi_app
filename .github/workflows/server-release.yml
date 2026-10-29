@@ -38,6 +38,7 @@ jobs:
           bash -n xiaoqi_harness/deploy/release_manager.sh
           bash -n xiaoqi_harness/deploy/run_release_job.sh
           python3 -m unittest discover -s xiaoqi_harness/deploy -p 'test_*.py' -v
+          python3 -m unittest discover -s xiaoqi_harness/genkit_server/bin/tests -p 'test_*.py' -v
           pwsh -NoProfile -File xiaoqi_harness/deploy/test_public_health.ps1
           pwsh -NoProfile -File xiaoqi_harness/deploy/test_deploy_controller.ps1
           pwsh -NoProfile -File xiaoqi_harness/deploy/test_github_build.ps1

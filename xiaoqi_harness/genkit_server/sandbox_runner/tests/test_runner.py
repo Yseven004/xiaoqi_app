@@ -492,6 +492,10 @@ class RunnerValidationTests(unittest.TestCase):
                     with self.assertRaises(json.JSONDecodeError):
                         json.loads(result['stdout'])
                 options = client.containers.create.call_args.kwargs
+                if profile == 'plugin_hook':
+                    self.assertEqual(options['labels']['com.xiaoqi.execution-profile'], 'plugin_hook')
+                else:
+                    self.assertNotIn('com.xiaoqi.execution-profile', options['labels'])
                 self.assertEqual(options['nano_cpus'], 500000000)
                 self.assertEqual(options['mem_limit'], '384m')
                 self.assertEqual(options['network'], 'none')

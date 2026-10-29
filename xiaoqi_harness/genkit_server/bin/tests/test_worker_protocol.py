@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 
 spec = importlib.util.spec_from_file_location('hook_protocol_bridge',
-    Path(__file__).resolve().parents[2] / 'bin' / 'docker_worker.py')
+    Path(__file__).resolve().parents[1] / 'docker_worker.py')
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 

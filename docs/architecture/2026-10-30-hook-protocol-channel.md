@@ -58,3 +58,22 @@ No new real Docker acceptance or deployment success is claimed in this record.
 The next exact-main pipeline must prove the corrected fixture and complete
 transport through real isolated containers. No paid image-provider calls,
 client rebuild or new hardware are part of this batch.
+
+## Restart recovery and CI packaging correction
+
+The exact-main run 40908412872 passed all 456 Dart tests but stopped while
+building the runner: its new bridge test referenced `bin/docker_worker.py`,
+which is deliberately outside that image's build context. The bridge test now
+lives beside the bridge under `bin/tests` and runs explicitly in the host CI
+validation step. No production files or image contents were added to satisfy
+a misplaced test, and no acceptance assertion was removed.
+
+Startup recovery also had a separate ordinary-output tail limit. Hook containers
+now carry their private execution profile in an owned container label, and
+recovery applies the same bounded protocol limit as live completion. Ordinary
+code retains its 40000-character tail. A durable-journal recovery test checks a
+120000-zero-byte escaped envelope and its exit-2 verdict; the creation test checks
+the label that carries this profile across a runner restart.
+
+Local verification: 90 runner tests and 2 separately executed bridge tests pass.
+The actual Docker gate and deployment remain pending.

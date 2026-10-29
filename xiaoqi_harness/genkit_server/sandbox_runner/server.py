@@ -434,7 +434,8 @@ def _recover_interrupted_executions(client: docker.DockerClient) -> None:
                 continue
             try:
                 result['artifacts'] = _safe_artifacts(container)
-                result['stdout'] = _decode_logs(container, 'stdout')[-40000:]
+                profile = container.labels.get('com.xiaoqi.execution-profile', 'code')
+                result['stdout'] = _decode_logs(container, 'stdout')[-_stdout_limit({'execution_profile': profile}):]
                 result['stderr'] = _decode_logs(container, 'stderr')[-20000:]
                 result['sandbox_id'] = container.id
             except (RequestError, DockerException, OSError):
@@ -585,6 +586,8 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
     if stdio is not None and stdio.lease_id:
         labels.update({'com.xiaoqi.mcp-lease': stdio.lease_id,
                        'com.xiaoqi.mcp-fingerprint': stdio.fingerprint})
+    if request.get('execution_profile') == 'plugin_hook':
+        labels['com.xiaoqi.execution-profile'] = 'plugin_hook'
     if stdio is None and isinstance(request.get('execution_id'), str) and re.fullmatch(r'[a-f0-9]{32}', request['execution_id']):
         labels['com.xiaoqi.execution-id'] = request['execution_id']
     volume = None
