@@ -203,6 +203,62 @@ void main() {
   );
 
   test(
+    'Python MCP import prepares dependencies before resolving the pinned source',
+    () async {
+      var preparations = 0;
+      final importer = service(
+        {
+          '.claude-plugin/plugin.json': '{"name":"python-reference"}',
+          '.mcp.json': jsonEncode({
+            'mcpServers': {
+              'python-reference': {
+                'command': 'uvx',
+                'args': ['example-server@1.2.3', '--literal', r'$(no-shell)'],
+              },
+            },
+          }),
+        },
+        prepare: (tenant, files, {cancellation}) async {
+          preparations++;
+          expect(
+            utf8.decode(files['requirements.txt']!),
+            contains('example-server==1.2.3'),
+          );
+          return {
+            '.xiaoqi/python/example_server-1.2.3.dist-info/METADATA': utf8
+                .encode('Name: example-server\nVersion: 1.2.3\n'),
+          };
+        },
+      );
+      final inspected = await importer.inspect(
+        'alice',
+        'https://github.com/example/python-mcp',
+      );
+      final candidate = (inspected['candidates'] as List).single as Map;
+      expect(candidate['status'], 'supported');
+      final saved = await importer.install(
+        'alice',
+        inspected['id'],
+        candidate['id'],
+      );
+      final resolved = PluginDependencies.resolve(store, 'alice', [
+        {
+          'id': saved.value['id'],
+          'version_id': saved.value['current_version_id'],
+        },
+      ]);
+      expect(preparations, 1);
+      expect(resolved.unavailable, isEmpty);
+      expect(resolved.isolatedConnections.single.isolated!.command.sublist(3), [
+        'example-server',
+        'example-server',
+        '--literal',
+        r'$(no-shell)',
+      ]);
+    },
+  );
+
+  test(
     'stdio plugin installs its declared dependency and resolves an owned immutable command',
     () async {
       var preparations = 0;

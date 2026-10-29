@@ -362,19 +362,26 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
       if (utf8.decode(store.getObject(item['object_key'])) != expected.value)
         throw StateError('Agent artifact integrity failed');
     }
-    if (rootHooks &&
-        ((store.get('task/$tenant/$task')!.value['code_execution_runs'] != 4) ||
-            events
-                    .where(
-                      (e) =>
-                          e['type'] == 'tool_succeeded' &&
-                          e['tool'] == 'plugin_hook',
-                    )
-                    .length !=
-                2 ||
-            artifacts.length != 4)) {
+    // The same task budget charges one MCP process, one Shell helper, one
+    // installed script and (when enabled) the two real command hooks.
+    final expectedCodeRuns = 3 + (rootHooks ? 2 : 0);
+    if ((store.get('task/$tenant/$task')!.value['code_execution_runs'] !=
+            expectedCodeRuns) ||
+        (rootHooks &&
+            (events
+                        .where(
+                          (e) =>
+                              e['type'] == 'tool_succeeded' &&
+                              e['tool'] == 'plugin_hook',
+                        )
+                        .length !=
+                    2 ||
+                artifacts.length != 4))) {
       throw StateError(
-        'Real Agent hook execution, budget or protocol artifact boundary failed',
+        'Real Agent hook execution, budget or protocol artifact boundary failed; '
+        'code_runs=${store.get('task/$tenant/$task')!.value['code_execution_runs']}; '
+        'artifacts=${artifacts.map((a) => a['name']).join(',')}; '
+        'hooks=${jsonEncode(events.where((e) => e['tool'] == 'plugin_hook').map((e) => {'type': e['type'], 'event': e['hook_event'], if (e['message'] != null) 'message': e['message'].toString().substring(0, e['message'].toString().length.clamp(0, 300))}).toList())}',
       );
     }
     if (!events.any(

@@ -16,6 +16,7 @@ import 'support/network_lifecycle_gate.dart';
 import 'support/mcp_restart_gate.dart';
 import 'support/mcp_api_restart_gate.dart';
 import 'support/plugin_hook_gate.dart';
+import 'support/python_mcp_gate.dart';
 
 /// Real Docker/official-package gate. No model or image-provider calls.
 Future<void> main(List<String> args) async {
@@ -288,6 +289,7 @@ PY
     await verifyCombinedBuild(store, executor, tenant);
     await verifyNetworkLifecycle(store, executor, tenant);
     await verifyPluginHookCommands(store, executor, tenant);
+    await verifyPythonMcp(store, executor, tenant);
     stdout.writeln(
       jsonEncode({
         'gate': 'stdio-runtime',
@@ -308,6 +310,7 @@ PY
         'plugin_mixed_mcp_declarations_agent_loop': true,
         'plugin_root_hooks_agent_shell_loop': true,
         'plugin_hook_command_protocol': true,
+        'python_registry_mcp_roundtrip': true,
         'failed_script_partial_artifacts': true,
         'running_code_cancel_cleanup': true,
         'disconnected_code_result_recovery': true,

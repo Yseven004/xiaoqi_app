@@ -718,6 +718,7 @@ class CapabilityImportService {
             try {
               IsolatedMcpSpec.declaredCommand(config);
               IsolatedMcpSpec.npmDependency(config);
+              IsolatedMcpSpec.pythonTool(config);
             } on FormatException catch (error) {
               commandError = error.message;
             }
@@ -745,6 +746,7 @@ class CapabilityImportService {
                 stdio &&
                 commandError == null &&
                 (IsolatedMcpSpec.npmDependency(config) != null ||
+                    IsolatedMcpSpec.pythonTool(config) != null ||
                     scoped.containsKey('package.json') ||
                     scoped.containsKey('requirements.txt') ||
                     scoped.containsKey('pyproject.toml') ||

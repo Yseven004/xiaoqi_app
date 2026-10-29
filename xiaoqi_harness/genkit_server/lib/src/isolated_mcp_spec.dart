@@ -62,6 +62,17 @@ class IsolatedMcpSpec {
     Map config,
     Map<String, List<int>> files,
   ) {
+    final python = pythonTool(config);
+    if (python != null) {
+      final existing = files['requirements.txt'];
+      final requirements = existing == null ? '' : utf8.decode(existing);
+      return {
+        ...files,
+        'requirements.txt': utf8.encode(
+          '$requirements\n${python.requirements.join('\n')}\n',
+        ),
+      };
+    }
     final dependency = npmDependency(config);
     if (dependency == null) return files;
     final manifest = files['package.json'] == null
@@ -84,6 +95,39 @@ class IsolatedMcpSpec {
     String? versionId,
   }) {
     var argv = declaredCommand(config);
+    final python = pythonTool(config);
+    if (python != null) {
+      final normalized = python.package
+          .replaceAll(RegExp(r'[-_.]+'), '-')
+          .toLowerCase();
+      final installed = files.entries.any((entry) {
+        if (!entry.key.startsWith('.xiaoqi/python/') ||
+            !entry.key.endsWith('.dist-info/METADATA'))
+          return false;
+        return const LineSplitter()
+            .convert(utf8.decode(entry.value))
+            .any(
+              (line) =>
+                  line.startsWith('Name: ') &&
+                  line
+                          .substring(6)
+                          .trim()
+                          .replaceAll(RegExp(r'[-_.]+'), '-')
+                          .toLowerCase() ==
+                      normalized,
+            );
+      });
+      if (!installed)
+        throw FormatException('MCP 依赖 ${python.package} 尚未安装，请重新安装插件');
+      argv = [
+        'python3',
+        '-c',
+        pythonToolLauncher,
+        python.package,
+        python.executable,
+        ...python.arguments,
+      ];
+    }
     final dependency = npmDependency(config);
     if (dependency != null) {
       final root = 'node_modules/${dependency.name}';
@@ -148,4 +192,83 @@ class IsolatedMcpSpec {
       versionId: versionId,
     );
   }
+
+  /// Resolve uv's registry tool syntax during installation, so starting an MCP
+  /// never performs an implicit download or depends on an API-host uv cache.
+  static ({
+    String package,
+    String executable,
+    List<String> requirements,
+    List<String> arguments,
+  })?
+  pythonTool(Map config) {
+    final values = declaredCommand(config);
+    var index = 1;
+    if (!const {'uvx', 'uvx.exe'}.contains(values.first)) {
+      if (!const {'uv', 'uv.exe'}.contains(values.first) ||
+          values.length < 3 ||
+          values[1] != 'tool' ||
+          values[2] != 'run')
+        return null;
+      index = 3;
+    }
+    String? source;
+    final extra = <String>[];
+    while (index < values.length && values[index].startsWith('-')) {
+      final option = values[index++];
+      if ((option != '--from' && option != '--with') ||
+          index == values.length) {
+        throw FormatException('MCP Python 工具选项尚未映射: $option');
+      }
+      final requirement = values[index++];
+      if (option == '--from') {
+        if (source != null)
+          throw const FormatException('MCP Python 工具重复声明 --from');
+        source = requirement;
+      } else {
+        extra.add(requirement);
+      }
+    }
+    if (index == values.length)
+      throw const FormatException('MCP Python 工具缺少命令');
+    final tool = values[index++].split('@');
+    if (tool.length > 2 ||
+        !RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]*$').hasMatch(tool.first)) {
+      throw const FormatException('MCP Python 工具命令无效');
+    }
+    if (source != null && tool.length != 1) {
+      throw const FormatException('MCP Python 工具版本应在 --from 中声明');
+    }
+    source ??= tool.length == 1 || tool[1] == 'latest'
+        ? tool.first
+        : '${tool.first}==${tool[1]}';
+    final pattern = RegExp(
+      r'^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*\])?(?:(?:===|==|!=|~=|<=|>=|<|>)[A-Za-z0-9.*+!_-]+(?:,(?:===|==|!=|~=|<=|>=|<|>)[A-Za-z0-9.*+!_-]+)*)?$',
+    );
+    for (final requirement in [source, ...extra]) {
+      if (!pattern.hasMatch(requirement)) {
+        throw const FormatException(
+          'MCP Python 工具需要 PyPI 包声明，不能隐式执行 URL 或本地来源',
+        );
+      }
+    }
+    return (
+      package: pattern.firstMatch(source)!.group(1)!,
+      executable: tool.first,
+      requirements: [source, ...extra],
+      arguments: values.sublist(index),
+    );
+  }
+
+  static const pythonToolLauncher = '''
+import sys
+from importlib.metadata import distribution
+package, command = sys.argv[1:3]
+entries = [entry for entry in distribution(package).entry_points
+           if entry.group == 'console_scripts' and entry.name == command]
+if len(entries) != 1:
+    raise RuntimeError('Installed MCP package has no unique console entry: ' + command)
+sys.argv = [command, *sys.argv[3:]]
+sys.exit(entries[0].load()())
+''';
 }
