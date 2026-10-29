@@ -154,6 +154,21 @@ def verify_mcp_restart(runner, info):
                 print(json.dumps({'gate': 'mcp-runner-restart', 'passed': True, 'original_sdk_call_resumed': True,
                                   'one_effect': True, 'original_container': True, 'original_input_snapshot': True,
                                   'original_artifact_integrity': True}))
+            except BaseException:
+                # Capture the failing isolated runner before the shell trap
+                # removes it. Never print environment, tokens or RPC bodies.
+                diagnostics = subprocess.run(['docker', 'logs', '--tail', '40', runner],
+                    capture_output=True, text=True, timeout=10)
+                print('MCP_RESTART_RUNNER_LOG:' + (diagnostics.stdout + diagnostics.stderr)[-8000:], flush=True)
+                if ready is not None:
+                    state = subprocess.run(['docker', 'exec', runner, 'python3', '-c',
+                        "import os,sqlite3,json,sys; d=sqlite3.connect('file:'+os.environ['XIAOQI_MCP_DB']+'?mode=ro',uri=True); "
+                        "r=d.execute('SELECT value FROM leases WHERE id=?',(sys.argv[1],)).fetchone(); "
+                        "v=json.loads(r[0]) if r else {}; print(json.dumps({k:v.get(k) for k in "
+                        "('phase','closed','stopped','error','cursor','stdout_offset','send_sequence')}))", ready['lease_id']],
+                        capture_output=True, text=True, timeout=10)
+                    print('MCP_RESTART_LEASE_STATE:' + state.stdout[-2000:], flush=True)
+                raise
             finally:
                 subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=20)
                 if process.poll() is None:

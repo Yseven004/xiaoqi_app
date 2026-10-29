@@ -4,9 +4,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 import threading
 import time
+import traceback
 from typing import Any, Callable
 
 from stdio_channel import StdioChannel
@@ -86,7 +88,12 @@ class McpLease:
                 if value.get("type") == "sandbox_started":
                     self.ready.set()
             self.result = run(request if request is not None else {'lease_id': self.lease_id, **self.journal.get(self.lease_id)}, event, self.channel)
-        except Exception:
+        except Exception as error:
+            # Private structural diagnostics, without exception text, Docker
+            # arguments, plugin output, environment values or credentials.
+            frames = traceback.extract_tb(error.__traceback__)[-8:]
+            logging.getLogger(__name__).warning('MCP_PROCESS_FAILURE type=%s frames=%s',
+                type(error).__name__, ','.join(f'{frame.name}:{frame.lineno}' for frame in frames))
             # Errors may contain user-defined environment values. The process
             # diagnostics remain separate from this public control error.
             if not self.channel.detached:

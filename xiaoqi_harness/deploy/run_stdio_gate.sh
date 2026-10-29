@@ -27,11 +27,11 @@ for attempt in {1..30}; do
   sleep 1
 done
 if [[ "$ready" != yes ]]; then docker logs --tail 80 xiaoqi-stdio-gate-runner; exit 1; fi
+python3 xiaoqi_harness/deploy/verify_runner_restart.py xiaoqi-stdio-gate-runner
 timeout --kill-after=30s 600 docker run --rm --name xiaoqi-stdio-gate-probe --network xiaoqi-stdio-gate \
   --env SANDBOX_RUNNER_TOKEN --env SANDBOX_RUNNER_URL=http://xiaoqi-stdio-gate-runner:8090 \
   --env MIMO_API_KEY=stdio-fixture --env MIMO_BASE_URL=http://127.0.0.1:40443/v1 \
   --entrypoint /app/bin/verify_stdio_runtime xiaoqi-genkit-server:local
-python3 xiaoqi_harness/deploy/verify_runner_restart.py xiaoqi-stdio-gate-runner
 for resource in container network volume; do
   case "$resource" in
     container) remaining="$(docker ps -aq --filter label=com.xiaoqi.ci-stdio-sandbox=true)";;

@@ -50,6 +50,17 @@ unavailable durable capability, immutable serialized concurrent sends, and no
 later submission after an explicit first-send rejection. Fresh Docker acceptance
 remains required; the failed CI did not replace production.
 
+Second CI 40807355855/job 123229372545 passed initialization and reached the
+pending-call marker, but the SDK connection closed after the real runner restart.
+The original container remained running at the host checkpoint; therefore this
+is unresolved recovery behavior, not successful acceptance. A new real-SDK HTTP
+and durable-registry restart test passes locally with one original effect. The
+remaining reproduction is Docker-specific. Failure handling now captures bounded
+CI-runner logs and filtered journal state before cleanup, and structural exception
+frames omit exception text/arguments/environment. Restart verification runs before
+the longer unchanged standard stdio gate, so a failure is diagnosed earlier; every
+existing gate and resource-leak check remains required. Production is unchanged.
+
 Real Docker gate added to the existing isolated CI flow: a Dart SDK call writes
 one counter, the host SIGKILL-restarts only the CI runner, then verifies the same
 container/process boot identity, original input/source hash, original pending RPC,
