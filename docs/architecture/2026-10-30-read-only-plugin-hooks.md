@@ -51,6 +51,17 @@ CPU/memory/process limits, network isolation and original budget accounting.
   read-only workflow remains to be verified; the SDK/fixture checks do not
   replace it.
 
+The next mixed-plugin real Agent gate now delegates to an actual plan-mode
+Agent with only Read. Its source Pre/Post hooks assert the plan payload and
+actual MCP-produced file contents, deliberately write a temporary output and
+mutate a staged skill copy. Acceptance still requires exactly the four original
+deliverables, unchanged installed skill bytes, one completed child and seven
+code executions: MCP startup, Shell, command script and four command hooks.
+It rejects write/code tools in the child model request. Literal matcher
+alternatives avoid charging isolated matcher jobs for unrelated tools. This
+complete container workflow is added and statically checked but has not run;
+the current in-flight release predates this gate extension.
+
 No current deployment includes this change. Previous production service remains
 in place while the prior exact-main build/deployment is active. This change
 does not close other Hook lifecycle/async/once/protocol mapping requirements or

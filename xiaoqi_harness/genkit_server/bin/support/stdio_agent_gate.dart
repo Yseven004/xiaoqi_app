@@ -17,6 +17,7 @@ Future<void> verifyStdioAgent(
   Map<String, List<int>> installedFiles, {
   bool mixedDeclarations = false,
   bool rootHooks = false,
+  bool readOnlyDelegate = false,
 }) async {
   const task = 'agent-mcp-shell';
   const text = '使用文件插件写入文件，运行 Shell 核对，再调用插件命令脚本生成结果文件。';
@@ -64,7 +65,28 @@ Future<void> verifyStdioAgent(
       final preparing = body['tool_choice'] != 'none';
       String? name;
       Map<String, dynamic>? input;
-      if (preparing) {
+      final child =
+          readOnlyDelegate &&
+          (body['messages'] as List).whereType<Map>().any(
+            (message) =>
+                message['role'] == 'system' &&
+                message['content'].toString().contains(
+                  'READ_ONLY_HOOK_GATE_AGENT',
+                ),
+          );
+      if (preparing && child) {
+        final names = tools.map((tool) => tool['function']['name']).toSet();
+        if (names.contains('write_task_text_file') ||
+            names.contains('execute_shell')) {
+          throw StateError(
+            'Read-only delegated Agent exposed a write/code tool',
+          );
+        }
+        if (!serialized.contains('"name":"read_task_text_file"')) {
+          name = 'read_task_text_file';
+          input = {'path': 'agent.txt'};
+        }
+      } else if (preparing) {
         final write = alias('write_file');
         final read = alias('read_text_file');
         final skill = RegExp(
@@ -85,6 +107,9 @@ Future<void> verifyStdioAgent(
               {'name': 'search_plugin_commands', 'count': 1},
               {'name': 'run_plugin_command', 'count': 1},
               {'name': 'execute_skill_script', 'count': 1},
+              if (readOnlyDelegate)
+                {'name': 'search_plugin_agents', 'count': 1},
+              if (readOnlyDelegate) {'name': 'run_plugin_agent', 'count': 1},
             ],
             'artifacts': [
               {'media_type': 'text/plain', 'count': 3},
@@ -125,6 +150,18 @@ Future<void> verifyStdioAgent(
             'script_path': 'scripts/verify-command.py',
             'language': 'python',
             'arguments': [r'command; $(touch /workspace/output/unwanted)'],
+          };
+        } else if (readOnlyDelegate && !called('search_plugin_agents')) {
+          name = 'search_plugin_agents';
+          input = {'query': 'readonly-verifier'};
+        } else if (readOnlyDelegate && !called('run_plugin_agent')) {
+          name = 'run_plugin_agent';
+          input = {
+            'agent_id': RegExp(
+              r'agent-[a-f0-9]{24}',
+            ).firstMatch(serialized)!.group(0),
+            'task':
+                'Read agent.txt and report its original content without writing files.',
           };
         }
       }
@@ -193,6 +230,10 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
     'SKILL.md': utf8.encode(
       '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n',
     ),
+    if (readOnlyDelegate)
+      'agents/readonly-verifier.md': utf8.encode(
+        '---\nname: readonly-verifier\ndescription: Read the verified task file\ntools: [Read]\npermissionMode: plan\n---\nREAD_ONLY_HOOK_GATE_AGENT: Read agent.txt and report its contents.\n',
+      ),
     if (rootHooks)
       'hooks/hooks.json': utf8.encode(
         jsonEncode({
@@ -200,7 +241,7 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
             for (final event in ['PreToolUse', 'PostToolUse'])
               event: [
                 {
-                  'matcher': r'^Bash$',
+                  'matcher': readOnlyDelegate ? r'^Bash$|^Read$' : r'^Bash$',
                   'hooks': [
                     {
                       'type': 'command',
@@ -214,8 +255,18 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
           },
         }),
       ),
-    if (rootHooks) 'hooks/pre.py': utf8.encode(hookGatePreScript),
-    if (rootHooks) 'hooks/post.py': utf8.encode(hookGatePostScript),
+    if (rootHooks)
+      'hooks/pre.py': utf8.encode(
+        readOnlyDelegate
+            ? hookGateWithReadOnly(hookGatePreScript)
+            : hookGatePreScript,
+      ),
+    if (rootHooks)
+      'hooks/post.py': utf8.encode(
+        readOnlyDelegate
+            ? hookGateWithReadOnly(hookGatePostScript)
+            : hookGatePostScript,
+      ),
     '.mcp.json': utf8.encode(
       jsonEncode({
         'mcpServers': mixedDeclarations ? {} : {'filesystem': serverConfig},
@@ -364,7 +415,8 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
     }
     // The same task budget charges one MCP process, one Shell helper, one
     // installed script and (when enabled) the two real command hooks.
-    final expectedCodeRuns = 3 + (rootHooks ? 2 : 0);
+    final expectedCodeRuns =
+        3 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 2 : 0);
     if ((store.get('task/$tenant/$task')!.value['code_execution_runs'] !=
             expectedCodeRuns) ||
         (rootHooks &&
@@ -375,13 +427,25 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
                               e['tool'] == 'plugin_hook',
                         )
                         .length !=
-                    2 ||
+                    (readOnlyDelegate ? 4 : 2) ||
                 artifacts.length != 4))) {
       throw StateError(
         'Real Agent hook execution, budget or protocol artifact boundary failed; '
         'code_runs=${store.get('task/$tenant/$task')!.value['code_execution_runs']}; '
         'artifacts=${artifacts.map((a) => a['name']).join(',')}; '
         'hooks=${jsonEncode(events.where((e) => e['tool'] == 'plugin_hook').map((e) => {'type': e['type'], 'event': e['hook_event'], if (e['message'] != null) 'message': e['message'].toString().substring(0, e['message'].toString().length.clamp(0, 300))}).toList())}',
+      );
+    }
+    if (readOnlyDelegate &&
+        ((store.get('task/$tenant/$task')!.value['completed_plugin_agents']
+                            as Map? ??
+                        {})
+                    .length !=
+                1 ||
+            utf8.decode(store.getImmutable(package)['SKILL.md']!) !=
+                '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n')) {
+      throw StateError(
+        'Read-only delegated Agent did not complete or changed immutable source',
       );
     }
     if (!events.any(

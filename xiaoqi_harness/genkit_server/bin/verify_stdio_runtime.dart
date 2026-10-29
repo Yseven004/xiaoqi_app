@@ -280,6 +280,7 @@ PY
       files,
       mixedDeclarations: true,
       rootHooks: true,
+      readOnlyDelegate: true,
     );
     await verifyExecutionRecovery(store, directory, tenant);
     await verifyBinaryArtifacts(store, executor, tenant);
@@ -310,6 +311,7 @@ PY
         'plugin_mixed_mcp_declarations_agent_loop': true,
         'plugin_root_hooks_agent_shell_loop': true,
         'plugin_hook_command_protocol': true,
+        'read_only_agent_hooks_no_persistence': true,
         'python_registry_mcp_roundtrip': true,
         'failed_script_partial_artifacts': true,
         'running_code_cancel_cleanup': true,
