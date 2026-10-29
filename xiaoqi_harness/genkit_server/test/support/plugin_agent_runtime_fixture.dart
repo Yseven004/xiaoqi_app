@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:genkit/genkit.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
@@ -54,7 +55,7 @@ if r.get('action'):
  print(json.dumps({'ok':True,'acknowledged':True}))
 else:
  assert r['authorized_domains'] == [] and r['language'] == 'javascript'
- assert r['execution_profile'] == 'plugin_hook'
+ assert r['execution_profile'] == ('plugin_hook_read_only' if ${jsonEncode(scenario)} == 'root-hook-readonly' else 'plugin_hook')
  assert 'hooks/hooks.json' in r['skill_files']
  line=r['code'].splitlines()[0]
  spec=json.loads(json.loads(line.split('JSON.parse(',1)[1].rsplit(');',1)[0]))
@@ -65,14 +66,20 @@ else:
  records.append(i); counter.write_text(json.dumps(records))
  specific={'hookEventName':event}
  if event=='PreToolUse':
-  if ${jsonEncode(scenario)} == 'root-hook-deny': specific['permissionDecision']='deny'
+  if ${jsonEncode(scenario)} == 'root-hook-readonly':
+   assert i['permission_mode']=='plan' and i['tool_name']=='Read'
+   assert i['tool_input']=={'file_path':'report.txt'}
+  elif ${jsonEncode(scenario)} == 'root-hook-deny': specific['permissionDecision']='deny'
   elif ${jsonEncode(scenario)} == 'root-hook-approval':
    assert i['tool_input']=={'recipient':'original'}
    specific.update({'permissionDecision':'ask','updatedInput':{'recipient':'changed'}})
   else:
    assert i['tool_input']=={'file_path':'report.txt','content':'verified child output'}
    specific['updatedInput']={'content': 7 if ${jsonEncode(scenario)} == 'root-hook-invalid' else 'verified rewritten output'}
- else: specific['additionalContext']='ROOT_HOOK_OBSERVED_RESULT'
+ else:
+  if ${jsonEncode(scenario)} == 'root-hook-readonly':
+   assert i['permission_mode']=='plan' and 'original task note' in str(i['tool_response'])
+  specific['additionalContext']='ROOT_HOOK_OBSERVED_RESULT'
  output={'hookSpecificOutput':specific}
  envelope={'xiaoqi_hook_command_v1':{'matched':True,'timed_out':False,'exit_code':0,'stdout':json.dumps(output),'stderr':''}}
  print(json.dumps({'type':'result','ok':True,'execution_id':r['execution_id'],'stdout':json.dumps(envelope),'artifacts':[],'cleanup_pending':False}))
@@ -184,6 +191,8 @@ else:
                 {
                   'matcher': scenario == 'root-hook-approval'
                       ? r'^mcp__Library__make_card$'
+                      : scenario == 'root-hook-readonly'
+                      ? r'^Read$'
                       : r'^Write$',
                   'hooks': [
                     {'type': 'command', 'command': 'fixture-hook'},
@@ -194,7 +203,7 @@ else:
         }),
       ),
     'agents/writer.md': utf8.encode(
-      '---\nname: writer\ndescription: Write task notes\n${mcp ? '' : toolHeader}${preloadSkill ? 'skills: [note]\n' : ''}${scenario == 'plan' || scenario == 'readonly'
+      '---\nname: writer\ndescription: Write task notes\n${mcp ? '' : toolHeader}${preloadSkill ? 'skills: [note]\n' : ''}${scenario == 'plan' || scenario == 'readonly' || scenario == 'root-hook-readonly'
           ? 'permissionMode: plan\n'
           : scenario == 'dontask'
           ? 'permissionMode: dontAsk\n'
@@ -249,6 +258,25 @@ else:
     ],
   }, null);
   store.put('task/personal/turn', {'artifacts': []}, null);
+  if (scenario == 'root-hook-readonly') {
+    const key = 'tenants/personal/tasks/turn/artifacts/readonly-seed';
+    final bytes = utf8.encode('original task note');
+    store.putTaskBlob(key, bytes);
+    final task = store.get('task/personal/turn')!;
+    store.put('task/personal/turn', {
+      ...task.value,
+      'artifacts': [
+        {
+          'id': 'readonly-seed',
+          'name': 'report.txt',
+          'media_type': 'text/plain',
+          'size': bytes.length,
+          'sha256': sha256.convert(bytes).toString(),
+          'object_key': key,
+        },
+      ],
+    }, task.revision);
+  }
   if (mcp)
     store.put('mcp/personal/library', {
       'id': 'library',

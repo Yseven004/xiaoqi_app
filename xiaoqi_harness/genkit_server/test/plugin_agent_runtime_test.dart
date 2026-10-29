@@ -21,6 +21,7 @@ void main() {
     'root-hook-deny',
     'root-hook-invalid',
     'root-hook-approval',
+    'root-hook-readonly',
   ]) {
     test(
       'real runtime agent $scenario preserves task tools, budget and completion evidence',
@@ -158,6 +159,11 @@ void main() {
                   'task': 'Write the verified task note',
                 };
               }
+            } else if (scenario == 'root-hook-readonly') {
+              if (!called('read_task_text_file')) {
+                tool = 'read_task_text_file';
+                input = {'path': 'report.txt'};
+              }
             } else if (!called('write_task_text_file')) {
               // Deliberately request a forbidden function in plan mode: the SDK
               // middleware must reject it even though the provider invents a call.
@@ -174,7 +180,11 @@ void main() {
                 'tools': [
                   {'name': 'run_plugin_agent', 'count': 1},
                 ],
-                'artifacts': scenario == 'plan' || mcp || scriptNetwork
+                'artifacts':
+                    scenario == 'plan' ||
+                        scenario == 'root-hook-readonly' ||
+                        mcp ||
+                        scriptNetwork
                     ? []
                     : [
                         {'media_type': 'text/plain', 'count': 1},
@@ -265,7 +275,7 @@ void main() {
               expect(names, isNot(contains('execute_python')));
             }
             expect(names, isNot(contains('set_task_deliverables')));
-            if (scenario == 'plan')
+            if (scenario == 'plan' || scenario == 'root-hook-readonly')
               expect(names, isNot(contains('write_task_text_file')));
           }
           if (scriptNetwork) {
@@ -288,6 +298,10 @@ void main() {
             expect(value['contents'], isEmpty);
             expect(value['completed'], 0);
             expect(value['missing'], isTrue);
+          } else if (scenario == 'root-hook-readonly') {
+            expect(value['contents'], ['original task note']);
+            expect(value['missing'], isFalse);
+            expect(value['completed'], 1);
           } else if (rootHooks) {
             expect(
               value['contents'],

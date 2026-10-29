@@ -38,10 +38,18 @@ CPU/memory/process limits, network isolation and original budget accounting.
   database, recovers original stdout and confirms no returned artifact becomes
   persistent and the invocation count stays one.
 - Dart static analysis passes. The additional recovery test compiles and passes.
+- The production Genkit parent/delegated-Agent integration scenario passes:
+  a plan-mode child exposes Read without Write, both original Read hooks receive
+  plan mode and the private read-only profile, the post hook observes the actual
+  original file contents, the Agent completes and two hook executions are
+  charged. Its isolated execution transport is a trusted Python fixture, not a
+  real Docker run; the existing source-write/deny/invalid/approval cases remain
+  separate regression checks.
 - The real Docker hook gate now writes temporary output and mutates a staged
   source copy, verifies computation output and absence of task artifacts, and
   checks cleanup. This new gate has not run yet. A full delegated Agent/container
-  read-only workflow remains to be verified; the unit checks do not replace it.
+  read-only workflow remains to be verified; the SDK/fixture checks do not
+  replace it.
 
 No current deployment includes this change. Previous production service remains
 in place while the prior exact-main build/deployment is active. This change
