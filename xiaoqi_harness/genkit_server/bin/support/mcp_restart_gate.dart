@@ -6,14 +6,7 @@ import 'package:genkit_mcp/genkit_mcp.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
-/// CI host kills/restarts only its isolated runner while this SDK call is pending.
-Future<void> verifyMcpRestartProbe() async {
-  final directory = await Directory.systemTemp.createTemp('mcp-restart-probe-');
-  final store = CloudStore(root: directory.path);
-  final executor = DockerCodeExecutionService(store);
-  const tenant = 'stdio-verification';
-  const task = 'mcp-pending-restart';
-  const script = r'''
+const mcpRestartFixtureScript = r'''
 import readline from 'node:readline';
 import fs from 'node:fs';
 import {randomUUID,createHash} from 'node:crypto';
@@ -33,8 +26,18 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
    await new Promise(resolve=>setTimeout(resolve,8000));
    reply(r.id,{content:[{type:'text',text:JSON.stringify(value)}]});
  }
+ else if(r.id!==undefined)process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,error:{code:-32601,message:'Method not found'}})+'\n');
 });
 ''';
+
+/// CI host kills/restarts only its isolated runner while this SDK call is pending.
+Future<void> verifyMcpRestartProbe() async {
+  final directory = await Directory.systemTemp.createTemp('mcp-restart-probe-');
+  final store = CloudStore(root: directory.path);
+  final executor = DockerCodeExecutionService(store);
+  const tenant = 'stdio-verification';
+  const task = 'mcp-pending-restart';
+  const script = mcpRestartFixtureScript;
   store.put('task/$tenant/$task', {
     'status': 'running',
     'artifacts': [],

@@ -10,6 +10,143 @@ import 'package:xiaoqi_genkit_server/src/store.dart';
 
 void main() {
   test(
+    'a runner without durable deduplication is closed before any RPC is sent',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final paths = <String>[];
+      String? lease;
+      final serving = server.listen((request) async {
+        paths.add('${request.method} ${request.uri.path}');
+        final value = request.method == 'POST'
+            ? jsonDecode(await utf8.decoder.bind(request).join()) as Map
+            : null;
+        if (value != null) lease = value['lease_id'] as String;
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(
+          jsonEncode(
+            request.method == 'POST'
+                ? {
+                    'ready': true,
+                    'control_version': 2,
+                    'deduplicated_sends': false,
+                  }
+                : {
+                    'completion': {'ok': false, 'artifacts': []},
+                  },
+          ),
+        );
+        await request.response.close();
+      });
+      try {
+        await expectLater(
+          SandboxMcpTransport.connect(
+            runnerUrl: Uri.parse('http://127.0.0.1:${server.port}'),
+            runnerToken: 'fixture',
+            request: {'task_id': 'bound-task'},
+            cancellation: CancellationController().token,
+          ),
+          throwsStateError,
+        );
+        expect(paths, ['POST /v1/mcp', 'DELETE /v1/mcp/$lease']);
+        expect(SandboxMcpTransport.isActive(lease!), isFalse);
+      } finally {
+        await server.close(force: true);
+        await serving.cancel();
+      }
+    },
+  );
+
+  for (final rejected in [false, true]) {
+    test(
+      'concurrent sends retain original bodies and order; rejection=$rejected',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        final firstArrived = Completer<void>();
+        final release = Completer<void>();
+        final stopped = Completer<void>();
+        final bodies = <Map>[];
+        final sequences = <String?>[];
+        final serving = server.listen((request) async {
+          Map<String, dynamic> result;
+          if (request.method == 'POST' && request.uri.path == '/v1/mcp') {
+            await request.drain<void>();
+            result = {
+              'ready': true,
+              'control_version': 2,
+              'deduplicated_sends': true,
+            };
+          } else if (request.uri.path.endsWith('/messages')) {
+            sequences.add(request.headers.value('X-Xiaoqi-Message-Sequence'));
+            bodies.add(
+              jsonDecode(await utf8.decoder.bind(request).join()) as Map,
+            );
+            if (bodies.length == 1) {
+              firstArrived.complete();
+              await release.future;
+              if (rejected) request.response.statusCode = 400;
+            }
+            result = {'ok': !rejected};
+          } else if (request.method == 'DELETE') {
+            if (!stopped.isCompleted) stopped.complete();
+            result = {
+              'completion': {'ok': true, 'artifacts': []},
+            };
+          } else {
+            await stopped.future;
+            result = {'messages': [], 'closed': true, 'cursor': 1};
+          }
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(jsonEncode(result));
+          await request.response.close();
+        });
+        SandboxMcpTransport? transport;
+        StreamSubscription<Map<String, dynamic>>? inbound;
+        try {
+          transport = await SandboxMcpTransport.connect(
+            runnerUrl: Uri.parse('http://127.0.0.1:${server.port}'),
+            runnerToken: 'fixture',
+            request: {'task_id': 'bound-task'},
+            cancellation: CancellationController().token,
+          );
+          inbound = transport.inbound.listen((_) {});
+          final firstBody = <String, dynamic>{
+            'jsonrpc': '2.0',
+            'id': 1,
+            'method': 'tools/call',
+            'params': {'text': 'original'},
+          };
+          final first = transport.send(firstBody);
+          // Attach rejection listeners before releasing the server response.
+          final firstResult = rejected
+              ? expectLater(first, throwsStateError)
+              : first;
+          await firstArrived.future.timeout(const Duration(seconds: 2));
+          final second = transport.send({
+            'jsonrpc': '2.0',
+            'id': 2,
+            'method': 'tools/list',
+          });
+          final secondResult = rejected
+              ? expectLater(second, throwsStateError)
+              : second;
+          (firstBody['params'] as Map)['text'] = 'changed after submission';
+          expect(bodies, hasLength(1));
+          release.complete();
+          await Future.wait([firstResult, secondResult]);
+          expect(sequences, rejected ? ['1'] : ['1', '2']);
+          expect((bodies.first['params'] as Map)['text'], 'original');
+          expect(bodies.map((body) => body['id']), rejected ? [1] : [1, 2]);
+        } finally {
+          if (!release.isCompleted) release.complete();
+          await transport?.close();
+          await inbound?.cancel();
+          await server.close(force: true);
+          await serving.cancel();
+        }
+      },
+    );
+  }
+  test(
     'private transport carries bidirectional JSON-RPC and releases its lease on cancel',
     () async {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);

@@ -39,6 +39,17 @@ analysis reports no issues. Deployment Python discovery passes 28 tests with 16
 Linux-only cases skipped locally; CI must run those on Linux.
 These tests do not substitute for real Docker acceptance.
 
+First CI run 40804928902/job 123221478720 passed image build, Dart/runner/deploy
+checks, the existing real stdio-runtime gate and ordinary runner-restart gate.
+The new MCP fixture timed out before the host restart because it ignored the
+SDK's initial `server/discover` request. The fixture now returns JSON-RPC -32601
+for unknown request methods (notifications remain unanswered). A native real-SDK
+smoke against this exact Node fixture passes initialization, tool listing, delayed
+call, original input and one effect. Three additional transport regressions pass:
+unavailable durable capability, immutable serialized concurrent sends, and no
+later submission after an explicit first-send rejection. Fresh Docker acceptance
+remains required; the failed CI did not replace production.
+
 Real Docker gate added to the existing isolated CI flow: a Dart SDK call writes
 one counter, the host SIGKILL-restarts only the CI runner, then verifies the same
 container/process boot identity, original input/source hash, original pending RPC,
