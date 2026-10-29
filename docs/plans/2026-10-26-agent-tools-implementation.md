@@ -804,3 +804,20 @@ post-probe container/network/volume counts are zero. No service restart or paid
 provider was used. This is representative overlap, not arbitrary workload/stress
 acceptance. Evidence:
 docs/architecture/evidence/2026-10-29-ecs-task-resources.json.
+
+Release 20261029-191909-6f2831d is now deployed and verified. Exact main
+6f2831d89167ea69611e6915431b0746526b80cd passed the artifact/deployment pipeline
+(CI 40864421735), activation, runtime/data checks, single restore-point checks
+and public HTTPS 200 via Cloud Assistant. Controller exits 0. This includes the
+mixed inline/file MCP declaration fix; the product/API remain unchanged.
+
+P11 root-hook foundation now has a source parser, output/verdict protocol and
+adapter into the existing isolated code operation/journal. Local evidence is 22
+Dart tests, six real Node/Bash fixture cases and clean targeted analysis.
+These modules are not imported into Agent/import runtime yet: hooks remain
+unsupported in the installed component metadata. Actual dispatch, handler
+coverage, real sandbox/restart acceptance, apps/extensions and the full-plan
+acceptance remain open. See
+docs/architecture/2026-10-29-plugin-hook-execution-foundation.md for exact evidence
+and required integration. No real image-provider call or device purchase is
+part of this batch.
