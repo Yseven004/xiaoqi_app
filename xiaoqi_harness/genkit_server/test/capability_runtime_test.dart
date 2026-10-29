@@ -54,6 +54,8 @@ void main() {
     'mcp-argument-change',
     'mcp-user-send',
     'mcp-user-send-change',
+    'mcp-user-send-generated-unknown',
+    'mcp-user-send-generated-completed',
   ]) {
     test(
       '$scenario exercises real Genkit discovery, tool loop and delivery gate',
@@ -101,10 +103,23 @@ void main() {
                       'role': 'assistant',
                       'content': jsonEncode({
                         'authorized': true,
-                        'instruction': '请用 MCP 生成图片卡片并发送到 A',
-                        'arguments': {'destination': 'A'},
-                        'generated_fields': [],
-                        'generation_instruction': '',
+                        'instruction':
+                            scenario.startsWith('mcp-user-send-generated')
+                            ? '请写一条问候并发送到 A'
+                            : '请用 MCP 生成图片卡片并发送到 A',
+                        'arguments': {
+                          'destination': 'A',
+                          if (scenario.startsWith('mcp-user-send-generated'))
+                            'content': 'draft',
+                        },
+                        'generated_fields': [
+                          if (scenario.startsWith('mcp-user-send-generated'))
+                            'content',
+                        ],
+                        'generation_instruction':
+                            scenario.startsWith('mcp-user-send-generated')
+                            ? '请写一条问候并发送'
+                            : '',
                       }),
                     },
                     'finish_reason': 'stop',
@@ -394,6 +409,8 @@ void main() {
                       'mcp-denied',
                       'mcp-argument-change',
                       'mcp-user-send-change',
+                      'mcp-user-send-generated-unknown',
+                      'mcp-user-send-generated-completed',
                     }.contains(scenario) &&
                     remoteResponses < 2)) {
               tool = remoteName;
@@ -423,6 +440,13 @@ void main() {
                       'mcp-user-send-change',
                     }.contains(scenario)
                   ? {'destination': remoteResponses == 0 ? 'A' : 'B'}
+                  : scenario.startsWith('mcp-user-send-generated')
+                  ? {
+                      'destination': 'A',
+                      'content': remoteResponses == 0
+                          ? 'first greeting'
+                          : 'regenerated greeting',
+                    }
                   : scenario == 'mcp-user-send'
                   ? {'destination': 'A'}
                   : {};
@@ -663,6 +687,29 @@ void main() {
             return;
           }
           if (scenario.startsWith('mcp-')) {
+            if (scenario.startsWith('mcp-user-send-generated')) {
+              expect(result['mcp_calls'], 1);
+              expect(result['before_approval'], 1);
+              expect(result['called_arguments'], [
+                {'destination': 'A', 'content': 'first greeting'},
+              ]);
+              if (scenario.endsWith('unknown')) {
+                expect(result['approval_events'], 0);
+                expect(result['missing'], isTrue);
+                expect(result['artifacts'], 0);
+                expect(
+                  jsonEncode(requests),
+                  contains('external_result_unknown'),
+                );
+              } else {
+                expect(result['approval_events'], 1);
+                expect(
+                  (result['pending_arguments'] as Map)['content'],
+                  'regenerated greeting',
+                );
+              }
+              return;
+            }
             if (scenario == 'mcp-alias-unknown') {
               expect(result['mcp_calls'], 1);
               expect(result['approval_events'], 1);

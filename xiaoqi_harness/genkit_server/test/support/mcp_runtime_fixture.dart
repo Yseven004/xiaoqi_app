@@ -17,11 +17,13 @@ class FixtureMcpConnections extends McpConnectionService {
     this.readOnly = false,
     this.toolCount = 1,
     this.userAuthorized = false,
+    this.generatedContent = false,
   });
   final int port;
   final bool readOnly;
   final int toolCount;
   final bool userAuthorized;
+  final bool generatedContent;
   @override
   List<McpCatalogEntry> catalog() => [
     McpCatalogEntry(
@@ -41,15 +43,17 @@ class FixtureMcpConnections extends McpConnectionService {
       },
       userActions: {
         if (userAuthorized)
-          'make_card': const UserActionRule(
+          'make_card': UserActionRule(
             description: 'Generate and send an image card to the destination',
             inputSchema: {
               'type': 'object',
               'properties': {
                 'destination': {'type': 'string'},
+                if (generatedContent) 'content': {'type': 'string'},
               },
               'additionalProperties': false,
             },
+            generatedFields: generatedContent ? const ['content'] : const [],
           ),
       },
     ),
@@ -79,6 +83,7 @@ class FixtureMcpConnections extends McpConnectionService {
 
 Future<void> main(List<String> args) async {
   final userAuthorized = args.single.startsWith('mcp-user-send');
+  final generatedContent = args.single.startsWith('mcp-user-send-generated');
   final publicRead = args.single == 'mcp-public-read';
   final readOnly = const {
     'mcp-read',
@@ -95,7 +100,9 @@ Future<void> main(List<String> args) async {
       : args.single == 'mcp-large'
       ? 120
       : 1;
-  final userText = userAuthorized
+  final userText = generatedContent
+      ? '请写一条问候并发送到 A'
+      : userAuthorized
       ? '请用 MCP 生成图片卡片并发送到 A'
       : readOnly
       ? '请读取 MCP 中已有的图片卡片'
@@ -173,6 +180,7 @@ Future<void> main(List<String> args) async {
                     'destination': {'type': 'string'},
                   if (args.single == 'mcp-alias-repeat')
                     'tag': {'type': 'string'},
+                  if (generatedContent) 'content': {'type': 'string'},
                 },
                 if (publicRead) 'required': ['repoName'],
                 if (refreshCatalog && i == 120) 'required': ['destination'],
@@ -207,7 +215,8 @@ Future<void> main(List<String> args) async {
       calledArguments.add(
         (body['params'] as Map)['arguments'] as Map? ?? const {},
       );
-      if (args.single == 'mcp-alias-unknown') {
+      if (args.single == 'mcp-alias-unknown' ||
+          args.single == 'mcp-user-send-generated-unknown') {
         // The external effect happened, but its response was lost.
         request.response.statusCode = 503;
         await request.response.close();
@@ -258,6 +267,7 @@ Future<void> main(List<String> args) async {
       readOnly: readOnly,
       toolCount: toolCount,
       userAuthorized: userAuthorized,
+      generatedContent: generatedContent,
     ),
   );
   final request = <String, dynamic>{

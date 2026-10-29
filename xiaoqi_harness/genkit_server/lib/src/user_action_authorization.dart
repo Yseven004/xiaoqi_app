@@ -60,6 +60,20 @@ class UserActionIntent {
   final Set<String> generatedFields;
   final String _requestDigest;
   bool isForRequest(String request) => _requestDigest == _digest(request);
+  String get logicalIdentity => _digest([
+    _requestDigest,
+    targetHash(arguments, generatedFields),
+    generatedFields.toList()..sort(),
+  ]);
+  static String targetHash(
+    Map<String, dynamic> arguments,
+    Iterable<String> generatedFields,
+  ) => _digest({
+    for (final entry in arguments.entries)
+      if (!generatedFields.contains(entry.key)) entry.key: entry.value,
+  });
+  static String argumentsHash(Map<String, dynamic> arguments) =>
+      _digest(arguments);
 
   static const system = '''XIAOQI_ORIGINAL_USER_ACTION_V1
 Interpret only the user's direct instruction for the deployment-owned action rule.

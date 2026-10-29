@@ -269,6 +269,27 @@ class ToolExecution {
       if (decisions[actionHash] == false ||
           (value['tool_authorization_denials'] as Map?)?[scopeHash] == true)
         return value;
+      final sources = Map<String, dynamic>.from(
+        value['tool_authorization_sources'] as Map? ?? const {},
+      );
+      final intentKey = digest([
+        requestIdentity,
+        scopeHash,
+        intent.logicalIdentity,
+      ]);
+      final argumentsHash = UserActionIntent.argumentsHash(arguments);
+      if (intent.generatedFields.isNotEmpty &&
+          sources.entries.any(
+            (entry) =>
+                entry.key != actionHash &&
+                entry.value is Map &&
+                ((entry.value as Map)['intent_key'] == intentKey ||
+                    ((entry.value as Map)['intent_key'] == null &&
+                        (entry.value as Map)['rule_fingerprint'] ==
+                            ruleFingerprint)) &&
+                (entry.value as Map)['arguments_hash'] != argumentsHash,
+          ))
+        return value;
       if (!decisions.containsKey(actionHash) &&
           decisions.length >= limits.toolOperations) {
         throw ExecutionBudgetExceeded('本次任务的操作确认数量已达到上限');
@@ -284,6 +305,14 @@ class ToolExecution {
             'request_identity': requestIdentity,
             'request_digest': digest(requestText!),
             'rule_fingerprint': ruleFingerprint,
+            'scope_hash': scopeHash,
+            'intent_key': intentKey,
+            'arguments_hash': argumentsHash,
+            'target_hash': UserActionIntent.targetHash(
+              arguments,
+              intent.generatedFields,
+            ),
+            'generated_fields': intent.generatedFields.toList()..sort(),
           },
         },
       };
@@ -321,6 +350,84 @@ class ToolExecution {
     }
     if (effect == 'workflow' && !contract.executesWorkflow) {
       throw StateError('本轮只需回答或读取结果，不能执行旧工作流');
+    }
+  }
+
+  Set<String> _originalActionKeys(
+    Map value,
+    String? scopeHash,
+    Map<String, dynamic>? arguments,
+  ) {
+    if (scopeHash == null || arguments == null) return const {};
+    return {
+      for (final source
+          in (value['tool_authorization_sources'] as Map? ?? const {}).values
+              .whereType<Map>())
+        if (source['scope_hash'] == scopeHash &&
+            source['intent_key'] is String &&
+            source['generated_fields'] is List &&
+            (source['generated_fields'] as List).isNotEmpty &&
+            source['target_hash'] ==
+                UserActionIntent.targetHash(
+                  arguments,
+                  (source['generated_fields'] as List).cast<String>(),
+                ))
+          source['intent_key'] as String,
+    };
+  }
+
+  void _checkOriginalActionOutcome(Map value, Set<String> intentKeys) {
+    if (intentKeys.isEmpty) return;
+    if ((value['scope_operations'] as Map? ?? const {}).values
+        .whereType<Map>()
+        .any(
+          (operation) =>
+              operation['request_identity'] == requestIdentity &&
+              operation['effect'] == 'external' &&
+              const {'running', 'unknown'}.contains(operation['status']) &&
+              (operation['user_action_intent_keys'] as List? ?? const []).any(
+                intentKeys.contains,
+              ),
+        )) {
+      throw UnconfirmedToolOperation('原始用户动作仍在执行或结果未知，改写生成内容不能重复提交');
+    }
+  }
+
+  void checkOriginalUserActionOutcome({
+    required String scopeHash,
+    required Map<String, dynamic> arguments,
+    String? generatedRuleFingerprint,
+  }) {
+    check('read');
+    final value = store.get(key)?.value ?? const <String, dynamic>{};
+    _checkOriginalActionOutcome(
+      value,
+      _originalActionKeys(value, scopeHash, arguments),
+    );
+    // Older releases did not link canonical effects to original-user grants.
+    // Do not invent a target for such an unknown result during migration.
+    if (generatedRuleFingerprint != null &&
+        (value['tool_authorization_sources'] as Map? ?? const {}).values
+            .whereType<Map>()
+            .any(
+              (source) =>
+                  source['source'] == 'original_user_request' &&
+                  source['rule_fingerprint'] == generatedRuleFingerprint &&
+                  (source['generated_fields'] == null ||
+                      (source['generated_fields'] as List).isNotEmpty),
+            ) &&
+        (value['scope_operations'] as Map? ?? const {}).values
+            .whereType<Map>()
+            .any(
+              (operation) =>
+                  operation['request_identity'] == requestIdentity &&
+                  operation['effect'] == 'external' &&
+                  const {'running', 'unknown'}.contains(operation['status']) &&
+                  operation['authorization_hash'] == null &&
+                  (operation['user_action_intent_keys'] as List? ?? const [])
+                      .isEmpty,
+            )) {
+      throw UnconfirmedToolOperation('旧版原始用户动作存在未归属的未知结果，请先核实原结果或更新任务');
     }
   }
 
@@ -384,6 +491,9 @@ class ToolExecution {
     required Future<Map<String, dynamic>> Function(String id) invoke,
     List<String> legacySlots = const [],
     List<String> uncertainLegacySlots = const [],
+    String? authorizationHash,
+    String? authorizationScopeHash,
+    Map<String, dynamic>? authorizationArguments,
   }) => _operation(
     effect: 'external',
     slot: slot,
@@ -392,6 +502,9 @@ class ToolExecution {
     invoke: invoke,
     legacySlots: legacySlots,
     uncertainLegacySlots: uncertainLegacySlots,
+    authorizationHash: authorizationHash,
+    authorizationScopeHash: authorizationScopeHash,
+    authorizationArguments: authorizationArguments,
   );
 
   /// One reservation per original SDK delegation request, including resumes.
@@ -453,6 +566,9 @@ class ToolExecution {
     bool Function(Object error)? effectsPossible,
     List<String> legacySlots = const [],
     List<String> uncertainLegacySlots = const [],
+    String? authorizationHash,
+    String? authorizationScopeHash,
+    Map<String, dynamic>? authorizationArguments,
   }) async {
     check(effect);
     final operationId = operationIdentity(effect, slot);
@@ -503,6 +619,12 @@ class ToolExecution {
           throw UnconfirmedToolOperation('操作正在处理或结果未知，不能重复提交');
         }
       }
+      final intentKeys = _originalActionKeys(
+        value,
+        authorizationScopeHash,
+        authorizationArguments,
+      );
+      _checkOriginalActionOutcome(value, intentKeys);
       if (uncertainLegacySlots.any((legacySlot) {
         final record = operations[operationIdentity(effect, legacySlot)];
         return record is Map &&
@@ -530,6 +652,9 @@ class ToolExecution {
         'request_identity': requestIdentity,
         'effect': effect,
         if (codeBudget) 'budget_owner': 'code',
+        if (authorizationHash != null) 'authorization_hash': authorizationHash,
+        if (intentKeys.isNotEmpty)
+          'user_action_intent_keys': intentKeys.toList()..sort(),
         'arguments_hash': hash,
         'status': 'running',
       };

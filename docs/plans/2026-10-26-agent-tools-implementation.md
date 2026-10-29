@@ -76,13 +76,13 @@ GitHub 构建状态 GET 遇到短暂传输/超时/特定临时服务错误时最
 | P02 工具并存 | 实施中 | 显式技能、stdio MCP 与 Shell 在同一实际 Agent/Docker 任务中验证通过；其余代表插件组合与目标平台验收仍待完成 |
 | P03 意图与发现分离 | 实施中 | 目录发现、工作区/资料读取、用户撤回旧要求及回答阶段改任务后的重新准备已上线；连接健康变化后的实时目录刷新及更广分类/取消验收仍待完成 |
 | P04 联网生命周期 | 实施中 | 精确动作授权、原请求恢复、任务短期凭据及模式 revision 顺序保护已上线；运行中撤权的更广能力边界和共享代理验收仍待完成 |
-| P05 大型目录 | 实施中 | 完整目录、检索及 schema 网关已上线；本批补目录通知/刷新、分页失败后整页重读、小目录的动态网关及调用前定义复查，121 工具及跨入口实际 Genkit 用例通过，最终检查/CI/部署中 |
+| P05 大型目录 | 实施中 | 完整目录、检索、schema 网关、目录通知/刷新、分页失败后整页重读及调用前定义复查已上线；121 工具和跨入口实际 Genkit 用例通过；全计划代表任务与客户端验收仍待完成 |
 | P06 产物复用 | 实施中 | 真实 Docker 中 XLSX/DOCX/PDF/PNG 多步编辑、同名新旧版本与跨任务隔离通过；资源读取入口、容量边界和目标平台全流程仍待验收 |
 | P07 stdio MCP | 实施中 | 官方样本混合调用、事件游标、原租约回收及独立于普通脚本的 MCP 心跳寿命已上线；runner 重启后持久化租约/RPC 恢复、重连和目标 ECS 资源验收仍待完成 |
 | P08 Shell | 实施中 | 通用 Shell、已安装脚本、字面 argv 与 MCP 文件接力均已验证；Docker 后台子进程资源清理通过；目标 ECS 资源及客户端验收待完成 |
 | P09 现有宿主能力适配 | 实施中 | 用户已撤回通用电脑/手机控制及硬件采购；技能/插件版本及文件局部不可用已通过真实 Agent 循环，健康组件继续交付；已有宿主映射和更广依赖状态验收仍待完成 |
 | P10 导入/安装/构建 | 实施中 | npm/Python 构建、离线交付、执行位、Node CLI 及安装未知结果的原执行恢复均已上线；历史包权限迁移、较长/组合构建仍待完成 |
-| P11 插件组件 | 实施中 | Markdown commands 的安装/旧包重索引、发现、参数展开、资源读取、脚本闭环及重命名后的绑定修复已上线；其余必要 hooks/agents/apps/extensions 目标协议与宿主适配待完成 |
+| P11 插件组件 | 实施中 | Markdown commands 与 Agent 的发现/版本绑定、真实子会话、窄文件工具、审批恢复、嵌套权限及脚本联网链路已上线；进阶 Agent 宿主字段、动态/分叉命令、必要 hooks/apps/extensions 目标协议适配仍待完成 |
 | P12 预算与计数 | 实施中 | 已修正累计次数、失败计数与恢复，工具调用不再由计划次数硬阻断；当前服务端资源预算待代表任务测量和全入口统一 |
 | P13 运行生命周期 | 实施中 | 执行恢复/清理、原授权关联、范围复查、计数及安装恢复已上线；本批补 MCP 跨入口去重和真实未知状态，原 RPC/输入快照连续性、MCP 重连及全生命周期验收未完成 |
 | P14 最终验证/部署 | 实施中 | 非生图阶段版本已部署并经健康/数据/真实容器门禁验证；剩余修复及客户端/真机验收未完成，真实生图按用户明确要求后置，不等待充值 |
@@ -615,3 +615,29 @@ original approval across runtime reconstruction, records exactly one runner
 execution and clears temporary network grants. Broad local regression passes 367;
 the final authority/registry/script changes pass 34 targeted checks and full server
 analysis. Exact-commit CI and standard deployment are the next release gates.
+
+## P01/P13 generated-content action identity (2026-10-29; pending release)
+
+A regression reproduced another automatic send authorization after the first
+response was lost and only generated content changed. Local changes bind the
+inferred grant to one original action and link MCP reservations to that identity;
+unknown/in-flight results cannot be bypassed with a new body or approval alias.
+Completed results remain reusable; changed content after completion requires an
+exact new decision. Legacy unlinked unknown state is retained without inventing a
+target. Eleven selected actual-runtime/unit checks and full analysis pass. See
+docs/architecture/2026-10-29-generated-user-action-binding.md. This is separate from
+the Agent release currently in CI/deployment, and is not deployed yet.
+
+Agent integration is now deployed and verified: release 20261029-073744-a8b1c00,
+main a8b1c00d8364099975e879a03cf8666df7fb7fdc, CI 40788639436/job
+123168028061 success. All 372 Dart, 60 runner, 28 deployment checks and real Docker
+stdio/image-roundtrip gates pass. Standard non-image controller exited 0; health,
+data, same-endpoint public HTTPS 200 and one latest-good restore point verified.
+Product/API remain 2026-10-27-agent-tools-2/24. No device/client acceptance or paid
+image success is claimed. Generated-content action binding remains a separate
+unreleased local batch; the rest of P01–P14 remains active.
+
+The generated-content batch now passes all 377 local server tests, 11 focused
+authorization/MCP checks and full analysis. The original action is linked to atomic
+effect reservations, including old unlinked unknown outcomes. It is ready for its
+own exact-commit CI and standard deployment after the verified Agent release.

@@ -1,10 +1,10 @@
-# Plugin agent adapter — runtime integration, pending release
+# Plugin agent adapter — runtime release verified
 
 The importer now discovers and reindexes Agent definitions from immutable plugin
 versions. The task runtime registers directory, delegation and resource tools,
 instantiates actual SDK child agents, and keeps loaded versus completed source
-bindings separate. This integration is local until full checks and standard
-deployment succeed. It does not close the whole P11 or P01–P14 plan.
+bindings separate. The runtime integration is deployed as release
+20261029-073744-a8b1c00. It does not close the whole P11 or P01–P14 plan.
 
 Genkit 1.0.0 agents middleware cannot propagate resumable child interrupts.
 The core uses the actual SDK Agent/chat/session API instead, preserving child
@@ -85,5 +85,16 @@ authority changes, registry checks and script fixture then pass 34 targeted test
 full server analysis reports no issues. The exact final commit still requires full
 CI (including runner/deployment and Docker gates) and standard deployment. No
 device/client acceptance or full-plan completion is implied.
+
+Release evidence (2026-10-29): main a8b1c00d8364099975e879a03cf8666df7fb7fdc;
+CI 40788639436, job 123168028061, completed success. All 372 Dart, 60 runner and
+28 deployment tests pass, along with real isolated stdio gates and verified image
+export/import roundtrip. The non-image standard controller exited 0. Service is
+healthy, public HTTPS returns 200 through the same endpoint via Cloud Assistant,
+data checks pass, and the one latest-good emergency restore point/data backup is
+present. Product 2026-10-27-agent-tools-2 and API contract 24 match. Local public TLS
+failed on Windows, so the controller used its existing remote HTTPS verification.
+Log: primary checkout `.codex-artifacts/deploy/20261029-073744-a8b1c00.log`.
+Paid image checks remain explicitly deferred; no client/device acceptance is claimed.
 
 Hooks/apps/extensions and remaining P01–P14 requirements retain their full scope.

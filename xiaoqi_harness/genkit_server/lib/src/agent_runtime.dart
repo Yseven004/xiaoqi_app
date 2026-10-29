@@ -3400,6 +3400,11 @@ class GenkitXiaoqiAgentRuntime
                   approved: resumed['approved'] as bool,
                 );
               }
+              final rule = mcpConnectionService.userActionFor(
+                connection,
+                remoteToolName,
+                rawTool['inputSchema'],
+              );
               var authorization = callExecution.authorization(
                 actionHash: approvalHash,
                 scopeHash: scopeHash,
@@ -3411,11 +3416,6 @@ class GenkitXiaoqiAgentRuntime
                     ToolEffect.delete,
                     ToolEffect.payment,
                   }.contains(effect)) {
-                final rule = mcpConnectionService.userActionFor(
-                  connection,
-                  remoteToolName,
-                  rawTool['inputSchema'],
-                );
                 if (rule != null) {
                   final authority = mcpConnectionService.authorizationBinding(
                     connection,
@@ -3475,6 +3475,31 @@ class GenkitXiaoqiAgentRuntime
                     'status': 'denied',
                     'retryable': false,
                     'error': '用户已拒绝此操作。不要更换参数重复申请；等待用户更新任务。',
+                  }),
+                );
+              }
+              try {
+                if (effect != ToolEffect.read && effect != ToolEffect.workspace)
+                  callExecution.checkOriginalUserActionOutcome(
+                    scopeHash: scopeHash,
+                    arguments: input,
+                    generatedRuleFingerprint:
+                        rule != null && rule.generatedFields.isNotEmpty
+                        ? rule.fingerprint
+                        : null,
+                  );
+              } on UnconfirmedToolOperation {
+                onProcessEvent({
+                  'type': 'tool_skipped',
+                  'tool': 'MCP · ${connection.name} · $remoteToolName',
+                  'reason': 'external_result_unknown',
+                });
+                return ToolResult.response(
+                  jsonEncode({
+                    'ok': false,
+                    'status': 'external_result_unknown',
+                    'retryable': false,
+                    'error': '原始用户动作仍在执行或结果未知，不能改写内容后重复提交；请先核实原结果。',
                   }),
                 );
               }
@@ -3549,6 +3574,9 @@ class GenkitXiaoqiAgentRuntime
                   slot: slot,
                   arguments: arguments,
                   invoke: invoke,
+                  authorizationHash: approvalHash,
+                  authorizationScopeHash: scopeHash,
+                  authorizationArguments: input,
                   legacySlots: [
                     for (final oldAlias in {
                       aliasFor(remoteToolName),
