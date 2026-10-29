@@ -26,6 +26,9 @@ void main() {
       var closed = false;
       var eventCursor = 0;
       var lostResponse = false;
+      var lostSendAck = false;
+      final acceptedSends = <int, String>{};
+      final sendSequences = <int>[];
       Map<String, dynamic>? retainedBatch;
       final serving = server.listen((request) async {
         expect(
@@ -41,7 +44,11 @@ void main() {
           leaseId = body['lease_id'] as String;
           expect(leaseToken!.length, 64);
           expect(leaseId!.length, 32);
-          result = {'ready': true};
+          result = {
+            'ready': true,
+            'control_version': 2,
+            'deduplicated_sends': true,
+          };
         } else {
           expect(request.headers.value('X-Xiaoqi-Lease-Token'), leaseToken);
           expect(path, startsWith('/v1/mcp/$leaseId'));
@@ -94,6 +101,19 @@ void main() {
             final body =
                 jsonDecode(await utf8.decoder.bind(request).join())
                     as Map<String, dynamic>;
+            final sequence = int.parse(
+              request.headers.value('X-Xiaoqi-Message-Sequence')!,
+            );
+            sendSequences.add(sequence);
+            final serialized = jsonEncode(body);
+            if (acceptedSends.containsKey(sequence)) {
+              expect(acceptedSends[sequence], serialized);
+              request.response.headers.contentType = ContentType.json;
+              request.response.write(jsonEncode({'ok': true}));
+              await request.response.close();
+              return;
+            }
+            acceptedSends[sequence] = serialized;
             sent.add(body);
             queued.addAll([
               {
@@ -104,6 +124,14 @@ void main() {
               {'jsonrpc': '2.0', 'id': 'server-1', 'method': 'roots/list'},
             ]);
             if (!wake.isCompleted) wake.complete();
+            if (!lostSendAck) {
+              lostSendAck = true;
+              final socket = await request.response.detachSocket(
+                writeHeaders: false,
+              );
+              socket.destroy();
+              return;
+            }
             result = {'ok': true};
           } else {
             deletes++;
@@ -156,6 +184,8 @@ void main() {
         await seen.future.timeout(const Duration(seconds: 5));
         expect(sent.single['method'], 'tools/list');
         expect(lostResponse, true);
+        expect(lostSendAck, true);
+        expect(sendSequences, [1, 1]);
         expect(observed.first['result'], {'tools': []});
         expect(observed.last['method'], 'roots/list');
         final executor = DockerCodeExecutionService(store);

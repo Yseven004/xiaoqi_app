@@ -1,7 +1,11 @@
 """CI-only: kill the real runner, then recover completed and interrupted jobs."""
 import json
+import os
+from pathlib import Path
+import re
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -85,10 +89,7 @@ def invoke(runner, *arguments):
     return result.stdout.strip()
 
 
-def main():
-    runner = sys.argv[1]
-    metadata = invoke(runner, 'begin')
-    json.loads(metadata)
+def restart(runner):
     subprocess.run(['docker', 'restart', '--signal', 'SIGKILL', '--timeout', '0', runner], check=True, capture_output=True, timeout=30)
     deadline = time.monotonic() + 30
     while True:
@@ -98,7 +99,80 @@ def main():
         if time.monotonic() >= deadline:
             raise RuntimeError('Runner did not recover after restart')
         time.sleep(0.25)
+
+
+def verify_mcp_restart(runner, info):
+    environment = dict(item.split('=', 1) for item in info['Config']['Env'] if '=' in item)
+    networks = list(info['NetworkSettings']['Networks'])
+    if environment.get('XIAOQI_SANDBOX_OWNER_LABEL') != 'com.xiaoqi.ci-stdio-sandbox' or len(networks) != 1:
+        raise RuntimeError('MCP restart gate requires its isolated CI runner')
+    name = 'xiaoqi-stdio-restart-probe'
+    with tempfile.TemporaryDirectory(prefix='xiaoqi-mcp-restart-') as root:
+        path = Path(root) / 'probe.log'
+        with path.open('wb') as output:
+            process = subprocess.Popen([
+                'docker', 'run', '--rm', '--interactive', '--name', name, '--network', networks[0],
+                '--env', 'SANDBOX_RUNNER_TOKEN', '--env', f'SANDBOX_RUNNER_URL=http://{runner}:8090',
+                '--entrypoint', '/app/bin/verify_stdio_runtime', 'xiaoqi-genkit-server:local', '--mcp-restart-probe',
+            ], stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
+               env={**os.environ, 'SANDBOX_RUNNER_TOKEN': environment['SANDBOX_RUNNER_TOKEN']})
+            try:
+                deadline = time.monotonic() + 45
+                ready = None
+                while ready is None:
+                    if path.stat().st_size > 2 * 1024 * 1024:
+                        raise RuntimeError('MCP restart probe exceeded diagnostic budget')
+                    text = path.read_text(errors='replace')
+                    for line in text.splitlines(keepends=True):
+                        if line.startswith('MCP_RESTART_READY:') and line.endswith('\n'):
+                            ready = json.loads(line.split(':', 1)[1])
+                    if ready is None:
+                        if process.poll() is not None or time.monotonic() >= deadline:
+                            raise RuntimeError('MCP restart probe was not ready: ' + text[-1800:])
+                        time.sleep(0.1)
+                lease = ready['lease_id']
+                if not isinstance(lease, str) or not re.fullmatch(r'[a-f0-9]{32}', lease):
+                    raise RuntimeError('Invalid original MCP lease marker')
+                ids = subprocess.check_output(['docker', 'ps', '-q',
+                    '--filter', 'label=com.xiaoqi.ci-stdio-sandbox=true',
+                    '--filter', f'label=com.xiaoqi.mcp-lease={lease}',
+                    '--filter', 'label=com.xiaoqi.role=mcp-server'], text=True, timeout=10).split()
+                if len(ids) != 1:
+                    raise RuntimeError('Original MCP process was not uniquely identified')
+                original = json.loads(subprocess.check_output(['docker', 'inspect', ids[0]], text=True, timeout=10))[0]['Id']
+                restart(runner)
+                restored = json.loads(subprocess.check_output(['docker', 'inspect', original], text=True, timeout=10))[0]
+                if restored['Id'] != original or not restored['State']['Running']:
+                    raise RuntimeError('Runner restart replaced or stopped the original MCP process')
+                process.stdin.write(b'CONTINUE\n')
+                process.stdin.flush()
+                if process.wait(timeout=60) != 0:
+                    raise RuntimeError('Original MCP SDK call did not resume: ' + path.read_text(errors='replace')[-2400:])
+                passed = [line for line in path.read_text(errors='replace').splitlines() if line.startswith('MCP_RESTART_PASSED:')]
+                if len(passed) != 1 or not all(json.loads(passed[0].split(':', 1)[1]).values()):
+                    raise RuntimeError('MCP original RPC/process/input/file checks were not verified')
+                print(json.dumps({'gate': 'mcp-runner-restart', 'passed': True, 'original_sdk_call_resumed': True,
+                                  'one_effect': True, 'original_container': True, 'original_input_snapshot': True,
+                                  'original_artifact_integrity': True}))
+            finally:
+                subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=20)
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
+                process.stdin.close()
+
+
+def main():
+    runner = sys.argv[1]
+    info = json.loads(subprocess.check_output(['docker', 'inspect', runner], text=True, timeout=10))[0]
+    environment = dict(item.split('=', 1) for item in info['Config']['Env'] if '=' in item)
+    if environment.get('XIAOQI_SANDBOX_OWNER_LABEL') != 'com.xiaoqi.ci-stdio-sandbox':
+        raise RuntimeError('Restart verification cannot target a production runner')
+    metadata = invoke(runner, 'begin')
+    json.loads(metadata)
+    restart(runner)
     print(invoke(runner, 'verify', metadata))
+    verify_mcp_restart(runner, info)
 
 
 if __name__ == '__main__':

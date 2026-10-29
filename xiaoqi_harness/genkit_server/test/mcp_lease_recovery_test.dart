@@ -39,7 +39,11 @@ void main() {
             jsonEncode(store.get('task/tenant/task')!.value),
             isNot(contains(leaseToken!)),
           );
-          result = {'ready': true};
+          result = {
+            'ready': true,
+            'control_version': 2,
+            'deduplicated_sends': true,
+          };
         } else {
           expect(request.headers.value('X-Xiaoqi-Lease-Token'), leaseToken);
           if (request.method == 'DELETE') {

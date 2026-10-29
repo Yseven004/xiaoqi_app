@@ -22,6 +22,8 @@ from typing import Any, Iterable
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from mcp_sessions import LeaseError, McpSessions
+from mcp_journal import McpJournalError
+from mcp_recovery import resume_mcp
 from execution_sessions import ExecutionError, Executions, StorageUnavailable
 from stdio_channel import StdioChannel
 
@@ -351,17 +353,41 @@ def _create_task_network(client: Any, name: str, labels: dict[str, str]) -> Any:
 
 def _remove_stale_resources(client: docker.DockerClient) -> None:
     filters = {"label": OWNER_LABEL}
+    protected = _mcp_sessions.active_lease_ids
+    def retained(labels):
+        # Previous releases did not label MCP resources with a durable lease.
+        # Their task-bound files cannot be attributed to a new RPC session.
+        # Freeze and retain those original workspaces rather than deleting data
+        # or fabricating a successful recovery under a new identity.
+        return (labels.get('com.xiaoqi.mcp-lease') in protected or
+                (labels.get(OWNER_LABEL) == 'true' and labels.get('com.xiaoqi.task-id') and
+                 not labels.get('com.xiaoqi.execution-id') and not labels.get('com.xiaoqi.mcp-lease')))
     for container in client.containers.list(all=True, filters=filters):
+        labels = container.attrs.get('Config', {}).get('Labels', {}) or {}
+        if retained(labels):
+            if not labels.get('com.xiaoqi.mcp-lease'):
+                try:
+                    container.reload()
+                    if container.attrs.get('State', {}).get('Running'):
+                        container.kill()
+                        container.wait(timeout=5)
+                except DockerException:
+                    pass
+            continue
         try:
             container.remove(force=True, v=True)
         except DockerException:
             pass
     for network in client.networks.list(filters=filters):
+        if retained(network.attrs.get('Labels', {}) or {}):
+            continue
         try:
             network.remove()
         except DockerException:
             pass
     for volume in client.volumes.list(filters=filters):
+        if retained(volume.attrs.get('Labels', {}) or {}):
+            continue
         try:
             volume.remove(force=True)
         except DockerException:
@@ -480,6 +506,8 @@ def _decode_logs(container: Any, stream: str) -> str:
 
 
 def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None, cancellation: threading.Event | None = None, checkpoint: Any = None) -> dict[str, Any]:
+    if stdio is not None and checkpoint is None:
+        checkpoint = stdio.checkpoint
     if cancellation is not None and cancellation.is_set():
         raise RequestError('Execution was cancelled before startup')
     client = _get_client()
@@ -510,6 +538,9 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
     payload = _make_archive(files)
     suffix = uuid.uuid4().hex
     labels = {OWNER_LABEL: "true", "com.xiaoqi.task-id": task_id[:128]}
+    if stdio is not None and stdio.lease_id:
+        labels.update({'com.xiaoqi.mcp-lease': stdio.lease_id,
+                       'com.xiaoqi.mcp-fingerprint': stdio.fingerprint})
     if stdio is None and isinstance(request.get('execution_id'), str) and re.fullmatch(r'[a-f0-9]{32}', request['execution_id']):
         labels['com.xiaoqi.execution-id'] = request['execution_id']
     volume = None
@@ -600,8 +631,8 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             mem_limit="256m" if stdio is not None else "384m",
             memswap_limit="256m" if stdio is not None else "384m",
             nano_cpus=250_000_000 if stdio is not None else 500_000_000,
-            labels=labels,
-            log_config=docker.types.LogConfig(type="json-file", config={"max-size": "1m", "max-file": "1"}),
+            labels={**labels, **({'com.xiaoqi.role': 'mcp-server'} if stdio is not None else {})},
+            log_config=docker.types.LogConfig(type="json-file", config={"max-size": "64m" if stdio is not None else "1m", "max-file": "1"}),
         )
         sandbox_id = container.id
         if not container.put_archive("/workspace", payload):
@@ -610,6 +641,11 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             raise RequestError("MCP startup was cancelled")
         if cancellation is not None and cancellation.is_set():
             raise RequestError('Execution was cancelled before startup')
+        if stdio is not None:
+            send({'type': 'sandbox_workspace_prepared', 'resources': {
+                'container': container.id, 'proxy': proxy.id if proxy is not None else None,
+                'network': network.name if network is not None else None, 'volume': volume.name,
+            }})
         container.start()
         if stdio is not None:
             attached = container.attach_socket(params={"stdin": True, "stdout": True, "stderr": True, "stream": True, "logs": True})
@@ -619,6 +655,8 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
         started_at = time.monotonic()
         exit_code: int | None = None
         while True:
+            if stdio is not None and stdio.detached:
+                return {'detached': True}
             container.reload()
             state = container.attrs.get("State", {})
             if state.get("Status") in {"exited", "dead"}:
@@ -631,7 +669,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
                 except DockerException:
                     pass
                 break
-            if stdio is not None and stdio.closed:
+            if stdio is not None and stdio.closed and not stdio.detached:
                 run_error = stdio.error or "MCP connection closed"
                 try:
                     container.kill()
@@ -651,8 +689,13 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
         if run_error is None and exit_code not in {None, 0}:
             run_error = f"脚本退出码：{exit_code}"
         try:
-            stdout = _decode_logs(container, "stdout")
-            stderr = _decode_logs(container, "stderr")
+            if stdio is None:
+                stdout = _decode_logs(container, "stdout")
+                stderr = _decode_logs(container, "stderr")
+            else:
+                # stdout is RPC data, not a diagnostic log. Avoid loading a
+                # complete retained recovery stream into the runner heap.
+                stderr = stdio.diagnostic
         except DockerException:
             pass
         # Failed and timed-out scripts may already have produced useful files.
@@ -664,10 +707,26 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
         # An exception escaping the finally block used to lose that outcome.
         run_error = str(error)[:500]
     finally:
+        if stdio is not None and stdio.detached:
+            # The private journal owns these exact resources. A frontend restart
+            # releases its socket, not the MCP process, workspace or proxy.
+            if attached is not None:
+                attached.close()
+            container = proxy = network = volume = attached = None
+            checkpoint = None
         if checkpoint is not None:
             try:
-                checkpoint({'type': 'result', 'execution_id': request['execution_id'], 'ok': process_finished and run_error is None, 'stdout': stdout[-40000:], 'stderr': stderr[-20000:], 'error': run_error if process_finished or run_error else 'Execution outcome is unknown', 'artifacts': artifacts, 'cleanup_pending': True, 'sandbox_id': sandbox_id})
+                if stdio is not None and container is not None and not process_finished:
+                    try:
+                        container.kill()
+                        container.wait(timeout=5)
+                    except NotFound:
+                        pass
+                    artifacts = _safe_artifacts(container)
+                checkpoint({'type': 'result', **({'execution_id': request['execution_id']} if stdio is None else {}), 'ok': process_finished and run_error is None, 'stdout': stdout[-40000:], 'stderr': stderr[-20000:], 'error': run_error if process_finished or run_error else 'Execution outcome is unknown', 'artifacts': artifacts, 'cleanup_pending': True, 'sandbox_id': sandbox_id})
             except Exception:
+                if stdio is not None:
+                    stdio.preserve_recovery = True
                 # Stop effects but retain workspaces if durable result storage
                 # failed. Startup recovery can still export these exact files.
                 for running in (container, proxy):
@@ -717,7 +776,13 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
 
 # An idle MCP connection must not hold the only ordinary-code slot: a task may
 # call MCP, run helper code, and return to the same MCP process.
-_mcp_sessions = McpSessions(_run_sandbox, threading.BoundedSemaphore(1), lifetime=MAX_RUN_SECONDS, max_lifetime=MAX_MCP_LIFETIME_SECONDS)
+def _recover_mcp(state, event, channel):
+    return resume_mcp(_get_client(), state, event, channel, owner=OWNER_LABEL,
+                      sandbox_image=SANDBOX_IMAGE, read_artifacts=_safe_artifacts)
+
+
+_mcp_sessions = McpSessions(_run_sandbox, threading.BoundedSemaphore(1), lifetime=MAX_RUN_SECONDS,
+    max_lifetime=MAX_MCP_LIFETIME_SECONDS, db_path=os.environ.get('XIAOQI_MCP_DB'), recover=_recover_mcp)
 
 
 def _wait_for_proxy(proxy: Any) -> bool:
@@ -936,7 +1001,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
         self._handle_mcp("DELETE")
 
     def _handle_mcp(self, method: str) -> None:
-        route = re.fullmatch(r"/v1/mcp(?:/([a-f0-9]{32})(?:/(messages|events|artifacts|ack))?)?", self.path)
+        route = re.fullmatch(r"/v1/mcp(?:/([a-f0-9]{32})(?:/(messages|events|artifacts|ack|status))?)?", self.path)
         if route is None:
             self._json_response(404, {"error": "not found"})
             return
@@ -967,7 +1032,8 @@ class RunnerHandler(BaseHTTPRequestHandler):
                 if lease.done.is_set():
                     self._json_response(503, {"error": "MCP process did not start"})
                     return
-                result = {"ready": True}
+                result = {"ready": True, 'control_version': 2,
+                          'deduplicated_sends': lease.journal is not None}
             elif lease_id is not None:
                 lease = _mcp_sessions.get(lease_id, token)
                 if method == "GET" and action == "events":
@@ -980,20 +1046,32 @@ class RunnerHandler(BaseHTTPRequestHandler):
                                                 if key in {"ok", "error", "cleanup_pending"}}
                 elif method == "GET" and action == "artifacts":
                     if lease.done.is_set():
+                        if not lease.result_ready:
+                            raise RuntimeError('Original MCP result is not persisted yet')
                         result = {"artifacts":(lease.result or {}).get("artifacts", [])}
                     elif lease.channel.exporter is not None:
                         result = {"artifacts":lease.channel.exporter()}
                     else:
                         raise RuntimeError("MCP workspace is not ready")
                     lease.heartbeat()
+                elif method == 'GET' and action == 'status':
+                    result = {'finished': lease.done.is_set(), 'result_ready': lease.result_ready, 'closed': lease.channel.closed,
+                              'completion': {key: value for key, value in (lease.result or {}).items()
+                                             if key in {'ok', 'error', 'cleanup_pending'}}}
+                    lease.heartbeat()
                 elif method == "POST" and action == "messages":
-                    lease.channel.send(body)
+                    sequence = self.headers.get('X-Xiaoqi-Message-Sequence', '')
+                    if lease.journal is not None and not re.fullmatch(r'[1-9][0-9]{0,5}', sequence):
+                        raise LeaseError('Invalid MCP send sequence')
+                    lease.channel.send(body, sequence=int(sequence) if sequence else None)
                     lease.heartbeat()
                     result = {"ok": True}
                 elif method == "DELETE" and action is None:
                     lease.stop()
                     result = {"closed": True, "cleanup_pending": not lease.done.wait(timeout=5)}
-                    result["completion"] = lease.result
+                    if not lease.result_ready:
+                        result['cleanup_pending'] = True
+                    result["completion"] = lease.result if lease.result_ready else None
                 elif method == "POST" and action == "ack" and lease.done.is_set():
                     lease.discard()
                     result = {"acknowledged": True}
@@ -1006,7 +1084,7 @@ class RunnerHandler(BaseHTTPRequestHandler):
             self._json_response(200, result)
         except (LeaseError, ValueError, UnicodeDecodeError):
             self._json_response(400, {"error": "Invalid or unavailable MCP lease"})
-        except (RuntimeError, OSError, DockerException):
+        except (RuntimeError, OSError, DockerException, McpJournalError):
             self._json_response(503, {"error": "MCP process connection unavailable"})
 
 
@@ -1015,6 +1093,7 @@ def main() -> int:
         raise RuntimeError("SANDBOX_RUNNER_TOKEN must contain at least 32 characters")
     client = _get_client()
     _recover_interrupted_executions(client)
+    _mcp_sessions.restore()
     _remove_stale_resources(client)
     _reconcile_restarted_cleanup(client)
     for image in (SANDBOX_IMAGE, PROXY_IMAGE):
@@ -1029,6 +1108,7 @@ def main() -> int:
         while not cleanup_stop.wait(2):
             try:
                 _reconcile_restarted_cleanup(_get_client())
+                _mcp_sessions.reconcile()
             except (DockerException, RuntimeError, OSError):
                 pass
     cleanup_thread = threading.Thread(target=retry_cleanup, daemon=True)
@@ -1040,7 +1120,7 @@ def main() -> int:
     finally:
         cleanup_stop.set()
         cleanup_thread.join(timeout=5)
-        _mcp_sessions.close()
+        _mcp_sessions.close(detach=True)
         _executions.close()
         server.server_close()
     return 0

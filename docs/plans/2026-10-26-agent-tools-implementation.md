@@ -658,3 +658,30 @@ Eleven focused checks and full analysis pass. See
 docs/architecture/2026-10-29-intent-classification-recovery.md. Exact-commit CI and
 the existing real non-image gate remain mandatory. P07 journal/channel work is an
 unreleased separate draft, not bundled into this deployment repair.
+
+The classification recovery and generated-content action binding are now deployed
+and verified together: release 20261029-085045-86a038c, main
+86a038c88ce7047772f34de21de85190dfee6409, CI 40796668531/job 123194690682 success.
+All 383 Dart, 60 runner and 28 deployment checks, real Docker gates and image
+roundtrip pass. The non-image real text-skill gate passes; standard controller
+exited 0 with healthy service/data, public HTTPS 200 and latest-good restore data.
+API/product remain 24/2026-10-27-agent-tools-2. P07 durable journal/channel work is
+still a local prototype with 27 focused tests; original-container wiring, source
+snapshot/RPC continuation, cleanup failure and actual Docker restart acceptance
+remain mandatory before release. Other original P01–P14 items remain active.
+
+## P07 durable runner integration (2026-10-29; CI acceptance pending)
+
+The journal/channel prototype is now wired through server startup, original
+resource labels, prepared-workspace checkpoints, shutdown detach, HTTP sequence
+capability negotiation, Dart serialized sends, status/file recovery and background
+cleanup reconciliation. Eighty-one runner tests pass, including registry reopen,
+unchanged deadlines, original response/cursor recovery, no duplicate sends, stop
+and ACK persistence, cleanup failures and safe legacy workspace retention. Dart
+analysis and the two focused transport/API recovery tests pass. Deployment Python
+discovery passes 28 cases with 16 Linux-only skips on Windows; CI must execute those.
+An actual isolated-Docker SIGKILL/restart gate now exercises the pending Dart SDK
+call, original process/input/file identity and final cleanup. That gate has not yet
+passed CI or been deployed. Full scope remains open, including legacy file
+reconciliation, API-process pending-RPC correlation and remaining P11/P14 items.
+See docs/architecture/2026-10-29-mcp-runner-recovery.md for exact boundaries.

@@ -41,3 +41,10 @@ The implementation extends the existing private authorization provenance and tas
 operation journal. It adds no provider, credential, UI flow or new service. Rolling
 back code retains the added metadata, but also restores the original replay gap;
 keep the current healthy release until this batch passes its gates.
+Deployment evidence: this change is now included in verified release
+20261029-085045-86a038c, with the classification recovery fix. Exact-commit CI
+40796668531 passes 383 Dart, 60 runner and 28 deployment checks plus Docker gates.
+The non-image controller exited 0 after real text-skill, health/data and public
+HTTPS checks; one latest-good restore point/data backup remains. See
+2026-10-29-intent-classification-recovery.md for the failed prior attempt and final
+release evidence. The original full plan remains unfinished.

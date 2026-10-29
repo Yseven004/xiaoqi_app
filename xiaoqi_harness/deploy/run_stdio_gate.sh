@@ -5,7 +5,7 @@ export SANDBOX_RUNNER_TOKEN
 SANDBOX_RUNNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 cleanup() {
   local item
-  docker rm -f xiaoqi-stdio-gate-probe xiaoqi-stdio-gate-runner >/dev/null 2>&1 || true
+  docker rm -f xiaoqi-stdio-gate-probe xiaoqi-stdio-restart-probe xiaoqi-stdio-gate-runner >/dev/null 2>&1 || true
   for item in $(docker ps -aq --filter label=com.xiaoqi.ci-stdio-sandbox=true); do docker rm -f "$item" >/dev/null || true; done
   for item in $(docker network ls -q --filter label=com.xiaoqi.ci-stdio-sandbox=true); do docker network rm "$item" >/dev/null || true; done
   for item in $(docker volume ls -q --filter label=com.xiaoqi.ci-stdio-sandbox=true); do docker volume rm "$item" >/dev/null || true; done

@@ -32,6 +32,18 @@ pure-router cancellation, budget exhaustion and valid business clarification.
 Full server analysis passes. Exact-commit CI and the unchanged real non-image
 deployment gate must pass before claiming this batch is deployed or effective.
 
+Release evidence: main 86a038c88ce7047772f34de21de85190dfee6409, CI
+40796668531/job 123194690682 completed success with all 383 Dart, 60 runner and
+28 deployment checks plus real Docker stdio and image roundtrip gates. Standard
+non-image deployment 20261029-085045-86a038c exited 0. The unchanged real text-only
+skill gate now passes, alongside the other required non-image checks. Service,
+data, same-endpoint public HTTPS 200 and latest-good restore point/data are
+verified; product/API remain 2026-10-27-agent-tools-2/24. Windows public TLS failed,
+so the existing Cloud Assistant HTTPS verification was used. Log is in the primary
+checkout `.codex-artifacts/deploy/20261029-085045-86a038c.log`. This release also
+includes the generated-content action binding from 0ae1828. No paid image or
+client/device success is claimed.
+
 The in-progress persistent MCP journal/channel changes are separate and are not
 included in this release. No new frontend flow, provider, hardware or image call
 is introduced.
