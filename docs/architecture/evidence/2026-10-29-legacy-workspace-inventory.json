@@ -1,0 +1,19 @@
+{
+  "audit": "legacy-unbound-workspaces",
+  "release": "20261029-145118-3c9ead8",
+  "invoke_id": "t-hk071hmurvppszk",
+  "invocation_status": "Finished",
+  "exit_code": 0,
+  "read_only": true,
+  "complete": true,
+  "counts": {
+    "container_owned": 0,
+    "legacy_unbound_container": 0,
+    "network_owned": 0,
+    "legacy_unbound_network": 0,
+    "volume_owned": 0,
+    "legacy_unbound_volume": 0
+  },
+  "method": "Identify the unique running production runner by Compose labels; enumerate Docker resources using its configured owner label; apply the runner's retained legacy-resource predicate. No resource identifiers, credentials, contents or user data emitted or modified.",
+  "limitation": "No historical workspace backlog exists at this snapshot. This does not implement a legacy recovery endpoint or prove recovery under artificial legacy resources."
+}

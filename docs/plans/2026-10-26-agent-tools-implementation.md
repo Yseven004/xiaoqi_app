@@ -758,3 +758,10 @@ operation/request correlation and response-before-cursor persistence. All 18
 focused checks and full Dart analysis pass. The real API-container death gate is
 wired into CI; actual Docker/exact-commit CI and deployment remain pending.
 See docs/architecture/2026-10-29-api-rpc-recovery.md. The complete plan remains open.
+
+Read-only production workspace inventory (Cloud Assistant
+t-hk071hmurvppszk, Finished/exit 0) finds zero owned task containers, networks or
+volumes, and zero retained legacy unbound resources. There is no current legacy
+workspace backlog to migrate or retrieve. This is not evidence of an implemented
+legacy-format collection endpoint. Counts and method:
+docs/architecture/evidence/2026-10-29-legacy-workspace-inventory.json.
