@@ -88,6 +88,9 @@ class RunnerValidationTests(unittest.TestCase):
         self.addCleanup(peer.close)
         attached = Mock()
         attached._sock = raw
+        reader = raw.makefile('rb')
+        attached._response.raw._fp.fp = reader
+        attached._response.close.side_effect = reader.close
         container.attach_socket.return_value = attached
         channel = StdioChannel()
         argv = ['node','/workspace/skill/server.js','literal; $(not-a-host-command)']
@@ -403,6 +406,7 @@ class RunnerValidationTests(unittest.TestCase):
                 request = {'task_id':'deadline-fixture','code':'pass','language':'python',
                            'command':['node','/workspace/skill/server.js']}
                 with (patch.object(server, '_get_client', return_value=client),
+                      patch.object(server, 'DockerAttachStream', return_value=Mock()),
                       patch.object(server, '_decode_logs', return_value=''),
                       patch.object(server, '_safe_artifacts', return_value=[]),
                       patch.object(server, 'MAX_RUN_SECONDS', 0),

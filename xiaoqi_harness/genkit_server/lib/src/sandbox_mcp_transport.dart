@@ -271,10 +271,13 @@ class SandboxMcpTransport implements McpClientTransport {
   }
 
   Future<void> _poll() async {
+    var phase = 'events';
     try {
       while (!_closed) {
+        phase = 'events';
         final result = await _readEvents();
         if (_closed) break;
+        phase = 'validate';
         final messages = result['messages'];
         if (messages is! List || messages.length > 32) {
           throw const FormatException('Invalid MCP runner event batch');
@@ -293,7 +296,9 @@ class SandboxMcpTransport implements McpClientTransport {
         }
         // Commit response correlation before the next poll acknowledges this
         // batch. A process death must not erase an already observed result.
+        phase = 'checkpoint';
         onEventBatch?.call(messages.cast<Map<String, dynamic>>(), cursor);
+        phase = 'deliver';
         _eventCursor = cursor;
         for (final message in messages) {
           _inbound.add(message);
@@ -303,7 +308,13 @@ class SandboxMcpTransport implements McpClientTransport {
         if (result['closed'] == true) break;
       }
     } catch (error, stack) {
-      if (!_closed) _inbound.addError(error, stack);
+      if (!_closed) {
+        // Structural diagnostics only: no RPC body, token or exception text.
+        stderr.writeln(
+          'MCP_TRANSPORT_FAILURE phase=$phase type=${error.runtimeType} cursor=$_eventCursor',
+        );
+        _inbound.addError(error, stack);
+      }
     } finally {
       await close();
     }

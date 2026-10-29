@@ -125,6 +125,8 @@ class McpRecoveryTests(unittest.TestCase):
             client, peer = socket.socketpair()
             peer.settimeout(2)
             attached = SimpleNamespace(_sock=client, close=client.close)
+            reader = client.makefile('rb')
+            attached._response = SimpleNamespace(raw=SimpleNamespace(_fp=SimpleNamespace(fp=reader)), close=reader.close)
             self.container.attach_socket.return_value = attached
             results = []
             thread = threading.Thread(target=lambda: results.append(resume_mcp(

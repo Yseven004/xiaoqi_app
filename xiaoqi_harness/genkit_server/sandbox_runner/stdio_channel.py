@@ -7,14 +7,70 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import queue
 import threading
+import traceback
 from typing import Any
 from mcp_journal import McpJournal, McpJournalError
 
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_PENDING_MESSAGES = 16
 MAX_DIAGNOSTIC_BYTES = 16 * 1024
+
+
+class DockerAttachStream:
+    """Preserve bytes prefetched while docker-py parses the upgrade headers."""
+    def __init__(self, attached):
+        self.socket = attached._sock
+        self.response = attached._response
+        self.reader = self.response.raw._fp.fp
+        if not callable(getattr(self.reader, 'read1', None)):
+            raise RuntimeError('Docker attach buffered reader is unavailable')
+        # Drain only the already buffered upgrade prefix before publishing the
+        # channel. Live reads stay on the socket, so cancellation never waits
+        # behind a BufferedReader lock (notably on Windows socket.makefile).
+        timeout = self.socket.gettimeout()
+        try:
+            self.socket.setblocking(False)
+            try:
+                prefetched = self.reader.peek(1)
+            except BlockingIOError:
+                prefetched = b''
+            if len(prefetched) > MAX_MESSAGE_BYTES:
+                raise RuntimeError('Docker attach upgrade prefix exceeds byte budget')
+            self.prefix = bytearray(self.reader.read1(len(prefetched))) if prefetched else bytearray()
+        finally:
+            self.socket.settimeout(timeout)
+        self.closed = False
+
+    def recv(self, count):
+        if self.prefix:
+            result = bytes(self.prefix[:count])
+            del self.prefix[:count]
+            return result
+        return self.socket.recv(count)
+
+    def sendall(self, data):
+        self.socket.sendall(data)
+
+    def shutdown(self, how):
+        self.socket.shutdown(how)
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            try:
+                self.socket.shutdown(2)
+            except OSError:
+                pass
+            # Close the buffered HTTP owner before its raw SocketIO. Reversing
+            # this order can also leave an invalid buffered-file finalizer.
+            self.response.close()
+        finally:
+            self.socket.close()
 
 
 class StdioChannel:
@@ -26,6 +82,8 @@ class StdioChannel:
         self._replay_hash = state.get('stdout_hash')
         self._stdout_hash = hashlib.sha256()
         self._stdout_offset = 0
+        self._stdout_received = 0
+        self._close_origin = 'none'
         self._replay_verified = threading.Event()
         if self._replay_remaining == 0:
             self._replay_verified.set()
@@ -124,6 +182,8 @@ class StdioChannel:
                     break
 
     def close(self, reason: str | None = None) -> None:
+        if self._replay_remaining and not self.closed:
+            self._close_origin = ','.join(f'{frame.name}:{frame.lineno}' for frame in traceback.extract_stack(limit=4)[:-1])
         if reason is not None and not self.closed and self._error is None:
             self._error = reason
         self._closed.set()
@@ -189,6 +249,7 @@ class StdioChannel:
                 if kind == 2:
                     self._diagnostic = (self._diagnostic + payload)[-MAX_DIAGNOSTIC_BYTES:]
                     continue
+                self._stdout_received += len(payload)
                 if self._replay_remaining:
                     count = min(self._replay_remaining, len(payload))
                     self._stdout_hash.update(payload[:count])
@@ -225,6 +286,9 @@ class StdioChannel:
         finally:
             if self._replay_remaining and not self.detached and self._error is None:
                 self._error = 'Original MCP stdout checkpoint is unavailable'
+            if self._replay_remaining and not self.detached:
+                logging.getLogger(__name__).warning('MCP_REPLAY_FAILURE remaining=%s stdout_received=%s close_origin=%s',
+                    self._replay_remaining, self._stdout_received, self._close_origin)
             self._closed.set()
             self._replay_verified.set()
             if self.journal is not None and not self.detached:

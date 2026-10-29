@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable
 
 from docker.errors import DockerException, NotFound
+from stdio_channel import DockerAttachStream
 
 
 def freeze_resources(resources):
@@ -93,9 +94,9 @@ def resume_mcp(client: Any, state: dict[str, Any], event: Callable, channel: Any
                 container.wait(timeout=5)
                 container.reload()
             if status == 'running' and not channel.closed:
-                attached = container.attach_socket(params={'stdin': True, 'stdout': True, 'stderr': True, 'stream': True, 'logs': True})
+                attached = DockerAttachStream(container.attach_socket(params={'stdin': True, 'stdout': True, 'stderr': True, 'stream': True, 'logs': True}))
                 channel.exporter = lambda: read_artifacts(container)
-                channel.attach(attached._sock)
+                channel.attach(attached)
                 event({'type': 'sandbox_started'})
                 while True:
                     if channel.detached:

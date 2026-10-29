@@ -25,7 +25,7 @@ from mcp_sessions import LeaseError, McpSessions
 from mcp_journal import McpJournalError
 from mcp_recovery import resume_mcp
 from execution_sessions import ExecutionError, Executions, StorageUnavailable
-from stdio_channel import StdioChannel
+from stdio_channel import StdioChannel, DockerAttachStream
 
 
 MAX_BODY_BYTES = 100 * 1024 * 1024
@@ -685,9 +685,9 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             }})
         container.start()
         if stdio is not None:
-            attached = container.attach_socket(params={"stdin": True, "stdout": True, "stderr": True, "stream": True, "logs": True})
+            attached = DockerAttachStream(container.attach_socket(params={"stdin": True, "stdout": True, "stderr": True, "stream": True, "logs": True}))
             stdio.exporter = lambda: _safe_artifacts(container)
-            stdio.attach(attached._sock)
+            stdio.attach(attached)
         send({"type": "sandbox_started", "sandbox_id": sandbox_id})
         started_at = time.monotonic()
         exit_code: int | None = None

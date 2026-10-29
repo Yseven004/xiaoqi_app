@@ -765,3 +765,10 @@ volumes, and zero retained legacy unbound resources. There is no current legacy
 workspace backlog to migrate or retrieve. This is not evidence of an implemented
 legacy-format collection endpoint. Counts and method:
 docs/architecture/evidence/2026-10-29-legacy-workspace-inventory.json.
+
+The API-recovery release's CI found a real Docker attach upgrade-buffer loss in
+the existing runner restart path. It is now reproduced with the actual pinned
+SDK/HTTP parser and fixed for both startup and recovery without weakening prefix
+integrity or replay controls. All 87 runner checks and 21 focused Dart checks
+pass; actual Docker/exact-commit CI and deployment are still pending. Root cause
+and evidence: docs/architecture/2026-10-29-docker-attach-buffer.md.
