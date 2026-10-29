@@ -641,3 +641,20 @@ The generated-content batch now passes all 377 local server tests, 11 focused
 authorization/MCP checks and full analysis. The original action is linked to atomic
 effect reservations, including old unlinked unknown outcomes. It is ready for its
 own exact-commit CI and standard deployment after the verified Agent release.
+
+## P03 classification recovery after a blocked runtime gate (2026-10-29)
+
+Generated-content main 0ae1828 passed exact-commit CI 40792216077, but deployment
+20261029-081011-0ae1828 stopped in RUNTIME_PROBE: the real text-only skill case
+returned the generic classification-failure fallback. Activation never started.
+Read-only status/public health verification confirms healthy Agent release
+20261029-073744-a8b1c00 remains running with restore data present. No gate was waived.
+
+The router now retries only the pure classification once, with the same original
+request and no failed-output injection. Valid business clarifications are final;
+budget exhaustion/cancellation stop retries. Safe type/attempt diagnostics and an
+accurate service-failure message replace the silent catch/user-ambiguity wording.
+Eleven focused checks and full analysis pass. See
+docs/architecture/2026-10-29-intent-classification-recovery.md. Exact-commit CI and
+the existing real non-image gate remain mandatory. P07 journal/channel work is an
+unreleased separate draft, not bundled into this deployment repair.

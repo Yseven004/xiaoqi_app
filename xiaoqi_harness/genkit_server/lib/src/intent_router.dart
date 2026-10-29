@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'turn_contract.dart';
+import 'execution_limits.dart';
 
 /// The classifier has no execution tools. Only catalog metadata and recent
 /// user context are supplied; skill bodies cannot grant themselves permission.
@@ -16,6 +17,51 @@ Future<TurnContract> routeTurnIntent({
   List<Map<String, dynamic>> agents = const [],
   List<Map<String, dynamic>> requirements = const [],
   List<String> priorWithdrawnRequirementIds = const [],
+  required Future<String> Function(String system, String prompt) generate,
+  void Function()? checkStillCurrent,
+  void Function(Object error, int attempt)? onAttemptFailure,
+}) async {
+  for (var attempt = 1; ; attempt++) {
+    checkStillCurrent?.call();
+    try {
+      return await _routeTurnIntentOnce(
+        text: text,
+        skills: skills,
+        connections: connections,
+        artifacts: artifacts,
+        recentUserMessages: recentUserMessages,
+        currentAction: currentAction,
+        materials: materials,
+        commands: commands,
+        agents: agents,
+        requirements: requirements,
+        priorWithdrawnRequirementIds: priorWithdrawnRequirementIds,
+        generate: generate,
+      );
+    } on ExecutionBudgetExceeded {
+      rethrow;
+    } catch (error) {
+      checkStillCurrent?.call();
+      onAttemptFailure?.call(error, attempt);
+      // Only a pure, tool-free classification is retried. A genuine valid
+      // clarification is returned above and never replaced by guessed scope.
+      if (attempt >= 2) rethrow;
+    }
+  }
+}
+
+Future<TurnContract> _routeTurnIntentOnce({
+  required String text,
+  required List<Map<String, dynamic>> skills,
+  required List<Map<String, dynamic>> connections,
+  required List<Map<String, dynamic>> artifacts,
+  required List<String> recentUserMessages,
+  required Map<String, dynamic>? currentAction,
+  required List<Map<String, dynamic>> materials,
+  required List<Map<String, dynamic>> commands,
+  required List<Map<String, dynamic>> agents,
+  required List<Map<String, dynamic>> requirements,
+  required List<String> priorWithdrawnRequirementIds,
   required Future<String> Function(String system, String prompt) generate,
 }) async {
   final raw = await generate(

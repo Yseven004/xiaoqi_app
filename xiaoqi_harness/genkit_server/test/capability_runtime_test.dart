@@ -15,6 +15,8 @@ void main() {
     'implicit',
     'script-available',
     'text-only',
+    'text-only-intent-retry',
+    'text-only-intent-unavailable',
     'text-only-plugin-command',
     'text-only-plugin-command-user-only',
     'text-only-plugin-command-direct',
@@ -62,6 +64,7 @@ void main() {
       () async {
         final requests = <Map<String, dynamic>>[];
         var providerRequests = 0;
+        var classifierCalls = 0;
         final searchQueries = <String>[];
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final serving = server.listen((request) async {
@@ -131,6 +134,28 @@ void main() {
             return;
           }
           if (serialized.contains('XIAOQI_TURN_INTENT_V1')) {
+            classifierCalls++;
+            if (scenario.startsWith('text-only-intent-') &&
+                (classifierCalls == 1 || scenario.endsWith('unavailable'))) {
+              request.response.headers.contentType = ContentType.json;
+              request.response.write(
+                jsonEncode({
+                  'id': 'invalid-intent',
+                  'choices': [
+                    {
+                      'index': 0,
+                      'message': {
+                        'role': 'assistant',
+                        'content': 'temporarily invalid classifier output',
+                      },
+                      'finish_reason': 'stop',
+                    },
+                  ],
+                }),
+              );
+              await request.response.close();
+              return;
+            }
             final messages = (body['messages'] as List)
                 .whereType<Map>()
                 .toList();
@@ -664,6 +689,16 @@ void main() {
             reason:
                 'Count every actual provider attempt, including intent, repair and resume',
           );
+          if (scenario.startsWith('text-only-intent-'))
+            expect(classifierCalls, 2);
+          if (scenario == 'text-only-intent-unavailable') {
+            expect(requests, isEmpty);
+            expect(result['generated'], 0);
+            expect(result['artifacts'], 0);
+            expect(result['active'] ?? const [], isEmpty);
+            expect(result['text'], contains('任务识别服务暂时未返回有效结果'));
+            return;
+          }
           expect(requests, isNotEmpty);
           if (!scenario.startsWith('mcp-')) {
             final firstToolNames = (requests.first['tools'] as List)

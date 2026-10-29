@@ -933,6 +933,12 @@ class GenkitXiaoqiAgentRuntime
     );
     try {
       return (await routeTurnIntent(
+        checkStillCurrent: cancellation.throwIfCancelled,
+        onAttemptFailure: (error, attempt) => _logAgentRuntime(
+          'turn_scope_attempt_failed',
+          (TaskModelClient.current as TaskModelClient?)?.taskId ?? 'unknown',
+          {'attempt': attempt, 'error_type': error.runtimeType.toString()},
+        ),
         text: text,
         commands: commands,
         agents: agents,
@@ -998,18 +1004,20 @@ class GenkitXiaoqiAgentRuntime
             cancel: cancellation,
           );
           if (result.finishReason != FinishReason.stop) {
-            throw StateError('意图识别未正常完成');
+            throw result.cause ?? StateError('意图识别未正常完成');
           }
           return jsonEncode(result.output);
         },
       )).constrainedBy(text, request['image_budget']);
+    } on ExecutionBudgetExceeded {
+      rethrow;
     } catch (_) {
       cancellation.throwIfCancelled();
       // An unresolved scope must also stop tools after mid-task steering.
       return TurnContract(
         mode: 'clarify',
         imageLimit: 0,
-        clarification: '本轮任务范围暂未识别清楚，请明确要解释已有结果还是执行新的任务。',
+        clarification: '任务识别服务暂时未返回有效结果，后续工具调用未继续。请稍后重试。',
       );
     }
   }
