@@ -53,3 +53,12 @@ nested keys and still rejects changed values. All 18 focused checks and full
 analysis pass after this fix. Superseded CI 40847214311 was explicitly cancelled;
 its deploy controller exited before production changes. It is not counted as a
 passing build or a deployment failure after activation.
+
+Recovery now receives the existing Agent cancellation token. Cancellation closes
+the original lease immediately, then persists its available files and unknown
+outcome; it does not wait for the reply deadline or submit another RPC. The
+additional forced-process-death/cancellation case brings the focused suite to
+19 passing checks. Original file bytes are asserted for both completion and
+cancellation. Full analysis remains clean. Superseded CI 40848175372 was cancelled
+before activation to include this cancellation path; its controller exited with
+production unchanged. The exact final commit still requires real-container CI.

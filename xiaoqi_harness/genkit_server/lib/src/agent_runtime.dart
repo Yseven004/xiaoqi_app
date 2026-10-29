@@ -1574,7 +1574,11 @@ class GenkitXiaoqiAgentRuntime
     void Function(String text)? onLegacyDelta,
   }) async {
     cancellation.throwIfCancelled();
-    await codeExecutor.recoverExecutions(tenantId: tenantId, taskId: taskId);
+    await codeExecutor.recoverExecutions(
+      tenantId: tenantId,
+      taskId: taskId,
+      cancellation: cancellation,
+    );
     cancellation.throwIfCancelled();
     request = {
       ...request,

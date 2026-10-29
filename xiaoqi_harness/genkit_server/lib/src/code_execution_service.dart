@@ -381,6 +381,7 @@ class DockerCodeExecutionService {
   Future<void> recoverMcpLeases({
     required String tenantId,
     required String taskId,
+    CancellationToken? cancellation,
   }) async {
     final url =
         _runnerUrl?.toString() ?? Platform.environment['SANDBOX_RUNNER_URL'];
@@ -402,6 +403,7 @@ class DockerCodeExecutionService {
           SandboxMcpTransport.isActive(id))
         continue;
       SandboxMcpTransport? transport;
+      void Function()? unregisterCancel;
       try {
         final rpcJournal = McpRpcJournal(
           store,
@@ -422,8 +424,14 @@ class DockerCodeExecutionService {
             rpcJournal.reconcile();
           },
         );
+        final recoveryTransport = transport;
+        unregisterCancel = cancellation?.onCancel(() {
+          unawaited(recoveryTransport.close().catchError((Object _) {}));
+        });
         final deadline = rpcJournal.pendingDeadline;
-        if (deadline != null && deadline.isAfter(DateTime.now())) {
+        if (cancellation?.isCancelled != true &&
+            deadline != null &&
+            deadline.isAfter(DateTime.now())) {
           try {
             await transport.recoverEvents(
               deadline: deadline,
@@ -435,12 +443,21 @@ class DockerCodeExecutionService {
         }
         await finishMcp(tenantId, taskId, transport);
       } on Object {
+        if (cancellation?.isCancelled == true && transport != null) {
+          try {
+            await finishMcp(tenantId, taskId, transport);
+          } on Object {
+            /* Preserve the lease for later artifact recovery. */
+          }
+        }
         // Preserve identity until artifacts and acknowledgment both persist.
         // An unavailable runner does not prove that the original call failed.
       } finally {
+        unregisterCancel?.call();
         transport?.disposeRecoveryReader();
       }
     }
+    cancellation?.throwIfCancelled();
   }
 
   Future<String> execute({
@@ -1040,8 +1057,13 @@ class DockerCodeExecutionService {
   Future<void> recoverExecutions({
     required String tenantId,
     required String taskId,
+    CancellationToken? cancellation,
   }) async {
-    await recoverMcpLeases(tenantId: tenantId, taskId: taskId);
+    await recoverMcpLeases(
+      tenantId: tenantId,
+      taskId: taskId,
+      cancellation: cancellation,
+    );
     final operations =
         store.get('task/$tenantId/$taskId')?.value['code_execution_operations']
             as Map? ??
