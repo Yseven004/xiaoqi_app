@@ -100,6 +100,20 @@ void main() {
             ], 1);
             expect(journal.records.single.$2.value['response'], isNull);
             journal.recordEvents([response], 2);
+            journal.recordEvents(
+              [
+                {
+                  'result': {
+                    'content': [
+                      {'text': 'original', 'type': 'text'},
+                    ],
+                  },
+                  'id': 1,
+                  'jsonrpc': '2.0',
+                },
+              ],
+              2,
+            ); // Runner journal sorts keys when reconstructing the same batch.
             expect(
               () => journal.recordEvents([
                 {

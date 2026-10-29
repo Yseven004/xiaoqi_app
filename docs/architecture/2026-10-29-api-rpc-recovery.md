@@ -45,3 +45,11 @@ Protocol references reviewed 2026-10-29 (reference only; no upstream code copied
 Response collection uses Xiaoqi's existing private runner channel, not a claim
 that MCP standard initialization itself resumes an old SDK session. Hooks/apps/
 extensions, legacy unbound files and other remaining plan work stay open.
+
+Pre-release review found the runner's durable JSON serialization sorts keys.
+Request/response digests now recursively canonicalize object keys, preserving
+list order and typed IDs. The response replay regression includes reordered
+nested keys and still rejects changed values. All 18 focused checks and full
+analysis pass after this fix. Superseded CI 40847214311 was explicitly cancelled;
+its deploy controller exited before production changes. It is not counted as a
+passing build or a deployment failure after activation.

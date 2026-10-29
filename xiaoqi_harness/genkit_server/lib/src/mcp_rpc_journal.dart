@@ -19,6 +19,17 @@ class McpRpcJournal {
   String get prefix => 'private_mcp_rpc/$tenant/$task/$lease/';
   String get leaseKey => 'private_mcp_lease/$tenant/$task/$lease';
   String get taskKey => 'task/$tenant/$task';
+  static Object? _canonical(Object? value) {
+    if (value is Map) {
+      final keys = value.keys.cast<String>().toList()..sort();
+      return {for (final key in keys) key: _canonical(value[key])};
+    }
+    if (value is List) return value.map(_canonical).toList();
+    return value;
+  }
+
+  static String _messageDigest(Map<String, dynamic> message) =>
+      ToolExecution.digest(_canonical(message)!);
   List<(String, StoredDocument)> get records =>
       store.list(prefix, limit: limit + 1).toList();
   String? _key(Object? id) => id is int || (id is String && id.length <= 128)
@@ -37,7 +48,7 @@ class McpRpcJournal {
       throw StateError('MCP request has no current operation reservation');
     _prune();
     final existing = store.get(key);
-    final hash = ToolExecution.digest(message);
+    final hash = _messageDigest(message);
     if (existing != null) {
       if (existing.value['request_hash'] != hash ||
           existing.value['operation_id'] != operation)
@@ -71,7 +82,7 @@ class McpRpcJournal {
       final key = _key(message['id']);
       final previous = key == null ? null : store.get(key);
       if (previous == null) continue;
-      final hash = ToolExecution.digest(message);
+      final hash = _messageDigest(message);
       if (previous.value['response_hash'] != null) {
         if (previous.value['response_hash'] != hash)
           throw StateError('Original MCP response changed');
