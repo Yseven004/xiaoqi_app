@@ -772,3 +772,11 @@ SDK/HTTP parser and fixed for both startup and recovery without weakening prefix
 integrity or replay controls. All 87 runner checks and 21 focused Dart checks
 pass; actual Docker/exact-commit CI and deployment are still pending. Root cause
 and evidence: docs/architecture/2026-10-29-docker-attach-buffer.md.
+
+P11 plugin-agent source-protocol correction is implemented locally: plugin-only
+mcpServers/hooks frontmatter no longer disables a usable child, while explicitly
+reporting that these fields do not execute. Root plugin components and meaningful
+host requirements remain independent. All 17 policy/runtime regressions pass,
+including an original MCP approval/resume with no duplicate effect. Source and
+scope: docs/architecture/2026-10-29-plugin-agent-ignored-fields.md. Deployment and
+remaining full-plan work are still pending.

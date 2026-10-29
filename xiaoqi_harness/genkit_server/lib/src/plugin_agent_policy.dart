@@ -13,8 +13,10 @@ class PluginAgentPolicy {
     required this.readOnly,
     required this.dontAsk,
     required this.maxTurns,
+    this.notes = const [],
   });
   final List<String> tools, issues;
+  final List<String> notes;
   final bool readOnly, dontAsk;
   final int maxTurns;
 
@@ -101,7 +103,20 @@ class PluginAgentPolicy {
     };
     for (final key in metadata.keys.where((key) => !known.contains(key)))
       issues.add('Agent 字段 $key 需要对应宿主适配');
-    for (final key in ['mcpServers', 'hooks', 'memory', 'isolation']) {
+    final notes = <String>[];
+    // These are plugin agents, not standalone project/user agents. The source
+    // plugin protocol ignores these fields; they cannot launch inline effects
+    // and must not make an otherwise usable child unavailable.
+    for (final key in ['mcpServers', 'hooks']) {
+      final value = metadata[key];
+      if (value != null &&
+          value != '' &&
+          !(value is List && value.isEmpty) &&
+          !(value is Map && value.isEmpty)) {
+        notes.add('按插件源协议忽略 Agent 的 $key；不会据此启动连接或执行钩子，插件根级组件独立处理。');
+      }
+    }
+    for (final key in ['memory', 'isolation']) {
       final value = metadata[key];
       if (value != null &&
           value != '' &&
@@ -157,6 +172,7 @@ class PluginAgentPolicy {
         1,
         limits.modelTurns,
       ),
+      notes: notes,
     );
   }
 }

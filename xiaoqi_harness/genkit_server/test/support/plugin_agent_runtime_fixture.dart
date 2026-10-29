@@ -47,6 +47,7 @@ else:
       : 'tools: [Read, Write, Agent]\n';
   final mcp = const {
     'approval',
+    'ignored-plugin-fields-approval',
     'denied',
     'dontask',
     'disabled',
@@ -120,7 +121,7 @@ else:
           ? 'permissionMode: plan\n'
           : scenario == 'dontask'
           ? 'permissionMode: dontAsk\n'
-          : ''}---\nAGENT_RUNTIME_WRITER: Write report.txt containing verified child output.',
+          : ''}${scenario.startsWith('ignored-plugin-fields') ? 'mcpServers: [not-a-root-server]\nhooks: {PreToolUse: [{command: never-execute-this-field}]}\n' : ''}---\nAGENT_RUNTIME_WRITER: Write report.txt containing verified child output.',
     ),
     'agents/helper.md': utf8.encode(
       '---\nname: helper\ndescription: Write delegated notes\ntools: [Read, Write]\n---\nAGENT_RUNTIME_HELPER: Write report.txt containing verified child output.',

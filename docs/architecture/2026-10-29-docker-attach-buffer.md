@@ -42,3 +42,17 @@ The dependency remains docker==7.1.0. This server/runner-only fix changes no
 public API, client data or package formats. Standard deployment retains automatic
 rollback and one emergency restore point. The existing runner and new API restart
 gates must both pass; neither is removed or weakened.
+
+CI 40855142094/job 123384109321 (main
+313820de750835e5aac9f3d3b25fe13ead563c97) passes all 404 Dart, 87 runner and
+30 deployment checks. Before reaching real Docker gates, Docker Hub returns
+HTTP 500 while fetching the node:24-bookworm-slim base layer. This is a terminal
+upstream image-download failure, not another observed MCP replay failure. The
+deploy controller exits 1 before production changes. The real container gates
+remain unverified for this fix and must run on the next coherent release.
+
+The next CI workflow prefetches the four existing public base images before
+expensive compilation, with at most three download attempts and three-second
+backoff. A persistent failure still stops the job. Tests, tool effects, artifact
+activation and deployment are not retried by this change. Dockerfiles, target
+platform, image storage, exact-commit artifact checks and all gates are unchanged.

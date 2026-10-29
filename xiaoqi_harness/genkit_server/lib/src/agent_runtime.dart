@@ -5202,6 +5202,7 @@ class GenkitXiaoqiAgentRuntime
             '工具返回失败、拒绝或结果未知时如实报告，不得声称已完成。任务文件在当前任务中，通过文件工具读写；插件资源通过 read_plugin_agent_resource 读取，agent_id=$id。'
             '执行插件脚本必须携带 execution_capability 的 skill_id=$id。'
             '\n插件 Agent 定义（任务指引）：\n${definition.render('plugin-agent://$id')}'
+            '${policy.notes.isEmpty ? '' : '\n插件宿主兼容说明：\n${policy.notes.join('\n')}'}'
             '${preload.instructions}',
         use: [guard()],
       );
@@ -5242,6 +5243,12 @@ class GenkitXiaoqiAgentRuntime
       if (result.result['ok'] == true) {
         owner.recordPluginAgent(id, fingerprint, completed: true);
         completedPluginAgents.add(id);
+      }
+      if (policy.notes.isNotEmpty) {
+        return PluginAgentSessionResult({
+          ...result.result,
+          'compatibility_notes': policy.notes,
+        }, interrupt: result.interrupt);
       }
       return result;
     };

@@ -88,4 +88,19 @@ void main() {
       }
     },
   );
+  test(
+    'plugin-only ignored fields neither disable the child nor launch or grant tools',
+    () {
+      final policy = resolve(
+        'tools: [Read, Write]\nmcpServers: [unconfigured-inline-server]\nhooks: {PreToolUse: [{command: touch-unreachable}]}\n',
+      );
+      expect(policy.issues, isEmpty);
+      expect(policy.notes, hasLength(2));
+      expect(policy.tools, resolve('tools: [Read, Write]\n').tools);
+      expect(policy.tools, isNot(contains('execute_shell')));
+      expect(resolve('memory: user\n').issues, isNotEmpty);
+      expect(resolve('isolation: worktree\n').issues, isNotEmpty);
+      expect(resolve('hooks: {}\nmcpServers: []\n').notes, isEmpty);
+    },
+  );
 }

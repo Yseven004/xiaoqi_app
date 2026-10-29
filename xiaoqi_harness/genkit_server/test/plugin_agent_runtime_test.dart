@@ -5,6 +5,8 @@ import 'package:test/test.dart';
 void main() {
   for (final scenario in [
     'write',
+    'ignored-plugin-fields',
+    'ignored-plugin-fields-approval',
     'preload',
     'preload-script-network',
     'nested',
@@ -24,6 +26,7 @@ void main() {
         final childToolSets = <Set<String>>[];
         final mcp = const {
           'approval',
+          'ignored-plugin-fields-approval',
           'denied',
           'dontask',
           'disabled',
@@ -86,6 +89,10 @@ void main() {
           Map<String, dynamic> input = {};
           if (child) {
             childToolSets.add(tools);
+            if (scenario.startsWith('ignored-plugin-fields')) {
+              expect(system, contains('按插件源协议忽略 Agent 的 mcpServers'));
+              expect(system, contains('按插件源协议忽略 Agent 的 hooks'));
+            }
             if (scenario == 'preload' && !called('read_skill_resource')) {
               expect(system, contains('FULL_PRELOADED_SKILL'));
               expect(system, contains('references/note.md'));
@@ -241,6 +248,10 @@ void main() {
               .singleWhere((line) => line.startsWith('RESULT:'));
           final value = jsonDecode(line.substring(7)) as Map;
           expect(value['provider_calls'], providerCalls);
+          if (scenario == 'ignored-plugin-fields') {
+            expect(value['external_calls'], 0);
+            expect(value['script_runs'], 0);
+          }
           expect(childToolSets, isNotEmpty);
           for (final names in childToolSets) {
             if (!mcp && !scriptNetwork) {
@@ -259,9 +270,13 @@ void main() {
             expect(value['missing'], isFalse);
           } else if (mcp) {
             expect(value['before_approval'], 0);
-            expect(value['external_calls'], scenario == 'approval' ? 1 : 0);
-            expect(value['completed'], scenario == 'approval' ? 1 : 0);
-            expect(value['missing'], scenario != 'approval');
+            final approved = const {
+              'approval',
+              'ignored-plugin-fields-approval',
+            }.contains(scenario);
+            expect(value['external_calls'], approved ? 1 : 0);
+            expect(value['completed'], approved ? 1 : 0);
+            expect(value['missing'], !approved);
           } else if (scenario == 'plan') {
             expect(value['contents'], isEmpty);
             expect(value['completed'], 0);

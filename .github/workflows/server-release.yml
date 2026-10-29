@@ -46,6 +46,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/build-logs"
+          # Fetch public bases before expensive compilation; only downloads retry.
+          base_images=$(awk '$1 == "FROM" {print $2}' genkit_server/Dockerfile genkit_server/sandbox_runner/Dockerfile genkit_server/sandbox_image/Dockerfile genkit_server/sandbox_proxy/Dockerfile | sort -u)
+          for base_image in $base_images; do
+            for attempt in 1 2 3; do
+              if docker pull --platform linux/amd64 "$base_image" 2>&1 | tee -a "$RUNNER_TEMP/build-logs/base-images.log"; then
+                break
+              fi
+              if [[ "$attempt" == 3 ]]; then exit 1; fi
+              sleep 3
+            done
+          done
           for spec in 'app genkit_server/Dockerfile .' 'runner genkit_server/sandbox_runner/Dockerfile genkit_server/sandbox_runner' 'sandbox genkit_server/sandbox_image/Dockerfile genkit_server/sandbox_image' 'proxy genkit_server/sandbox_proxy/Dockerfile genkit_server/sandbox_proxy'; do
             read -r name dockerfile context <<< "$spec"
             case "$name" in
