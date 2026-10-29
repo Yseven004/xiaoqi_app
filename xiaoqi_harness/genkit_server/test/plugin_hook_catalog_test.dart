@@ -36,6 +36,30 @@ void main() {
       }),
     ),
   };
+  test('exec form is independently mapped and ignores the shell setting', () {
+    final catalog = PluginHookCatalog.inspect({
+      'hooks/hooks.json': utf8.encode(
+        jsonEncode({
+          'hooks': {
+            'PreToolUse': [
+              {
+                'hooks': [
+                  {
+                    'type': 'command',
+                    'command': 'node',
+                    'args': ['script.js'],
+                    'shell': 'powershell',
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+      ),
+    }, '');
+    expect(catalog.single['status'], 'partial');
+  });
+
   test('root SKILL and mixed MCP declarations do not hide root hooks', () {
     final mixed = {
       ...files,

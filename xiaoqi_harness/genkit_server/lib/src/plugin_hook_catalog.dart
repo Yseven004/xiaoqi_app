@@ -7,7 +7,7 @@ import 'plugin_hooks.dart';
 import 'store.dart';
 
 class PluginHookCatalog {
-  static const profileVersion = 1;
+  static const profileVersion = 2;
   static const toolEvents = {'PreToolUse', 'PostToolUse', 'PostToolUseFailure'};
 
   static PluginHooks parse(Map<String, List<int>> files) {
@@ -48,15 +48,13 @@ class PluginHookCatalog {
           'hook_event': hook.event,
           'status':
               toolEvents.contains(hook.event) &&
-                  PluginHookCommand.unsupported(hook) == null &&
-                  hook.config['once'] != true
+                  PluginHookCommand.unsupported(hook) == null
               ? 'partial'
               : 'unsupported',
           'issues': [
             if (!toolEvents.contains(hook.event)) '此生命周期事件尚待映射',
             if (PluginHookCommand.unsupported(hook) case final String issue)
               issue,
-            if (hook.config['once'] == true) 'once 会话生命周期尚待映射',
             '工具事件已映射；ask/defer 等高级控制仅在宿主已有对应流程时执行',
           ],
           'has_dependencies': dependencies,

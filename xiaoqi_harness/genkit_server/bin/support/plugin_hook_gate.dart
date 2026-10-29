@@ -41,6 +41,19 @@ String hookCommandProbe({
       'command':
           '$python -c ${quote('import sys; sys.stdout.buffer.write(bytes(120000))')}',
     },
+    {
+      'command': pythonExecutable,
+      'shell': 'powershell', // Ignored for exec form, even on Linux.
+      'args': [
+        '-c',
+        'import json,sys; print(json.dumps({"argv":sys.argv[1:],"stdin":json.load(sys.stdin)}))',
+        '中文 空格',
+        r'literal; $(touch SHOULD_NOT_EXIST); `not-code`',
+        r'${CLAUDE_PLUGIN_ROOT}/path with spaces/file',
+        r'${CLAUDE_PROJECT_DIR}/file',
+        '',
+      ],
+    },
   ];
   final programs = <String>[];
   for (final entry in commands) {
@@ -53,6 +66,8 @@ String hookCommandProbe({
               {
                 'type': 'command',
                 'command': entry['command'],
+                if (entry.containsKey('args')) 'args': entry['args'],
+                if (entry.containsKey('shell')) 'shell': entry['shell'],
                 if (entry.containsKey('timeout')) 'timeout': entry['timeout'],
               },
             ],
@@ -87,7 +102,7 @@ process.stdout.write(JSON.stringify(results));
 
 void checkHookCommandProbe(String text) {
   final values = jsonDecode(text) as List;
-  if (values.length != 8) throw StateError('hook probe result missing');
+  if (values.length != 9) throw StateError('hook probe result missing');
   final results = [
     for (final value in values) PluginHookCommand.result(jsonEncode(value)),
   ];
@@ -108,6 +123,22 @@ void checkHookCommandProbe(String text) {
     stdout: results[5]['stdout'] as String,
     stderr: results[5]['stderr'] as String,
   );
+  if (results[8]['exit_code'] != 0)
+    throw StateError('exec hook failed: ${results[8]['stderr']}');
+  final direct = jsonDecode(results[8]['stdout'] as String) as Map;
+  if (jsonEncode(direct['stdin']) != jsonEncode(_input) ||
+      jsonEncode(direct['argv']) !=
+          jsonEncode([
+            '中文 空格',
+            r'literal; $(touch SHOULD_NOT_EXIST); `not-code`',
+            '/workspace/skill/path with spaces/file',
+            '/workspace/work/file',
+            '',
+          ])) {
+    throw StateError(
+      'exec hook changed argv, path placeholders or JSON stdin: ${jsonEncode(direct)}',
+    );
+  }
   if (!denied.preventAction || denied.reason != 'source-guard') {
     throw StateError('actual source hook denial was lost');
   }

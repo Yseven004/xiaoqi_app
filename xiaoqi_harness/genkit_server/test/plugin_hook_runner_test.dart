@@ -146,6 +146,35 @@ void main() {
     expect(executor.submissions, 1);
   });
   test(
+    'root once option does not disable future distinct tool invocations',
+    () async {
+      final rootOnce = PluginHooks.parse({}, {
+        'hooks': {
+          'PreToolUse': [
+            {
+              'hooks': [
+                {'type': 'command', 'command': 'source-guard', 'once': true},
+              ],
+            },
+          ],
+        },
+      }, manifestPath: 'plugin.json').handlers.single;
+      for (final invocation in ['first', 'second']) {
+        await PluginHookRunner(executor).run(
+          execution: execution,
+          hook: rootOnce,
+          sourceBinding: 'same-root-source',
+          invocation: invocation,
+          input: {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash'},
+          matchValue: 'Bash',
+          sourceFiles: source,
+          cancellation: cancellation.token,
+        );
+      }
+      expect(executor.submissions, 2);
+    },
+  );
+  test(
     'unknown original effects are not replayed after a failed bridge',
     () async {
       executor.submissionFailure = SandboxExecutionError(

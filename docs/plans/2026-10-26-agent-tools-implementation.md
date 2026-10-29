@@ -1,5 +1,9 @@
 # Agent 工具全链路实施记录
 
+## 2026-10-30 P11 Hook 直接参数调用（本地通过，待容器验收）
+
+接入 command+args 的无 Shell 直接调用，支持隔离根目录占位符、空参数/空格/中文/字面 Shell 字符，保留原 UTF-8 JSON stdin 与原执行预算。Windows 原生测试发现并修复 Python stdin 本地编码问题。根 Hook 的 once 按官方“仅技能 frontmatter 生效”规则忽略，不再整条阻断；不冒称技能 once 生命周期已实现。20 项 parser/catalog/runner 测试、10 个原生 launcher 场景通过，共享 Docker probe 52522 字节未超 64 KiB。catalog profile 2 从相同原始安装字节刷新。详见 `docs/architecture/2026-10-30-hook-exec-arguments.md`。未移动正在构建部署的 main，不据此关闭 P11。
+
 ## 2026-10-30 P07 安装包与普通产物容量区分（修复中）
 
 main 196ad3e 的 CI 40971211637 已通过真实 Hook Agent 组合检查，新增官方 Python 时间 MCP 在依赖打包的 10 MB 限制处失败，未激活上线。只为绑定来源的 dependency_build 根目录 dependencies.zip 提供 20 MiB 单文件额度；普通文件 10 MiB、总输出 20 MiB、展开依赖 40 MiB、请求 100 MiB 不变。API 即时/恢复与 runner 即时/恢复一致校验；pip 不再预编译字节码缓存。实际 11 MiB 边界与普通任务拒绝检查已添加，完整本地回归和新 Docker 门禁分别记录，不能冒称上线。详见 `docs/architecture/2026-10-30-private-dependency-archive.md`。

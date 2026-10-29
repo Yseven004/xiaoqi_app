@@ -90,6 +90,6 @@ Future<void> main() async {
     await directory.delete(recursive: true);
   }
   stdout.writeln(
-    'HOOK_COMMAND_NATIVE_VERIFIED cases=9 bytes=${utf8.encode(program).length}',
+    'HOOK_COMMAND_NATIVE_VERIFIED cases=10 bytes=${utf8.encode(program).length}',
   );
 }

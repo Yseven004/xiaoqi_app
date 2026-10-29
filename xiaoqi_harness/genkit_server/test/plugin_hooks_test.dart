@@ -3,6 +3,39 @@ import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/plugin_hooks.dart';
 
 void main() {
+  test(
+    'exec args are validated per handler without dropping healthy siblings',
+    () {
+      final parsed = PluginHooks.parse({}, {
+        'hooks': {
+          'PreToolUse': [
+            {
+              'hooks': [
+                {
+                  'type': 'command',
+                  'command': 'python3',
+                  'args': ['-c', 'print(1)', '中文'],
+                },
+                {'type': 'command', 'command': 'node', 'args': []},
+                for (final args in [
+                  null,
+                  'one string',
+                  [7],
+                  ['bad\u0000argument'],
+                  List.filled(65, 'x'),
+                ])
+                  {'type': 'command', 'command': 'node', 'args': args},
+              ],
+            },
+          ],
+        },
+      }, manifestPath: '.claude-plugin/plugin.json');
+      expect(parsed.handlers, hasLength(2));
+      expect(parsed.issues, hasLength(5));
+      expect(parsed.handlers.first.config['args'], ['-c', 'print(1)', '中文']);
+    },
+  );
+
   const manifestPath = '.claude-plugin/plugin.json';
   List<int> encoded(Object value) => utf8.encode(jsonEncode(value));
   Map<String, dynamic> events(

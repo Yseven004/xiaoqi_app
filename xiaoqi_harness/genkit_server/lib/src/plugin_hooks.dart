@@ -154,6 +154,20 @@ class PluginHooks {
             continue;
           }
           final timeout = config['timeout'];
+          if (type == 'command' && config.containsKey('args')) {
+            final args = config['args'];
+            if (args is! List ||
+                args.length > 64 ||
+                args.any(
+                  (arg) =>
+                      arg is! String ||
+                      arg.contains('\u0000') ||
+                      utf8.encode(arg).length > 4096,
+                )) {
+              _issue(source, handlerPointer, 'hook args 必须是有界字符串参数列表');
+              continue;
+            }
+          }
           if (timeout != null &&
               (timeout is! num || !timeout.isFinite || timeout <= 0)) {
             _issue(source, handlerPointer, 'hook timeout 必须是有限正数');

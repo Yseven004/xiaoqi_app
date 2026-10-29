@@ -37,11 +37,20 @@ class PluginHookCommand {
     if (hook.config['async'] == true || hook.config['asyncRewake'] == true) {
       return '后台 hook 尚需独立生命周期映射';
     }
-    if (hook.config['shell'] != null && hook.config['shell'] != 'bash') {
+    if (!hook.config.containsKey('args') &&
+        hook.config['shell'] != null &&
+        hook.config['shell'] != 'bash') {
       return '当前隔离宿主提供 Bash';
     }
-    if (hook.config['args'] != null || hook.config['if'] != null) {
-      return '直接 argv 或条件命令尚需宿主映射';
+    if (hook.config['if'] != null) {
+      return '条件命令尚需宿主映射';
+    }
+    if (hook.config.containsKey('args') &&
+        [
+          hook.config['command'],
+          ...(hook.config['args'] as List),
+        ].any((value) => value.toString().contains(r'${user_config.'))) {
+      return 'hook user_config 需要插件专属配置映射';
     }
     if (hook.config['onFailure'] != null &&
         !const {'continue', 'block'}.contains(hook.config['onFailure'])) {
@@ -68,6 +77,7 @@ class PluginHookCommand {
     final payload = jsonEncode(
       jsonEncode({
         'command': hook.config['command'],
+        'args': hook.config['args'],
         'matcher': hook.matcher,
         'literalMatch': trivialMatch(hook.matcher, matchValue),
         'matchValue': matchValue,
@@ -130,9 +140,13 @@ async function matches() {
     if (!await matches()) { emit(); return; }
     output.matched = true;
     await new Promise(resolve => {
-      const child = spawn(spec.shell, ['-c', spec.command], {
+      const roots = { CLAUDE_PLUGIN_ROOT: '/workspace/skill', CODEX_PLUGIN_ROOT: '/workspace/skill', PLUGIN_ROOT: '/workspace/skill', CLAUDE_PROJECT_DIR: '/workspace/work' };
+      const expand = value => value.replace(/\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PROJECT_DIR)\}/g, (_, name) => roots[name]);
+      const executable = spec.args === null ? spec.shell : expand(spec.command);
+      const args = spec.args === null ? ['-c', spec.command] : spec.args.map(expand);
+      const child = spawn(executable, args, {
         cwd: process.cwd(),
-        env: { ...process.env, CLAUDE_PLUGIN_ROOT: '/workspace/skill', CLAUDE_PROJECT_DIR: '/workspace/work' },
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', CLAUDE_PLUGIN_ROOT: '/workspace/skill', CLAUDE_PROJECT_DIR: '/workspace/work' },
         detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe']
       });
       let done = false, size = 0;

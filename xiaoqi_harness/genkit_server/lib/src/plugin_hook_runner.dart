@@ -45,11 +45,9 @@ class PluginHookRunner {
     }
     final issue = PluginHookCommand.unsupported(hook);
     if (issue != null) throw StateError(issue);
-    // Once-only skill hooks need a session lifecycle binding. Do not silently
-    // reinterpret them as once per tool call or reuse a different input hash.
-    if (hook.config['once'] == true) {
-      throw StateError('once hook 尚需会话生命周期映射');
-    }
+    // This adapter receives root plugin hooks. The source protocol honors once
+    // only in skill frontmatter, and ignores it in root/settings declarations.
+    // Skill-scoped lifecycle registration remains a separate adapter.
     final snapshot = jsonDecode(jsonEncode(input)) as Map<String, dynamic>;
     final code = PluginHookCommand.program(
       hook,
