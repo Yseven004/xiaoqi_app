@@ -18,6 +18,9 @@ class UnconfirmedToolOperation extends StateError {
 class ToolExecution {
   static final _authorityCheckKey = Object();
 
+  static void checkCurrentAuthority() =>
+      (Zone.current[_authorityCheckKey] as void Function()?)?.call();
+
   /// The live plugin source remains authoritative through asynchronous native
   /// tool work. Nested delegates inherit checks; concurrent tasks do not share
   /// mutable callbacks or broaden each other's authority.
@@ -327,7 +330,7 @@ class ToolExecution {
   }
 
   void check(String effect) {
-    (Zone.current[_authorityCheckKey] as void Function()?)?.call();
+    checkCurrentAuthority();
     final value = store.get(key)?.value ?? const <String, dynamic>{};
     if (value['cancel_requested'] == true ||
         const {'cancelled', 'stopped'}.contains(value['status'])) {

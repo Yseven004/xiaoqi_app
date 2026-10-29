@@ -73,6 +73,7 @@ class PluginAgentPolicy {
     required String model,
     bool ancestorReadOnly = false,
     bool ancestorDontAsk = false,
+    bool skillsPrepared = false,
     ExecutionLimits limits = const ExecutionLimits(),
   }) {
     final available = parentTools
@@ -100,13 +101,7 @@ class PluginAgentPolicy {
     };
     for (final key in metadata.keys.where((key) => !known.contains(key)))
       issues.add('Agent 字段 $key 需要对应宿主适配');
-    for (final key in [
-      'skills',
-      'mcpServers',
-      'hooks',
-      'memory',
-      'isolation',
-    ]) {
+    for (final key in ['mcpServers', 'hooks', 'memory', 'isolation']) {
       final value = metadata[key];
       if (value != null &&
           value != '' &&
@@ -114,6 +109,8 @@ class PluginAgentPolicy {
           !(value is Map && value.isEmpty))
         issues.add('Agent 的 $key 需要对应宿主配置');
     }
+    if (!skillsPrepared && (metadata['skills'] as List? ?? const []).isNotEmpty)
+      issues.add('Agent 所需技能尚未完成绑定和预加载');
     if (metadata['background'] == true) issues.add('Agent 请求后台运行，需要后台会话适配');
     final mode = metadata['permissionMode'] ?? 'default';
     if (!const {

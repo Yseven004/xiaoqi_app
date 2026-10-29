@@ -12,7 +12,9 @@ Future<void> main(List<String> args) async {
   final root = await Directory.systemTemp.createTemp('plugin-agent-runtime-');
   final store = CloudStore(root: root.path);
   final scenario = args.single;
-  final scriptNetwork = scenario == 'script-network';
+  final scriptNetwork = scenario.endsWith('script-network');
+  final preloadSkill =
+      scenario == 'preload' || scenario == 'preload-script-network';
   final scriptCounter = File('${root.path}/script-count');
   DockerCodeExecutionService? codeExecutor;
   if (scriptNetwork) {
@@ -114,7 +116,7 @@ else:
   final files = <String, List<int>>{
     '.claude-plugin/plugin.json': utf8.encode('{"name":"agent-fixture"}'),
     'agents/writer.md': utf8.encode(
-      '---\nname: writer\ndescription: Write task notes\n${mcp ? '' : toolHeader}${scenario == 'plan' || scenario == 'readonly'
+      '---\nname: writer\ndescription: Write task notes\n${mcp ? '' : toolHeader}${preloadSkill ? 'skills: [note]\n' : ''}${scenario == 'plan' || scenario == 'readonly'
           ? 'permissionMode: plan\n'
           : scenario == 'dontask'
           ? 'permissionMode: dontAsk\n'
@@ -125,8 +127,31 @@ else:
     ),
     if (scriptNetwork)
       'scripts/check.py': utf8.encode('print("source-bound agent script")'),
+    if (preloadSkill)
+      'skills/note/SKILL.md': utf8.encode(
+        '---\nname: note\ndescription: Agent note conventions\n---\nFULL_PRELOADED_SKILL: Read references/note.md before writing the report.',
+      ),
+    if (preloadSkill)
+      'skills/note/references/note.md': utf8.encode(
+        'PRELOADED_RESOURCE: verified child output',
+      ),
+    if (preloadSkill && scriptNetwork)
+      'skills/note/scripts/check.py': utf8.encode(
+        'print("source-bound preloaded script")',
+      ),
   };
-  final components = PluginAgentDefinition.inspect(files, '', {});
+  final components = <Map<String, dynamic>>[
+    ...PluginAgentDefinition.inspect(files, '', {}),
+    if (preloadSkill)
+      {
+        'id': 'note',
+        'type': 'skill',
+        'root': 'skills/note',
+        'name': 'note',
+        'description': 'Agent note conventions',
+        'status': 'supported',
+      },
+  ];
   store.putImmutable('packages/agents', files);
   store.put('cap/personal/agents', {
     'id': 'agents',

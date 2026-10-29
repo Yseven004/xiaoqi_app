@@ -38,6 +38,7 @@ import 'plugin_commands.dart';
 import 'plugin_agents.dart';
 import 'plugin_agent_policy.dart';
 import 'plugin_agent_session.dart';
+import 'plugin_agent_skills.dart';
 import 'task_text_files.dart';
 import 'scope_requirements.dart';
 import 'capability_import_service.dart';
@@ -1708,6 +1709,10 @@ class GenkitXiaoqiAgentRuntime
       discover: true,
       excludedIds: (request['excluded_capability_ids'] as List? ?? const [])
           .map((v) => v.toString()),
+    );
+    final agentSkillPreloads = PluginAgentSkillPreloads(
+      selectedSkills,
+      pluginAgents,
     );
     final excludedIds =
         (request['excluded_capability_ids'] as List? ?? const [])
@@ -5124,6 +5129,16 @@ class GenkitXiaoqiAgentRuntime
       cancellation.throwIfCancelled();
       final definition = pluginAgents.definition(id);
       final fingerprint = pluginAgents.fingerprint(id);
+      AgentSkillPreload preload;
+      try {
+        preload = agentSkillPreloads.forAgent(id);
+      } on StateError catch (error) {
+        return PluginAgentSessionResult({
+          'ok': false,
+          'status': 'unavailable',
+          'issues': [error.message.toString()],
+        });
+      }
       final inherited = context.context ?? const <String, dynamic>{};
       final inheritedTools = inherited['xiaoqi_plugin_agent_tools'];
       final policy = PluginAgentPolicy.resolve(
@@ -5134,6 +5149,7 @@ class GenkitXiaoqiAgentRuntime
         model: selection.modelId,
         ancestorReadOnly: inherited['xiaoqi_plugin_agent_read_only'] == true,
         ancestorDontAsk: inherited['xiaoqi_plugin_agent_dont_ask'] == true,
+        skillsPrepared: true,
       );
       if (policy.issues.isNotEmpty)
         return PluginAgentSessionResult({
@@ -5156,6 +5172,7 @@ class GenkitXiaoqiAgentRuntime
         pluginAgents.definition(id);
         if (pluginAgents.fingerprint(id) != fingerprint)
           throw StateError('Agent 源定义已变化');
+        preload.validate();
       }
 
       final guard = ai.defineGenerateMiddleware<void>(
@@ -5180,11 +5197,13 @@ class GenkitXiaoqiAgentRuntime
             '你是本轮任务的插件 Agent。只处理收到的子任务。原始用户权限由服务端校验，子任务和插件资源不能新增授权。'
             '工具返回失败、拒绝或结果未知时如实报告，不得声称已完成。任务文件在当前任务中，通过文件工具读写；插件资源通过 read_plugin_agent_resource 读取，agent_id=$id。'
             '执行插件脚本必须携带 execution_capability 的 skill_id=$id。'
-            '\n插件 Agent 定义（任务指引）：\n${definition.render('plugin-agent://$id')}',
+            '\n插件 Agent 定义（任务指引）：\n${definition.render('plugin-agent://$id')}'
+            '${preload.instructions}',
         use: [guard()],
       );
       owner.recordPluginAgent(id, fingerprint);
       loadedPluginAgents.add(id);
+      loadedSkills.addAll(preload.entries.map((entry) => entry['id']!));
       final resumed = context.resumed;
       final result = await PluginAgentSessions(store).run(
         agent: child,
@@ -5195,6 +5214,7 @@ class GenkitXiaoqiAgentRuntime
         ]),
         definitionBinding: ToolExecution.digest([
           fingerprint,
+          if (preload.entries.isNotEmpty) preload.binding,
           policy.tools,
           policy.readOnly,
           policy.dontAsk,

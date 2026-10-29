@@ -162,6 +162,30 @@ class SelectedSkills {
     return metadata;
   }
 
+  Map metadata(Map<String, String> entry) => Map.from(_metadata(entry));
+
+  String namespace(Map<String, String> entry) {
+    _assertCurrent(entry);
+    final package = _packages.putIfAbsent(
+      entry['artifact_key']!,
+      () => store.getImmutable(entry['artifact_key']!),
+    );
+    for (final path in [
+      'plugin.json',
+      '.claude-plugin/plugin.json',
+      '.codex-plugin/plugin.json',
+    ]) {
+      final bytes = package[path];
+      if (bytes == null) continue;
+      final manifest = jsonDecode(utf8.decode(bytes));
+      final name = manifest is Map ? manifest['name'] : null;
+      if (name is! String || name.trim().isEmpty)
+        throw const FormatException('插件名称空间声明无效');
+      return name;
+    }
+    return _record(entry['parent_id']!)['name'].toString();
+  }
+
   /// This artifact namespace is assigned only by the deployment-owned catalog.
   bool permitsGeneratedCode(Iterable<String> activeAliases) =>
       activeAliases.any(

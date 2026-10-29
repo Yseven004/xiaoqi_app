@@ -78,13 +78,13 @@ GitHub 构建状态 GET 遇到短暂传输/超时/特定临时服务错误时最
 | P04 联网生命周期 | 实施中 | 精确动作授权、原请求恢复、任务短期凭据及模式 revision 顺序保护已上线；运行中撤权的更广能力边界和共享代理验收仍待完成 |
 | P05 大型目录 | 实施中 | 完整目录、检索、schema 网关、目录通知/刷新、分页失败后整页重读及调用前定义复查已上线；121 工具和跨入口实际 Genkit 用例通过；全计划代表任务与客户端验收仍待完成 |
 | P06 产物复用 | 实施中 | 真实 Docker 中 XLSX/DOCX/PDF/PNG 多步编辑、同名新旧版本与跨任务隔离通过；资源读取入口、容量边界和目标平台全流程仍待验收 |
-| P07 stdio MCP | 实施中 | 官方样本混合调用、事件游标、原租约回收及独立于普通脚本的 MCP 心跳寿命已上线；runner 重启后持久化租约/RPC 恢复、重连和目标 ECS 资源验收仍待完成 |
+| P07 stdio MCP | 实施中 | runner 重启后的原容器、原 RPC、输入快照恢复、去重和文件保全已上线，真实重启与资源清理验收通过；旧版无绑定工作区文件取回及目标 ECS 资源测量仍待完成 |
 | P08 Shell | 实施中 | 通用 Shell、已安装脚本、字面 argv 与 MCP 文件接力均已验证；Docker 后台子进程资源清理通过；目标 ECS 资源及客户端验收待完成 |
 | P09 现有宿主能力适配 | 实施中 | 用户已撤回通用电脑/手机控制及硬件采购；技能/插件版本及文件局部不可用已通过真实 Agent 循环，健康组件继续交付；已有宿主映射和更广依赖状态验收仍待完成 |
 | P10 导入/安装/构建 | 实施中 | npm/Python 构建、离线交付、执行位、Node CLI 及安装未知结果的原执行恢复均已上线；历史包权限迁移、较长/组合构建仍待完成 |
 | P11 插件组件 | 实施中 | Markdown commands 与 Agent 的发现/版本绑定、真实子会话、窄文件工具、审批恢复、嵌套权限及脚本联网链路已上线；进阶 Agent 宿主字段、动态/分叉命令、必要 hooks/apps/extensions 目标协议适配仍待完成 |
 | P12 预算与计数 | 实施中 | 已修正累计次数、失败计数与恢复，工具调用不再由计划次数硬阻断；当前服务端资源预算待代表任务测量和全入口统一 |
-| P13 运行生命周期 | 实施中 | 执行恢复/清理、原授权关联、范围复查、计数及安装恢复已上线；本批补 MCP 跨入口去重和真实未知状态，原 RPC/输入快照连续性、MCP 重连及全生命周期验收未完成 |
+| P13 运行生命周期 | 实施中 | 执行恢复/清理、原授权关联、范围复查、计数、安装恢复与 MCP runner 重启后的原调用连续性已上线；API 进程退出后的待返回 RPC 关联及更广全生命周期验收仍待完成 |
 | P14 最终验证/部署 | 实施中 | 非生图阶段版本已部署并经健康/数据/真实容器门禁验证；剩余修复及客户端/真机验收未完成，真实生图按用户明确要求后置，不等待充值 |
 
 ## 首批改动
@@ -685,3 +685,25 @@ call, original process/input/file identity and final cleanup. That gate has not 
 passed CI or been deployed. Full scope remains open, including legacy file
 reconciliation, API-process pending-RPC correlation and remaining P11/P14 items.
 See docs/architecture/2026-10-29-mcp-runner-recovery.md for exact boundaries.
+
+## P07 runner recovery deployed; P11 skill preloads local
+
+Release 20261029-122110-3c1fbd6 is deployed and verified from main
+3c1fbd6d3347b9e78cbffe868de54518fc14d6a3. CI 40817105183/job 123260878932
+passes 387 Dart, 82 runner and 28 deployment checks, original pending SDK call
+recovery after real Docker SIGKILL/restart, unchanged process/input/artifact
+identity, one effect, existing stdio gates, resource cleanup and image roundtrip.
+The standard non-image controller exited 0; runtime/data/current health and the
+single latest-good restore point pass. Public HTTPS health is 200 through Cloud
+Assistant after the local TLS probe failed. Product/API remain
+2026-10-27-agent-tools-2/24. No client/device or paid-image success is claimed.
+
+The next local P11 implementation resolves declared Agent skills against the
+tenant catalog and pinned plugin siblings, injects full instructions/resources,
+and binds sources through child tool effects and approval resume. It retains
+parent tools and user-only rules. MCP control sends also recheck the existing
+authority zone before each attempt. Source-label edits do not change immutable
+skill identity. Focused checks pass; fixed-source acceptance and exact-commit
+CI/deployment remain pending. See
+docs/architecture/2026-10-29-agent-skill-preload.md. Other original P01–P14 work
+remains open; neither release closes the goal.

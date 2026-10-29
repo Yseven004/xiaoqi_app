@@ -7,6 +7,7 @@ import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/sandbox_mcp_transport.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
+import 'package:xiaoqi_genkit_server/src/tool_execution.dart';
 
 void main() {
   test(
@@ -56,9 +57,10 @@ void main() {
     },
   );
 
-  for (final rejected in [false, true]) {
+  for (final mode in ['success', 'rejected', 'revoked']) {
+    final rejected = mode != 'success';
     test(
-      'concurrent sends retain original bodies and order; rejection=$rejected',
+      'concurrent sends retain original bodies and order; mode=$mode',
       () async {
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final firstArrived = Completer<void>();
@@ -66,6 +68,7 @@ void main() {
         final stopped = Completer<void>();
         final bodies = <Map>[];
         final sequences = <String?>[];
+        var sourceEnabled = true;
         final serving = server.listen((request) async {
           Map<String, dynamic> result;
           if (request.method == 'POST' && request.uri.path == '/v1/mcp') {
@@ -83,7 +86,10 @@ void main() {
             if (bodies.length == 1) {
               firstArrived.complete();
               await release.future;
-              if (rejected) request.response.statusCode = 400;
+              if (rejected) {
+                request.response.statusCode = mode == 'revoked' ? 503 : 400;
+                if (mode == 'revoked') sourceEnabled = false;
+              }
             }
             result = {'ok': !rejected};
           } else if (request.method == 'DELETE') {
@@ -115,13 +121,18 @@ void main() {
             'method': 'tools/call',
             'params': {'text': 'original'},
           };
-          final first = transport.send(firstBody);
+          Future<void> send(Map<String, dynamic> message) =>
+              ToolExecution.withAuthorityCheck(() {
+                if (!sourceEnabled)
+                  throw StateError('Original plugin source disabled');
+              }, () => transport!.send(message));
+          final first = send(firstBody);
           // Attach rejection listeners before releasing the server response.
           final firstResult = rejected
               ? expectLater(first, throwsStateError)
               : first;
           await firstArrived.future.timeout(const Duration(seconds: 2));
-          final second = transport.send({
+          final second = send({
             'jsonrpc': '2.0',
             'id': 2,
             'method': 'tools/list',

@@ -5,6 +5,8 @@ import 'package:test/test.dart';
 void main() {
   for (final scenario in [
     'write',
+    'preload',
+    'preload-script-network',
     'nested',
     'plan',
     'approval',
@@ -18,6 +20,7 @@ void main() {
       'real runtime agent $scenario preserves task tools, budget and completion evidence',
       () async {
         var providerCalls = 0;
+        final scriptNetwork = scenario.endsWith('script-network');
         final childToolSets = <Set<String>>[];
         final mcp = const {
           'approval',
@@ -83,13 +86,32 @@ void main() {
           Map<String, dynamic> input = {};
           if (child) {
             childToolSets.add(tools);
-            if (scenario == 'script-network') {
+            if (scenario == 'preload' && !called('read_skill_resource')) {
+              expect(system, contains('FULL_PRELOADED_SKILL'));
+              expect(system, contains('references/note.md'));
+              tool = 'read_skill_resource';
+              input = {
+                'skill_id': RegExp(
+                  r'<agent_skill id="(skill-[a-f0-9]{24})">',
+                ).firstMatch(system)!.group(1),
+                'path': 'references/note.md',
+              };
+            } else if (scenario == 'preload' &&
+                !called('write_task_text_file')) {
+              expect(serialized, contains('PRELOADED_RESOURCE'));
+              tool = 'write_task_text_file';
+              input = {'path': 'report.txt', 'text': 'verified child output'};
+            } else if (scriptNetwork) {
               if (!called('execute_skill_script')) {
                 tool = 'execute_skill_script';
                 input = {
-                  'skill_id': RegExp(
-                    r'agent-[a-f0-9]{24}',
-                  ).firstMatch(system)!.group(0),
+                  'skill_id': scenario == 'preload-script-network'
+                      ? RegExp(
+                          r'<agent_skill id="(skill-[a-f0-9]{24})">',
+                        ).firstMatch(system)!.group(1)
+                      : RegExp(
+                          r'agent-[a-f0-9]{24}',
+                        ).firstMatch(system)!.group(0),
                   'script_path': 'scripts/check.py',
                   'language': 'python',
                   'arguments': [r'literal; $(not-a-host-command)'],
@@ -139,8 +161,7 @@ void main() {
                 'tools': [
                   {'name': 'run_plugin_agent', 'count': 1},
                 ],
-                'artifacts':
-                    scenario == 'plan' || mcp || scenario == 'script-network'
+                'artifacts': scenario == 'plan' || mcp || scriptNetwork
                     ? []
                     : [
                         {'media_type': 'text/plain', 'count': 1},
@@ -222,7 +243,7 @@ void main() {
           expect(value['provider_calls'], providerCalls);
           expect(childToolSets, isNotEmpty);
           for (final names in childToolSets) {
-            if (!mcp && scenario != 'script-network') {
+            if (!mcp && !scriptNetwork) {
               expect(names, isNot(contains('execute_shell')));
               expect(names, isNot(contains('execute_python')));
             }
@@ -230,7 +251,7 @@ void main() {
             if (scenario == 'plan')
               expect(names, isNot(contains('write_task_text_file')));
           }
-          if (scenario == 'script-network') {
+          if (scriptNetwork) {
             expect(value['before_approval'], 0);
             expect(value['script_runs'], 1);
             expect(value['network_grants'], isEmpty);

@@ -1,4 +1,4 @@
-# MCP runner recovery — implementation wired, Docker acceptance pending
+# MCP runner recovery — deployed and verified
 
 Problem: runner restart previously lost in-memory leases and removed their
 containers/workspaces. This batch retains the original process, private transport
@@ -71,6 +71,23 @@ and contrasts the previous failing defaults; the real gate inspects the Engine's
 recorded configuration before killing the runner. The active original-container
 reattach helper also has a real framed-socket test with durable historical stdout,
 the next request and pre-cleanup file checkpoint. Docker reacceptance is pending.
+
+CI 40817105183/job 123260878932 for main 3c1fbd6d3347b9e78cbffe868de54518fc14d6a3
+completed successfully: all 387 Dart, 82 runner and 28 deployment checks pass.
+The real MCP restart gate resumes the original pending SDK call with one effect,
+the original container/input snapshot and hash-verified artifact. Ordinary restart,
+the existing real stdio-runtime gate, resource cleanup and image export/import
+roundtrip also pass. The standard non-image production deployment is in progress;
+this CI evidence alone does not claim deployed effectiveness.
+
+Production release 20261029-122110-3c1fbd6 completed the standard non-image
+deployment with exit 0. Runtime checks, activation/data checks, current health,
+the latest-good emergency restore point and restore data passed. Public HTTPS
+health returned 200 through Cloud Assistant after the local Windows TLS probe
+failed. Product/API remain 2026-10-27-agent-tools-2/24. Deployment log:
+`C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261029-122110-3c1fbd6.log`.
+This does not claim client/device verification, legacy-file reconciliation or
+API-process pending-RPC correlation. The overall P01–P14 goal remains active.
 
 Real Docker gate added to the existing isolated CI flow: a Dart SDK call writes
 one counter, the host SIGKILL-restarts only the CI runner, then verifies the same

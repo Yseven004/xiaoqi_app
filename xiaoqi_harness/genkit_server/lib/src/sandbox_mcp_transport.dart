@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:genkit/genkit.dart';
 import 'package:genkit_mcp/genkit_mcp.dart';
+import 'tool_execution.dart';
 
 class _RunnerResponseError extends StateError {
   _RunnerResponseError(this.status)
@@ -163,6 +164,7 @@ class SandboxMcpTransport implements McpClientTransport {
       try {
         for (var attempt = 0; ; attempt++) {
           try {
+            ToolExecution.checkCurrentAuthority();
             await _request(
               'POST',
               '/v1/mcp/$_leaseId/messages',
