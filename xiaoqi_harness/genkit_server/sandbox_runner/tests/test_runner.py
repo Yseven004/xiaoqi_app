@@ -14,6 +14,32 @@ from stdio_channel import StdioChannel
 
 
 class RunnerValidationTests(unittest.TestCase):
+    def test_legacy_shebang_launchability_changes_only_task_source_modes(self):
+        script = b'#!/bin/sh\nprintf "%s" "$1"\n'
+        files = [('skill/scripts/legacy', script), ('materials/upload.sh', script),
+                 ('skill/node_modules/tool/cli', script), ('skill/.xiaoqi/python/bin/tool', script),
+                 ('skill/.git/hooks/post-checkout', script), ('skill/handbook/example.sh', script),
+                 ('skill/notes.txt', b'example\n#!/bin/sh\n')]
+        with tarfile.open(fileobj=io.BytesIO(server._make_archive(files))) as archive:
+            source = archive.getmember('skill/scripts/legacy')
+            self.assertEqual(source.mode, 0o755)
+            self.assertEqual((source.uid, source.gid), (10001, 10001))
+            self.assertEqual(archive.extractfile(source).read(), script)
+            for name, _ in files[1:]:
+                self.assertEqual(archive.getmember(name).mode, 0o644)
+        self.assertEqual(files[0][1], script)
+
+    def test_recorded_source_modes_remain_authoritative_over_legacy_inference(self):
+        script = b'#!/bin/sh\nexit 0\n'
+        files = [('skill/scripts/resource.sh', script), ('skill/scripts/declared', b'original binary bytes'),
+                 ('skill/.xiaoqi-source-executables.json', json.dumps({'schema': 1, 'executables': ['scripts/declared']}).encode())]
+        with tarfile.open(fileobj=io.BytesIO(server._make_archive(files))) as archive:
+            self.assertEqual(archive.getmember('skill/scripts/resource.sh').mode, 0o644)
+            self.assertEqual(archive.getmember('skill/scripts/declared').mode, 0o755)
+        files[-1] = ('skill/.xiaoqi-source-executables.json', b'{invalid')
+        with self.assertRaises(server.RequestError):
+            server._make_archive(files)
+
     def test_failed_script_preserves_validated_partial_artifacts_and_cleanup(self):
         client = Mock()
         volume = Mock()

@@ -1,4 +1,4 @@
-# P10 shared installation budget — local implementation, acceptance pending
+# P10 shared installation budget — deployed and verified
 
 Problem: dependency preparation shared the normal 120-second code limit while
 pip/npm phases had unrelated 30/40/60/85-second limits. Python followed by npm
@@ -53,3 +53,32 @@ References reviewed 2026-10-29:
 [Python subprocess timeouts](https://docs.python.org/3/library/subprocess.html#subprocess.run),
 [npm ci lifecycle configuration](https://docs.npmjs.com/cli/v11/commands/npm-ci/).
 No upstream implementation or new dependency is copied.
+
+Release evidence: main 3b0301d825545a08c5906a2d505ac18f6ab88a28, CI
+40823869686/job 123282307050 completed success with all 398 Dart, 84 runner and
+30 deployment checks passing. The real combined Python/npm build checkpoint ran
+at 05:45:49 UTC and the stdio gate completed at 05:48:35 UTC with
+combined_python_npm_build_over_script_deadline=true. Original MCP restart,
+ordinary deadlines, all other stdio cases, resource cleanup and image roundtrip
+also pass. Production release 20261029-134538-3b0301d completed the standard
+non-image deployment with exit 0. Runtime/data/current-health and latest-good
+restore checks pass; public HTTPS health is 200 through Cloud Assistant after
+local Windows TLS verification failed. Product/API remain
+2026-10-27-agent-tools-2/24. Log:
+`C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261029-134538-3b0301d.log`.
+
+The frozen-source release APK builds successfully (Gradle 533.6 seconds), with
+the same signing certificate as the previous client. Its three ABI binaries carry
+the expected product and public endpoint markers. Current delivery:
+`C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/client-current/app-release.apk`,
+369817076 bytes, SHA256
+1cfb9c52cbd1fc2bc5e509e178e8cb7a45be775a0d803d9426f7c7dff522ab01.
+Manifest and artifact hashes were checked after copying. Client/device visual and
+on-device behavior verification were not performed; those remain user-owned.
+
+A read-only post-release inventory examined all 14 stored package versions:
+three contain shebang scripts without recorded source execute modes, including
+one GitHub source with a recoverable revision and two with unknown origins. None
+is currently enabled. No package data was changed by the inventory. Historical
+task-copy compatibility remains outstanding rather than inventing lost metadata.
+See docs/architecture/evidence/2026-10-29-source-executable-inventory.json.

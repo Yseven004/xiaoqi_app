@@ -1,0 +1,24 @@
+{
+  "audit": "source-executable-inventory",
+  "release": "20261029-134538-3b0301d",
+  "invoke_id": "t-hk071h4dyh6ct1c",
+  "invocation_status": "Finished",
+  "exit_code": 0,
+  "read_only": true,
+  "complete": true,
+  "counts": {
+    "records_total": 10,
+    "records_active": 0,
+    "versions_total": 14,
+    "versions_audited": 14,
+    "versions_with_source_modes": 0,
+    "versions_without_source_modes": 14,
+    "potential_legacy_executable_versions": 3,
+    "active_potential_legacy_executable_versions": 0,
+    "potential_legacy_origin_github": 1,
+    "potential_legacy_origin_unknown": 2,
+    "potential_recoverable_github_versions": 1
+  },
+  "method": "Read-only SQLite snapshot and bounded ZIP metadata/shebang inspection; no package content, account names, credentials or source identifiers emitted.",
+  "limitation": "Missing mode records are not proof that original files were executable. This inventory does not reconstruct missing metadata or claim old packages were repaired."
+}

@@ -269,6 +269,22 @@ def _request_files(request: dict[str, Any]) -> tuple[list[tuple[str, bytes]], st
     return files, language, arguments, ([script_path] if script_path else [])
 
 
+def _legacy_source_script(name: str, data: bytes) -> bool:
+    if not name.startswith('skill/'):
+        return False
+    relative = name[len('skill/'):].split('/')
+    if any(part.startswith('.') or part == 'node_modules' for part in relative):
+        return False
+    if relative[0] not in {'scripts', 'bin', 'libexec', 'hooks'} and not (
+            len(relative) == 1 and PurePosixPath(relative[0]).suffix in {'.sh', '.bash', '.py', '.js', '.cjs', '.mjs', '.ts', '.mts'}):
+        return False
+    header = data[:512].split(b'\n', 1)[0]
+    if not header.startswith(b'#!') or len(header) >= 512 or b'\0' in header:
+        return False
+    interpreter = header[2:].split(None, 1)
+    return bool(interpreter and interpreter[0].startswith(b'/'))
+
+
 def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
     files = list(files)
     staged = dict(files)
@@ -290,6 +306,11 @@ def _make_archive(files: Iterable[tuple[str, bytes]]) -> bytes:
                 executable_files.add(name)
         except (ValueError, TypeError, AttributeError) as error:
             raise RequestError('依赖执行文件记录无效') from error
+    if 'skill/.xiaoqi-source-executables.json' not in staged:
+        # Old immutable packages lost archive mode bits. A declared shebang
+        # enables direct launch only in this authorized task copy; it is not a
+        # reconstruction of the original flags or a grant to execute a tool.
+        executable_files.update(name for name, data in files if _legacy_source_script(name, data))
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w") as archive:
         directories = {"materials", "skill", "skill/scripts", "output", "work", ".home", ".python"}

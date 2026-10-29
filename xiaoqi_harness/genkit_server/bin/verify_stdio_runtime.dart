@@ -10,6 +10,7 @@ import 'support/stdio_agent_gate.dart';
 import 'support/execution_recovery_gate.dart';
 import 'support/binary_artifact_gate.dart';
 import 'support/npm_build_gate.dart';
+import 'support/source_mode_gate.dart';
 import 'support/python_build_gate.dart';
 import 'support/network_lifecycle_gate.dart';
 import 'support/mcp_restart_gate.dart';
@@ -267,6 +268,7 @@ PY
     await verifyExecutionRecovery(store, directory, tenant);
     await verifyBinaryArtifacts(store, executor, tenant);
     await verifyNpmBuild(store, executor, tenant);
+    await verifyLegacySourceMode(store, executor, tenant);
     await verifyPythonBuild(store, executor, tenant);
     await verifyCombinedBuild(store, executor, tenant);
     await verifyNetworkLifecycle(store, executor, tenant);
@@ -300,6 +302,8 @@ PY
         'combined_python_npm_build_over_script_deadline': true,
         'python_built_skill_offline_delivery': true,
         'source_executable_permissions_roundtrip': true,
+        'legacy_source_script_direct_execution': true,
+        'legacy_source_archive_unchanged': true,
         'npm_cli_entrypoint_offline': true,
         'network_live_revocation_and_immediate_reauthorization': true,
         'network_delayed_off_preserves_reauthorization': true,
