@@ -62,6 +62,60 @@ print(json.dumps({"type":"result","ok":True,"stdout":"hello","stderr":"","artifa
   });
 
   test(
+    'large dependency archive remains private to source-bound installation',
+    () async {
+      final digest = 'a' * 64;
+      final installTask = 'install-$digest';
+      store.put('task/personal/$installTask', {
+        'status': 'preparing_dependencies',
+        'dependency_source_digest': digest,
+        'artifacts': [],
+        'events': [],
+      }, null);
+      worker.writeAsStringSync('''
+import base64,json,sys
+r=json.loads(sys.stdin.readline())
+data=base64.b64encode(b'x'*(11*1024*1024)).decode()
+print(json.dumps({'type':'result','ok':True,'stdout':'prepared','cleanup_pending':False,
+ 'artifacts':[{'name':'dependencies.zip','media_type':'application/zip','base64':data}]}), flush=True)
+''');
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await service.execute(
+        tenantId: 'personal',
+        taskId: installTask,
+        language: 'python',
+        code: 'pass',
+        authorizedDomains: [],
+        materials: [],
+        skillFiles: {},
+        cancellation: CancellationController().token,
+        profile: SandboxExecutionProfile.dependencyBuild,
+      );
+      final files =
+          store.get('task/personal/$installTask')!.value['artifacts'] as List;
+      expect(files.single['size'], 11 * 1024 * 1024);
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          language: 'python',
+          code: 'pass',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+        ),
+        throwsA(isA<SandboxExecutionError>()),
+      );
+      expect(store.get('task/personal/task-code')!.value['artifacts'], isEmpty);
+    },
+  );
+
+  test(
     'ordinary tasks cannot request the installer execution budget',
     () async {
       final service = DockerCodeExecutionService(

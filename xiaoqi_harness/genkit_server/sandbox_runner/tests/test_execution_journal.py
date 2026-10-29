@@ -199,7 +199,7 @@ class JournalTests(unittest.TestCase):
     def test_restart_preserves_hook_protocol_and_normal_output_limit(self):
         protocol = json.dumps({'xiaoqi_hook_command_v1': {
             'stdout': '\x00' * 120000, 'exit_code': 2}})
-        for profile in ('code', 'plugin_hook', 'plugin_hook_read_only'):
+        for profile in ('code', 'plugin_hook', 'plugin_hook_read_only', 'dependency_build'):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as root:
                 registry = Executions(db_path=str(Path(root) / 'journal.sqlite'))
                 request = self.request()
@@ -216,12 +216,14 @@ class JournalTests(unittest.TestCase):
                           patch.object(server, '_decode_logs', return_value=protocol)):
                         server._recover_interrupted_executions(client)
                     stdout = registry.read(request)['completion']['stdout']
-                    self.assertEqual(stdout, protocol if profile != 'code' else protocol[-40000:])
-                    if profile != 'code':
+                    self.assertEqual(stdout, protocol if profile in ('plugin_hook', 'plugin_hook_read_only') else protocol[-40000:])
+                    if profile in ('plugin_hook', 'plugin_hook_read_only'):
                         self.assertEqual(json.loads(stdout)['xiaoqi_hook_command_v1']['exit_code'], 2)
                     if profile == 'plugin_hook_read_only':
                         export.assert_not_called()
                         self.assertEqual(registry.read(request)['completion']['artifacts'], [])
+                    elif profile == 'dependency_build':
+                        export.assert_called_once_with(container, dependency_build=True)
                 finally:
                     registry.close()
 

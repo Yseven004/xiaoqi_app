@@ -14,6 +14,41 @@ from stdio_channel import StdioChannel
 
 
 class RunnerValidationTests(unittest.TestCase):
+    def test_installer_export_profile_is_carried_across_container_restart(self):
+        client, container, volume = Mock(), Mock(), Mock()
+        volume.name = 'installer-export-profile'
+        client.volumes.create.return_value = volume
+        client.containers.create.return_value = container
+        container.put_archive.return_value = True
+        container.attrs = {'State': {'Status': 'exited', 'Running': False, 'ExitCode': 0}}
+        with (patch.object(server, '_get_client', return_value=client),
+              patch.object(server, '_decode_logs', return_value=''),
+              patch.object(server, '_safe_artifacts', return_value=[]) as export):
+            server._run_sandbox({'task_id':'installer-profile', 'execution_id':'a'*32,
+                'execution_profile':'dependency_build', 'language':'python', 'code':'pass'}, Mock())
+            export.assert_called_once_with(container, dependency_build=True)
+        self.assertEqual(client.containers.create.call_args.kwargs['labels']['com.xiaoqi.execution-profile'], 'dependency_build')
+
+    def test_only_installer_dependency_archive_gets_twenty_mb_single_file_limit(self):
+        payload = b'x' * (11 * 1024 * 1024)
+        def container_for(name, data=payload):
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode='w') as archive:
+                entry = tarfile.TarInfo('output/' + name)
+                entry.size = len(data)
+                archive.addfile(entry, io.BytesIO(data))
+            container = Mock()
+            container.get_archive.return_value = ([stream.getvalue()], {})
+            return container
+        result = server._execution_artifacts(container_for('dependencies.zip'), 'dependency_build')
+        self.assertEqual(base64.b64decode(result[0]['base64']), payload)
+        for profile, name in [('code', 'dependencies.zip'), ('plugin_hook', 'dependencies.zip'),
+                              ('dependency_build', 'other.zip')]:
+            with self.subTest(profile=profile, name=name), self.assertRaises(server.RequestError):
+                server._execution_artifacts(container_for(name), profile)
+        with self.assertRaises(server.RequestError):
+            server._execution_artifacts(container_for('dependencies.zip', b'x' * (20 * 1024 * 1024 + 1)), 'dependency_build')
+
     def test_legacy_shebang_launchability_changes_only_task_source_modes(self):
         script = b'#!/bin/sh\nprintf "%s" "$1"\n'
         files = [('skill/scripts/legacy', script), ('materials/upload.sh', script),

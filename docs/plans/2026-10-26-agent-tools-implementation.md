@@ -1,5 +1,9 @@
 # Agent 工具全链路实施记录
 
+## 2026-10-30 P07 安装包与普通产物容量区分（修复中）
+
+main 196ad3e 的 CI 40971211637 已通过真实 Hook Agent 组合检查，新增官方 Python 时间 MCP 在依赖打包的 10 MB 限制处失败，未激活上线。只为绑定来源的 dependency_build 根目录 dependencies.zip 提供 20 MiB 单文件额度；普通文件 10 MiB、总输出 20 MiB、展开依赖 40 MiB、请求 100 MiB 不变。API 即时/恢复与 runner 即时/恢复一致校验；pip 不再预编译字节码缓存。实际 11 MiB 边界与普通任务拒绝检查已添加，完整本地回归和新 Docker 门禁分别记录，不能冒称上线。详见 `docs/architecture/2026-10-30-private-dependency-archive.md`。
+
 ## 2026-10-30 P11 只读子 Agent 的 command Hook（本地实现，待完整容器链路验收）
 
 取消匹配 Hook 时一律阻断只读子 Agent 的粗粒度限制，改为 plan 模式的私有临时计算配置：无联网、无文件导出，API 即时与恢复路径再次丢弃文件，保留原预算/时限/原事件防重放及原生工具权限。91 runner 检查通过；原生桥接断流后重开数据库验证 stdout 找回、文件不持久化且计数为一，middleware 十项通过。临时工作区可写，不冒称只读挂载；新增实际容器检查尚待运行，完整委派 Agent/容器组合仍待验证。详见 `docs/architecture/2026-10-30-read-only-plugin-hooks.md`。当前不变更正在部署的 main。

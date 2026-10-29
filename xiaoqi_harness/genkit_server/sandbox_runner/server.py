@@ -434,7 +434,7 @@ def _recover_interrupted_executions(client: docker.DockerClient) -> None:
                 continue
             try:
                 profile = container.labels.get('com.xiaoqi.execution-profile', 'code')
-                result['artifacts'] = [] if profile == 'plugin_hook_read_only' else _safe_artifacts(container)
+                result['artifacts'] = _execution_artifacts(container, profile)
                 result['stdout'] = _decode_logs(container, 'stdout')[-_stdout_limit({'execution_profile': profile}):]
                 result['stderr'] = _decode_logs(container, 'stderr')[-20000:]
                 result['sandbox_id'] = container.id
@@ -469,7 +469,15 @@ def _reconcile_restarted_cleanup(client: docker.DockerClient) -> None:
             _executions.cleaned(execution)
 
 
-def _safe_artifacts(container: Any) -> list[dict[str, str]]:
+def _execution_artifacts(container: Any, profile: str) -> list[dict[str, str]]:
+    if profile == 'plugin_hook_read_only':
+        return []
+    if profile == 'dependency_build':
+        return _safe_artifacts(container, dependency_build=True)
+    return _safe_artifacts(container)
+
+
+def _safe_artifacts(container: Any, *, dependency_build: bool = False) -> list[dict[str, str]]:
     try:
         stream, _stat = container.get_archive("/workspace/output")
     except NotFound:
@@ -488,14 +496,15 @@ def _safe_artifacts(container: Any) -> list[dict[str, str]]:
             relative = entry.name.removeprefix("output/").lstrip("/")
             if not relative or relative.startswith("../") or "/../" in relative:
                 continue
-            if entry.size > MAX_ARTIFACT_BYTES:
-                raise RequestError("单个任务产物超过 10 MB")
+            maximum = MAX_ARTIFACT_TOTAL_BYTES if dependency_build and relative == 'dependencies.zip' else MAX_ARTIFACT_BYTES
+            if entry.size > maximum:
+                raise RequestError(f"单个任务产物超过 {maximum // (1024 * 1024)} MB")
             source = archive.extractfile(entry)
             if source is None:
                 continue
-            data = source.read(MAX_ARTIFACT_BYTES + 1)
-            if len(data) > MAX_ARTIFACT_BYTES:
-                raise RequestError("单个任务产物超过 10 MB")
+            data = source.read(maximum + 1)
+            if len(data) > maximum:
+                raise RequestError(f"单个任务产物超过 {maximum // (1024 * 1024)} MB")
             total += len(data)
             if total > MAX_ARTIFACT_TOTAL_BYTES:
                 raise RequestError("任务产物总大小超过 20 MB")
@@ -588,7 +597,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
     if stdio is not None and stdio.lease_id:
         labels.update({'com.xiaoqi.mcp-lease': stdio.lease_id,
                        'com.xiaoqi.mcp-fingerprint': stdio.fingerprint})
-    if request.get('execution_profile') in {'plugin_hook', 'plugin_hook_read_only'}:
+    if request.get('execution_profile') in {'plugin_hook', 'plugin_hook_read_only', 'dependency_build'}:
         labels['com.xiaoqi.execution-profile'] = request['execution_profile']
     if stdio is None and isinstance(request.get('execution_id'), str) and re.fullmatch(r'[a-f0-9]{32}', request['execution_id']):
         labels['com.xiaoqi.execution-id'] = request['execution_id']
@@ -752,7 +761,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             pass
         # Failed and timed-out scripts may already have produced useful files.
         # Export only through the same bounded path/size validator as success.
-        artifacts = [] if request.get('execution_profile') == 'plugin_hook_read_only' else _safe_artifacts(container)
+        artifacts = _execution_artifacts(container, request.get('execution_profile', 'code'))
         process_finished = True
     except (RequestError, DockerException, RuntimeError, OSError) as error:
         # Preserve the cleanup outcome even when preparation or export failed.

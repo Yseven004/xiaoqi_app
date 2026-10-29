@@ -96,7 +96,7 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
             requested += ['-r', str(source / 'requirements.txt')]
         requested += [str(python_project)] if python_project is not None else requirements
         run_dependency_command(['python3', '-m', 'pip', 'install', '--disable-pip-version-check',
-                        '--no-input', '--only-binary=:all:', '--ignore-installed', '--use-pep517',
+                        '--no-input', '--no-compile', '--only-binary=:all:', '--ignore-installed', '--use-pep517',
                         '--index-url', 'https://pypi.org/simple', '--report', str(root / 'pip.json'),
                         '--target', str(root / 'python'), *requested])
         for item in json.loads((root / 'pip.json').read_text())['install']:
@@ -191,6 +191,6 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
                     executable_files.append(relative.as_posix())
         lock['executables'] = sorted(executable_files)
         archive.writestr('.xiaoqi/dependency-lock.json', json.dumps(lock))
-    if output.stat().st_size > 10 * 1024 * 1024:
-        raise ValueError('Dependency archive exceeds 10 MB')
+    if output.stat().st_size > 20 * 1024 * 1024:
+        raise ValueError('Dependency archive exceeds 20 MB')
     print('Dependencies prepared: ' + hashlib.sha256(output.read_bytes()).hexdigest())

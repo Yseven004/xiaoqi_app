@@ -700,6 +700,7 @@ class DockerCodeExecutionService {
             ? const []
             : result['artifacts'],
         operationId: executionId,
+        dependencyBuild: profile == SandboxExecutionProfile.dependencyBuild,
       );
       _storeExecutionOutput(
         tenantId,
@@ -1139,6 +1140,9 @@ class DockerCodeExecutionService {
             ? const []
             : result['artifacts'],
         operationId: entry.key as String,
+        dependencyBuild:
+            operation['execution_profile'] ==
+            SandboxExecutionProfile.dependencyBuild.wireName,
       );
       _recordExecution(tenantId, taskId, entry.key as String, {
         'cleanup_pending': result['cleanup_pending'] == true,
@@ -1305,6 +1309,7 @@ class DockerCodeExecutionService {
     String taskId,
     Object? rawArtifacts, {
     String? operationId,
+    bool dependencyBuild = false,
   }) async {
     if (rawArtifacts is! List || rawArtifacts.isEmpty) return const [];
     if (rawArtifacts.length > 10) throw StateError('任务最多可返回 10 个产物');
@@ -1315,8 +1320,11 @@ class DockerCodeExecutionService {
       final name = _safeArtifactName(rawName);
       final encoded = raw['base64']?.toString() ?? '';
       final bytes = base64Decode(encoded);
-      if (bytes.length > 10 * 1024 * 1024) {
-        throw StateError('产物 $name 超过 10 MB');
+      final maximum = dependencyBuild && name == 'dependencies.zip'
+          ? 20 * 1024 * 1024
+          : 10 * 1024 * 1024;
+      if (bytes.length > maximum) {
+        throw StateError('产物 $name 超过 ${maximum ~/ (1024 * 1024)} MB');
       }
       total += bytes.length;
       if (total > 20 * 1024 * 1024) {
