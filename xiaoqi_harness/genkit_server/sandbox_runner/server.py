@@ -618,6 +618,9 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
             name=f"xq-code-{suffix}",
             command=command if command is not None else _command(language, arguments, script_paths),
             stdin_open=stdio is not None,
+            # docker-py otherwise sets StdinOnce=True for interactive create:
+            # losing the first attach permanently closes the plugin's stdin.
+            detach=stdio is not None,
             working_dir="/workspace/skill" if script_paths else "/workspace/work",
             environment=environment,
             user="10001:10001",

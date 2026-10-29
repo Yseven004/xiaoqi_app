@@ -139,7 +139,10 @@ def verify_mcp_restart(runner, info):
                     '--filter', 'label=com.xiaoqi.role=mcp-server'], text=True, timeout=10).split()
                 if len(ids) != 1:
                     raise RuntimeError('Original MCP process was not uniquely identified')
-                original = json.loads(subprocess.check_output(['docker', 'inspect', ids[0]], text=True, timeout=10))[0]['Id']
+                initial = json.loads(subprocess.check_output(['docker', 'inspect', ids[0]], text=True, timeout=10))[0]
+                if not initial['Config']['OpenStdin'] or initial['Config']['StdinOnce']:
+                    raise RuntimeError('Original MCP stdin is not configured for reattachment')
+                original = initial['Id']
                 restart(runner)
                 restored = json.loads(subprocess.check_output(['docker', 'inspect', original], text=True, timeout=10))[0]
                 if restored['Id'] != original or not restored['State']['Running']:

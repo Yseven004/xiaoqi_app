@@ -61,6 +61,17 @@ frames omit exception text/arguments/environment. Restart verification runs befo
 the longer unchanged standard stdio gate, so a failure is diagnosed earlier; every
 existing gate and resource-leak check remains required. Production is unchanged.
 
+Root cause identified from the installed docker-py ContainerConfig encoder:
+`stdin_open=True` with its default `detach=False` serializes `StdinOnce=True`.
+Disconnecting the first runner attach therefore closes the original plugin stdin;
+a delayed response can keep its process briefly alive while the input is already
+lost. MCP create now sets `detach=True` with `stdin_open=True`, producing
+`OpenStdin=True, StdinOnce=False`. A test exercises the actual docker-py encoder
+and contrasts the previous failing defaults; the real gate inspects the Engine's
+recorded configuration before killing the runner. The active original-container
+reattach helper also has a real framed-socket test with durable historical stdout,
+the next request and pre-cleanup file checkpoint. Docker reacceptance is pending.
+
 Real Docker gate added to the existing isolated CI flow: a Dart SDK call writes
 one counter, the host SIGKILL-restarts only the CI runner, then verifies the same
 container/process boot identity, original input/source hash, original pending RPC,

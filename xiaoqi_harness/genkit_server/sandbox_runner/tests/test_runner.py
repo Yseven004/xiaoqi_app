@@ -7,6 +7,7 @@ import socket
 import tarfile
 import unittest
 from unittest.mock import Mock, patch
+from docker.types import ContainerConfig
 
 import server
 from stdio_channel import StdioChannel
@@ -70,6 +71,13 @@ class RunnerValidationTests(unittest.TestCase):
         options = client.containers.create.call_args.kwargs
         self.assertEqual(options['command'], argv)
         self.assertTrue(options['stdin_open'])
+        # Assert docker-py's actual Engine API encoding, not only our kwargs.
+        config = ContainerConfig(version='1.45', image='fixture', command=argv,
+                                 stdin_open=options['stdin_open'], detach=options['detach'])
+        self.assertTrue(config['OpenStdin'])
+        self.assertFalse(config['StdinOnce'])
+        original_default = ContainerConfig(version='1.45', image='fixture', command=argv, stdin_open=True)
+        self.assertTrue(original_default['StdinOnce'])
         self.assertEqual(options['network'], 'none')
         self.assertEqual(options['mem_limit'], '256m')
         self.assertEqual(options['user'], '10001:10001')

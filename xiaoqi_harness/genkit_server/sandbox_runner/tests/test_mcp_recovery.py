@@ -1,9 +1,16 @@
 from types import SimpleNamespace
+import hashlib
+import json
+import socket
+import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import Mock
 
-from mcp_journal import McpJournalError
+from mcp_journal import McpJournal, McpJournalError
 from mcp_recovery import resume_mcp
+from stdio_channel import StdioChannel
 
 
 class McpRecoveryTests(unittest.TestCase):
@@ -102,6 +109,49 @@ class McpRecoveryTests(unittest.TestCase):
         self.container.kill.assert_not_called()
         self.container.remove.assert_not_called()
         self.read.assert_not_called()
+
+    def test_running_original_reattaches_verified_history_and_accepts_the_next_request(self):
+        with tempfile.TemporaryDirectory() as root:
+            journal = McpJournal(root + '/mcp.sqlite')
+            lease_id = self.state['lease_id']
+            journal.create(lease_id, task_id=self.state['task_id'], token_hash='b' * 64,
+                           fingerprint=self.state['fingerprint'], issued_at=int(time.time()), now=time.time())
+            prior = {'jsonrpc': '2.0', 'id': 1, 'result': {}}
+            wire = json.dumps(prior).encode() + b'\n'
+            journal.receive(lease_id, prior, len(wire), hashlib.sha256(wire).hexdigest())
+            batch = journal.poll(lease_id, 0, timeout=0)
+            channel = StdioChannel(journal, lease_id)
+            channel.checkpoint = lambda result: journal.patch(lease_id, phase='finishing', result=result)
+            client, peer = socket.socketpair()
+            peer.settimeout(2)
+            attached = SimpleNamespace(_sock=client, close=client.close)
+            self.container.attach_socket.return_value = attached
+            results = []
+            thread = threading.Thread(target=lambda: results.append(resume_mcp(
+                self.client, self.state, Mock(), channel, owner=self.owner,
+                sandbox_image='fixture-image', read_artifacts=self.read)), daemon=True)
+            thread.start()
+            try:
+                peer.sendall(b'\x01\0\0\0' + len(wire).to_bytes(4, 'big') + wire)
+                self.assertTrue(channel._replay_verified.wait(2))
+                request = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'}
+                channel.send(request, sequence=1)
+                self.assertEqual(json.loads(peer.recv(4096)), request)
+                reply = {'jsonrpc': '2.0', 'id': 2, 'result': {'tools': []}}
+                payload = json.dumps(reply).encode() + b'\n'
+                peer.sendall(b'\x01\0\0\0' + len(payload).to_bytes(4, 'big') + payload)
+                self.assertEqual(journal.poll(lease_id, batch['cursor'], timeout=2)['messages'], [reply])
+                self.container.start.assert_not_called()
+                self.container.kill.assert_not_called()
+            finally:
+                channel.close()
+                thread.join(3)
+                peer.close()
+                journal.close()
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(results[0]['artifacts'], self.files)
+            self.container.attach_socket.assert_called_once_with(params={
+                'stdin': True, 'stdout': True, 'stderr': True, 'stream': True, 'logs': True})
 
 
 if __name__ == '__main__':
