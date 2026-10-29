@@ -23,3 +23,19 @@ can be considered released. Existing source-mode and long-build gates remain.
 
 Rollback uses the standard deployment restore point. There is no stored-data or
 client API change. Remaining P01–P14 work is not closed by this batch.
+
+Released: main 3c9ead85aef8b60269395be60490a343b415205a, exact-commit CI
+40831672535/job 123307075362 succeeds. All 398 Dart, 86 runner and 30
+deployment tests pass. The real container gate reports both
+legacy_source_script_direct_execution and legacy_source_archive_unchanged true;
+previous source-mode, long-build, MCP restart and stdio gates remain green.
+SANDBOX_RESOURCES_CLEAN and IMAGE_ROUNDTRIP_VERIFIED are present.
+
+Standard non-image deployment exits 0 for release
+20261029-145118-3c9ead8. Runtime/data checks, healthy current service, one
+latest-good restore point with data and public HTTPS 200 through Cloud Assistant
+pass. Local Windows public TLS checking failed, so that public check used the
+same endpoint from Cloud Assistant. Product/API stay 2026-10-27-agent-tools-2/24.
+Log: C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261029-145118-3c9ead8.log.
+This server-only fix does not require another client build; device verification
+is not claimed. No image provider was called.

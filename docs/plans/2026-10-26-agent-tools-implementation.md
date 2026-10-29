@@ -81,7 +81,7 @@ GitHub 构建状态 GET 遇到短暂传输/超时/特定临时服务错误时最
 | P07 stdio MCP | 实施中 | runner 重启后的原容器、原 RPC、输入快照恢复、去重和文件保全已上线，真实重启与资源清理验收通过；旧版无绑定工作区文件取回及目标 ECS 资源测量仍待完成 |
 | P08 Shell | 实施中 | 通用 Shell、已安装脚本、字面 argv 与 MCP 文件接力均已验证；Docker 后台子进程资源清理通过；目标 ECS 资源及客户端验收待完成 |
 | P09 现有宿主能力适配 | 实施中 | 用户已撤回通用电脑/手机控制及硬件采购；技能/插件版本及文件局部不可用已通过真实 Agent 循环，健康组件继续交付；已有宿主映射和更广依赖状态验收仍待完成 |
-| P10 导入/安装/构建 | 实施中 | npm/Python 构建、离线交付、执行位、Node CLI、原安装结果恢复及较长组合构建已上线；历史包启动兼容仍待完成，全部 14 个旧版本已只读核对，目前均未启用 |
+| P10 导入/安装/构建 | 实施中 | npm/Python 构建、离线交付、执行位、Node CLI、原安装结果恢复及较长组合构建已上线；历史包脚本任务副本启动兼容已通过真实容器验收并部署，原归档不变；无法恢复的原始模式不虚构，全计划组合验收仍待完成 |
 | P11 插件组件 | 实施中 | Markdown commands 与 Agent 的发现/版本绑定、真实子会话、窄文件工具、审批恢复、嵌套权限、技能预加载及脚本联网链路已上线；其他进阶宿主字段、动态/分叉命令、必要 hooks/apps/extensions 目标协议适配仍待完成 |
 | P12 预算与计数 | 实施中 | 已修正累计次数、失败计数与恢复，工具调用不再由计划次数硬阻断；当前服务端资源预算待代表任务测量和全入口统一 |
 | P13 运行生命周期 | 实施中 | 执行恢复/清理、原授权关联、范围复查、计数、安装恢复与 MCP runner 重启后的原调用连续性已上线；API 进程退出后的待返回 RPC 关联及更广全生命周期验收仍待完成 |
@@ -741,3 +741,14 @@ checks passing. Recorded modes remain authoritative and immutable packages are
 unchanged. The real-container direct-launch/hash gate is wired into standard CI;
 its execution and release are pending. See
 docs/architecture/2026-10-29-legacy-source-launch.md.
+
+P10 legacy-source release 20261029-145118-3c9ead8 is now deployed and verified.
+Main 3c9ead85aef8b60269395be60490a343b415205a; exact-commit CI
+40831672535/job 123307075362 passes all 398 Dart, 86 runner and 30 deployment
+checks. Real direct execution and unchanged immutable archive checks pass,
+alongside existing gates, clean resources and image roundtrip. Standard non-image
+deployment exits 0 with runtime/data/restore-point verification and public HTTPS
+200 via Cloud Assistant; API/product remain 24/2026-10-27-agent-tools-2.
+This batch changes no client contract. Remaining concrete adapter and API-restart
+acceptance gaps are recorded in
+docs/architecture/2026-10-29-remaining-plugin-evidence.md; they remain open.
