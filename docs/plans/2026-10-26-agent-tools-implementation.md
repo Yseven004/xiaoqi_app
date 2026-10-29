@@ -780,3 +780,11 @@ host requirements remain independent. All 17 policy/runtime regressions pass,
 including an original MCP approval/resume with no duplicate effect. Source and
 scope: docs/architecture/2026-10-29-plugin-agent-ignored-fields.md. Deployment and
 remaining full-plan work are still pending.
+
+Mixed file/inline plugin MCP arrays now preserve valid inline definitions and
+declared override order, including repeated file maps. All 16 capability-chain/
+isolated-spec checks and full analysis pass. An additional real Agent/Docker
+mixed-declaration loop is wired alongside the unchanged original case; its CI
+execution and deployment are pending. See
+docs/architecture/2026-10-29-mixed-mcp-declarations.md. This does not close root
+hooks/apps/extensions or the remaining complete-plan requirements.

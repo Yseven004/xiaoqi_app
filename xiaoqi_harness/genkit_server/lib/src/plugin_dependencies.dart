@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:collection';
 import 'package:crypto/crypto.dart';
 
 import 'mcp_connection_service.dart';
@@ -15,39 +16,63 @@ class PluginDependencies {
 
   static Map<String, dynamic> declarations(Map<String, List<int>> files) {
     final result = <String, dynamic>{};
-    final pending = [
+    final pending = Queue<Object>.of([
       '.mcp.json',
       'mcp.json',
       'plugin.json',
       '.claude-plugin/plugin.json',
       '.codex-plugin/plugin.json',
-    ];
+    ]);
     final visited = <String>{};
+    final loadedMaps = <String, Map<String, dynamic>>{};
     while (pending.isNotEmpty && visited.length < 16) {
-      final path = pending.removeAt(0).replaceFirst(RegExp(r'^\./'), '');
+      final declaration = pending.removeFirst();
+      if (declaration is Map) {
+        result.addAll(Map<String, dynamic>.from(declaration));
+        continue;
+      }
+      if (declaration is! String) throw const FormatException('插件连接声明格式无效');
+      final path = declaration.replaceFirst(RegExp(r'^\./'), '');
       if (path.startsWith('/') ||
           path.contains('\\') ||
           path.split('/').any((part) => part == '..' || part == '.')) {
         throw const FormatException('插件连接配置路径越界');
       }
-      if (!visited.add(path) || !files.containsKey(path)) continue;
+      if (!visited.add(path)) {
+        // Repeated file references still participate in override order, without
+        // rereading files or recursively expanding a reference cycle.
+        if (loadedMaps[path] != null) result.addAll(loadedMaps[path]!);
+        continue;
+      }
+      if (!files.containsKey(path)) continue;
       final config = jsonDecode(utf8.decode(files[path]!));
       if (config is! Map) continue;
       final servers = config['mcpServers'] ?? config['servers'];
       if (servers is Map) {
-        result.addAll(Map<String, dynamic>.from(servers));
+        loadedMaps[path] = Map<String, dynamic>.from(servers);
+        result.addAll(loadedMaps[path]!);
       } else if (servers is String) {
-        pending.add(servers);
+        pending.addFirst(servers);
       } else if (servers is List) {
-        pending.addAll(servers.whereType<String>());
+        // Load in declaration order, including inline definitions. Queuing the
+        // maps as well as paths preserves the source's last-definition wins.
+        for (final entry in servers.reversed) {
+          if (entry is! String && entry is! Map) {
+            continue; // Invalid entries never become connections or hide siblings.
+          }
+          pending.addFirst(entry as Object);
+        }
       } else if (!path.endsWith('plugin.json')) {
+        final direct = <String, dynamic>{};
         for (final entry in config.entries) {
           if (entry.value is Map &&
               ((entry.value as Map)['url'] != null ||
                   (entry.value as Map)['command'] != null)) {
-            result[entry.key.toString()] = entry.value;
+            direct[entry.key.toString()] = entry.value;
           }
         }
+        loadedMaps[path] = direct;
+        result.addAll(direct);
       }
     }
     return result;

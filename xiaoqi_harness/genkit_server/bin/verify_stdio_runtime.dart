@@ -271,6 +271,13 @@ PY
       throw StateError('Cancelled execution cleanup was not confirmed');
     }
     await verifyStdioAgent(store, executor, tenant, files);
+    await verifyStdioAgent(
+      store,
+      executor,
+      '$tenant-mixed',
+      files,
+      mixedDeclarations: true,
+    );
     await verifyExecutionRecovery(store, directory, tenant);
     await verifyBinaryArtifacts(store, executor, tenant);
     await verifyNpmBuild(store, executor, tenant);
@@ -295,6 +302,7 @@ PY
         'agent_mcp_shell_loop': true,
         'explicit_skill_mcp_shell_loop': true,
         'plugin_command_script_loop': true,
+        'plugin_mixed_mcp_declarations_agent_loop': true,
         'failed_script_partial_artifacts': true,
         'running_code_cancel_cleanup': true,
         'disconnected_code_result_recovery': true,

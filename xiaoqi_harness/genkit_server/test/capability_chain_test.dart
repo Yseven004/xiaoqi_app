@@ -220,6 +220,123 @@ void main() {
   });
 
   test(
+    'a repeated MCP file wins at its declared position and invalid values do not hide siblings',
+    () {
+      final files = <String, List<int>>{
+        '.mcp.json': utf8.encode(
+          '{"mcpServers":{"shared":{"url":"https://example.com/file"}}}',
+        ),
+        '.claude-plugin/plugin.json': utf8.encode(
+          jsonEncode({
+            'name': 'ordered',
+            'mcpServers': [
+              {
+                'shared': {'url': 'https://example.com/inline'},
+              },
+              42,
+              './.mcp.json',
+              {
+                'additional': {
+                  'command': 'node',
+                  'args': ['server.js'],
+                },
+              },
+            ],
+          }),
+        ),
+      };
+      final declarations = PluginDependencies.declarations(files);
+      expect(declarations['shared']['url'], 'https://example.com/file');
+      expect(declarations.keys, {'shared', 'additional'});
+    },
+  );
+
+  test(
+    'mixed file and inline MCP declarations preserve order, import and tenant binding',
+    () {
+      final files = <String, List<int>>{
+        '.claude-plugin/plugin.json': utf8.encode(
+          jsonEncode({
+            'name': 'mixed',
+            'mcpServers': [
+              './config/mcp.json',
+              {
+                'shared': {
+                  'command': 'node',
+                  'args': ['/workspace/skill/new.mjs'],
+                },
+                'remote': {'url': 'https://example.com/mcp'},
+              },
+              './config/last.json',
+            ],
+          }),
+        ),
+        'config/mcp.json': utf8.encode(
+          jsonEncode({
+            'mcpServers': {
+              'shared': {
+                'command': 'node',
+                'args': ['/workspace/skill/old.mjs'],
+              },
+              'file-only': {
+                'command': 'node',
+                'args': ['/workspace/skill/file.mjs'],
+              },
+            },
+          }),
+        ),
+        'config/last.json': utf8.encode(
+          jsonEncode({
+            'mcpServers': {
+              'remote': {'url': 'https://example.com/final'},
+            },
+          }),
+        ),
+        'new.mjs': utf8.encode('// source fixture'),
+        'file.mjs': utf8.encode('// source fixture'),
+      };
+      final declarations = PluginDependencies.declarations(files);
+      expect(declarations.keys, {'shared', 'file-only', 'remote'});
+      expect(declarations['shared']['args'], ['/workspace/skill/new.mjs']);
+      expect(declarations['remote']['url'], 'https://example.com/final');
+      final candidate = CapabilityImportService.discover(files, '').single;
+      expect(
+        (candidate['components'] as List).whereType<Map>().where(
+          (c) => c['type'] == 'mcp',
+        ),
+        hasLength(3),
+      );
+      store.putImmutable('packages/mixed', files);
+      store.put('cap/alice/notes', {
+        'id': 'notes',
+        'kind': 'plugin',
+        'name': 'Mixed',
+        'enabled': true,
+        'versions': [
+          {'id': 'v1', 'artifact_key': 'packages/mixed'},
+        ],
+      }, null);
+      store.put('mcp/bob/other', {
+        'id': 'other',
+        'url': 'https://example.com/final',
+      }, null);
+      final unbound = PluginDependencies.resolve(store, 'alice', [selection]);
+      expect(unbound.isolatedConnections, hasLength(2));
+      expect(unbound.connectionIds, isEmpty);
+      store.put('mcp/alice/own', {
+        'id': 'own',
+        'url': 'https://example.com/final',
+      }, null);
+      final bound = PluginDependencies.resolve(store, 'alice', [selection]);
+      expect(bound.connectionIds, {'own'});
+      expect(
+        bound.isolatedConnections.map((c) => c.isolated!.command.last),
+        containsAll(['/workspace/skill/new.mjs', '/workspace/skill/file.mjs']),
+      );
+    },
+  );
+
+  test(
     'MCP business error remains failed through public process projection',
     () {
       final normalized = McpToolResultAdapter(store, 'alice', 'turn').normalize(

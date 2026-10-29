@@ -13,8 +13,9 @@ Future<void> verifyStdioAgent(
   CloudStore store,
   DockerCodeExecutionService executor,
   String tenant,
-  Map<String, List<int>> installedFiles,
-) async {
+  Map<String, List<int>> installedFiles, {
+  bool mixedDeclarations = false,
+}) async {
   const task = 'agent-mcp-shell';
   const text = '使用文件插件写入文件，运行 Shell 核对，再调用插件命令脚本生成结果文件。';
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 40443);
@@ -176,7 +177,16 @@ printf '%s' "$1" > /workspace/output/agent-helper.txt
       await request.response.close();
     }
   });
-  store.putImmutable('verification/stdio-plugin', {
+  final package =
+      'verification/stdio-plugin${mixedDeclarations ? '-mixed' : ''}';
+  final serverConfig = {
+    'command': 'npx',
+    'args': [
+      '@modelcontextprotocol/server-filesystem@2.0.1',
+      '/workspace/output',
+    ],
+  };
+  store.putImmutable(package, {
     ...installedFiles,
     'commands/verify.md': utf8.encode(
       '---\ndescription: Verify a literal command script handoff\n---\nRun scripts/verify-command.py using execute_skill_script. \$ARGUMENTS',
@@ -191,17 +201,30 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
     ),
     '.mcp.json': utf8.encode(
       jsonEncode({
-        'mcpServers': {
-          'filesystem': {
-            'command': 'npx',
-            'args': [
-              '@modelcontextprotocol/server-filesystem@2.0.1',
-              '/workspace/output',
-            ],
-          },
-        },
+        'mcpServers': mixedDeclarations ? {} : {'filesystem': serverConfig},
       }),
     ),
+    if (mixedDeclarations)
+      '.claude-plugin/plugin.json': utf8.encode(
+        jsonEncode({
+          'name': 'mixed-filesystem',
+          'mcpServers': [
+            './config/first.json',
+            {'filesystem': serverConfig},
+          ],
+        }),
+      ),
+    if (mixedDeclarations)
+      'config/first.json': utf8.encode(
+        jsonEncode({
+          'mcpServers': {
+            'filesystem': {
+              'command': 'node',
+              'args': ['/workspace/skill/never-start.mjs'],
+            },
+          },
+        }),
+      ),
   });
   store.put('cap/$tenant/filesystem', {
     'id': 'filesystem',
@@ -224,7 +247,7 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
     'versions': [
       {
         'id': 'v1',
-        'artifact_key': 'verification/stdio-plugin',
+        'artifact_key': package,
         'components': [
           {
             'id': 'command',
