@@ -14,6 +14,7 @@ import 'mcp_rpc_journal.dart';
 
 enum SandboxExecutionProfile {
   code('code', 120),
+  pluginHook('plugin_hook', 120),
   dependencyBuild('dependency_build', 600);
 
   const SandboxExecutionProfile(this.wireName, this.runSeconds);
@@ -484,6 +485,10 @@ class DockerCodeExecutionService {
           preparation?['status'] != 'preparing_dependencies' ||
           preparation?['dependency_source_digest'] != taskId.substring(8))
         throw StateError('依赖构建必须绑定原始安装准备记录');
+    }
+    if (profile == SandboxExecutionProfile.pluginHook &&
+        (language != 'javascript' || scriptPath != null)) {
+      throw StateError('hook 协议通道只接受宿主生成的 JavaScript 启动器');
     }
     if (scriptPath == null &&
         (code.trim().isEmpty || utf8.encode(code).length > 64 * 1024)) {

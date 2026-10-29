@@ -529,13 +529,23 @@ def _decode_logs(container: Any, stream: str) -> str:
 
 def _execution_run_seconds(request: dict[str, Any], stdio: StdioChannel | None = None) -> int:
     profile = request.get('execution_profile', 'code')
-    if not isinstance(profile, str) or profile not in {'code', 'dependency_build'}:
+    if not isinstance(profile, str) or profile not in {'code', 'dependency_build', 'plugin_hook'}:
         raise RequestError('Invalid sandbox execution profile')
     if profile == 'dependency_build':
         if stdio is not None or request.get('language') != 'python' or 'script_path' in request or 'command' in request:
             raise RequestError('Dependency build profile requires the trusted Python installer')
         return MAX_BUILD_SECONDS
+    if profile == 'plugin_hook' and (stdio is not None or request.get('language') != 'javascript'
+            or 'script_path' in request or 'command' in request):
+        raise RequestError('Plugin hook profile requires the host JavaScript launcher')
     return MAX_RUN_SECONDS
+
+
+def _stdout_limit(request: dict[str, Any]) -> int:
+    # A hook envelope can contain 128 KiB of child data escaped up to six times.
+    # Do not slice a valid JSON verdict into an invalid tail. Both the Docker
+    # log decoder and the private response remain bounded to the existing MiB.
+    return MAX_LOG_BYTES if request.get('execution_profile') == 'plugin_hook' else 40000
 
 
 def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None, cancellation: threading.Event | None = None, checkpoint: Any = None) -> dict[str, Any]:
@@ -760,7 +770,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
                     except NotFound:
                         pass
                     artifacts = _safe_artifacts(container)
-                checkpoint({'type': 'result', **({'execution_id': request['execution_id']} if stdio is None else {}), 'ok': process_finished and run_error is None, 'stdout': stdout[-40000:], 'stderr': stderr[-20000:], 'error': run_error if process_finished or run_error else 'Execution outcome is unknown', 'artifacts': artifacts, 'cleanup_pending': True, 'sandbox_id': sandbox_id})
+                checkpoint({'type': 'result', **({'execution_id': request['execution_id']} if stdio is None else {}), 'ok': process_finished and run_error is None, 'stdout': stdout[-_stdout_limit(request):], 'stderr': stderr[-20000:], 'error': run_error if process_finished or run_error else 'Execution outcome is unknown', 'artifacts': artifacts, 'cleanup_pending': True, 'sandbox_id': sandbox_id})
             except Exception:
                 if stdio is not None:
                     stdio.preserve_recovery = True
@@ -802,7 +812,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
     return {
         "type": "result",
         "ok": run_error is None,
-        "stdout": stdout[-40000:],
+        "stdout": stdout[-_stdout_limit(request):],
         "stderr": stderr[-20000:],
         "error": run_error,
         "artifacts": artifacts,

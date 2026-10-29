@@ -845,3 +845,15 @@ exit 1. The exact hook failure cause is not yet established; bounded diagnostics
 and literal-selector handling are improved for the next real run. See
 docs/architecture/2026-10-29-hook-native-result-checkpoint.md. No complete-plan
 or current hook deployment acceptance is claimed.
+
+P11/P12 update: exact CI 40901373409 on main 1ca616e passes 455 Dart, 87 runner
+and 30 deployment checks, but the hook gate identifies a fixture assertion that
+mistook a literal argv value for Shell code. Command and argv checks now use a
+shared real sample; all actual file/budget assertions remain required.
+
+A separate valid-large-verdict truncation is fixed through a private host hook
+profile: bounded MiB JSON stdout is retained in live/durable results, with the
+same normal runtime, CPU, memory and network limits. Local evidence is clean
+analysis, 39 service/driver tests, 91 runner/bridge tests, four SDK hook scenarios
+and nine native launcher fixtures. Real Docker and deployment remain pending.
+See docs/architecture/2026-10-30-hook-protocol-channel.md. The full plan stays open.

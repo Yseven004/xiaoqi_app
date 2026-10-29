@@ -170,6 +170,48 @@ else:
       );
     },
   );
+  test(
+    'hook protocol profile shares normal deadlines and rejects alternate entrypoints before IO',
+    () async {
+      expect(
+        SandboxExecutionProfile.pluginHook.runSeconds,
+        SandboxExecutionProfile.code.runSeconds,
+      );
+      expect(
+        SandboxExecutionProfile.pluginHook.apiDeadline,
+        SandboxExecutionProfile.code.apiDeadline,
+      );
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      for (final entry in [
+        (language: 'python', path: null),
+        (language: 'javascript', path: 'scripts/entry.js'),
+      ]) {
+        await expectLater(
+          service.execute(
+            tenantId: 'personal',
+            taskId: 'task-code',
+            code: 'process.exit(0)',
+            language: entry.language,
+            scriptPath: entry.path,
+            authorizedDomains: [],
+            materials: [],
+            skillFiles: {},
+            cancellation: CancellationController().token,
+            profile: SandboxExecutionProfile.pluginHook,
+          ),
+          throwsStateError,
+        );
+      }
+      expect(
+        store.get('task/personal/task-code')!.value['code_execution_runs'] ?? 0,
+        0,
+      );
+    },
+  );
 
   test(
     'network permission withdrawn during token lookup never submits execution',

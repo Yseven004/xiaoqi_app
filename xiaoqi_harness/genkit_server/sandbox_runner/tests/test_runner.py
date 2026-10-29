@@ -459,6 +459,56 @@ class RunnerValidationTests(unittest.TestCase):
                         'code': 'true', 'execution_profile': profile}, Mock())
             client.assert_not_called()
 
+    def test_hook_json_and_durable_checkpoint_keep_large_verdict_while_code_tail_stays_bounded(self):
+        verdict = {'hookSpecificOutput': {'hookEventName': 'PreToolUse',
+                   'permissionDecision': 'deny', 'additionalContext': 'x' * 70000}}
+        envelope = json.dumps({'xiaoqi_hook_command_v1': {'exit_code': 0,
+                              'stdout': json.dumps(verdict), 'stderr': '',
+                              'matched': True, 'timed_out': False}})
+        for profile in ('code', 'plugin_hook'):
+            with self.subTest(profile=profile):
+                client, container, volume = Mock(), Mock(), Mock()
+                volume.name = 'hook-protocol-fixture'
+                client.volumes.create.return_value = volume
+                client.containers.create.return_value = container
+                container.put_archive.return_value = True
+                container.attrs = {'State': {'Status': 'exited', 'Running': False, 'ExitCode': 0}}
+                checkpoints = []
+                with (patch.object(server, '_get_client', return_value=client),
+                      patch.object(server, '_decode_logs', side_effect=lambda c, stream: envelope if stream == 'stdout' else ''),
+                      patch.object(server, '_safe_artifacts', return_value=[])):
+                    result = server._run_sandbox({'task_id': 'hook-output-test', 'language': 'javascript',
+                        'execution_id': 'a' * 32,
+                        'code': 'process.stdout.write("{}");', 'execution_profile': profile}, Mock(),
+                        checkpoint=checkpoints.append)
+                self.assertTrue(result['ok'])
+                self.assertEqual(result['stdout'], checkpoints[-1]['stdout'])
+                if profile == 'plugin_hook':
+                    self.assertEqual(result['stdout'], envelope)
+                    actual = json.loads(json.loads(result['stdout'])['xiaoqi_hook_command_v1']['stdout'])
+                    self.assertEqual(actual, verdict)
+                else:
+                    self.assertEqual(len(result['stdout']), 40000)
+                    with self.assertRaises(json.JSONDecodeError):
+                        json.loads(result['stdout'])
+                options = client.containers.create.call_args.kwargs
+                self.assertEqual(options['nano_cpus'], 500000000)
+                self.assertEqual(options['mem_limit'], '384m')
+                self.assertEqual(options['network'], 'none')
+
+    def test_hook_profile_does_not_grant_longer_deadline_or_mcp_script_entrypoints(self):
+        request = {'execution_profile': 'plugin_hook', 'language': 'javascript', 'code': 'process.exit(0)'}
+        self.assertEqual(server._execution_run_seconds(request), server.MAX_RUN_SECONDS)
+        invalid = [{**request, 'language': 'shell'}, {**request, 'script_path': 'scripts/entry.js'},
+                   {**request, 'command': ['node', 'entry.js']}]
+        with patch.object(server, '_get_client') as client:
+            for value in invalid:
+                with self.assertRaises(server.RequestError):
+                    server._run_sandbox({'task_id': 'hook-profile-test', **value}, Mock())
+            with self.assertRaises(server.RequestError):
+                server._execution_run_seconds(request, Mock())
+            client.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,12 @@ const _input = {
 };
 
 /// Same launcher probe for native development and real Linux sandbox gates.
-String hookCommandProbe({String shellExecutable = '/bin/bash'}) {
+String hookCommandProbe({
+  String shellExecutable = '/bin/bash',
+  String pythonExecutable = 'python3',
+}) {
+  String quote(String value) => "'${value.replaceAll("'", "'\"'\"'")}'";
+  final python = quote(pythonExecutable.replaceAll('\\', '/'));
   final commands = [
     {'command': r'''IFS= read -r payload; printf '%s' "$payload"'''},
     {'command': 'exit 2'},
@@ -27,6 +32,14 @@ String hookCommandProbe({String shellExecutable = '/bin/bash'}) {
     {
       'command':
           r'''printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"source-guard"}}' ''',
+    },
+    {
+      'command':
+          '$python -c ${quote(r'''import json; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"large source verdict","additionalContext":"x"*70000}}))''')}',
+    },
+    {
+      'command':
+          '$python -c ${quote('import sys; sys.stdout.buffer.write(bytes(120000))')}',
     },
   ];
   final programs = <String>[];
@@ -64,7 +77,7 @@ const { spawnSync } = require('node:child_process');
 const programs = JSON.parse($encoded);
 const results = [];
 for (const program of programs) {
-  const run = spawnSync(process.execPath, ['-'], { input: program, encoding: 'utf8', timeout: 10000, maxBuffer: 512 * 1024 });
+  const run = spawnSync(process.execPath, ['-'], { input: program, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 });
   if (run.status !== 0) throw new Error('hook launcher probe failed: ' + run.status + ':' + run.stderr);
   results.push(JSON.parse(run.stdout));
 }
@@ -74,7 +87,7 @@ process.stdout.write(JSON.stringify(results));
 
 void checkHookCommandProbe(String text) {
   final values = jsonDecode(text) as List;
-  if (values.length != 6) throw StateError('hook probe result missing');
+  if (values.length != 8) throw StateError('hook probe result missing');
   final results = [
     for (final value in values) PluginHookCommand.result(jsonEncode(value)),
   ];
@@ -98,6 +111,21 @@ void checkHookCommandProbe(String text) {
   if (!denied.preventAction || denied.reason != 'source-guard') {
     throw StateError('actual source hook denial was lost');
   }
+  final large = PluginHookOutput.parse(
+    event: 'PreToolUse',
+    exitCode: results[6]['exit_code'] as int?,
+    stdout: results[6]['stdout'] as String,
+    stderr: results[6]['stderr'] as String,
+  );
+  if (!large.preventAction ||
+      large.additionalContext?.length != 70000 ||
+      large.error != null ||
+      results[7]['exit_code'] != 0 ||
+      results[7]['stdout'] != '\u0000' * 120000) {
+    throw StateError(
+      'Large hook JSON verdict or escaped payload was truncated',
+    );
+  }
 }
 
 Future<void> verifyPluginHookCommands(
@@ -116,6 +144,7 @@ Future<void> verifyPluginHookCommands(
     taskId: task,
     code: hookCommandProbe(),
     language: 'javascript',
+    profile: SandboxExecutionProfile.pluginHook,
     authorizedDomains: [],
     materials: [],
     skillFiles: {},

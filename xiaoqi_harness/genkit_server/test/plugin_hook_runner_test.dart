@@ -36,7 +36,7 @@ class _Executor extends DockerCodeExecutionService {
     expect(authorizedDomains, isEmpty);
     expect(scopeOperationId, matches(RegExp(r'^[a-f0-9]{64}$')));
     expect(language, 'javascript');
-    expect(profile, SandboxExecutionProfile.code);
+    expect(profile, SandboxExecutionProfile.pluginHook);
     submissions++;
     if (submissionFailure != null) throw submissionFailure!;
     return jsonEncode({

@@ -54,6 +54,7 @@ if r.get('action'):
  print(json.dumps({'ok':True,'acknowledged':True}))
 else:
  assert r['authorized_domains'] == [] and r['language'] == 'javascript'
+ assert r['execution_profile'] == 'plugin_hook'
  assert 'hooks/hooks.json' in r['skill_files']
  line=r['code'].splitlines()[0]
  spec=json.loads(json.loads(line.split('JSON.parse(',1)[1].rsplit(');',1)[0]))

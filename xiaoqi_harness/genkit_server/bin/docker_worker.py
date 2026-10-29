@@ -69,7 +69,7 @@ def main() -> int:
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     profile = request.get('execution_profile', 'code')
-    if not isinstance(profile, str) or profile not in {'code', 'dependency_build'}:
+    if not isinstance(profile, str) or profile not in {'code', 'dependency_build', 'plugin_hook'}:
         _emit({'type': 'result', 'ok': False, 'error': 'Invalid sandbox execution profile'})
         return 1
     execution_timeout = 180 + (600 if profile == 'dependency_build' else 120) + 30

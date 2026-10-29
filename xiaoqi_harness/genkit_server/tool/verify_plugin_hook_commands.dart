@@ -12,7 +12,13 @@ Future<void> main() async {
   final shell = Platform.isWindows
       ? 'C:/Program Files/Git/bin/bash.exe'
       : '/bin/bash';
-  final program = hookCommandProbe(shellExecutable: shell);
+  final python =
+      Platform.environment['XIAOQI_TEST_PYTHON'] ??
+      (Platform.isWindows ? 'python' : 'python3');
+  final program = hookCommandProbe(
+    shellExecutable: shell,
+    pythonExecutable: python,
+  );
   if (utf8.encode(program).length > 64 * 1024) {
     throw StateError('hook probe exceeds normal code budget');
   }
@@ -32,9 +38,6 @@ Future<void> main() async {
     final script = File('${directory.path}/pre.py')
       ..writeAsStringSync(hookGatePreScript);
     String quote(String value) => "'${value.replaceAll("'", "'\"'\"'")}'";
-    final python =
-        Platform.environment['XIAOQI_TEST_PYTHON'] ??
-        (Platform.isWindows ? 'python' : 'python3');
     final hook = PluginHooks.parse({}, {
       'hooks': {
         'PreToolUse': [
@@ -56,7 +59,10 @@ Future<void> main() async {
       {
         'hook_event_name': 'PreToolUse',
         'tool_name': 'Bash',
-        'tool_input': {'command': 'echo agent-shell-verified'},
+        'tool_input': {
+          'command': hookGateShellCode,
+          'arguments': hookGateShellArguments,
+        },
       },
       matchValue: 'Bash',
       shellExecutable: shell,
@@ -75,7 +81,7 @@ Future<void> main() async {
       stderr: raw['stderr'] as String,
     );
     if (verdict.updatedInput?['command'] !=
-        'echo agent-shell-verified\nprintf "hook-shell-verified" > /workspace/output/hook-verified.txt\n') {
+        '$hookGateShellCode\nprintf "hook-shell-verified" > /workspace/output/hook-verified.txt\n') {
       throw StateError(
         'native Python pre-hook did not return the real command rewrite: ${verdict.error}',
       );
@@ -84,6 +90,6 @@ Future<void> main() async {
     await directory.delete(recursive: true);
   }
   stdout.writeln(
-    'HOOK_COMMAND_NATIVE_VERIFIED cases=7 bytes=${utf8.encode(program).length}',
+    'HOOK_COMMAND_NATIVE_VERIFIED cases=9 bytes=${utf8.encode(program).length}',
   );
 }

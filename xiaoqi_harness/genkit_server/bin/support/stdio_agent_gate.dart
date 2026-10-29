@@ -102,16 +102,8 @@ Future<void> verifyStdioAgent(
         } else if (!called('execute_shell')) {
           name = 'execute_shell';
           input = {
-            'code': r'''set -eu
-python3 - <<'PY'
-import json, pathlib
-manifest = json.loads(pathlib.Path('/workspace/input_manifest.json').read_text())
-item = next(item for item in manifest['inputs'] if item['name'] == 'agent.txt')
-assert pathlib.Path(item['path']).read_text() == 'agent-mcp-payload'
-PY
-printf '%s' "$1" > /workspace/output/agent-helper.txt
-''',
-            'arguments': ['agent-shell-verified'],
+            'code': hookGateShellCode,
+            'arguments': hookGateShellArguments,
           };
         } else if (!called('search_plugin_commands')) {
           name = 'search_plugin_commands';
