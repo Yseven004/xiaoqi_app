@@ -36,6 +36,40 @@ void main() {
       }),
     ),
   };
+  test('root SKILL and mixed MCP declarations do not hide root hooks', () {
+    final mixed = {
+      ...files,
+      'SKILL.md': utf8.encode(
+        '---\nname: workflow\ndescription: Root workflow\n---\nDo the workflow.',
+      ),
+      '.mcp.json': utf8.encode('{"mcpServers":{}}'),
+      '.claude-plugin/plugin.json': utf8.encode(
+        jsonEncode({
+          'name': 'mixed-filesystem',
+          'mcpServers': [
+            './config/first.json',
+            {
+              'filesystem': {
+                'command': 'npx',
+                'args': ['@modelcontextprotocol/server-filesystem@2.0.1'],
+              },
+            },
+          ],
+        }),
+      ),
+      'config/first.json': utf8.encode(
+        '{"mcpServers":{"filesystem":{"command":"node","args":["never-start.mjs"]}}}',
+      ),
+    };
+    final plugin = CapabilityImportService.discover(mixed, '').single;
+    expect(plugin['kind'], 'plugin');
+    expect(
+      (plugin['components'] as List).whereType<Map>().where(
+        (c) => c['type'] == 'hook' && c['status'] == 'partial',
+      ),
+      hasLength(1),
+    );
+  });
   test(
     'independent hook states keep healthy commands and expose unmapped handlers',
     () {

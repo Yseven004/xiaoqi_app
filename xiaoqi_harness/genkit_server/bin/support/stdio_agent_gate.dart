@@ -6,6 +6,7 @@ import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
+import 'plugin_hook_fixtures.dart';
 
 /// Deterministic local model responses drive the production Agent/tool code.
 /// The MCP process and Shell helper still execute in real isolated containers.
@@ -211,6 +212,7 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
                   'hooks': [
                     {
                       'type': 'command',
+                      'onFailure': 'block',
                       'command':
                           'python3 "\$CLAUDE_PLUGIN_ROOT/hooks/${event == 'PreToolUse' ? 'pre' : 'post'}.py"',
                     },
@@ -220,25 +222,8 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
           },
         }),
       ),
-    if (rootHooks)
-      'hooks/pre.py': utf8.encode(r'''
-import json,sys
-value=json.load(sys.stdin)
-assert value['hook_event_name']=='PreToolUse' and value['tool_name']=='Bash'
-command=value['tool_input']['command']
-assert 'agent-shell-verified' in command
-print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','updatedInput':{
- 'command':command+'\nprintf "hook-shell-verified" > /workspace/output/hook-verified.txt\n'
-}}}))
-'''),
-    if (rootHooks)
-      'hooks/post.py': utf8.encode(r'''
-import json,sys
-value=json.load(sys.stdin)
-assert value['hook_event_name']=='PostToolUse' and value['tool_name']=='Bash'
-assert 'hook-verified.txt' in str(value['tool_response'])
-print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'hook-post-verified'}}))
-'''),
+    if (rootHooks) 'hooks/pre.py': utf8.encode(hookGatePreScript),
+    if (rootHooks) 'hooks/post.py': utf8.encode(hookGatePostScript),
     '.mcp.json': utf8.encode(
       jsonEncode({
         'mcpServers': mixedDeclarations ? {} : {'filesystem': serverConfig},
@@ -346,8 +331,11 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additiona
           onProcessEvent: events.add,
           cancellation: CancellationController().token,
         );
-    if (result.extensionEvidenceMissing)
-      throw StateError('Agent delivery evidence incomplete');
+    if (result.extensionEvidenceMissing) {
+      throw StateError(
+        'Agent delivery evidence incomplete; hooks=${jsonEncode(events.where((e) => e['tool'] == 'plugin_hook').map((e) => {'type': e['type'], 'event': e['hook_event'], if (e['message'] != null) 'message': e['message'].toString().substring(0, e['message'].toString().length.clamp(0, 300))}).toList())}',
+      );
+    }
     if (result.activeCapabilities?.any(
           (capability) =>
               capability['id'] == 'filesystem' &&
@@ -367,9 +355,18 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additiona
       'plugin-command.txt': 'plugin-command-script-verified',
       if (rootHooks) 'hook-verified.txt': 'hook-shell-verified',
     }.entries) {
-      final item = artifacts
+      final matches = artifacts
           .where((artifact) => artifact['name'] == expected.key)
-          .single;
+          .toList();
+      if (matches.length != 1) {
+        throw StateError(
+          'Agent artifact ${expected.key} count=${matches.length}; '
+          'names=${artifacts.map((a) => a['name']).join(',')}; '
+          'code_runs=${store.get('task/$tenant/$task')!.value['code_execution_runs']}; '
+          'hooks=${jsonEncode(events.where((e) => e['tool'] == 'plugin_hook').map((e) => {'type': e['type'], 'event': e['hook_event'], if (e['message'] != null) 'message': e['message'].toString().substring(0, e['message'].toString().length.clamp(0, 300))}).toList())}',
+        );
+      }
+      final item = matches.single;
       if (utf8.decode(store.getObject(item['object_key'])) != expected.value)
         throw StateError('Agent artifact integrity failed');
     }

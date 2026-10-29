@@ -69,6 +69,7 @@ class PluginHookCommand {
       jsonEncode({
         'command': hook.config['command'],
         'matcher': hook.matcher,
+        'literalMatch': trivialMatch(hook.matcher, matchValue),
         'matchValue': matchValue,
         'input': input,
         'shell': shellExecutable,
@@ -104,6 +105,7 @@ const { spawn } = require('node:child_process');
 const output = { matched: false, timed_out: false, exit_code: null, stdout: '', stderr: '' };
 function emit() { process.stdout.write(JSON.stringify({ xiaoqi_hook_command_v1: output }) + '\n'); }
 async function matches() {
+  if (spec.literalMatch != null) return spec.literalMatch;
   if (spec.matcher == null || spec.matcher === '' || spec.matcher === '*') return true;
   return await new Promise((resolve, reject) => {
     const worker = new Worker(`

@@ -831,3 +831,17 @@ passed before the final matching refinement). Real Docker gates are added but
 not yet claimed passed here. Hook support remains partial: other lifecycle and
 handler mappings, readonly/async/defer semantics and complete recovery acceptance
 remain open. See docs/architecture/2026-10-29-plugin-hook-tool-dispatch.md.
+
+P11/P13 follow-up reproduces and fixes repeated native effects after a post-hook
+failure: the original result is privately checkpointed before post processing.
+Native process-death, unchanged output/parts/metadata and one-effect restoration
+are locally verified. Current local evidence is 73 focused tests, four real-SDK
+root-hook cases, seven native Node/Bash/Python fixtures and clean full analysis.
+
+The first hook CI (40894142924/main 66f89eb) passes 446 Dart, 87 runner and 30
+deployment tests plus both existing real restart gates, but fails the new hook
+artifact gate. Activation does not occur and the controller terminates with
+exit 1. The exact hook failure cause is not yet established; bounded diagnostics
+and literal-selector handling are improved for the next real run. See
+docs/architecture/2026-10-29-hook-native-result-checkpoint.md. No complete-plan
+or current hook deployment acceptance is claimed.

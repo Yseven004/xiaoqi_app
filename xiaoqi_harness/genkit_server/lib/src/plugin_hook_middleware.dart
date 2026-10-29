@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:genkit/genkit.dart';
 import 'plugin_hook_output.dart';
+import 'plugin_hook_tool_journal.dart';
 import 'tool_execution.dart';
 
 /// Task-local shared state across parent and delegated Agent middleware.
@@ -213,11 +214,16 @@ class PluginHookMiddleware extends GenerateMiddleware {
     try {
       result = await ToolExecution.withAuthorityCheck(
         () => checkSources(view),
-        () => runZoned(
-          () => next(effective, context),
-          zoneValues: {
-            PluginHookControl._ask: ask || PluginHookControl.asksPermission,
-          },
+        () => PluginHookToolJournal(owner).run(
+          invocation: eventId,
+          arguments: {'tool': request.toolRequest.name, 'input': input},
+          resumed: request.metadata?['resumed'] != null,
+          invoke: () => runZoned(
+            () => next(effective, context),
+            zoneValues: {
+              PluginHookControl._ask: ask || PluginHookControl.asksPermission,
+            },
+          ),
         ),
       );
     } on Object catch (error) {

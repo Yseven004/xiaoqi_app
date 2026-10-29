@@ -204,7 +204,10 @@ void main() {
               : [],
           canAsk: true,
         );
-        await hooks.tool(request(), ActionFnArg(), (_, context) async {
+        await hooks.tool(request(ref: 'original-$permission'), ActionFnArg(), (
+          _,
+          context,
+        ) async {
           expect(PluginHookControl.asksPermission, permission == 'ask');
           expect(context.context?['approved'], isNot(true));
           return ToolResult.response('ok');
@@ -259,4 +262,39 @@ void main() {
     );
     expect(result.output, 'native original');
   });
+  test(
+    'post-hook recovery reuses the confirmed native effect across middleware reconstruction',
+    () async {
+      var effects = 0;
+      var failPost = true;
+      Future<List<PluginHookOutput>> dispatch(
+        String event,
+        String _,
+        Map<String, dynamic> __,
+      ) async {
+        if (event == 'PostToolUse' && failPost)
+          throw StateError('post connection lost');
+        return [];
+      }
+
+      Future<ToolResult> native(
+        ToolRequestPart _,
+        ActionFnArg<void, dynamic, void> __,
+      ) async {
+        effects++;
+        return ToolResult.response('confirmed original native output');
+      }
+
+      await expectLater(
+        middleware(dispatch).tool(request(), ActionFnArg(), native),
+        throwsStateError,
+      );
+      failPost = false;
+      final result = await middleware(
+        dispatch,
+      ).tool(request(), ActionFnArg(), native);
+      expect(effects, 1);
+      expect(result.output, 'confirmed original native output');
+    },
+  );
 }
