@@ -17,6 +17,9 @@ class UnconfirmedToolOperation extends StateError {
 /// Claims scope and budget together in the existing task document.
 class ToolExecution {
   static final _authorityCheckKey = Object();
+  static final _operationKey = Object();
+  static String? get currentOperationId =>
+      Zone.current[_operationKey] as String?;
 
   static void checkCurrentAuthority() =>
       (Zone.current[_authorityCheckKey] as void Function()?)?.call();
@@ -665,9 +668,12 @@ class ToolExecution {
     });
     if (cached != null) return cached!;
     try {
-      final result = await invoke(operationId);
+      final result = await runZoned(
+        () => invoke(operationId),
+        zoneValues: {_operationKey: operationId},
+      );
       final confirmed = _finish(operationId, 'succeeded', result);
-      if (codeBudget && confirmed != null) {
+      if (confirmed != null) {
         check(effect);
         return confirmed;
       }
@@ -681,7 +687,7 @@ class ToolExecution {
             : 'unknown',
         null,
       );
-      if (codeBudget && confirmed != null) {
+      if (confirmed != null) {
         check(effect);
         return confirmed;
       }
@@ -700,7 +706,8 @@ class ToolExecution {
         value['scope_operations'] as Map? ?? const {},
       );
       final previous = Map<String, dynamic>.from(operations[id] as Map);
-      if (previous['execution_id'] is String &&
+      if ((previous['execution_id'] is String ||
+              previous['mcp_response_id'] is String) &&
           const {'succeeded', 'failed'}.contains(previous['status']) &&
           previous['result'] is Map) {
         confirmed = Map<String, dynamic>.from(previous['result'] as Map);

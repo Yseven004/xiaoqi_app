@@ -14,9 +14,15 @@ import 'support/source_mode_gate.dart';
 import 'support/python_build_gate.dart';
 import 'support/network_lifecycle_gate.dart';
 import 'support/mcp_restart_gate.dart';
+import 'support/mcp_api_restart_gate.dart';
 
 /// Real Docker/official-package gate. No model or image-provider calls.
 Future<void> main(List<String> args) async {
+  if (args.length == 2 &&
+      const {'--mcp-api-start', '--mcp-api-recover'}.contains(args.first)) {
+    await verifyMcpApiRestart(args.first, args[1]);
+    return;
+  }
   if (args.length == 1 && args.single == '--mcp-restart-probe') {
     await verifyMcpRestartProbe();
     return;

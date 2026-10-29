@@ -752,3 +752,9 @@ deployment exits 0 with runtime/data/restore-point verification and public HTTPS
 This batch changes no client contract. Remaining concrete adapter and API-restart
 acceptance gaps are recorded in
 docs/architecture/2026-10-29-remaining-plugin-evidence.md; they remain open.
+
+P13 API pending-RPC result recovery is now implemented locally, with durable
+operation/request correlation and response-before-cursor persistence. All 18
+focused checks and full Dart analysis pass. The real API-container death gate is
+wired into CI; actual Docker/exact-commit CI and deployment remain pending.
+See docs/architecture/2026-10-29-api-rpc-recovery.md. The complete plan remains open.

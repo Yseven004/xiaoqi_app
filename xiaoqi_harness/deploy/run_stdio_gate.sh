@@ -5,12 +5,13 @@ export SANDBOX_RUNNER_TOKEN
 SANDBOX_RUNNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 cleanup() {
   local item
-  docker rm -f xiaoqi-stdio-gate-probe xiaoqi-stdio-restart-probe xiaoqi-stdio-gate-runner >/dev/null 2>&1 || true
+  docker rm -f xiaoqi-stdio-gate-probe xiaoqi-stdio-restart-probe xiaoqi-stdio-api-before xiaoqi-stdio-api-after xiaoqi-stdio-gate-runner >/dev/null 2>&1 || true
   for item in $(docker ps -aq --filter label=com.xiaoqi.ci-stdio-sandbox=true); do docker rm -f "$item" >/dev/null || true; done
   for item in $(docker network ls -q --filter label=com.xiaoqi.ci-stdio-sandbox=true); do docker network rm "$item" >/dev/null || true; done
   for item in $(docker volume ls -q --filter label=com.xiaoqi.ci-stdio-sandbox=true); do docker volume rm "$item" >/dev/null || true; done
   docker network rm xiaoqi-stdio-gate >/dev/null 2>&1 || true
   docker volume rm xiaoqi-stdio-gate-results >/dev/null 2>&1 || true
+  docker volume rm xiaoqi-stdio-api-state >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 docker network create xiaoqi-stdio-gate >/dev/null
@@ -28,6 +29,7 @@ for attempt in {1..30}; do
 done
 if [[ "$ready" != yes ]]; then docker logs --tail 80 xiaoqi-stdio-gate-runner; exit 1; fi
 python3 xiaoqi_harness/deploy/verify_runner_restart.py xiaoqi-stdio-gate-runner
+python3 xiaoqi_harness/deploy/verify_api_restart.py xiaoqi-stdio-gate-runner
 timeout --kill-after=30s 600 docker run --rm --name xiaoqi-stdio-gate-probe --network xiaoqi-stdio-gate \
   --env SANDBOX_RUNNER_TOKEN --env SANDBOX_RUNNER_URL=http://xiaoqi-stdio-gate-runner:8090 \
   --env MIMO_API_KEY=stdio-fixture --env MIMO_BASE_URL=http://127.0.0.1:40443/v1 \

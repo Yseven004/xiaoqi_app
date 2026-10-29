@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import 'execution_limits.dart';
 import 'store.dart';
 import 'sandbox_mcp_transport.dart';
+import 'mcp_rpc_journal.dart';
 
 enum SandboxExecutionProfile {
   code('code', 120),
@@ -271,10 +272,18 @@ class DockerCodeExecutionService {
       materials: materials,
     );
     _claimExecution(tenantId, taskId, skillScript: false);
+    late McpRpcJournal rpcJournal;
     return SandboxMcpTransport.connect(
       runnerUrl: Uri.parse(url),
       runnerToken: token,
       beforeStart: (identity) {
+        rpcJournal = McpRpcJournal(
+          store,
+          tenantId,
+          taskId,
+          identity['lease_id'] as String,
+          limit: limits.toolOperations,
+        );
         // Separate private document: credentials never enter task/model output.
         store.put(
           'private_mcp_lease/$tenantId/$taskId/${identity['lease_id']}',
@@ -286,6 +295,10 @@ class DockerCodeExecutionService {
           null,
         );
       },
+      beforeSend: (message, sequence) =>
+          rpcJournal.beforeSend(message, sequence),
+      onEventBatch: (messages, cursor) =>
+          rpcJournal.recordEvents(messages, cursor),
       request: {
         'task_id': _runnerTaskId(tenantId, taskId),
         'command': command,
@@ -322,6 +335,15 @@ class DockerCodeExecutionService {
     await transport.close();
     final result = transport.completion;
     if (result == null) return;
+    final rpcJournal = McpRpcJournal(
+      store,
+      tenantId,
+      taskId,
+      transport.leaseId,
+      limit: limits.toolOperations,
+    );
+    rpcJournal.reconcile();
+    rpcJournal.finishUnknown();
     await _saveArtifacts(
       tenantId,
       taskId,
@@ -349,6 +371,9 @@ class DockerCodeExecutionService {
       result['sandbox_id']?.toString(),
     );
     await transport.acknowledgeCompletion();
+    for (final (key, _) in rpcJournal.records) {
+      store.delete(key);
+    }
     store.delete('private_mcp_lease/$tenantId/$taskId/${transport.leaseId}');
   }
 
@@ -378,18 +403,42 @@ class DockerCodeExecutionService {
         continue;
       SandboxMcpTransport? transport;
       try {
+        final rpcJournal = McpRpcJournal(
+          store,
+          tenantId,
+          taskId,
+          id,
+          limit: limits.toolOperations,
+        );
+        rpcJournal.reconcile();
         transport = SandboxMcpTransport.forRecovery(
           runnerUrl: Uri.parse(url),
           runnerToken: token,
           leaseId: id,
           leaseToken: leaseToken,
+          eventCursor: value['event_cursor'] as int? ?? 0,
+          onEventBatch: (messages, cursor) {
+            rpcJournal.recordEvents(messages, cursor);
+            rpcJournal.reconcile();
+          },
         );
+        final deadline = rpcJournal.pendingDeadline;
+        if (deadline != null && deadline.isAfter(DateTime.now())) {
+          try {
+            await transport.recoverEvents(
+              deadline: deadline,
+              pending: () => rpcJournal.pendingDeadline != null,
+            );
+          } on TimeoutException {
+            // The original call deadline has elapsed; never submit it again.
+          }
+        }
         await finishMcp(tenantId, taskId, transport);
       } on Object {
         // Preserve identity until artifacts and acknowledgment both persist.
         // An unavailable runner does not prove that the original call failed.
       } finally {
-        await transport?.close();
+        transport?.disposeRecoveryReader();
       }
     }
   }

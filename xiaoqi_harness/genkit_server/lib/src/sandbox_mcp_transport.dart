@@ -22,8 +22,12 @@ class SandboxMcpTransport implements McpClientTransport {
     this._runnerToken, {
     String? leaseId,
     String? leaseToken,
+    this.beforeSend,
+    this.onEventBatch,
+    int eventCursor = 0,
   }) : _leaseId = leaseId ?? _randomHex(16),
-       _leaseToken = leaseToken ?? _randomHex(32);
+       _leaseToken = leaseToken ?? _randomHex(32),
+       _eventCursor = eventCursor;
 
   static final _activeLeases = <String>{};
   static bool isActive(String leaseId) => _activeLeases.contains(leaseId);
@@ -34,6 +38,8 @@ class SandboxMcpTransport implements McpClientTransport {
     required String runnerToken,
     required String leaseId,
     required String leaseToken,
+    int eventCursor = 0,
+    void Function(List<Map<String, dynamic>>, int)? onEventBatch,
   }) {
     if (!RegExp(r'^[a-f0-9]{32}$').hasMatch(leaseId) ||
         !RegExp(r'^[a-f0-9]{64}$').hasMatch(leaseToken))
@@ -43,6 +49,8 @@ class SandboxMcpTransport implements McpClientTransport {
       runnerToken,
       leaseId: leaseId,
       leaseToken: leaseToken,
+      eventCursor: eventCursor,
+      onEventBatch: onEventBatch,
     );
   }
 
@@ -56,7 +64,9 @@ class SandboxMcpTransport implements McpClientTransport {
   void Function()? _unregisterCancel;
   bool _closed = false;
   Map<String, dynamic>? _completion;
-  int _eventCursor = 0;
+  int _eventCursor;
+  final void Function(Map<String, dynamic>, int)? beforeSend;
+  final void Function(List<Map<String, dynamic>>, int)? onEventBatch;
   int _sendSequence = 0;
   Future<void> _sending = Future<void>.value();
   bool _sendFailed = false;
@@ -108,9 +118,16 @@ class SandboxMcpTransport implements McpClientTransport {
     required Map<String, dynamic> request,
     required CancellationToken cancellation,
     FutureOr<void> Function(Map<String, dynamic> identity)? beforeStart,
+    void Function(Map<String, dynamic>, int)? beforeSend,
+    void Function(List<Map<String, dynamic>>, int)? onEventBatch,
   }) async {
     cancellation.throwIfCancelled();
-    final transport = SandboxMcpTransport._(runnerUrl, runnerToken);
+    final transport = SandboxMcpTransport._(
+      runnerUrl,
+      runnerToken,
+      beforeSend: beforeSend,
+      onEventBatch: onEventBatch,
+    );
     _activeLeases.add(transport.leaseId);
     try {
       final issuedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -162,6 +179,8 @@ class SandboxMcpTransport implements McpClientTransport {
       if (_closed || _sendFailed)
         throw StateError('Original MCP submission is unconfirmed or closed');
       try {
+        ToolExecution.checkCurrentAuthority();
+        beforeSend?.call(frozen, sequence);
         for (var attempt = 0; ; attempt++) {
           try {
             ToolExecution.checkCurrentAuthority();
@@ -272,6 +291,9 @@ class SandboxMcpTransport implements McpClientTransport {
             throw const FormatException('Invalid MCP runner protocol message');
           }
         }
+        // Commit response correlation before the next poll acknowledges this
+        // batch. A process death must not erase an already observed result.
+        onEventBatch?.call(messages.cast<Map<String, dynamic>>(), cursor);
         _eventCursor = cursor;
         for (final message in messages) {
           _inbound.add(message);
@@ -308,6 +330,49 @@ class SandboxMcpTransport implements McpClientTransport {
         await Future<void>.delayed(const Duration(milliseconds: 250));
       }
     }
+  }
+
+  /// Read only the original lease's pending replies. Never initializes a new
+  /// SDK session, submits an RPC or resets the original call deadline.
+  Future<void> recoverEvents({
+    required DateTime deadline,
+    required bool Function() pending,
+  }) async {
+    final elapsed = Stopwatch()..start();
+    final originalRemaining = deadline.difference(DateTime.now());
+    final budget = originalRemaining < const Duration(seconds: 60)
+        ? originalRemaining
+        : const Duration(seconds: 60);
+    while (!_closed && pending()) {
+      final remaining = budget - elapsed.elapsed;
+      if (remaining <= Duration.zero) return;
+      final result = await _readEvents().timeout(remaining);
+      final messages = result['messages'];
+      final cursor = result['cursor'];
+      final advances =
+          messages is List &&
+          (messages.isNotEmpty ||
+              result['closed'] == true ||
+              result['error'] != null);
+      if (messages is! List ||
+          messages.length > 32 ||
+          cursor is! int ||
+          cursor != _eventCursor + (advances ? 1 : 0) ||
+          messages.any(
+            (m) => m is! Map<String, dynamic> || m['jsonrpc'] != '2.0',
+          )) {
+        throw const FormatException('Invalid original MCP response batch');
+      }
+      onEventBatch?.call(messages.cast<Map<String, dynamic>>(), cursor);
+      _eventCursor = cursor;
+      if (result['closed'] == true || result['error'] != null) return;
+    }
+  }
+
+  /// Dispose an unsuccessful recovery read without stopping the original job.
+  void disposeRecoveryReader() {
+    _closed = true;
+    _http.close(force: true);
   }
 
   @override
