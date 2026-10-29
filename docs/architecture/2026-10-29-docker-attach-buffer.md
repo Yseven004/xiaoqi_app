@@ -56,3 +56,11 @@ expensive compilation, with at most three download attempts and three-second
 backoff. A persistent failure still stops the job. Tests, tool effects, artifact
 activation and deployment are not retried by this change. Dockerfiles, target
 platform, image storage, exact-commit artifact checks and all gates are unchanged.
+
+Final release evidence: main bf0f896c5cee28b90604cd84da54ec0a9e920f41;
+CI 40858154228/job 123394287817 succeeds with 407 Dart, 87 runner and 30
+deployment checks. The original real Docker runner-restart gate now passes,
+as does the new API restart gate; all stdio/cleanup/image-roundtrip gates pass.
+Production 20261029-183110-bf0f896 exits 0 with health/data/restore-point checks
+and public HTTPS 200 via Cloud Assistant. This is a verified root-cause fix,
+not an accepted flaky rerun of the old raw-socket implementation.

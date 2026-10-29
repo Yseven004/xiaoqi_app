@@ -788,3 +788,19 @@ mixed-declaration loop is wired alongside the unchanged original case; its CI
 execution and deployment are pending. See
 docs/architecture/2026-10-29-mixed-mcp-declarations.md. This does not close root
 hooks/apps/extensions or the remaining complete-plan requirements.
+
+Release 20261029-183110-bf0f896 is deployed and verified: main
+bf0f896c5cee28b90604cd84da54ec0a9e920f41, exact CI 40858154228/job
+123394287817 succeeds with 407 Dart, 87 runner and 30 deployment checks, both
+original runner and API-container restart gates, stdio/source/long-build gates,
+clean resources and image roundtrip. Standard non-image deployment exits 0 with
+runtime/data/restore-point checks and public HTTPS 200 via Cloud Assistant.
+API/product remain 24/2026-10-27-agent-tools-2.
+
+Target ECS acceptance additionally runs one original Node MCP operation alongside
+an offline Python CPU/file task. Both results and files verify, 24 simultaneous
+samples are observed, host available memory stays above 1086443520 bytes, and
+post-probe container/network/volume counts are zero. No service restart or paid
+provider was used. This is representative overlap, not arbitrary workload/stress
+acceptance. Evidence:
+docs/architecture/evidence/2026-10-29-ecs-task-resources.json.

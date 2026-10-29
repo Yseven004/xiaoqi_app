@@ -80,3 +80,16 @@ distinguish a missing Docker stdout replay prefix from an API-initiated close or
 event/cursor error, reproduce with private cursor journaling enabled, fix the
 actual cause, then rerun all original and new real-container gates. Do not remove
 the runner-restart gate or call this batch deployed from the green unit suite.
+
+Released and verified: main bf0f896c5cee28b90604cd84da54ec0a9e920f41,
+CI 40858154228/job 123394287817 passes all 407 Dart, 87 runner and 30 deployment
+checks. Both real runner-restart and API-container-death gates pass with the
+original process, response, input/files and one effect/budget charge. Standard
+stdio, source modes, long builds, resource cleanup and image roundtrip pass.
+Release 20261029-183110-bf0f896 completes standard non-image deployment with
+exit 0, healthy service/data, latest-good restore data and public HTTPS 200 via
+Cloud Assistant after local Windows TLS checking failed. Product/API stay
+2026-10-27-agent-tools-2/24. Log:
+C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261029-183110-bf0f896.log.
+No client rebuild or paid image check is required by this server-only change.
+Remaining full-plan work and user device acceptance stay open.

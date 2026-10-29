@@ -34,3 +34,10 @@ The configured complete policy/runtime suite now passes all 17 checks, including
 both ignored-field cases and existing approval/denial/plan/nesting/network modes.
 The ignored-field approval case completes exactly one authorized parent MCP call;
 inline hook/connection declarations do not create their own execution path.
+
+Deployed with main bf0f896c5cee28b90604cd84da54ec0a9e920f41 and release
+20261029-183110-bf0f896. Exact CI 40858154228/job 123394287817 passes all
+407 Dart, 87 runner and 30 deployment checks, including these policy/runtime
+cases; real stdio/restart/cleanup/image roundtrip also pass. Standard non-image
+deployment exits 0 with healthy service/data/restore point and public HTTPS 200.
+This does not implement root plugin hooks/apps/extensions.

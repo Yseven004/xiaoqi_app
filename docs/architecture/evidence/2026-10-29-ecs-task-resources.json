@@ -1,0 +1,27 @@
+{
+  "release": "20261029-183110-bf0f896",
+  "probe_invoke_id": "t-hk071hvqfqmczcw",
+  "probe_status": "Finished",
+  "probe_exit_code": 0,
+  "passed": true,
+  "restart_performed": false,
+  "paid_provider_called": false,
+  "mcp_original_result_verified": true,
+  "code_original_file_verified": true,
+  "code_cleanup_acknowledged": true,
+  "simultaneous_samples": 24,
+  "minimum_host_available_bytes": 1086443520,
+  "peaks": {
+    "app": {"memory_bytes": 43843584, "pids": 10, "samples": 52, "memory_limit_bytes": 805306368, "nano_cpus": 1500000000},
+    "runner": {"memory_bytes": 66367488, "pids": 9, "samples": 52, "memory_limit_bytes": 402653184, "nano_cpus": 200000000},
+    "code": {"memory_bytes": 25595904, "pids": 1, "samples": 24, "memory_limit_bytes": 402653184, "nano_cpus": 500000000},
+    "mcp": {"memory_bytes": 110546944, "pids": 7, "samples": 31, "memory_limit_bytes": 268435456, "nano_cpus": 250000000}
+  },
+  "public_health": 200,
+  "cleanup_invoke_id": "t-hk071hw7qsx2vpc",
+  "cleanup_status": "Finished",
+  "cleanup_exit_code": 0,
+  "probe_resources_remaining": {"container": 0, "network": 0, "volume": 0},
+  "method": "Use the deployed prebuilt MCP probe with its original Node process/input/file checks and a concurrent offline Python task holding 16 MiB and doing CPU work for six seconds. Sample Docker stats and host MemAvailable for twelve seconds. Require idle task capacity first; use synthetic task identities only. No service restart, image build, Dart compilation, credentials output or user-data modification.",
+  "limitation": "Representative single-MCP plus code workload, not a multi-tenant stress test or proof that arbitrary plugin workloads fit. Runner peak includes the measurement helper. Existing resource limits were observed, not changed."
+}
