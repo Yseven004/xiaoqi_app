@@ -14,6 +14,7 @@ class _Executor extends DockerCodeExecutionService {
   int submissions = 0;
   void Function()? onAttempt;
   Object? submissionFailure;
+  SandboxExecutionProfile expectedProfile = SandboxExecutionProfile.pluginHook;
   @override
   Future<String> execute({
     required String tenantId,
@@ -36,7 +37,7 @@ class _Executor extends DockerCodeExecutionService {
     expect(authorizedDomains, isEmpty);
     expect(scopeOperationId, matches(RegExp(r'^[a-f0-9]{64}$')));
     expect(language, 'javascript');
-    expect(profile, SandboxExecutionProfile.pluginHook);
+    expect(profile, expectedProfile);
     submissions++;
     if (submissionFailure != null) throw submissionFailure!;
     return jsonEncode({
@@ -102,15 +103,30 @@ void main() {
     String id = 'original-tool-ref',
     String tool = 'Bash',
     ToolExecution? owner,
+    bool readOnly = false,
   }) => PluginHookRunner(executor).run(
     execution: owner ?? execution,
     hook: hook,
     sourceBinding: 'immutable-version',
     invocation: id,
-    input: {'hook_event_name': 'PreToolUse', 'tool_name': tool},
+    input: {
+      'hook_event_name': 'PreToolUse',
+      'tool_name': tool,
+      if (readOnly) 'permission_mode': 'plan',
+    },
     matchValue: tool,
     sourceFiles: source,
     cancellation: cancellation.token,
+  );
+
+  test(
+    'plan hook uses ephemeral no-export profile and retains original verdict',
+    () async {
+      executor.expectedProfile = SandboxExecutionProfile.pluginHookReadOnly;
+      expect(await run(readOnly: true), isNotNull);
+      await run(readOnly: true);
+      expect(executor.submissions, 1);
+    },
   );
 
   test(

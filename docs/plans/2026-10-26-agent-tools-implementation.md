@@ -1,5 +1,9 @@
 # Agent 工具全链路实施记录
 
+## 2026-10-30 P11 只读子 Agent 的 command Hook（本地实现，待完整容器链路验收）
+
+取消匹配 Hook 时一律阻断只读子 Agent 的粗粒度限制，改为 plan 模式的私有临时计算配置：无联网、无文件导出，API 即时与恢复路径再次丢弃文件，保留原预算/时限/原事件防重放及原生工具权限。91 runner 检查通过；原生桥接断流后重开数据库验证 stdout 找回、文件不持久化且计数为一，middleware 十项通过。临时工作区可写，不冒称只读挂载；新增实际容器检查尚待运行，完整委派 Agent/容器组合仍待验证。详见 `docs/architecture/2026-10-30-read-only-plugin-hooks.md`。当前不变更正在部署的 main。
+
 ## 2026-10-30 P07 Python MCP 与 Hook 验收修正（本地通过，待容器验收与发布）
 
 补齐常见 uvx/uv tool run 声明的安装前依赖准备、已安装 console entry 启动及 argv 保真；不依赖宿主 uv、不开启运行时隐式下载。26 项导入/spec 检查和 Dart 静态分析通过，新增官方时间 MCP 的真实 PyPI/stdio/时区转换/清理门禁尚待 CI。完整 uv 参数、其他源安装与 P07 总体验收不据此关闭。

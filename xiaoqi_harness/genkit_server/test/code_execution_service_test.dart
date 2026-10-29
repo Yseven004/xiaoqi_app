@@ -213,6 +213,120 @@ else:
     },
   );
 
+  test('read-only hook drops files even if a worker reports them', () async {
+    final service = DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable: pythonExecutable(),
+    );
+    final output = await service.execute(
+      tenantId: 'personal',
+      taskId: 'task-code',
+      language: 'javascript',
+      code: 'process.exit(0)',
+      authorizedDomains: [],
+      materials: [],
+      skillFiles: {},
+      cancellation: CancellationController().token,
+      profile: SandboxExecutionProfile.pluginHookReadOnly,
+    );
+    expect(output, contains('hello'));
+    expect(output, isNot(contains('report.txt')));
+    final task = store.get('task/personal/task-code')!.value;
+    expect(task['artifacts'], isEmpty);
+    expect(
+      (task['code_execution_operations'] as Map)
+          .values
+          .single['execution_profile'],
+      'plugin_hook_read_only',
+    );
+    await expectLater(
+      service.execute(
+        tenantId: 'personal',
+        taskId: 'task-code',
+        language: 'javascript',
+        code: 'process.exit(0)',
+        authorizedDomains: ['example.com'],
+        materials: [],
+        skillFiles: {},
+        cancellation: CancellationController().token,
+        profile: SandboxExecutionProfile.pluginHookReadOnly,
+      ),
+      throwsStateError,
+    );
+    expect(
+      store.get('task/personal/task-code')!.value['code_execution_runs'],
+      1,
+    );
+  });
+
+  test(
+    'read-only hook recovery after store reopen cannot persist returned files',
+    () async {
+      final original = jsonEncode('${directory.path}/readonly-original.json');
+      final ready = jsonEncode('${directory.path}/readonly-ready');
+      worker.writeAsStringSync('''
+import json, pathlib, sys
+r = json.loads(sys.stdin.readline())
+original, ready = pathlib.Path($original), pathlib.Path($ready)
+if r.get('action') == 'execution_result':
+    first = json.loads(original.read_text())
+    result = {'type':'result','ok':True,'execution_id':first['execution_id'],
+      'stdout':'recovered calculation: 42','cleanup_pending':False,
+      'artifacts':[{'name':'forbidden.txt','media_type':'text/plain','base64':'eA=='}]}
+    print(json.dumps({'type':'result','ok':True,'finished':ready.exists(),
+      'completion':result if ready.exists() else None}), flush=True)
+elif r.get('action') == 'ack_execution':
+    print(json.dumps({'type':'result','ok':True,'acknowledged':True}), flush=True)
+else:
+    assert not original.exists(), 'read-only hook was replayed'
+    assert r['execution_profile'] == 'plugin_hook_read_only'
+    original.write_text(json.dumps(r))
+    print(json.dumps({'type':'sandbox_started','sandbox_id':'readonly-original'}), flush=True)
+''');
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await expectLater(
+        service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          language: 'javascript',
+          code: 'process.exit(0)',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+          profile: SandboxExecutionProfile.pluginHookReadOnly,
+        ),
+        throwsA(isA<SandboxExecutionError>()),
+      );
+      File('${directory.path}/readonly-ready').writeAsStringSync('ready');
+      store.close();
+      store = CloudStore(root: directory.path);
+      final resumed = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      await resumed.recoverExecutions(
+        tenantId: 'personal',
+        taskId: 'task-code',
+      );
+      final task = store.get('task/personal/task-code')!.value;
+      expect(task['artifacts'], isEmpty);
+      expect(task['code_execution_runs'], 1);
+      expect(task['sandbox_cleanup_pending'], false);
+      final result = jsonEncode(
+        resumed.recoveredExecutionResults('personal', 'task-code'),
+      );
+      expect(result, contains('recovered calculation: 42'));
+      expect(result, isNot(contains('forbidden.txt')));
+    },
+  );
+
   test(
     'network permission withdrawn during token lookup never submits execution',
     () async {

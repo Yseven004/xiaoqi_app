@@ -125,16 +125,7 @@ class PluginHookMiddleware extends GenerateMiddleware {
     var view = describe(request.toolRequest.name, input);
     if (!hasHooks(view)) return next(request, context);
     checkSources(view);
-    if (context.context?['xiaoqi_plugin_agent_read_only'] == true) {
-      return ToolResult.response(
-        jsonEncode({
-          'ok': false,
-          'status': 'hook_mapping_unavailable',
-          'retryable': false,
-          'error': '只读子 Agent 的 command hook 尚需只读沙箱映射，未启动命令或目标工具',
-        }),
-      );
-    }
+    final readOnly = context.context?['xiaoqi_plugin_agent_read_only'] == true;
     final ref = request.toolRequest.ref;
     // A missing ref cannot be guessed from arguments: two identical fresh
     // calls are distinct events while a resume must retain its original ID.
@@ -148,7 +139,7 @@ class PluginHookMiddleware extends GenerateMiddleware {
     Map<String, dynamic> payload() => {
       'session_id': owner.taskId,
       'cwd': '/workspace/work',
-      'permission_mode': 'default',
+      'permission_mode': readOnly ? 'plan' : 'default',
       'tool_name': view.name,
       'tool_input': view.input,
       'tool_use_id': ref,

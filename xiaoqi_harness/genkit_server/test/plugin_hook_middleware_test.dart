@@ -53,8 +53,11 @@ void main() {
             canAsk: true,
           )
         : PluginHookTool.native(name, input),
-    validateInput: (_, input) async =>
-        input is Map && input['path'] is String && input['text'] is String,
+    validateInput: (name, input) async =>
+        input is Map &&
+        input['path'] is String &&
+        (name.split('/').last == 'read_task_text_file' ||
+            input['text'] is String),
   );
   ToolRequestPart request({String? ref = 'original'}) => ToolRequestPart(
     toolRequest: ToolRequest(
@@ -132,6 +135,36 @@ void main() {
       });
       expect(effects, 0);
       expect(events, ['PreToolUse', 'PostToolUseFailure']);
+    },
+  );
+
+  test(
+    'matched read-only hook receives plan mode and permits native read',
+    () async {
+      final events = <String>[];
+      final hooks = middleware((event, _, input) async {
+        expect(input['permission_mode'], 'plan');
+        expect(input['tool_name'], 'Read');
+        events.add(event);
+        return [];
+      });
+      var reads = 0;
+      await hooks.tool(
+        ToolRequestPart(
+          toolRequest: ToolRequest(
+            name: 'read_task_text_file',
+            ref: 'read-original',
+            input: {'path': 'report.txt'},
+          ),
+        ),
+        ActionFnArg(context: {'xiaoqi_plugin_agent_read_only': true}),
+        (_, _) async {
+          reads++;
+          return ToolResult.response('original task bytes');
+        },
+      );
+      expect(reads, 1);
+      expect(events, ['PreToolUse', 'PostToolUse']);
     },
   );
 

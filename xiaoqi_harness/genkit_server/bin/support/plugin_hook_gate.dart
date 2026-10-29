@@ -155,4 +155,38 @@ Future<void> verifyPluginHookCommands(
       .isNotEmpty) {
     throw StateError('hook private protocol output became a deliverable');
   }
+  const readOnlyTask = 'plugin-hook-read-only';
+  store.put('task/$tenant/$readOnlyTask', {
+    'status': 'running',
+    'artifacts': [],
+    'events': [],
+  }, null);
+  final source = {'source.txt': utf8.encode('original installed source')};
+  final calculation = await executor.execute(
+    tenantId: tenant,
+    taskId: readOnlyTask,
+    language: 'javascript',
+    profile: SandboxExecutionProfile.pluginHookReadOnly,
+    code: r'''
+const fs = require('fs');
+if (fs.readFileSync('/workspace/skill/source.txt','utf8') !== 'original installed source') throw Error('missing source');
+fs.writeFileSync('/workspace/skill/source.txt','ephemeral changed source');
+fs.writeFileSync('/workspace/output/should-not-persist.txt','ephemeral result');
+console.log('read-only-hook-calculation-verified');
+''',
+    authorizedDomains: [],
+    materials: [],
+    skillFiles: source,
+    cancellation: CancellationController().token,
+  );
+  final state = store.get('task/$tenant/$readOnlyTask')!.value;
+  if (!calculation.contains('read-only-hook-calculation-verified') ||
+      calculation.contains('should-not-persist') ||
+      (state['artifacts'] as List).isNotEmpty ||
+      state['sandbox_cleanup_pending'] != false ||
+      utf8.decode(source['source.txt']!) != 'original installed source') {
+    throw StateError(
+      'Read-only hook persisted ephemeral writes or lost cleanup',
+    );
+  }
 }

@@ -15,6 +15,7 @@ import 'mcp_rpc_journal.dart';
 enum SandboxExecutionProfile {
   code('code', 120),
   pluginHook('plugin_hook', 120),
+  pluginHookReadOnly('plugin_hook_read_only', 120),
   dependencyBuild('dependency_build', 600);
 
   const SandboxExecutionProfile(this.wireName, this.runSeconds);
@@ -486,9 +487,16 @@ class DockerCodeExecutionService {
           preparation?['dependency_source_digest'] != taskId.substring(8))
         throw StateError('依赖构建必须绑定原始安装准备记录');
     }
-    if (profile == SandboxExecutionProfile.pluginHook &&
+    if (const {
+          SandboxExecutionProfile.pluginHook,
+          SandboxExecutionProfile.pluginHookReadOnly,
+        }.contains(profile) &&
         (language != 'javascript' || scriptPath != null)) {
       throw StateError('hook 协议通道只接受宿主生成的 JavaScript 启动器');
+    }
+    if (profile == SandboxExecutionProfile.pluginHookReadOnly &&
+        authorizedDomains.isNotEmpty) {
+      throw StateError('只读 hook 不允许外部联网');
     }
     if (scriptPath == null &&
         (code.trim().isEmpty || utf8.encode(code).length > 64 * 1024)) {
@@ -643,6 +651,7 @@ class DockerCodeExecutionService {
       _recordExecution(tenantId, taskId, executionId, {
         'issued_at': issuedAt,
         'status': 'submitted',
+        'execution_profile': profile.wireName,
         if (scopeOperationId != null) 'scope_operation_id': scopeOperationId,
       });
       requestSubmitted = true;
@@ -687,7 +696,9 @@ class DockerCodeExecutionService {
       final artifactNames = await _saveArtifacts(
         tenantId,
         taskId,
-        result['artifacts'],
+        profile == SandboxExecutionProfile.pluginHookReadOnly
+            ? const []
+            : result['artifacts'],
         operationId: executionId,
       );
       _storeExecutionOutput(
@@ -1123,7 +1134,10 @@ class DockerCodeExecutionService {
       final artifactNames = await _saveArtifacts(
         tenantId,
         taskId,
-        result['artifacts'],
+        operation['execution_profile'] ==
+                SandboxExecutionProfile.pluginHookReadOnly.wireName
+            ? const []
+            : result['artifacts'],
         operationId: entry.key as String,
       );
       _recordExecution(tenantId, taskId, entry.key as String, {

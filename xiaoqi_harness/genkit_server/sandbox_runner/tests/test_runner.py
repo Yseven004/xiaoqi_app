@@ -513,6 +513,33 @@ class RunnerValidationTests(unittest.TestCase):
                 server._execution_run_seconds(request, Mock())
             client.assert_not_called()
 
+    def test_read_only_hook_never_exports_ephemeral_files_or_grants_network(self):
+        request = {'task_id': 'readonly-hook', 'execution_id': 'a' * 32,
+                   'execution_profile': 'plugin_hook_read_only',
+                   'language': 'javascript', 'code': 'process.exit(0)'}
+        client, container, volume = Mock(), Mock(), Mock()
+        volume.name = 'readonly-hook-volume'
+        client.volumes.create.return_value = volume
+        client.containers.create.return_value = container
+        container.put_archive.return_value = True
+        container.attrs = {'State': {'Status': 'exited', 'Running': False, 'ExitCode': 0}}
+        checkpoints = []
+        with (patch.object(server, '_get_client', return_value=client),
+              patch.object(server, '_decode_logs', return_value='protocol'),
+              patch.object(server, '_safe_artifacts') as export):
+            result = server._run_sandbox(request, Mock(), checkpoint=checkpoints.append)
+            export.assert_not_called()
+        self.assertEqual(result['artifacts'], [])
+        self.assertEqual(checkpoints[-1]['artifacts'], [])
+        self.assertEqual(result['stdout'], 'protocol')
+        options = client.containers.create.call_args.kwargs
+        self.assertEqual(options['labels']['com.xiaoqi.execution-profile'], 'plugin_hook_read_only')
+        self.assertEqual(options['network'], 'none')
+        self.assertEqual(server._execution_run_seconds(request), server.MAX_RUN_SECONDS)
+        with patch.object(server, '_get_client') as create, self.assertRaises(server.RequestError):
+            server._run_sandbox({**request, 'authorized_domains': ['example.com']}, Mock())
+        create.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

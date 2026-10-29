@@ -78,7 +78,9 @@ class PluginHookRunner {
             taskId: execution.taskId,
             code: code,
             language: 'javascript',
-            profile: SandboxExecutionProfile.pluginHook,
+            profile: snapshot['permission_mode'] == 'plan'
+                ? SandboxExecutionProfile.pluginHookReadOnly
+                : SandboxExecutionProfile.pluginHook,
             // A plugin declaration never adds network access. Hook HTTP and
             // prompt handlers will need their own exact action authorization.
             authorizedDomains: const [],
