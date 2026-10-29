@@ -62,3 +62,21 @@ additional forced-process-death/cancellation case brings the focused suite to
 cancellation. Full analysis remains clean. Superseded CI 40848175372 was cancelled
 before activation to include this cancellation path; its controller exited with
 production unchanged. The exact final commit still requires real-container CI.
+
+Final-commit CI 40849378098/job 123364737377 (main
+b70c2c31f75a7a0d468d5f098e407dc358c3fa58) passes all 403 Dart, 86 runner and
+30 deployment tests, including both actual API-child-death cases. Image build
+succeeds. The existing real Docker runner-restart gate then fails before the new
+API-container gate runs: original SDK request 3 reaches its 30-second timeout;
+the retained runner state reports "Original MCP stdout checkpoint is unavailable",
+stdout_offset 442, cursor 4, send_sequence 5, closed/stopped/finished. The host
+had verified the original container remained running after runner restart.
+This is not yet a diagnosed root cause or an accepted flaky rerun.
+
+The standard deploy controller exits 1 in the build phase and explicitly leaves
+production unchanged. No artifact activation or production rollback was needed.
+The prior healthy release remains 20261029-145118-3c9ead8. Next required work:
+distinguish a missing Docker stdout replay prefix from an API-initiated close or
+event/cursor error, reproduce with private cursor journaling enabled, fix the
+actual cause, then rerun all original and new real-container gates. Do not remove
+the runner-restart gate or call this batch deployed from the green unit suite.
