@@ -1,0 +1,48 @@
+{
+  "release": "20261030-073514-eeb173c",
+  "main_commit": "eeb173c7c45e86743c5c50117cbb89c16ff451c3",
+  "verification_profile": "non-image",
+  "ci": {
+    "run_id": 40974111602,
+    "job_id": 123797795496,
+    "conclusion": "success",
+    "dart_tests": 467,
+    "runner_tests": 93,
+    "deployment_python_tests": 30,
+    "bridge_tests": 2,
+    "sandbox_image_tests": 2,
+    "runner_restart_gate": true,
+    "mcp_runner_restart_gate": true,
+    "mcp_api_restart_gate": true,
+    "stdio_runtime_gate": true,
+    "root_hooks_real_agent_gate": true,
+    "private_read_only_hook_no_export_gate": true,
+    "python_registry_mcp_roundtrip": true,
+    "image_export_import_roundtrip": true
+  },
+  "deployment": {
+    "controller_exit_code": 0,
+    "artifact_source_verified": true,
+    "prebuilt_image_identities_verified": true,
+    "runtime_probe_passed": true,
+    "writes_held_during_data_backup_and_activation": true,
+    "health_and_data_verification_passed": true,
+    "traffic_resumed": true,
+    "cleanup_completed": true,
+    "current_health": "healthy",
+    "restore_point": "latest-good",
+    "restore_data": "present",
+    "public_https_status": 200,
+    "public_https_verification_via": "cloud_assistant",
+    "product_release": "2026-10-27-agent-tools-2",
+    "api_contract": "24",
+    "deployment_log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261030-073514-eeb173c.log"
+  },
+  "not_claimed": [
+    "Pending exec-form Hook implementation is not in this release",
+    "Pending complete delegated read-only Agent Docker gate is not in this release",
+    "All remaining P01-P14 requirements are not closed",
+    "No paid image-provider verification was performed",
+    "Client/device verification remains unperformed and user-owned"
+  ]
+}

@@ -76,8 +76,17 @@ Future<void> verifyStdioAgent(
           );
       if (preparing && child) {
         final names = tools.map((tool) => tool['function']['name']).toSet();
-        if (names.contains('write_task_text_file') ||
-            names.contains('execute_shell')) {
+        if (names.any(
+          const {
+            'write_task_text_file',
+            'edit_task_text_file',
+            'execute_shell',
+            'execute_python',
+            'execute_javascript',
+            'execute_typescript',
+            'execute_skill_script',
+          }.contains,
+        )) {
           throw StateError(
             'Read-only delegated Agent exposed a write/code tool',
           );

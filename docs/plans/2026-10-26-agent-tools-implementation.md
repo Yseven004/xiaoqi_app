@@ -1,5 +1,11 @@
 # Agent 工具全链路实施记录
 
+## 2026-10-30 Hook / Python MCP / 只读临时执行 / 安装包容量（已部署并验证）
+
+main eeb173c7c45e86743c5c50117cbb89c16ff451c3 的 CI 40974111602/job 123797795496 成功：467 Dart、93 runner、30 部署 Python、2 bridge 检查、2 沙箱镜像检查、真实 stdio/重启门禁与镜像往返通过。真实 Python MCP 时区转换、根 Hook Agent 组合和只读临时计算不导出均已通过。标准部署 20261030-073514-eeb173c 退出 0，目标探针、暂停写入/备份/切换、健康与数据、恢复流量、清理完成；运行健康，唯一 latest-good 恢复点数据存在，公开 HTTPS 经 Cloud Assistant 验证 200，product 2026-10-27-agent-tools-2/API 24 匹配。服务器已部署并验证（server deployed and verified）。
+
+完整证据见 `docs/architecture/evidence/2026-10-30-hooks-python-mcp-release.json`。本批不含后续 exec args 实现和完整委派只读 Agent Docker 用例；不冒称 P01–P14 全完成，不重建无变化客户端，不调用欠费生图服务。客户端未执行验证，待用户真机验证。
+
 ## 2026-10-30 P11 Hook 直接参数调用（本地通过，待容器验收）
 
 接入 command+args 的无 Shell 直接调用，支持隔离根目录占位符、空参数/空格/中文/字面 Shell 字符，保留原 UTF-8 JSON stdin 与原执行预算。Windows 原生测试发现并修复 Python stdin 本地编码问题。根 Hook 的 once 按官方“仅技能 frontmatter 生效”规则忽略，不再整条阻断；不冒称技能 once 生命周期已实现。20 项 parser/catalog/runner 测试、10 个原生 launcher 场景通过，共享 Docker probe 52522 字节未超 64 KiB。catalog profile 2 从相同原始安装字节刷新。详见 `docs/architecture/2026-10-30-hook-exec-arguments.md`。未移动正在构建部署的 main，不据此关闭 P11。
