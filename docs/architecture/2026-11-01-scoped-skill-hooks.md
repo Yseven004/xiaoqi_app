@@ -49,10 +49,17 @@ read-only children. It requires 14 code jobs (previous 11 plus three independent
 skill Hook runs), 9 Hook successes, exactly four original artifacts, two child
 sessions and three distinct successful once registrations. Temporary files from
 read-only skill Hooks must not be persisted. Original SKILL bytes must match.
-This gate has been extended but has not yet run for this batch.
+This gate passed in exact-main CI `41284972600`, including the actual image
+export/import roundtrip.
 
 Complete targeted local regression passed 140 tests, including the old root
 Hook, fork, model, import, permission and restart scenarios; final `dart analyze`
-reported no issues. Exact-main CI/container and deployment remain pending.
+reported no issues. Exact-main CI passed 508 Dart tests (one native launcher
+skip), 95 runner, 30 deployment, 2 bridge and 2 image tests. Standard deployment
+`20261101-152921-4ce890b` exited 0 after runtime probe, health/data, traffic
+resumption, cleanup and public HTTPS 200/API 24 verification. The service is
+healthy with one latest-good restore point and its data.
+This batch is server deployed and verified. See
+`evidence/2026-11-01-scoped-skill-hook-release.json`.
 No API or Flutter contract changed. Client 未执行验证，待用户真机验证。No paid image
 service is called, and no generic computer/device control is added.

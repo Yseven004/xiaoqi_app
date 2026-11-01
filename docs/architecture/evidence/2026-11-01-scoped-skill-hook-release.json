@@ -1,0 +1,51 @@
+{
+  "main_commit": "4ce890b5314b10d7c8231ea6c7fd24dc9c1b045d",
+  "release": "20261101-152921-4ce890b",
+  "verification_profile": "non-image",
+  "ci": {
+    "run_id": 41284972600,
+    "job_id": 124784897257,
+    "conclusion": "success",
+    "dart_passed": 508,
+    "dart_skipped": 1,
+    "runner_tests": 95,
+    "deployment_python_tests": 30,
+    "bridge_tests": 2,
+    "sandbox_image_tests": 2,
+    "stdio_runtime_gate": true,
+    "image_export_import_roundtrip": true
+  },
+  "container_assertions": {
+    "mixed_code_jobs": 14,
+    "hook_successes": 9,
+    "private_child_sessions": 2,
+    "scoped_skill_registrations": 3,
+    "independent_successful_once_records": 3,
+    "pending_once_records": 0,
+    "original_artifacts": 4,
+    "read_only_skill_hook_files_not_persisted": true,
+    "immutable_skill_unchanged": true
+  },
+  "deployment": {
+    "controller_exit_code": 0,
+    "runtime_probe": true,
+    "health_and_data": true,
+    "traffic_resumed": true,
+    "cleanup": true,
+    "current_release": "20261101-152921-4ce890b",
+    "current_health": "healthy",
+    "restore_point": "latest-good",
+    "restore_data": "present",
+    "public_https": 200,
+    "public_verification_source": "cloud_assistant",
+    "product_release": "2026-10-27-agent-tools-2",
+    "api_contract": "24",
+    "log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261101-152921-4ce890b.log"
+  },
+  "limitations": [
+    "SessionStart/UserPromptSubmit follow-up, Stop and asynchronous lifecycle work are not included in this artifact.",
+    "Real selected plugin combinations, Apps/extensions and final cross-entry acceptance remain open.",
+    "No paid image service invoked.",
+    "Client: 未执行验证，待用户真机验证。"
+  ]
+}
