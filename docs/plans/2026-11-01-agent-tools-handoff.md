@@ -10,7 +10,8 @@
 - 工作区已提交技能 Hook 发布证据 `620e6ca`，并接续 root SessionStart/UserPromptSubmit 生命周期实现与测试；本地源码以实际 git log/status 为准，尚未同步 main 或部署。
 - 生命周期本地：18 项 catalog/lifecycle/journal/skill 状态检查、3 个实际 SDK 场景通过，随后完整定向回归 114 项通过，静态分析通过。日志 `%TEMP%/xiaoqi-lifecycle-regression.log`；会话 `33331` 已退出 0，无测试进程需继续等待。不要重复运行已通过检查，除非后续修改相关代码。
 - 新 root 生命周期实现位于 `plugin_hook_lifecycle.dart`、`plugin_hook_event_journal.dart`；skill once 复用后者且保留原私有记录格式。真实 gate 已扩展到 16 code jobs / 11 Hook 成功，但此扩展未跑 CI。当前线上技能 Hook gate 是 14 jobs / 9 Hook 成功 / 3 独立 once。
-- Stop/async 尚未实现；必要 Apps/extensions、真实代表组合、跨入口剩余验收和最终矩阵仍开放。客户端未执行验证，待用户真机验证。不得把剩余项当作全部重新开发，也不得凭现有局部成功关闭 P01–P14。
+- 后续本地已实现 Stop、任务所有的 async/asyncRewake、持久化后台恢复和条件过滤。完整回归 531 项通过；最后边界加强后 26 项定向检查、12 项队列/后台裁决/实际 SDK 检查及静态分析通过。混合容器 gate 目标为 18 jobs / 13 Hook 成功 / 5 文件，尚待精确 main CI。见 `2026-11-01-hook-lifecycle-followup.md`，不能当作已部署。
+- 用户已确认必要 Apps 使用“聊天结果内展开（推荐）”，完整交互范围见 `2026-11-01-apps-interaction-review.md`，不用重复询问位置。已选真实官方 npm 样本 `@modelcontextprotocol/server-basic-vanillajs@2.0.4`，来源/完整性已记录，尚未执行或接入。必要 Apps/extensions、真实代表组合、跨入口剩余验收和最终矩阵仍开放。客户端未执行验证，待用户真机验证。不得把剩余项当作全部重新开发，也不得凭现有局部成功关闭 P01–P14。
 - `2026-11-01-agent-tools-current-matrix.md`、各批 acceptance 文档及 `docs/architecture/evidence/2026-11-01-*-release.json` 为当前证据。
 - 远端网络已用现有 `127.0.0.1:7890` 的进程级 HTTP(S)_PROXY 恢复稳定；不要启动新加速器或改系统配置。发布用 `pwsh -NoProfile`，避免旧 PowerShell 的 NativeCommandError；仍以 `deploy_current.ps1 -VerificationProfile non-image` 为唯一入口。
 - 当前发布进程已退出 0，没有需要重复启动的部署。工作区后续改动未部署。不要移动 main 触发无必要的文档单独构建；将发布证据与下一批完整改动一起正常同步，确保下一批用精确 main 产物发布。

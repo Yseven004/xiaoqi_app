@@ -30,6 +30,8 @@ void main() {
     'root-life-context',
     'root-life-approval',
     'root-life-deny',
+    'root-life-stop',
+    'root-life-async-stop',
     'fork-write',
     'fork-plan',
     'fork-custom',
@@ -241,7 +243,13 @@ void main() {
               expect(system, contains('ROOT_STARTUP_CONTEXT'));
               expect(system, contains('ROOT_PROMPT_CONTEXT'));
             }
-            if (!called('set_task_deliverables')) {
+            if ((scenario == 'root-life-stop' ||
+                    scenario == 'root-life-async-stop') &&
+                serialized.contains('STOP_REVIEW_REQUIRED') &&
+                !called('write_task_text_file')) {
+              tool = 'write_task_text_file';
+              input = {'path': 'review.txt', 'text': 'resolved review finding'};
+            } else if (!called('set_task_deliverables')) {
               tool = 'set_task_deliverables';
               input = {
                 'steps': ['Delegate the note'],
@@ -441,6 +449,17 @@ void main() {
             expect(value['contents'], ['original task note']);
             expect(value['missing'], isFalse);
             expect(value['completed'], 1);
+          } else if (scenario == 'root-life-stop' ||
+              scenario == 'root-life-async-stop') {
+            expect(
+              value['contents'],
+              unorderedEquals([
+                'verified child output',
+                'resolved review finding',
+              ]),
+            );
+            expect(value['completed'], 1);
+            expect(value['missing'], isFalse);
           } else if (skillHooks) {
             expect(
               value['contents'],
@@ -506,8 +525,27 @@ void main() {
             expect(hooks.map((h) => h['hook_event_name']), [
               'SessionStart',
               'UserPromptSubmit',
+              if (scenario == 'root-life-stop' ||
+                  scenario == 'root-life-async-stop') ...[
+                'Stop',
+                'Stop',
+              ],
             ]);
-            expect(value['code_runs'], 2);
+            expect(
+              value['code_runs'],
+              (scenario == 'root-life-stop' ||
+                      scenario == 'root-life-async-stop')
+                  ? 4
+                  : 2,
+            );
+            if (scenario == 'root-life-stop' ||
+                scenario == 'root-life-async-stop')
+              expect(
+                hooks
+                    .where((h) => h['hook_event_name'] == 'Stop')
+                    .map((h) => h['stop_hook_active']),
+                [false, true],
+              );
           }
         } finally {
           await serving.cancel();

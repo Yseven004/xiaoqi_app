@@ -79,13 +79,15 @@ else:
  records=json.loads(counter.read_text()) if counter.exists() else []
  records.append(i); counter.write_text(json.dumps(records))
  if ${rootLifecycle ? 'True' : 'False'}:
-  assert event in ('SessionStart','UserPromptSubmit')
+  assert event in ('SessionStart','UserPromptSubmit','Stop')
   if event=='SessionStart': assert i['source']=='startup'
-  else: assert i['prompt']=='请使用 writer Agent 完成任务笔记'
+  elif event=='UserPromptSubmit': assert i['prompt']=='请使用 writer Agent 完成任务笔记'
+  else: assert i['host_phase']=='task_execution_exit'
   envelope={'xiaoqi_hook_command_v1':{'matched':True,'timed_out':False,
-   'exit_code':2 if ${jsonEncode(scenario)}=='root-life-deny' and event=='UserPromptSubmit' else 0,
-   'stdout':'ROOT_STARTUP_CONTEXT' if event=='SessionStart' else 'ROOT_PROMPT_CONTEXT',
-   'stderr':'prompt blocked'}}
+   'exit_code':2 if (${jsonEncode(scenario)}=='root-life-deny' and event=='UserPromptSubmit') or (${jsonEncode(scenario)}=='root-life-async-stop' and event=='Stop' and not i['stop_hook_active']) else 0,
+   'stdout':('ROOT_STARTUP_CONTEXT' if event=='SessionStart' else
+    json.dumps({} if i['stop_hook_active'] else {'decision':'block','reason':'STOP_REVIEW_REQUIRED'}) if event=='Stop' else 'ROOT_PROMPT_CONTEXT'),
+   'stderr':'STOP_REVIEW_REQUIRED' if ${jsonEncode(scenario)}=='root-life-async-stop' and event=='Stop' and not i['stop_hook_active'] else 'prompt blocked'}}
   print(json.dumps({'type':'result','ok':True,'execution_id':r['execution_id'],'stdout':json.dumps(envelope),'artifacts':[],'cleanup_pending':False}))
   sys.exit(0)
  specific={'hookEventName':event}
@@ -263,7 +265,13 @@ else:
           'hooks': {
             for (final event
                 in (rootLifecycle
-                    ? ['SessionStart', 'UserPromptSubmit']
+                    ? [
+                        'SessionStart',
+                        'UserPromptSubmit',
+                        if (scenario == 'root-life-stop' ||
+                            scenario == 'root-life-async-stop')
+                          'Stop',
+                      ]
                     : ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']))
               event: [
                 {
@@ -275,7 +283,12 @@ else:
                       ? r'^Read$'
                       : r'^Write$',
                   'hooks': [
-                    {'type': 'command', 'command': 'fixture-hook'},
+                    {
+                      'type': 'command',
+                      'command': 'fixture-hook',
+                      if (scenario == 'root-life-async-stop' && event == 'Stop')
+                        'asyncRewake': true,
+                    },
                   ],
                 },
               ],

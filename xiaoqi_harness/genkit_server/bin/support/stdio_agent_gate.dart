@@ -134,7 +134,12 @@ Future<void> verifyStdioAgent(
                             value,
                   ),
             );
-        if (!called('set_task_deliverables')) {
+        if (readOnlyDelegate &&
+            serialized.contains('ASYNC_STOP_REVIEW_REQUIRED') &&
+            !called('write_task_text_file')) {
+          name = 'write_task_text_file';
+          input = {'path': 'review.txt', 'text': 'async-review-resolved'};
+        } else if (!called('set_task_deliverables')) {
           name = 'set_task_deliverables';
           input = {
             'steps': ['写入文件', '核对文件', '执行 Shell 接力', '调用插件命令及脚本'],
@@ -334,12 +339,18 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additional
             for (final event in [
               'PreToolUse',
               'PostToolUse',
-              if (readOnlyDelegate) ...['SessionStart', 'UserPromptSubmit'],
+              if (readOnlyDelegate) ...[
+                'SessionStart',
+                'UserPromptSubmit',
+                'Stop',
+              ],
             ])
               event: [
                 {
                   'matcher':
-                      event == 'SessionStart' || event == 'UserPromptSubmit'
+                      event == 'SessionStart' ||
+                          event == 'UserPromptSubmit' ||
+                          event == 'Stop'
                       ? null
                       : readOnlyDelegate
                       ? r'^Bash$|^Read$'
@@ -348,11 +359,14 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additional
                     {
                       'type': 'command',
                       'onFailure': 'block',
+                      if (event == 'Stop') 'asyncRewake': true,
                       'command':
                           'python3 "\$CLAUDE_PLUGIN_ROOT/hooks/${event == 'SessionStart'
                               ? 'start'
                               : event == 'UserPromptSubmit'
                               ? 'prompt'
+                              : event == 'Stop'
+                              ? 'stop'
                               : event == 'PreToolUse'
                               ? 'pre'
                               : 'post'}.py"',
@@ -369,6 +383,18 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additional
             ? hookGateWithReadOnly(hookGatePreScript)
             : hookGatePreScript,
       ),
+    if (readOnlyDelegate)
+      'hooks/stop.py': utf8.encode(r'''
+import json,pathlib,sys
+i=json.load(sys.stdin)
+assert i['hook_event_name']=='Stop' and i['host_phase']=='task_execution_exit'
+if not i['stop_hook_active']:
+ print('ASYNC_STOP_REVIEW_REQUIRED: Write review.txt with async-review-resolved',file=sys.stderr)
+ sys.exit(2)
+manifest=json.loads(pathlib.Path('/workspace/input_manifest.json').read_text())
+item=next(item for item in manifest['inputs'] if item['name']=='review.txt')
+assert pathlib.Path(item['path']).read_text()=='async-review-resolved'
+'''),
     if (readOnlyDelegate)
       'hooks/start.py': utf8.encode(r'''
 import json,sys
@@ -519,6 +545,7 @@ print('ROOT_PROMPT_CONTEXT')
       'agent-helper.txt': 'agent-shell-verified',
       'plugin-command.txt': 'plugin-command-script-verified',
       if (rootHooks) 'hook-verified.txt': 'hook-shell-verified',
+      if (readOnlyDelegate) 'review.txt': 'async-review-resolved',
     }.entries) {
       final matches = artifacts
           .where((artifact) => artifact['name'] == expected.key)
@@ -539,7 +566,7 @@ print('ROOT_PROMPT_CONTEXT')
     // delegations including the fork's private dynamic context, plus one
     // independent once skill Hook in the parent and each private child.
     final expectedCodeRuns =
-        4 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 10 : 0);
+        4 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 12 : 0);
     if ((store.get('task/$tenant/$task')!.value['code_execution_runs'] !=
             expectedCodeRuns) ||
         (rootHooks &&
@@ -550,8 +577,8 @@ print('ROOT_PROMPT_CONTEXT')
                               e['tool'] == 'plugin_hook',
                         )
                         .length !=
-                    (readOnlyDelegate ? 11 : 2) ||
-                artifacts.length != 4))) {
+                    (readOnlyDelegate ? 13 : 2) ||
+                artifacts.length != (readOnlyDelegate ? 5 : 4)))) {
       throw StateError(
         'Real Agent hook execution, budget or protocol artifact boundary failed; '
         'code_runs=${store.get('task/$tenant/$task')!.value['code_execution_runs']}; '

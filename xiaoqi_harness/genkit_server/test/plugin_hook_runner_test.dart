@@ -14,6 +14,8 @@ class _Executor extends DockerCodeExecutionService {
   int submissions = 0;
   void Function()? onAttempt;
   Object? submissionFailure;
+  int exitCode = 2;
+  String commandOutput = '';
   SandboxExecutionProfile expectedProfile = SandboxExecutionProfile.pluginHook;
   @override
   Future<String> execute({
@@ -44,8 +46,8 @@ class _Executor extends DockerCodeExecutionService {
       'xiaoqi_hook_command_v1': {
         'matched': true,
         'timed_out': false,
-        'exit_code': 2,
-        'stdout': '',
+        'exit_code': exitCode,
+        'stdout': commandOutput,
         'stderr': 'guard denied',
       },
     });
@@ -117,6 +119,54 @@ void main() {
     matchValue: tool,
     sourceFiles: source,
     cancellation: cancellation.token,
+  );
+
+  test(
+    'background verdicts cannot veto or rewrite and rewake requires exit 2',
+    () async {
+      for (final rewake in [true, false]) {
+        for (final exit in [0, 1, 2]) {
+          final backgroundHook = PluginHooks.parse({}, {
+            'hooks': {
+              'PreToolUse': [
+                {
+                  'hooks': [
+                    {
+                      'type': 'command',
+                      'command': 'source-guard',
+                      rewake ? 'asyncRewake' : 'async': true,
+                      'onFailure': 'block',
+                    },
+                  ],
+                },
+              ],
+            },
+          }, manifestPath: 'plugin.json').handlers.single;
+          executor.exitCode = exit;
+          executor.commandOutput =
+              '{"decision":"block","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","updatedInput":{"command":"injected"}}}';
+          final output = await PluginHookRunner(executor).run(
+            execution: execution,
+            hook: backgroundHook,
+            sourceBinding: 'immutable-version',
+            invocation: 'background-$rewake-$exit',
+            input: {'hook_event_name': 'PreToolUse'},
+            matchValue: 'Bash',
+            sourceFiles: source,
+            cancellation: cancellation.token,
+          );
+          expect(output!.preventAction, isFalse);
+          expect(output.stopProcessing, isFalse);
+          expect(output.continueLoop, isFalse);
+          expect(output.updatedInput, isNull);
+          expect(output.permission, isNull);
+          expect(
+            output.additionalContext,
+            rewake && exit == 2 ? 'guard denied' : null,
+          );
+        }
+      }
+    },
   );
 
   test(

@@ -71,6 +71,23 @@ resolve the sample's separate legacy tool or lifecycle requirements.
 
 ## Apps and client extension protocol
 
+### Selected executable Apps sample (2026-11-01 follow-up)
+
+- Official `examples/basic-server-vanillajs` sources inspected at the pinned
+  ext-apps commit below: package/server/HTML/view TypeScript. Package version
+  2.0.4; MCP server implementation advertises 1.0.0.
+- Published package verified from the npm registry:
+  `@modelcontextprotocol/server-basic-vanillajs@2.0.4`, MIT metadata;
+  integrity `sha512-L+IOxLjfX9oAwvnzLAMGX1pwBsIsXUsc9mB5iOTFuQ7lIaejetsrfYngPKwf9ZPHk9iCNVbHHaI7sj5dqax55Q==`.
+- Actual tool is `get-time`, linked resource `ui://get-time/mcp-app.html`.
+  The source UI also requests a tool refresh, chat-message sending, host logging
+  and external link opening. These are distinct host actions, not blanket grants.
+- Source/registry inspection only; not yet installed or executed in Xiaoqi.
+  No paid model, image service, account credentials or hardware required.
+- User confirmed inline expansion in existing conversation result cards. See
+  `2026-11-01-apps-interaction-review.md`; this is implementation authorization,
+  not client verification or final Apps acceptance.
+
 Repository: [modelcontextprotocol/ext-apps](https://github.com/modelcontextprotocol/ext-apps/tree/cf599cc462406accc90ec3ca7879e3a22a9fc2a8),
 fixed commit `cf599cc462406accc90ec3ca7879e3a22a9fc2a8`, SDK version 2.0.4.
 The root package declares MIT, but the root LICENSE records an MIT/Apache-2.0

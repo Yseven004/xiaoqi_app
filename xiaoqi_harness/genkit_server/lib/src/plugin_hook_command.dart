@@ -35,16 +35,15 @@ class PluginHookCommand {
 
   static String? unsupported(PluginHook hook) {
     if (hook.type != 'command') return '不是 command hook';
-    if (hook.config['async'] == true || hook.config['asyncRewake'] == true) {
-      return '后台 hook 尚需独立生命周期映射';
-    }
     if (!hook.config.containsKey('args') &&
         hook.config['shell'] != null &&
         hook.config['shell'] != 'bash') {
       return '当前隔离宿主提供 Bash';
     }
-    if (hook.config['if'] != null) {
-      return '条件命令尚需宿主映射';
+    if (hook.config['if'] != null &&
+        (hook.config['if'] is! String ||
+            (hook.config['if'] as String).length > 4096)) {
+      return 'hook if 需要不超过 4096 字符的权限规则';
     }
     if (hook.config.containsKey('args') &&
         [
@@ -82,6 +81,7 @@ class PluginHookCommand {
         'command': hook.config['command'],
         'args': hook.config['args'],
         'matcher': hook.matcher,
+        'condition': hook.config['if'],
         'literalMatch': trivialMatch(hook.matcher, matchValue),
         'matchValue': matchValue,
         'input': input,
@@ -121,14 +121,39 @@ const { spawn } = require('node:child_process');
 const output = { matched: false, timed_out: false, exit_code: null, stdout: '', stderr: '' };
 function emit() { process.stdout.write(JSON.stringify({ xiaoqi_hook_command_v1: output }) + '\n'); }
 async function matches() {
-  if (spec.literalMatch != null) return spec.literalMatch;
-  if (spec.matcher == null || spec.matcher === '' || spec.matcher === '*') return true;
+  if (spec.literalMatch === false) return false;
+  if (spec.condition == null && spec.literalMatch != null) return spec.literalMatch;
   return await new Promise((resolve, reject) => {
-    const worker = new Worker(`
+    const worker = new Worker(String.raw`
       const { parentPort, workerData } = require('node:worker_threads');
-      try { parentPort.postMessage({match: new RegExp(workerData.pattern).test(workerData.value)}); }
+      function conditionMatches(rule, input) {
+        if (rule == null) return true;
+        if (!['PreToolUse','PostToolUse','PostToolUseFailure','PermissionRequest','PermissionDenied'].includes(input.hook_event_name)) return false;
+        const parsed = /^([^()]+)(?:\((.*)\))?$/.exec(rule);
+        if (!parsed) throw new Error('invalid condition');
+        const glob = pattern => new RegExp('^' + pattern.split('*').map(part => part.replace(/[.*+?^\u0024{}()|[\]\\]/g, '\\$&')).join('.*') + '$', 's');
+        if (!glob(parsed[1]).test(input.tool_name || '')) return false;
+        if (parsed[2] == null) return true;
+        const value = input.tool_input || {};
+        const pattern = parsed[2].replace(/:\*$/, ' *');
+        if (input.tool_name !== 'Bash') return glob(pattern).test(value.file_path || value.url || '');
+        const command = value.command || '';
+        // This is a spawn filter, never authorization. Shell constructs that
+        // cannot be resolved statically run the check conservatively.
+        if (/[\u0024\x60(){}<>\\\n]/.test(command)) return true;
+        const parts = command.split(/&&|\|\||[;|&]/);
+        return parts.some(part => {
+          const clean = part.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s]+)\s+)*/, '');
+          return glob(pattern).test(clean);
+        });
+      }
+      try {
+        const regexMatch = workerData.literalMatch == null
+          ? new RegExp(workerData.pattern).test(workerData.value) : workerData.literalMatch;
+        parentPort.postMessage({match: regexMatch && conditionMatches(workerData.condition, workerData.input)});
+      }
       catch (_) { parentPort.postMessage({error: 'hook matcher 无效'}); }
-    `, { eval: true, workerData: { pattern: spec.matcher, value: spec.matchValue } });
+    `, { eval: true, workerData: { pattern: spec.matcher, value: spec.matchValue, literalMatch: spec.literalMatch, condition: spec.condition, input: spec.input } });
     let done = false;
     const settle = (error, value) => {
       if (done) return;

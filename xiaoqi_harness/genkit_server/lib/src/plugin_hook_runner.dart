@@ -113,6 +113,31 @@ class PluginHookRunner {
       );
     }
     if (output['matched'] == false && output['stderr'] == '') return null;
+    if (hook.config['async'] == true || hook.config['asyncRewake'] == true) {
+      // Background output cannot veto or rewrite an action already performed.
+      // Rewake is strictly exit-2, irrespective of JSON permission decisions.
+      if (hook.config['asyncRewake'] == true) {
+        final message = output['stderr'] == ''
+            ? output['stdout'] as String
+            : output['stderr'] as String;
+        return PluginHookOutput(
+          additionalContext: output['exit_code'] == 2 ? message : null,
+          successful: output['exit_code'] == 0,
+        );
+      }
+      final verdict = PluginHookOutput.parse(
+        event: hook.event,
+        exitCode: output['exit_code'] as int?,
+        stdout: output['stdout'] as String,
+        stderr: output['stderr'] as String,
+        timedOut: output['timed_out'] == true,
+      );
+      return PluginHookOutput(
+        additionalContext: verdict.additionalContext ?? verdict.systemMessage,
+        error: verdict.error,
+        successful: verdict.successful,
+      );
+    }
     return PluginHookOutput.parse(
       event: hook.event,
       exitCode: output['exit_code'] as int?,

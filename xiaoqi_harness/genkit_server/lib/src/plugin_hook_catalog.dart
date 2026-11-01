@@ -9,7 +9,12 @@ import 'store.dart';
 class PluginHookCatalog {
   static const profileVersion = 3;
   static const toolEvents = {'PreToolUse', 'PostToolUse', 'PostToolUseFailure'};
-  static const rootEvents = {...toolEvents, 'SessionStart', 'UserPromptSubmit'};
+  static const rootEvents = {
+    ...toolEvents,
+    'SessionStart',
+    'UserPromptSubmit',
+    'Stop',
+  };
   static List<String> skillIssues(Map metadata) {
     final parsed = PluginHooks.skill(metadata);
     return [
@@ -71,6 +76,7 @@ class PluginHookCatalog {
               '工具事件已映射；ask/defer 等高级控制仅在宿主已有对应流程时执行'
             else if (rootEvents.contains(hook.event))
               '生命周期映射到当前任务；插件声明不新增权限',
+            if (hook.event == 'Stop') 'Stop 在任务工具阶段结束、最终正文渲染前执行；不会审查最终展示文案',
           ],
           'has_dependencies': dependencies,
         },

@@ -12,6 +12,7 @@ import 'package:xiaoqi_genkit_server/src/turn_contract.dart';
 class _Executor extends DockerCodeExecutionService {
   _Executor(super.store);
   final submitted = <String>[];
+  final stopStates = <bool>[];
   bool deny = false;
   Object? failure;
   @override
@@ -42,6 +43,7 @@ class _Executor extends DockerCodeExecutionService {
     final spec = jsonDecode(jsonDecode(literal) as String) as Map;
     final input = spec['input'] as Map;
     final event = input['hook_event_name'] as String;
+    if (event == 'Stop') stopStates.add(input['stop_hook_active'] as bool);
     expect(input['session_id'], 'task');
     if (event == 'UserPromptSubmit') expect(input['prompt'], 'original prompt');
     submitted.add(event);
@@ -53,6 +55,12 @@ class _Executor extends DockerCodeExecutionService {
         'exit_code': deny && event == 'UserPromptSubmit' ? 2 : 0,
         'stdout': event == 'SessionStart'
             ? 'STARTUP_CONTEXT'
+            : event == 'Stop'
+            ? jsonEncode(
+                input['stop_hook_active'] == true
+                    ? {}
+                    : {'decision': 'block', 'reason': 'STOP_REVIEW_REQUIRED'},
+              )
             : 'PROMPT_CONTEXT',
         'stderr': deny ? 'prompt blocked' : '',
       },
@@ -94,7 +102,7 @@ void main() {
       'hooks/hooks.json': utf8.encode(
         jsonEncode({
           'hooks': {
-            for (final event in ['SessionStart', 'UserPromptSubmit'])
+            for (final event in ['SessionStart', 'UserPromptSubmit', 'Stop'])
               event: [
                 {
                   'hooks': [
@@ -162,6 +170,54 @@ void main() {
         'UserPromptSubmit',
         'UserPromptSubmit',
       ]);
+    },
+  );
+  test(
+    'an in-memory cached lifecycle verdict cannot accept changed original prompt arguments',
+    () async {
+      final hooks = lifecycle();
+      await run(hooks);
+      await expectLater(
+        hooks.beforeTurn(
+          execution: owner,
+          prompt: 'changed prompt',
+          model: 'deepseek-flash',
+          cancellation: cancellation.token,
+          materials: const [],
+        ),
+        throwsStateError,
+      );
+      expect(executor.submitted, ['SessionStart', 'UserPromptSubmit']);
+    },
+  );
+  test(
+    'Stop veto resumes work; its original retry snapshot survives a recreated runtime',
+    () async {
+      Future<List<String>> stop(
+        PluginHookLifecycle hooks,
+        String event, {
+        String message = 'prepared work',
+      }) => hooks.beforeExit(
+        execution: owner,
+        eventIdentity: event,
+        lastAssistantMessage: message,
+        cancellation: cancellation.token,
+        materials: const [],
+      );
+      final hooks = lifecycle();
+      expect(await stop(hooks, 'original'), ['STOP_REVIEW_REQUIRED']);
+      expect(await stop(hooks, 'original'), ['STOP_REVIEW_REQUIRED']);
+      expect(await stop(lifecycle(), 'original'), ['STOP_REVIEW_REQUIRED']);
+      expect(executor.stopStates, [false]);
+      expect(await stop(hooks, 'after-work'), isEmpty);
+      expect(executor.stopStates, [false, true]);
+      await expectLater(
+        stop(hooks, 'original', message: 'changed'),
+        throwsStateError,
+      );
+      owner = execution('next-user-turn');
+      expect(await stop(lifecycle(), 'new-original'), ['STOP_REVIEW_REQUIRED']);
+      expect(executor.stopStates, [false, true, false]);
     },
   );
   test(
