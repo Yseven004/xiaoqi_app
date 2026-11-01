@@ -1,5 +1,32 @@
 # Representative protocol sources
 
+## Lifecycle reference checked during implementation
+
+Official mutable references fetched on 2026-11-01, used as reference only (no
+documentation text or upstream implementation copied into runtime):
+
+- [Hooks reference](https://code.claude.com/docs/en/hooks.md), 284268 bytes,
+  SHA-256 `8e4d5d8c03b5a4cd0e6fe15cc8d71d782a5acc29cf738c584337d024ff1e4ca1`.
+- [Skills reference](https://code.claude.com/docs/en/skills.md), 118879 bytes,
+  SHA-256 `d2a5d07c0d1cef1d1edcf30f38f6b2712ff70ac050e3d50601cd3dadb42f9097`.
+
+Skill frontmatter Hooks activate on invocation and remain for the session,
+including following turns. Skill-only `once` removes a handler after a successful
+run; failure, exit-2 blocking and timeout leave it active. Agent frontmatter
+Hooks instead end with that Agent; its Stop is mapped to SubagentStop. Root and
+Agent declarations ignore `once`. Parent and private child session activation
+must therefore be tracked independently, with current source authorization
+rechecked even for persisted activation or cached output.
+
+`asyncRewake` is a background command mode whose exit-2 result wakes the Agent
+with source output as a reminder. It is not equivalent to synchronously waiting
+for the command. Required adaptation must preserve task-owned cancellation,
+secret isolation, bounded resources and original operation recovery. The source
+host's unbounded post-background timeout behavior is not permission to remove
+Xiaoqi task budgets; a bounded host difference must be explicit and tested.
+
+These rules describe the next adapter requirements, not completed support.
+
 Read-only research on 2026-11-01. These are reference targets, not installation
 or runtime acceptance claims. Existing filesystem MCP and Python time MCP remain
 the executable baseline; their successful gates must not be reimplemented.
