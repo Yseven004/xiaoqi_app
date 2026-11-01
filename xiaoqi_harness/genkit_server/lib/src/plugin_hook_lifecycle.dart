@@ -93,9 +93,21 @@ class PluginHookLifecycle {
           cancellation: cancellation,
           materials: materials,
         );
-        Future<PluginHookOutput?> execute() => background == null
-            ? command()
-            : background!.run(
+        Future<PluginHookOutput?> execute() => event == 'SessionStart'
+            ? PluginHookEventJournal(
+                store,
+                'private_plugin_lifecycle/${execution.tenantId}/${execution.taskId}/startup/${ToolExecution.digest([binding, hook.id])}',
+              ).run(
+                invocation: invocation,
+                inputBinding: ToolExecution.digest(input),
+                check: checkSource,
+                execute: command,
+                returnForLaterEvents: true,
+              )
+            : command();
+        result = background == null
+            ? await execute()
+            : await background!.run(
                 hook: hook,
                 identity: cache,
                 requestIdentity: execution.requestIdentity,
@@ -108,21 +120,9 @@ class PluginHookLifecycle {
                   'match': match,
                   'materials': materials,
                 },
-                execute: command,
+                execute: execute,
                 check: checkSource,
               );
-        result = event == 'SessionStart'
-            ? await PluginHookEventJournal(
-                store,
-                'private_plugin_lifecycle/${execution.tenantId}/${execution.taskId}/startup/${ToolExecution.digest([binding, hook.id])}',
-              ).run(
-                invocation: invocation,
-                inputBinding: ToolExecution.digest(input),
-                check: checkSource,
-                execute: execute,
-                returnForLaterEvents: true,
-              )
-            : await execute();
         checkSource();
         _results[cache] = (ToolExecution.digest(input), result);
         onEvent({

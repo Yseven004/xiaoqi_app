@@ -49,6 +49,7 @@ import 'plugin_hooks.dart';
 import 'scoped_skill_hooks.dart';
 import 'plugin_hook_lifecycle.dart';
 import 'plugin_hook_background.dart';
+import 'plugin_hook_event_journal.dart';
 import 'task_text_files.dart';
 import 'scope_requirements.dart';
 import 'capability_import_service.dart';
@@ -5925,7 +5926,24 @@ class GenkitXiaoqiAgentRuntime
                     .toList(),
                 skillRoot: entry?['root'] ?? '',
               );
-          if (entry == null) return command();
+          if (entry == null) {
+            if (hook.event != 'SessionStart') return command();
+            final startupInput = Map<String, dynamic>.from(input)
+              ..remove('hook_event_name');
+            return PluginHookEventJournal(
+              store,
+              'private_plugin_lifecycle/$tenantId/$taskId/startup/${ToolExecution.digest([saved['binding'], hook.id])}',
+            ).run(
+              invocation: saved['invocation'] as String,
+              inputBinding: ToolExecution.digest(startupInput),
+              check: () {
+                execution.check('workspace');
+                files();
+              },
+              execute: command,
+              returnForLaterEvents: true,
+            );
+          }
           final skillInput = Map<String, dynamic>.from(input)
             ..remove('hook_event_name');
           return scopedSkillHooks.run(

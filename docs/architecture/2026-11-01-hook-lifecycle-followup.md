@@ -64,6 +64,16 @@ analysis (`xiaoqi-hook-final-tests.log`, `xiaoqi-all-analyze-final.log`);
 final SDK rerun/CI/deployment status must be recorded separately. Five lifecycle
 SDK scenarios already passed context, approval, denial, Stop repair and async
 Stop repair before that strengthening. Real Node condition tests passed.
+
+Final SDK/queue/verdict rerun passed 12 checks. Subsequent source review found
+that an asynchronous startup wrapped the durable journal around scheduling,
+not actual command completion. The wrapper is now outside the complete startup
+journal operation; recovery follows the same startup key and original input.
+A regression explicitly starts two original turns and observes only one startup
+submission. Fourteen lifecycle/background tests and static analysis passed
+after this correction. The local controller waiting for `806b7dd`'s build was
+stopped while its last phase was BUILD_WAIT; no upload/activation occurred.
+CI `41292853963` was cancellation-requested so it cannot be used as final proof.
 Additional external SDK/account requirements
 of the pinned security-guidance stress sample are distinct from event dispatch;
 no provider credential is passed into a sandbox. Necessary Apps/extensions and

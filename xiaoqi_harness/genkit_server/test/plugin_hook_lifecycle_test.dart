@@ -5,6 +5,7 @@ import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/plugin_hook_catalog.dart';
 import 'package:xiaoqi_genkit_server/src/plugin_hook_lifecycle.dart';
+import 'package:xiaoqi_genkit_server/src/plugin_hook_background.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'package:xiaoqi_genkit_server/src/tool_execution.dart';
 import 'package:xiaoqi_genkit_server/src/turn_contract.dart';
@@ -153,6 +154,45 @@ void main() {
     model: 'deepseek-flash',
     cancellation: cancellation.token,
     materials: const [],
+  );
+
+  test(
+    'async startup records actual success and later turns do not restart it',
+    () async {
+      final files = store.getImmutable('packages/lifecycle');
+      final config = jsonDecode(utf8.decode(files['hooks/hooks.json']!)) as Map;
+      config['hooks']['SessionStart'][0]['hooks'][0]['async'] = true;
+      files['hooks/hooks.json'] = utf8.encode(jsonEncode(config));
+      store.putImmutable('packages/lifecycle-async', files);
+      final cap = store.get('cap/alice/plugin')!;
+      final version = cap.value['versions'][0] as Map;
+      version['artifact_key'] = 'packages/lifecycle-async';
+      version['components'] = PluginHookCatalog.inspect(files, '');
+      store.put('cap/alice/plugin', cap.value, cap.revision);
+      catalog = SelectedPluginHooks(store, 'alice', [
+        {'id': 'plugin', 'version_id': 'v1'},
+      ]);
+      for (final turn in ['first', 'later']) {
+        owner = execution(turn);
+        final background = PluginHookBackground(store, 'alice', 'task');
+        final hooks = PluginHookLifecycle(
+          store: store,
+          catalog: catalog,
+          executor: executor,
+          aliases: () => catalog.entries.keys,
+          onEvent: (_) {},
+          background: background,
+        );
+        expect(await run(hooks), ['PROMPT_CONTEXT']);
+        expect(await background.drain(), ['STARTUP_CONTEXT']);
+        background.acknowledge();
+        await background.close();
+      }
+      expect(
+        executor.submitted.where((event) => event == 'SessionStart'),
+        hasLength(1),
+      );
+    },
   );
 
   test(
