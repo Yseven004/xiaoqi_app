@@ -12,12 +12,15 @@
     "restore_data": "present"
   },
   "deployment": {
+    "controller_exit_code": 0,
     "entry_point": "xiaoqi_harness/deploy/deploy_current.ps1 -VerificationProfile non-image",
     "remote_log_result": "DEPLOY_OK",
     "runtime_probe": true,
     "health_and_data": true,
     "traffic_resumed": true,
     "cleanup": true,
+    "upload_cleanup_independently_verified": true,
+    "upload_cleanup_check_invoke_id": "t-hk071rb34lg27sw",
     "current_release": "20261101-102152-67e29ef",
     "current_health": "healthy",
     "restore_point": "latest-good",
