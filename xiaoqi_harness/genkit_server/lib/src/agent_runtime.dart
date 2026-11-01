@@ -45,6 +45,8 @@ import 'plugin_hook_command.dart';
 import 'plugin_hook_middleware.dart';
 import 'plugin_hook_output.dart';
 import 'plugin_hook_runner.dart';
+import 'plugin_hooks.dart';
+import 'scoped_skill_hooks.dart';
 import 'task_text_files.dart';
 import 'scope_requirements.dart';
 import 'capability_import_service.dart';
@@ -2327,6 +2329,54 @@ class GenkitXiaoqiAgentRuntime
     }
     final stagedSkills = await _stageSkills(selectedSkills);
     final loadedSkills = <String>{};
+    final scopedSkillHooks = ScopedSkillHooks(store, tenantId, taskId);
+    final skillHookDefinitions = <String, List<PluginHook>>{};
+    String skillHookBinding(Map entry) => ToolExecution.digest([
+      entry['parent_id'],
+      entry['version_id'],
+      entry['component_id'],
+      entry['artifact_key'],
+      entry['root'],
+    ]);
+    bool skillHookInScope(String id) =>
+        !scopeRequirements.contains(id) ||
+        scopeRequirements.required(turnContract, id);
+    String hookSession(Map<String, dynamic> context) {
+      final child = context['xiaoqi_plugin_agent_invocation'];
+      return child is String && child.isNotEmpty
+          ? ToolExecution.digest(child)
+          : taskId;
+    }
+
+    List<PluginHook> definitionsForSkill(String id) =>
+        skillHookDefinitions.putIfAbsent(
+          id,
+          () => PluginHooks.skill(
+            selectedSkills.metadata(selectedSkills.resolve({'skill_id': id})),
+          ).handlers,
+        );
+    void activateSkillHooks(String id, Map<String, dynamic> context) {
+      if (!turnContract.executesWorkflow || !skillHookInScope(id)) return;
+      final entry = selectedSkills.resolve({'skill_id': id});
+      if (definitionsForSkill(id).isEmpty) return;
+      scopedSkillHooks.activate(
+        hookSession(context),
+        id,
+        skillHookBinding(entry),
+      );
+    }
+
+    List<(String, PluginHook)> activeSkillHooks(String session) => [
+      for (final id in scopedSkillHooks.active(session, {
+        for (final entry in selectedSkills.entries.entries)
+          if (skillHookInScope(entry.key))
+            entry.key: skillHookBinding(entry.value),
+      }))
+        for (final hook in definitionsForSkill(id))
+          if (PluginHookCatalog.toolEvents.contains(hook.event) &&
+              PluginHookCommand.unsupported(hook) == null)
+            (id, hook),
+    ];
     final explicitSkillInstructions = StringBuffer();
     for (final id in selectedSkills.explicitIds.where(
       (id) => scopeRequirements.required(turnContract, id),
@@ -2343,7 +2393,13 @@ class GenkitXiaoqiAgentRuntime
         '当前版本的实际文件清单：${jsonEncode(selectedSkills.files(entry).keys.toList())}\n'
         '</active_skill>\n',
       );
+      final hookIssues = PluginHookCatalog.skillIssues(
+        selectedSkills.metadata(entry),
+      );
+      if (hookIssues.isNotEmpty)
+        explicitSkillInstructions.write('\n技能宿主兼容说明：${hookIssues.join('；')}\n');
       loadedSkills.add(id);
+      activateSkillHooks(id, const {});
       onProcessEvent({
         'type': 'tool_started',
         'tool': 'use_skill',
@@ -5186,6 +5242,10 @@ class GenkitXiaoqiAgentRuntime
       name: 'xiaoqi_skill_tool_recovery_$taskId',
       create: (_, _) => SkillToolRecoveryMiddleware(
         skillIds: stagedSkills.entries.map((entry) => entry['id']!),
+        onLoaded: activateSkillHooks,
+        compatibilityNotes: (id) => PluginHookCatalog.skillIssues(
+          selectedSkills.metadata(selectedSkills.resolve({'skill_id': id})),
+        ),
         beforeLoad: (id) {
           final entry = selectedSkills.resolve({'skill_id': id});
           return {
@@ -5316,6 +5376,11 @@ class GenkitXiaoqiAgentRuntime
       for (final alias in activeHookAliases()) {
         if (hookMatches(alias, tool)) pluginHooks.files(alias);
       }
+      for (final (id, hook) in activeSkillHooks(tool.sessionId)) {
+        if (PluginHookCommand.trivialMatch(hook.matcher, tool.name) != false) {
+          selectedSkills.files(selectedSkills.entries[id]!);
+        }
+      }
     }
 
     final hookControl = PluginHookControl();
@@ -5324,8 +5389,20 @@ class GenkitXiaoqiAgentRuntime
       create: (_, _) => PluginHookMiddleware(
         execution: () => execution,
         control: hookControl,
+        prepareSession: (context) {
+          for (final id
+              in (context['xiaoqi_preloaded_skill_hooks'] as List? ?? const [])
+                  .whereType<String>()) {
+            activateSkillHooks(id, context);
+          }
+        },
         hasHooks: (tool) =>
-            activeHookAliases().any((alias) => hookMatches(alias, tool)),
+            activeHookAliases().any((alias) => hookMatches(alias, tool)) ||
+            activeSkillHooks(tool.sessionId).any(
+              (entry) =>
+                  PluginHookCommand.trivialMatch(entry.$2.matcher, tool.name) !=
+                  false,
+            ),
         validateInput: (name, input) async {
           final tool = await ai.registry.lookupAction(.tool, name);
           return tool != null &&
@@ -5383,6 +5460,86 @@ class GenkitXiaoqiAgentRuntime
             });
             if (result?.preventAction == true || result?.stopProcessing == true)
               break;
+          }
+          if (!results.any(
+            (result) => result.preventAction || result.stopProcessing,
+          )) {
+            final session = PluginHookControl.session ?? taskId;
+            final skillInput = {...input, 'session_id': session};
+            for (final (id, hook) in activeSkillHooks(session)) {
+              final match = input['tool_name'].toString();
+              if (hook.event != event ||
+                  PluginHookCommand.trivialMatch(hook.matcher, match) == false)
+                continue;
+              final entry = selectedSkills.entries[id]!;
+              final binding = skillHookBinding(entry);
+              void validateSkillSource() {
+                cancellation.throwIfCancelled();
+                if (!owner.contract.executesWorkflow || !skillHookInScope(id))
+                  throw StateError('技能 hook 来源已从本轮移除');
+                selectedSkills.files(entry);
+              }
+
+              void checkSkillSource() {
+                owner.check('workspace');
+                validateSkillSource();
+              }
+
+              onProcessEvent({
+                'type': 'tool_started',
+                'tool': 'plugin_hook',
+                'capability_name': entry['name'],
+                'hook_event': event,
+              });
+              final result = await scopedSkillHooks.run(
+                session: session,
+                binding: binding,
+                hook: hook,
+                invocation: ToolExecution.digest([
+                  owner.requestIdentity,
+                  invocation,
+                ]),
+                inputBinding: ToolExecution.digest(skillInput),
+                check: checkSkillSource,
+                execute: () async => PluginHookRunner(codeExecutor).run(
+                  execution: owner,
+                  hook: hook,
+                  sourceBinding: binding,
+                  invocation: invocation,
+                  input: {...skillInput, 'hook_event_name': event},
+                  matchValue: match,
+                  sourceFiles: () {
+                    validateSkillSource();
+                    return selectedSkills.hookFiles(entry);
+                  },
+                  skillRoot: entry['root']!,
+                  cancellation: cancellation,
+                  materials: await _scriptMaterials(
+                    tenantId,
+                    request['materials'],
+                  ),
+                ),
+              );
+              onProcessEvent({
+                'type': result == null
+                    ? 'tool_skipped'
+                    : result.error == null
+                    ? 'tool_succeeded'
+                    : 'tool_failed',
+                'tool': 'plugin_hook',
+                'capability_name': entry['name'],
+                'hook_event': event,
+                if (result == null)
+                  'reason': 'skill_hook_once_or_matcher_skipped',
+                if (result?.systemMessage != null)
+                  'message': result!.systemMessage,
+                if (result?.error != null) 'message': result!.error,
+              });
+              if (result != null) results.add(result);
+              if (result?.preventAction == true ||
+                  result?.stopProcessing == true)
+                break;
+            }
           }
           return results;
         },
@@ -5566,7 +5723,8 @@ class GenkitXiaoqiAgentRuntime
             '执行插件脚本必须携带 execution_capability 的 skill_id=$id。'
             '\n插件 Agent 定义（任务指引）：\n${definition.render(sourceAgent == null ? 'plugin-command://$id' : 'plugin-agent://$sourceAgent')}'
             '${policy.notes.isEmpty ? '' : '\n插件宿主兼容说明：\n${policy.notes.join('\n')}'}'
-            '${preload.instructions}',
+            '${preload.instructions}'
+            '${preload.entries.expand((entry) => PluginHookCatalog.skillIssues(selectedSkills.metadata(entry))).map((issue) => '\n技能宿主兼容说明：$issue').join()}',
         use: [guard(), hooks()],
       );
       if (sourceAgent != null) {
@@ -5597,6 +5755,13 @@ class GenkitXiaoqiAgentRuntime
             ? Map<String, dynamic>.from(resumed)
             : null,
         context: {
+          if (preload.entries.any(
+            (entry) => definitionsForSkill(entry['id']!).isNotEmpty,
+          ))
+            'xiaoqi_preloaded_skill_hooks': preload.entries
+                .where((entry) => definitionsForSkill(entry['id']!).isNotEmpty)
+                .map((entry) => entry['id']!)
+                .toList(),
           'xiaoqi_plugin_agent_model': childSelection.modelId,
           'xiaoqi_plugin_agent_tools': policy.tools,
           'xiaoqi_plugin_agent_read_only': policy.readOnly,

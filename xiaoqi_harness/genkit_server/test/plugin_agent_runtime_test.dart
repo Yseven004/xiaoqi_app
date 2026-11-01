@@ -11,6 +11,9 @@ void main() {
     'ignored-plugin-fields-approval',
     'preload',
     'preload-script-network',
+    'skill-hook-once',
+    'skill-hook-block',
+    'skill-hook-approval',
     'nested',
     'plan',
     'approval',
@@ -43,6 +46,7 @@ void main() {
         var providerCalls = 0;
         final scriptNetwork = scenario.endsWith('script-network');
         final rootHooks = scenario.startsWith('root-hook-');
+        final skillHooks = scenario.startsWith('skill-hook-');
         final fork = scenario.startsWith('fork-');
         final childToolSets = <Set<String>>[];
         var childHistoryLeaked = false;
@@ -56,6 +60,7 @@ void main() {
           'disabled',
           'readonly',
           'root-hook-approval',
+          'skill-hook-approval',
           'fork-approval',
           'fork-denied',
           'fork-disabled',
@@ -183,7 +188,9 @@ void main() {
                       as String;
               if (!called(remote)) {
                 tool = remote;
-                input = rootHooks ? {'recipient': 'original'} : {};
+                input = rootHooks || skillHooks
+                    ? {'recipient': 'original'}
+                    : {};
               }
             } else if (scenario.endsWith('nested') &&
                 system.contains('AGENT_RUNTIME_WRITER')) {
@@ -203,6 +210,20 @@ void main() {
               if (!called('read_task_text_file')) {
                 tool = 'read_task_text_file';
                 input = {'path': 'report.txt'};
+              }
+            } else if (skillHooks) {
+              final writes = messages
+                  .expand(
+                    (m) => (m['tool_calls'] as List? ?? []).whereType<Map>(),
+                  )
+                  .where((t) => t['function']['name'] == 'write_task_text_file')
+                  .length;
+              if (writes < (scenario == 'skill-hook-block' ? 3 : 2)) {
+                tool = 'write_task_text_file';
+                input = {
+                  'path': 'report-$writes.txt',
+                  'text': 'verified child output',
+                };
               }
             } else if (!called('write_task_text_file')) {
               // Deliberately request a forbidden function in plan mode: the SDK
@@ -255,6 +276,9 @@ void main() {
                       ).allMatches(serialized).last.group(0),
                       'task': 'Write the verified task note',
                     };
+            } else if (skillHooks && !called('write_task_text_file')) {
+              tool = 'write_task_text_file';
+              input = {'path': 'parent.txt', 'text': 'parent output'};
             }
           }
           final delta = tool == null
@@ -387,6 +411,7 @@ void main() {
               'approval',
               'ignored-plugin-fields-approval',
               'root-hook-approval',
+              'skill-hook-approval',
             }.contains(scenario);
             expect(value['external_calls'], approved ? 1 : 0);
             expect(value['completed'], approved ? 1 : 0);
@@ -399,6 +424,18 @@ void main() {
             expect(value['contents'], ['original task note']);
             expect(value['missing'], isFalse);
             expect(value['completed'], 1);
+          } else if (skillHooks) {
+            expect(
+              value['contents'],
+              unorderedEquals([
+                'verified rewritten output',
+                'verified child output',
+                'parent output',
+              ]),
+              reason: jsonEncode(value),
+            );
+            expect(value['completed'], 1);
+            expect(value['missing'], isFalse);
           } else if (rootHooks) {
             expect(
               value['contents'],
@@ -435,6 +472,15 @@ void main() {
               expect(hooks.last['tool_input'], {'recipient': 'changed'});
               expect(value['before_approval'], 0);
             }
+          }
+          if (skillHooks) {
+            final hooks = (value['hook_runs'] as List)
+                .whereType<Map>()
+                .toList();
+            expect(hooks, hasLength(scenario == 'skill-hook-block' ? 2 : 1));
+            expect(value['code_runs'], hooks.length);
+            expect(hooks.every((h) => h['session_id'] != 'turn'), isTrue);
+            expect(value['contents'], contains('parent output'));
           }
         } finally {
           await serving.cancel();

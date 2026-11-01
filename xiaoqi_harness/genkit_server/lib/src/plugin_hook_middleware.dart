@@ -9,18 +9,29 @@ import 'tool_execution.dart';
 class PluginHookControl {
   String? stopReason;
   static final _ask = Object();
+  static final _session = Object();
   static bool get asksPermission => Zone.current[_ask] == true;
+  static String? get session => Zone.current[_session] as String?;
 }
 
 /// A source protocol view of one host tool. Rewrites stay on this same tool;
 /// the SDK subsequently validates its input schema and its native handler
 /// recomputes the current action authorization using the changed arguments.
 class PluginHookTool {
-  PluginHookTool(this.name, this.input, this.rewrite, {this.canAsk = false});
+  PluginHookTool(
+    this.name,
+    this.input,
+    this.rewrite, {
+    this.canAsk = false,
+    this.sessionId = '',
+  });
   final String name;
+  final String sessionId;
   final Map<String, dynamic> input;
   final Map<String, dynamic> Function(Map<String, dynamic>) rewrite;
   final bool canAsk;
+  PluginHookTool inSession(String id) =>
+      PluginHookTool(name, input, rewrite, canAsk: canAsk, sessionId: id);
 
   static PluginHookTool native(String name, Map<String, dynamic> input) {
     final short = name.split('/').last;
@@ -76,6 +87,7 @@ class PluginHookMiddleware extends GenerateMiddleware {
     required this.control,
     required this.hasHooks,
     required this.validateInput,
+    this.prepareSession,
   });
   final ToolExecution Function() execution;
   final PluginHookDispatch dispatch;
@@ -84,6 +96,16 @@ class PluginHookMiddleware extends GenerateMiddleware {
   final PluginHookControl control;
   final bool Function(PluginHookTool) hasHooks;
   final Future<bool> Function(String, Object?) validateInput;
+  final void Function(Map<String, dynamic>)? prepareSession;
+  Future<List<PluginHookOutput>> dispatchInSession(
+    String event,
+    String invocation,
+    Map<String, dynamic> input,
+    String session,
+  ) => runZoned(
+    () => dispatch(event, invocation, input),
+    zoneValues: {PluginHookControl._session: session},
+  );
 
   void check() {
     execution().check('read');
@@ -101,6 +123,9 @@ class PluginHookMiddleware extends GenerateMiddleware {
     next,
   ) {
     check();
+    prepareSession?.call(
+      Map<String, dynamic>.from(context.context ?? const {}),
+    );
     return next(request, context);
   }
 
@@ -115,6 +140,9 @@ class PluginHookMiddleware extends GenerateMiddleware {
     next,
   ) async {
     check();
+    prepareSession?.call(
+      Map<String, dynamic>.from(context.context ?? const {}),
+    );
     final owner = execution();
     if (!owner.contract.executesWorkflow) return next(request, context);
     final original = request.toolRequest.input;
@@ -122,7 +150,11 @@ class PluginHookMiddleware extends GenerateMiddleware {
     var input = Map<String, dynamic>.from(
       jsonDecode(jsonEncode(original)) as Map,
     );
-    var view = describe(request.toolRequest.name, input);
+    final privateSession = context.context?['xiaoqi_plugin_agent_invocation'];
+    final session = privateSession is String && privateSession.isNotEmpty
+        ? ToolExecution.digest(privateSession)
+        : owner.taskId;
+    var view = describe(request.toolRequest.name, input).inSession(session);
     if (!hasHooks(view)) return next(request, context);
     checkSources(view);
     final readOnly = context.context?['xiaoqi_plugin_agent_read_only'] == true;
@@ -146,7 +178,12 @@ class PluginHookMiddleware extends GenerateMiddleware {
     };
     final contexts = <String>[];
     var ask = false;
-    final pre = await dispatch('PreToolUse', '$eventId:pre', payload());
+    final pre = await dispatchInSession(
+      'PreToolUse',
+      '$eventId:pre',
+      payload(),
+      session,
+    );
     for (final result in pre) {
       if (result.additionalContext case final String value) contexts.add(value);
       if (result.stopProcessing)
@@ -176,16 +213,16 @@ class PluginHookMiddleware extends GenerateMiddleware {
       ask |= result.permission == 'ask';
       if (result.updatedInput != null) {
         input = view.rewrite(result.updatedInput!);
-        view = describe(request.toolRequest.name, input);
+        view = describe(request.toolRequest.name, input).inSession(session);
       }
     }
     check();
     if (!await validateInput(request.toolRequest.name, input)) {
-      await dispatch('PostToolUseFailure', '$eventId:failure', {
+      await dispatchInSession('PostToolUseFailure', '$eventId:failure', {
         ...payload(),
         'error': '参数不符合当前工具 schema',
         'is_interrupt': false,
-      });
+      }, session);
       return ToolResult.response(
         jsonEncode({
           'ok': false,
@@ -221,11 +258,11 @@ class PluginHookMiddleware extends GenerateMiddleware {
       // Source withdrawal, cancellation and budget checks still terminate the
       // original call. Post-failure feedback cannot authorize its replay.
       check();
-      await dispatch('PostToolUseFailure', '$eventId:failure', {
+      await dispatchInSession('PostToolUseFailure', '$eventId:failure', {
         ...payload(),
         'error': error.runtimeType.toString(),
         'is_interrupt': context.cancel?.isCancelled == true,
-      });
+      }, session);
       rethrow;
     }
     if (result is ToolInterruptResult) return result;
@@ -243,7 +280,7 @@ class PluginHookMiddleware extends GenerateMiddleware {
     final failed =
         structured is Map &&
         (structured['ok'] == false || structured['isError'] == true);
-    final post = await dispatch(
+    final post = await dispatchInSession(
       failed ? 'PostToolUseFailure' : 'PostToolUse',
       '$eventId:${failed ? 'failure' : 'post'}',
       {
@@ -251,6 +288,7 @@ class PluginHookMiddleware extends GenerateMiddleware {
         if (failed) 'error': structured else 'tool_response': structured,
         if (failed) 'is_interrupt': false,
       },
+      session,
     );
     var replaced = false;
     for (final hook in post) {

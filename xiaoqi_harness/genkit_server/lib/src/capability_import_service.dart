@@ -873,6 +873,7 @@ class CapabilityImportService {
       ).firstMatch(text);
       if (match == null) throw const FormatException('SKILL.md 缺少 YAML 信息');
       final header = loadYaml(match.group(1)!) as Map;
+      warnings.addAll(PluginHookCatalog.skillIssues(header));
       name = header['name']?.toString() ?? '';
       description = header['description']?.toString() ?? '';
       if (!RegExp(r'^[a-z0-9]+(?:-[a-z0-9]+)*$').hasMatch(name) ||

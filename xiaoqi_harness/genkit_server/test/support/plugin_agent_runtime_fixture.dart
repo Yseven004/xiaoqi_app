@@ -16,10 +16,13 @@ Future<void> main(List<String> args) async {
   final scenario = args.single;
   final fork = scenario.startsWith('fork-');
   final rootHooks = scenario.startsWith('root-hook-');
+  final skillHooks = scenario.startsWith('skill-hook-');
   final hookCounter = File('${root.path}/hook-count.json');
   final scriptNetwork = scenario.endsWith('script-network');
   final preloadSkill =
-      scenario == 'preload' || scenario == 'preload-script-network';
+      scenario == 'preload' ||
+      scenario == 'preload-script-network' ||
+      skillHooks;
   final scriptCounter = File('${root.path}/script-count');
   DockerCodeExecutionService? codeExecutor;
   if (scriptNetwork) {
@@ -47,7 +50,7 @@ else:
           (Platform.isWindows ? 'python' : 'python3'),
     );
   }
-  if (rootHooks) {
+  if (rootHooks || skillHooks) {
     final worker = File('${root.path}/hook_worker.py');
     worker.writeAsStringSync('''
 import json,pathlib,sys
@@ -58,17 +61,29 @@ if r.get('action'):
 else:
  assert r['authorized_domains'] == [] and r['language'] == 'javascript'
  assert r['execution_profile'] == ('plugin_hook_read_only' if ${jsonEncode(scenario)} == 'root-hook-readonly' else 'plugin_hook')
- assert 'hooks/hooks.json' in r['skill_files']
+ if ${skillHooks ? 'True' : 'False'}:
+  assert 'skills/note/SKILL.md' in r['skill_files'] and '.claude-plugin/plugin.json' in r['skill_files']
+ else: assert 'hooks/hooks.json' in r['skill_files']
  line=r['code'].splitlines()[0]
  spec=json.loads(json.loads(line.split('JSON.parse(',1)[1].rsplit(');',1)[0]))
+ if ${skillHooks ? 'True' : 'False'}: assert spec['skillDirectory']=='/workspace/skill/skills/note'
  i=spec['input']; event=i['hook_event_name']
  assert i['cwd']=='/workspace/work' and i['tool_use_id']
  counter=pathlib.Path(${jsonEncode(hookCounter.path)})
  records=json.loads(counter.read_text()) if counter.exists() else []
  records.append(i); counter.write_text(json.dumps(records))
  specific={'hookEventName':event}
+ exit_code=0
  if event=='PreToolUse':
-  if ${jsonEncode(scenario)} == 'root-hook-readonly':
+  if ${skillHooks ? 'True' : 'False'}:
+   assert event=='PreToolUse'
+   if ${jsonEncode(scenario)} == 'skill-hook-approval':
+    assert i['tool_input']=={'recipient':'original'}
+    specific.update({'permissionDecision':'ask','updatedInput':{'recipient':'changed'}})
+   elif ${jsonEncode(scenario)} == 'skill-hook-block' and len(records)==1:
+    exit_code=2
+   else: specific['updatedInput']={'content':'verified rewritten output'}
+  elif ${jsonEncode(scenario)} == 'root-hook-readonly':
    assert i['permission_mode']=='plan' and i['tool_name']=='Read'
    assert i['tool_input']=={'file_path':'report.txt'}
   elif ${jsonEncode(scenario)} == 'root-hook-deny': specific['permissionDecision']='deny'
@@ -83,7 +98,7 @@ else:
    assert i['permission_mode']=='plan' and 'original task note' in str(i['tool_response'])
   specific['additionalContext']='ROOT_HOOK_OBSERVED_RESULT'
  output={'hookSpecificOutput':specific}
- envelope={'xiaoqi_hook_command_v1':{'matched':True,'timed_out':False,'exit_code':0,'stdout':json.dumps(output),'stderr':''}}
+ envelope={'xiaoqi_hook_command_v1':{'matched':True,'timed_out':False,'exit_code':exit_code,'stdout':json.dumps(output),'stderr':'guard denied' if exit_code==2 else ''}}
  print(json.dumps({'type':'result','ok':True,'execution_id':r['execution_id'],'stdout':json.dumps(envelope),'artifacts':[],'cleanup_pending':False}))
 ''');
     codeExecutor = DockerCodeExecutionService(
@@ -130,6 +145,7 @@ else:
     'disabled',
     'readonly',
     'root-hook-approval',
+    'skill-hook-approval',
     'fork-approval',
     'fork-denied',
     'fork-disabled',
@@ -167,19 +183,19 @@ else:
               'description': 'Execute approved fixture effect',
               'inputSchema': {
                 'type': 'object',
-                'properties': rootHooks
+                'properties': rootHooks || skillHooks
                     ? {
                         'recipient': {'type': 'string'},
                       }
                     : {},
-                if (rootHooks) 'required': ['recipient'],
+                if (rootHooks || skillHooks) 'required': ['recipient'],
                 'additionalProperties': false,
               },
             },
           ],
         };
       case 'tools/call':
-        if (rootHooks &&
+        if ((rootHooks || skillHooks) &&
             body['params']['arguments']['recipient'] != 'changed') {
           throw StateError(
             'hook rewritten recipient was not authorized/executed',
@@ -262,7 +278,18 @@ else:
       'scripts/check.py': utf8.encode('print("source-bound agent script")'),
     if (preloadSkill)
       'skills/note/SKILL.md': utf8.encode(
-        '---\nname: note\ndescription: Agent note conventions\n---\nFULL_PRELOADED_SKILL: Read references/note.md before writing the report.',
+        '---\nname: note\ndescription: Agent note conventions\n'
+        '${skillHooks ? 'hooks: ${jsonEncode({
+                'PreToolUse': [
+                  {
+                    'matcher': scenario == 'skill-hook-approval' ? r'^mcp__Library__make_card$' : '^Write\$',
+                    'hooks': [
+                      {'type': 'command', 'command': 'fixture-skill-hook', 'once': true},
+                    ],
+                  },
+                ],
+              })}\n' : ''}'
+        '---\nFULL_PRELOADED_SKILL: Read references/note.md before writing the report.',
       ),
     if (preloadSkill)
       'skills/note/references/note.md': utf8.encode(
@@ -392,6 +419,30 @@ else:
             : 0);
     if (scriptNetwork ||
         (mcp && !const {'dontask', 'readonly'}.contains(scenario))) {
+      if (skillHooks &&
+          !result.messages
+              .expand((m) => m.content)
+              .any(
+                (p) =>
+                    p.isToolRequest &&
+                    p.metadata?['interrupt'] is Map &&
+                    p.metadata?['pendingOutput'] == null,
+              )) {
+        stderr.writeln(
+          jsonEncode(
+            result.messages
+                .expand((m) => m.content)
+                .where(
+                  (part) =>
+                      part.isToolResponse &&
+                      part.toolResponse!.name.split('/').last ==
+                          'run_plugin_agent',
+                )
+                .map((part) => part.toJson())
+                .toList(),
+          ),
+        );
+      }
       final pending = result.messages
           .expand((m) => m.content)
           .where((p) => p.isToolRequest)
@@ -467,7 +518,7 @@ else:
         'script_runs': scriptCounter.existsSync() ? int.parse(scriptCounter.readAsStringSync()) : 0,
         'code_runs': task['code_execution_runs'],
         'network_grants': task['authorized_network_domains'],
-        if (rootHooks) 'hook_runs': hookCounter.existsSync() ? jsonDecode(hookCounter.readAsStringSync()) : [],
+        if (rootHooks || skillHooks) 'hook_runs': hookCounter.existsSync() ? jsonDecode(hookCounter.readAsStringSync()) : [],
         'events': events,
       })}',
     );

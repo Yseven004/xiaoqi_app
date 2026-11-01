@@ -9,6 +9,17 @@ import 'store.dart';
 class PluginHookCatalog {
   static const profileVersion = 2;
   static const toolEvents = {'PreToolUse', 'PostToolUse', 'PostToolUseFailure'};
+  static List<String> skillIssues(Map metadata) {
+    final parsed = PluginHooks.skill(metadata);
+    return [
+      for (final issue in parsed.issues) '技能 hook：${issue.reason}',
+      for (final hook in parsed.handlers) ...[
+        if (!toolEvents.contains(hook.event)) '技能 hook ${hook.event} 生命周期尚待适配',
+        if (PluginHookCommand.unsupported(hook) case final String issue)
+          '技能 hook：$issue',
+      ],
+    ];
+  }
 
   static PluginHooks parse(Map<String, List<int>> files) {
     for (final path in [

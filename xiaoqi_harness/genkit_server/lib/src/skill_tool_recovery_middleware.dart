@@ -13,11 +13,15 @@ class SkillToolRecoveryMiddleware extends GenerateMiddleware {
     required Iterable<String> skillIds,
     required this.onEvent,
     this.beforeLoad,
+    this.onLoaded,
+    this.compatibilityNotes,
   }) : skillIds = List.unmodifiable(skillIds.toSet().toList()..sort());
 
   final List<String> skillIds;
   final void Function(Map<String, Object?> event) onEvent;
   final Map<String, Object?> Function(String id)? beforeLoad;
+  final void Function(String id, Map<String, dynamic> context)? onLoaded;
+  final List<String> Function(String id)? compatibilityNotes;
 
   @override
   Future<ToolResult> tool(
@@ -38,7 +42,19 @@ class SkillToolRecoveryMiddleware extends GenerateMiddleware {
       final id = input is Map ? input['skillName']?.toString() ?? '' : '';
       final binding = beforeLoad?.call(id) ?? const <String, Object?>{};
       final result = await next(request, context);
+      onLoaded?.call(
+        id,
+        Map<String, dynamic>.from(context.context ?? const {}),
+      );
       onEvent({'type': 'tool_succeeded', 'tool': 'use_skill', ...binding});
+      final notes = compatibilityNotes?.call(id) ?? const <String>[];
+      if (notes.isNotEmpty && result is ToolResponseResult) {
+        return ToolResult.response(
+          '${result.output}\n\n技能宿主兼容说明：\n${notes.join('\n')}',
+          parts: result.parts,
+          metadata: result.metadata,
+        );
+      }
       return result;
     } on Object {
       if (context.cancel?.isCancelled == true) rethrow;

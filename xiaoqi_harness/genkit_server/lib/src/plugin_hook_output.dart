@@ -16,16 +16,62 @@ class PluginHookOutput {
     this.hasUpdatedToolOutput = false,
     this.mcpOnlyOutput = false,
     this.error,
+    this.successful = false,
   });
 
   final String? permission, reason, additionalContext, systemMessage, error;
   final bool preventAction, stopProcessing, continueLoop;
+
+  /// Used only for skill-scoped once removal; exit-2/blocks/timeouts retain it.
+  final bool successful;
   final Map<String, dynamic>? updatedInput;
   final Object? updatedToolOutput;
   final bool hasUpdatedToolOutput;
   final bool mcpOnlyOutput;
 
   static const maxOutputBytes = 128 * 1024;
+  Map<String, dynamic> toJson() => {
+    'schema': 1,
+    'permission': permission,
+    'prevent_action': preventAction,
+    'stop_processing': stopProcessing,
+    'continue_loop': continueLoop,
+    'reason': reason,
+    'additional_context': additionalContext,
+    'system_message': systemMessage,
+    'updated_input': updatedInput,
+    'updated_tool_output': updatedToolOutput,
+    'has_updated_tool_output': hasUpdatedToolOutput,
+    'mcp_only_output': mcpOnlyOutput,
+    'error': error,
+    'successful': successful,
+  };
+
+  /// Only server-owned private journal records use this representation.
+  static PluginHookOutput restore(Map value) {
+    if (value['schema'] != 1 ||
+        utf8.encode(jsonEncode(value)).length > 1024 * 1024) {
+      throw const FormatException('技能 hook 缓存结果格式或容量无效');
+    }
+    return PluginHookOutput(
+      permission: value['permission'] as String?,
+      preventAction: value['prevent_action'] as bool,
+      stopProcessing: value['stop_processing'] as bool,
+      continueLoop: value['continue_loop'] as bool,
+      reason: value['reason'] as String?,
+      additionalContext: value['additional_context'] as String?,
+      systemMessage: value['system_message'] as String?,
+      updatedInput: value['updated_input'] == null
+          ? null
+          : _freeze(value['updated_input']) as Map<String, dynamic>,
+      updatedToolOutput: _freeze(value['updated_tool_output']),
+      hasUpdatedToolOutput: value['has_updated_tool_output'] as bool,
+      mcpOnlyOutput: value['mcp_only_output'] as bool,
+      error: value['error'] as String?,
+      successful: value['successful'] as bool,
+    );
+  }
+
   static const _blockable = {
     'PreToolUse',
     'UserPromptSubmit',
@@ -165,6 +211,7 @@ class PluginHookOutput {
             ? reason
             : null);
     return PluginHookOutput(
+      successful: exitCode == 0 && invalid == null && !blocks && !stop,
       permission: permission,
       preventAction:
           (_blockable.contains(event) && blocks) ||

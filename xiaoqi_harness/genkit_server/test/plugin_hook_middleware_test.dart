@@ -115,6 +115,28 @@ void main() {
       ]);
     },
   );
+  test(
+    'private skill scope does not change durable root Hook input or leak outside dispatch',
+    () async {
+      final sessions = <String?>[];
+      final inputs = <String?>[];
+      final hooks = middleware((event, id, input) async {
+        sessions.add(PluginHookControl.session);
+        inputs.add(input['session_id'] as String?);
+        return [];
+      });
+      await hooks.tool(
+        request(),
+        ActionFnArg(
+          context: {'xiaoqi_plugin_agent_invocation': 'private-child'},
+        ),
+        (_, _) async => ToolResult.response('{"ok":true}'),
+      );
+      expect(sessions, everyElement(ToolExecution.digest('private-child')));
+      expect(inputs, ['task', 'task']);
+      expect(PluginHookControl.session, isNull);
+    },
+  );
 
   test(
     'malformed rewrite cannot reach native effect and triggers failure event',

@@ -6,6 +6,44 @@ import 'package:xiaoqi_genkit_server/src/skill_tool_recovery_middleware.dart';
 
 void main() {
   test(
+    'successful load activates its original session and returns compatibility notes',
+    () async {
+      final activated = <String>[];
+      final middleware = SkillToolRecoveryMiddleware(
+        skillIds: ['alpha'],
+        onEvent: (_) {},
+        onLoaded: (id, context) =>
+            activated.add('$id:${context['xiaoqi_plugin_agent_invocation']}'),
+        compatibilityNotes: (_) => ['Unmapped lifecycle remains pending'],
+      );
+      final request = ToolRequestPart(
+        toolRequest: ToolRequest(
+          name: 'use_skill',
+          input: {'skillName': 'alpha'},
+        ),
+      );
+      final result = await middleware.tool(
+        request,
+        ActionFnArg(
+          context: {'xiaoqi_plugin_agent_invocation': 'private-child'},
+        ),
+        (_, _) async => ToolResult.response('source instructions'),
+      );
+      expect(activated, ['alpha:private-child']);
+      expect(
+        (result as ToolResponseResult).output,
+        contains('source instructions'),
+      );
+      expect(result.output, contains('Unmapped lifecycle remains pending'));
+      await middleware.tool(
+        request,
+        ActionFnArg(),
+        (_, _) async => throw StateError('failed load'),
+      );
+      expect(activated, hasLength(1));
+    },
+  );
+  test(
     'a missing skill name returns recoverable guidance to the model',
     () async {
       final events = <Map<String, Object?>>[];

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'capability_import_service.dart';
 import 'plugin_hooks.dart';
 import 'plugin_hook_output.dart';
 
@@ -66,7 +67,9 @@ class PluginHookCommand {
     Map<String, dynamic> input, {
     required String matchValue,
     String shellExecutable = '/bin/bash',
+    String skillRoot = '',
   }) {
+    if (skillRoot.isNotEmpty) CapabilityImportService.safePath(skillRoot);
     final issue = unsupported(hook);
     if (issue != null) throw StateError(issue);
     if (input['hook_event_name'] != hook.event) {
@@ -83,6 +86,9 @@ class PluginHookCommand {
         'matchValue': matchValue,
         'input': input,
         'shell': shellExecutable,
+        'skillDirectory': skillRoot.isEmpty
+            ? '/workspace/skill'
+            : '/workspace/skill/$skillRoot',
         // Leave time for result collection within the normal 120s code budget.
         'timeoutMs': ((hook.config['timeout'] as num? ?? 600) * 1000)
             .clamp(1, 115000)
@@ -140,13 +146,13 @@ async function matches() {
     if (!await matches()) { emit(); return; }
     output.matched = true;
     await new Promise(resolve => {
-      const roots = { CLAUDE_PLUGIN_ROOT: '/workspace/skill', CODEX_PLUGIN_ROOT: '/workspace/skill', PLUGIN_ROOT: '/workspace/skill', CLAUDE_PROJECT_DIR: '/workspace/work' };
-      const expand = value => value.replace(/\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PROJECT_DIR)\}/g, (_, name) => roots[name]);
+      const roots = { CLAUDE_PLUGIN_ROOT: '/workspace/skill', CODEX_PLUGIN_ROOT: '/workspace/skill', PLUGIN_ROOT: '/workspace/skill', CLAUDE_PROJECT_DIR: '/workspace/work', CLAUDE_SKILL_DIR: spec.skillDirectory };
+      const expand = value => value.replace(/\$\{(CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_PROJECT_DIR|CLAUDE_SKILL_DIR)\}/g, (_, name) => roots[name]);
       const executable = spec.args === null ? spec.shell : expand(spec.command);
       const args = spec.args === null ? ['-c', spec.command] : spec.args.map(expand);
       const child = spawn(executable, args, {
         cwd: process.cwd(),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', CLAUDE_PLUGIN_ROOT: '/workspace/skill', CLAUDE_PROJECT_DIR: '/workspace/work' },
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', CLAUDE_PLUGIN_ROOT: '/workspace/skill', CLAUDE_PROJECT_DIR: '/workspace/work', CLAUDE_SKILL_DIR: spec.skillDirectory },
         detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe']
       });
       let done = false, size = 0;

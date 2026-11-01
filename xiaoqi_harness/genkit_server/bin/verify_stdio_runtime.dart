@@ -310,6 +310,8 @@ PY
         'plugin_command_script_loop': true,
         'dynamic_command_context': true,
         'fork_read_only_context_no_persistence': true,
+        'skill_hooks_scoped_once_parent_and_private_children': true,
+        'skill_hook_read_only_private_files_not_persisted': true,
         'plugin_mixed_mcp_declarations_agent_loop': true,
         'plugin_root_hooks_agent_shell_loop': true,
         'plugin_hook_command_protocol': true,

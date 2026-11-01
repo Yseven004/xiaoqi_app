@@ -75,6 +75,12 @@ Future<void> verifyStdioAgent(
                 ),
           );
       if (preparing && child) {
+        if (serialized.contains('"name":"read_task_text_file"') &&
+            !serialized.contains('SCOPED_SKILL_HOOK_OK')) {
+          throw StateError(
+            'Child did not receive its own scoped skill Hook context',
+          );
+        }
         if (serialized.contains('FORK_READ_GATE') &&
             !serialized.contains('READ_ONLY_CONTEXT_READY')) {
           throw StateError(
@@ -266,6 +272,25 @@ Future<void> verifyStdioAgent(
       '/workspace/output',
     ],
   };
+  final skillSource =
+      '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n'
+      '${readOnlyDelegate ? 'hooks: ${jsonEncode({
+              'PreToolUse': [
+                {
+                  'matcher': '^Bash\$|^Read\$',
+                  'hooks': [
+                    {
+                      'type': 'command',
+                      'command': 'python3',
+                      'args': [r'${CLAUDE_SKILL_DIR}/hooks/skill.py'],
+                      'once': true,
+                      'onFailure': 'block',
+                    },
+                  ],
+                },
+              ],
+            })}\n' : ''}'
+      '---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n';
   store.putImmutable(package, {
     ...installedFiles,
     'commands/verify-command.md': utf8.encode(
@@ -276,16 +301,24 @@ import pathlib,sys
 assert sys.argv[1:] == ['command; $(touch /workspace/output/unwanted)']
 pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-script-verified')
 '''),
-    'SKILL.md': utf8.encode(
-      '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n',
-    ),
+    'SKILL.md': utf8.encode(skillSource),
+    if (readOnlyDelegate)
+      'hooks/skill.py': utf8.encode(r'''
+import json,os,pathlib,sys
+i=json.load(sys.stdin)
+assert os.environ['CLAUDE_SKILL_DIR']=='/workspace/skill'
+assert i['hook_event_name']=='PreToolUse' and i['tool_name'] in ('Read','Bash')
+if i['permission_mode']=='plan':
+ pathlib.Path('/workspace/output/scoped-skill-private.txt').write_text('private computation')
+print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'SCOPED_SKILL_HOOK_OK'}}))
+'''),
     if (readOnlyDelegate)
       'commands/fork-read.md': utf8.encode(
         "---\ndescription: fork-read isolated verification\ncontext: fork\nagent: readonly-verifier\n---\n!`printf private > /workspace/output/context-private.txt; printf 'READ_ONLY_%s' CONTEXT_READY`\nRead agent.txt without writing files. \$ARGUMENTS\n",
       ),
     if (readOnlyDelegate)
       'agents/readonly-verifier.md': utf8.encode(
-        '---\nname: readonly-verifier\ndescription: Read the verified task file\ntools: [Read]\npermissionMode: plan\n---\nREAD_ONLY_HOOK_GATE_AGENT: Read agent.txt and report its contents.\n',
+        '---\nname: readonly-verifier\ndescription: Read the verified task file\ntools: [Read]\nskills: [file-workflow]\npermissionMode: plan\n---\nREAD_ONLY_HOOK_GATE_AGENT: Read agent.txt and report its contents.\n',
       ),
     if (rootHooks)
       'hooks/hooks.json': utf8.encode(
@@ -467,9 +500,10 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
         throw StateError('Agent artifact integrity failed');
     }
     // Charge MCP, Shell, command context, script, root hooks and both read-only
-    // delegations including the fork's private dynamic context.
+    // delegations including the fork's private dynamic context, plus one
+    // independent once skill Hook in the parent and each private child.
     final expectedCodeRuns =
-        4 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 5 : 0);
+        4 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 8 : 0);
     if ((store.get('task/$tenant/$task')!.value['code_execution_runs'] !=
             expectedCodeRuns) ||
         (rootHooks &&
@@ -480,7 +514,7 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
                               e['tool'] == 'plugin_hook',
                         )
                         .length !=
-                    (readOnlyDelegate ? 6 : 2) ||
+                    (readOnlyDelegate ? 9 : 2) ||
                 artifacts.length != 4))) {
       throw StateError(
         'Real Agent hook execution, budget or protocol artifact boundary failed; '
@@ -502,10 +536,24 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
                 1 ||
             store.list('private_plugin_agent/$tenant/$task/').length != 2 ||
             utf8.decode(store.getImmutable(package)['SKILL.md']!) !=
-                '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n')) {
+                skillSource)) {
       throw StateError(
         'Read-only delegated Agent did not complete or changed immutable source',
       );
+    }
+    if (readOnlyDelegate) {
+      final records = store
+          .list('private_skill_hooks/$tenant/$task/')
+          .map((entry) => entry.$2.value)
+          .toList();
+      if (records.where((record) => record['sources'] is Map).length != 3 ||
+          records.where((record) => record['phase'] == 'succeeded').length !=
+              3 ||
+          records.any((record) => record['phase'] == 'pending')) {
+        throw StateError(
+          'Scoped skill once registrations crossed sessions or remained pending',
+        );
+      }
     }
     if (!events.any(
       (event) =>

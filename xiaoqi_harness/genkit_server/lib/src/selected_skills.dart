@@ -256,6 +256,16 @@ class SelectedSkills {
     );
   }
 
+  /// Hook plugin-root paths refer to this same pinned installation, including
+  /// shared plugin scripts; they never refer to the API host filesystem.
+  Map<String, List<int>> hookFiles(Map entry) {
+    final bound = resolve({'skill_id': entry['id']});
+    return _packages.putIfAbsent(
+      bound['artifact_key']!,
+      () => store.getImmutable(bound['artifact_key']!),
+    );
+  }
+
   void _assertCurrent(Map<String, String> entry) {
     final record = _record(entry['parent_id']!);
     final version = (record['versions'] as List? ?? const [])

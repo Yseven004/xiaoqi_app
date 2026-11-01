@@ -23,6 +23,7 @@ class PluginHookRunner {
     required Map<String, List<int>> Function() sourceFiles,
     required CancellationToken cancellation,
     List<Map<String, dynamic>> materials = const [],
+    String skillRoot = '',
   }) async {
     void validateSource() {
       cancellation.throwIfCancelled();
@@ -53,6 +54,7 @@ class PluginHookRunner {
       hook,
       snapshot,
       matchValue: matchValue,
+      skillRoot: skillRoot,
     );
     final result = await ToolExecution.withAuthorityCheck(
       validateSource,
@@ -67,6 +69,7 @@ class PluginHookRunner {
           'matcher': hook.matcher,
           'input': snapshot,
           'match_value': matchValue,
+          if (skillRoot.isNotEmpty) 'skill_root': skillRoot,
         },
         effectsPossible: (error) => error is SandboxExecutionError,
         invoke: (operationId) async {

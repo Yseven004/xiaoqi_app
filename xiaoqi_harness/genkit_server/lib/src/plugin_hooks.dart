@@ -45,6 +45,21 @@ class PluginHooks {
   List<PluginHook> get handlers => List.unmodifiable(_handlers);
   List<PluginHookIssue> get issues => List.unmodifiable(_issues);
 
+  /// Skill declarations use the same event map, but have their own source and
+  /// session lifetime. Parsing never registers or executes a handler.
+  static PluginHooks skill(Map metadata) {
+    final result = PluginHooks._();
+    final value = metadata['hooks'];
+    if (value == null) return result;
+    if (value is! Map ||
+        utf8.encode(jsonEncode(value)).length > maxConfigBytes) {
+      result._issue('SKILL.md', '/hooks', '技能 hooks 需要不超过 128 KiB 的事件对象');
+      return result;
+    }
+    result._events(value, 'SKILL.md', '/hooks');
+    return result;
+  }
+
   static PluginHooks parse(
     Map<String, List<int>> files,
     Map manifest, {
