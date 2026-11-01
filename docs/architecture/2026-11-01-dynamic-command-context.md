@@ -38,6 +38,11 @@ Local targeted checks passed: 9 parser/context tests including native Node/Bash
 literal argument and failure-stop execution; 4 SDK dynamic-fork cases covering
 normal, read-only, approval-resume and denial; 34 runner Python tests. Complete
 local parser/import/policy/Agent/code-executor/Hook regression passed 109 tests.
+Seven additional authority/recovery checks passed: original result reuse,
+argument identity conflict, private read-only profile, unknown-effect no replay,
+withdrawal before and after execution, cached-result withdrawal/cancellation,
+and answer-only workflow denial. These are local executor-boundary tests, not
+substitutes for real-container or live-service results.
 
 The real-container gate now requires expanded context in both ordinary and
 read-only fork commands. Mixed composition expects 11 actual code jobs (previous
