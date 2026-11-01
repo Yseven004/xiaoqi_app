@@ -74,6 +74,17 @@ submission. Fourteen lifecycle/background tests and static analysis passed
 after this correction. The local controller waiting for `806b7dd`'s build was
 stopped while its last phase was BUILD_WAIT; no upload/activation occurred.
 CI `41292853963` was cancellation-requested so it cannot be used as final proof.
+
+Exact-main `19baf10` CI `41293515191` failed only the five new native Node
+condition tests: its Dart build image intentionally has no Node. The 529 other
+tests passed, one older native launcher skipped. Production was not changed.
+The optional native condition tests now detect their dependency like the older
+native launcher. Actual isolated Hook probes add positive and negative condition
+checks, without making sandbox runtime validation optional. Probe generation
+shares one identical launcher instead of repeating it per case, keeping code
+admission bounded. All 11 native probe cases passed, UTF-8 explicitly decoded on
+Windows; payload 26119 bytes, below 64 KiB. Five native condition tests passed.
+The replacement exact-main CI/container/deployment are still pending.
 Additional external SDK/account requirements
 of the pinned security-guidance stress sample are distinct from event dispatch;
 no provider credential is passed into a sandbox. Necessary Apps/extensions and

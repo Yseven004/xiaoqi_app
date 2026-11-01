@@ -54,6 +54,22 @@ String hookCommandProbe({
         '',
       ],
     },
+    {
+      'command': 'printf if-matched',
+      'if': 'Bash(git *)',
+      'input': {
+        ..._input,
+        'tool_input': {'command': 'npm test && FOO=bar git push'},
+      },
+    },
+    {
+      'command': 'exit 99',
+      'if': 'Bash(git *)',
+      'input': {
+        ..._input,
+        'tool_input': {'command': 'npm test'},
+      },
+    },
   ];
   final programs = <String>[];
   for (final entry in commands) {
@@ -69,6 +85,7 @@ String hookCommandProbe({
                 if (entry.containsKey('args')) 'args': entry['args'],
                 if (entry.containsKey('shell')) 'shell': entry['shell'],
                 if (entry.containsKey('timeout')) 'timeout': entry['timeout'],
+                if (entry.containsKey('if')) 'if': entry['if'],
               },
             ],
           },
@@ -78,7 +95,7 @@ String hookCommandProbe({
     programs.add(
       PluginHookCommand.program(
         hook,
-        _input,
+        entry['input'] as Map<String, dynamic>? ?? _input,
         matchValue: entry['matcher'] == r'(a+)+$' ? '${'a' * 10000}!' : 'Bash',
         shellExecutable: shellExecutable,
       ),
@@ -86,13 +103,17 @@ String hookCommandProbe({
   }
   // Keep the runtime script inside the existing 64 KiB admission budget. The
   // large regex subject is already JSON data and never API-host regex input.
-  final encoded = jsonEncode(jsonEncode(programs));
+  final encoded = jsonEncode(
+    jsonEncode(programs.map((program) => program.split('\n').first).toList()),
+  );
+  final launcher = jsonEncode(programs.first.split('\n').skip(1).join('\n'));
   return '''
 const { spawnSync } = require('node:child_process');
 const programs = JSON.parse($encoded);
+const launcher = $launcher;
 const results = [];
 for (const program of programs) {
-  const run = spawnSync(process.execPath, ['-'], { input: program, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 });
+  const run = spawnSync(process.execPath, ['-'], { input: program + '\\n' + launcher, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 });
   if (run.status !== 0) throw new Error('hook launcher probe failed: ' + run.status + ':' + run.stderr);
   results.push(JSON.parse(run.stdout));
 }
@@ -102,10 +123,19 @@ process.stdout.write(JSON.stringify(results));
 
 void checkHookCommandProbe(String text) {
   final values = jsonDecode(text) as List;
-  if (values.length != 9) throw StateError('hook probe result missing');
+  if (values.length != 11) throw StateError('hook probe result missing');
   final results = [
     for (final value in values) PluginHookCommand.result(jsonEncode(value)),
   ];
+  if (results[9]['stdout'] != 'if-matched' ||
+      results[9]['exit_code'] != 0 ||
+      results[10]['matched'] != false ||
+      results[10]['exit_code'] != null ||
+      results[10]['stderr'] != '') {
+    throw StateError(
+      'isolated hook condition positive/negative matching failed',
+    );
+  }
   if (results[0]['exit_code'] != 0 ||
       jsonEncode(jsonDecode(results[0]['stdout'] as String)) !=
           jsonEncode(_input) ||
