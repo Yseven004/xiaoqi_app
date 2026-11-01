@@ -1,13 +1,13 @@
 # P01–P14 current acceptance matrix
 
-As of 2026-11-01, after verifying deployment `20261101-102152-67e29ef` and
-submitting fork main `00d6c0f` to CI `41265757169`. This is an interim matrix,
+As of 2026-11-01, after verifying fork deployment `20261101-105322-56f94d5`
+and successful CI `41266979666`. This is an interim matrix,
 not the final closure report. Historical todo tables do not override newer proof.
 
 | Item | Existing implementation/evidence | Remaining acceptance |
 | --- | --- | --- |
 | P01 action authorization | Bound action parameters, connection authority, pre-submit recheck, persisted approval/denial; fork approval/revocation SDK checks | Cross-entry and representative account effects; no arbitrary real service rule invented |
-| P02 coexistence | Existing real filesystem MCP + Shell + skill/command/Agent/Hook composition | Fork-enhanced container composition and further selected samples |
+| P02 coexistence | Real filesystem MCP + Shell + skill/command/Agent/fork/Hook composition | Further selected samples |
 | P03 intent/discovery | Discovery remains available outside initial recommendation; task/source withdrawal handling | Connection-health change refresh and cross-entry cancellation |
 | P04 network lifecycle | Exact network action approval, original request resume, short-lived task grant, revision ordering; no per-call task-wide disconnect in inspected production call graph | Real shared-network end-of-call versus explicit revocation, all selected entry points |
 | P05 large catalogs | 121-tool SDK scenario, pagination/search/schema recheck, notification refresh and failed refresh tests | Final representative composition; do not rebuild the existing gateway |
@@ -16,10 +16,10 @@ not the final closure report. Historical todo tables do not override newer proof
 | P08 Shell | Literal argv, installed scripts, MCP file handoff, process cleanup | Selected protocol composition and client validation; ECS representative resource measurement already exists |
 | P09 existing hosts | Independent component health, task/version isolation; no generic device-control scope | Actual target host declarations, dependency failure/recovery, no fabricated host execution |
 | P10 installation/build | Real npm/Python/combined builds, offline reuse, execution modes, old task-copy source compatibility, original install recovery | Full chosen-sample combinations; preserve immutable archives |
-| P11 plugin protocols | Basic commands, custom child Agents, preloaded skills, root tool Hooks deployed; fork has 25 import/parser + 5 ordinary command + 26 Agent local checks | Fork real-container/CI/deploy; dynamic command preprocessing, skill Hooks, necessary lifecycle/async behavior, actual Apps/client extension protocol and required design confirmation |
+| P11 plugin protocols | Basic commands, custom child Agents, preloaded skills, root tool Hooks and fork deployed; fork has local and real-container/CI evidence | User-selected DeepSeek model mapping CI/deploy; dynamic command preprocessing, skill Hooks, necessary lifecycle/async behavior, actual Apps/client extension protocol and required design confirmation |
 | P12 budgets | Shared persisted tool/code/model counters, failed/resumed work, no plan-count hard block; provider-count comparisons | Cross-entry concurrency/failure/recovery matrix. Existing ECS sample is not arbitrary concurrency/load proof |
 | P13 lifecycle | Source/operation identity, unknown-effect no replay, correlated result/file preservation, real restart/cleanup gates | Cross-entry revoke/cancel/restart combinations not already proven |
-| P14 release | `67e29ef` standard deployment verified health/data/API/public HTTPS/restore/cleanup; fork CI in progress | Remaining scope completion and final current-release deployment; client 未执行验证，待用户真机验证 |
+| P14 release | `56f94d5` standard deployment verified health/data/API/public HTTPS/restore/cleanup and fork container gate | Remaining scope completion and final current-release deployment; client 未执行验证，待用户真机验证 |
 
 ## Evidence anchors
 

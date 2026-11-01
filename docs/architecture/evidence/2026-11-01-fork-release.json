@@ -1,0 +1,46 @@
+{
+  "main_commit": "56f94d58220479a65651c1774d38cdc08f12d080",
+  "release": "20261101-105322-56f94d5",
+  "verification_profile": "non-image",
+  "ci": {
+    "run_id": 41266979666,
+    "job_id": 124731710285,
+    "conclusion": "success",
+    "dart_tests": 480,
+    "runner_tests": 93,
+    "deployment_python_tests": 30,
+    "bridge_tests": 2,
+    "sandbox_image_tests": 2,
+    "stdio_runtime_gate": true,
+    "fork_custom_agent_composition": true,
+    "composition_code_runs": 9,
+    "composition_successful_hooks": 6,
+    "composition_private_child_sessions": 2,
+    "composition_artifacts": 4,
+    "immutable_skill_unchanged": true,
+    "read_only_children_have_no_write_or_code_tools": true,
+    "image_export_import_roundtrip": true
+  },
+  "deployment": {
+    "controller_exit_code": 0,
+    "runtime_probe": true,
+    "health_and_data": true,
+    "traffic_resumed": true,
+    "cleanup": true,
+    "current_release": "20261101-105322-56f94d5",
+    "current_health": "healthy",
+    "restore_point": "latest-good",
+    "restore_data": "present",
+    "public_https": 200,
+    "public_verification_source": "cloud_assistant",
+    "product_release": "2026-10-27-agent-tools-2",
+    "api_contract": "24",
+    "log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261101-105322-56f94d5.log"
+  },
+  "limitations": [
+    "DeepSeek alias mapping was implemented after this release commit and is not included here.",
+    "Remaining P11 protocols and cross-entry acceptance are not closed.",
+    "No paid image service was invoked.",
+    "Client: 未执行验证，待用户真机验证。"
+  ]
+}

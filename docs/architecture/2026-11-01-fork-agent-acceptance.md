@@ -26,7 +26,7 @@ without starting a child, no parent-only history in any child provider request,
 and provider request counts against shared persisted budget. Failure and rejection
 never create completion evidence. These are local SDK tests, not real containers.
 
-## Real-container gate (pending CI execution)
+## Real-container gate (passed in CI 41266979666)
 
 `bin/support/stdio_agent_gate.dart` extends the existing filesystem MCP + Shell +
 installed command + root Hook composition with `commands/fork-read.md` referencing
@@ -37,8 +37,8 @@ Hooks, exactly 4 artifacts with original contents, one completed custom Agent,
 one completed fork command, two private child sessions, unchanged SKILL bytes,
 and no write/code tools exposed to the read-only children.
 
-The host has no Docker; CI must execute this gate and the full server regression
-before this batch is deployed. No local fixture is presented as container proof.
+The host has no Docker. CI executed this gate and the full server regression;
+no local fixture is presented as container proof.
 
 CI `41265757169` passed full image build/tests, then failed the container gate:
 the pre-existing gate wrote `commands/verify.md` while manually describing it as
@@ -59,9 +59,21 @@ and API `24`. See `evidence/2026-11-01-hook-exec-release.json`.
 
 ## Remaining scope
 
-Fork CI/container and deployment are still required. P11 dynamic commands,
+Fork CI/container and deployment passed as recorded below. P11 dynamic commands,
 skill-scoped Hooks, necessary lifecycle/asynchronous protocols and apps/extensions
 remain open and must be tied to concrete representative sources. Cross-entry
 authorization/network/cancellation/recovery/budget acceptance and the final
 P01–P14 matrix remain open. No paid image service was called. No API or Flutter
 contract change is included. Client: 未执行验证，待用户真机验证。
+
+## Release outcome (supersedes pending fork status above)
+
+Exact main `56f94d5`, CI `41266979666` / job `124731710285` passed 480 Dart,
+93 runner, 30 deployment, 2 bridge and 2 sandbox image tests, the real fork
+composition assertions and image export/import roundtrip. Standard deployment
+`20261101-105322-56f94d5` completed with controller exit 0 and `DEPLOY_OK`.
+Runtime probe, health/data, traffic resumption and cleanup passed; independent
+status and public HTTPS verified healthy service, product/API 24 and one
+`latest-good` restore point with data. Fork is server deployed and verified.
+See `evidence/2026-11-01-fork-release.json`. This does not close the other P items
+or include the subsequent user-selected DeepSeek model mapping.
