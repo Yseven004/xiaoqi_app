@@ -32,6 +32,7 @@ import 'package:genkit/genkit.dart'
         GenkitException,
         Message,
         ModelResponseChunk,
+        PartExtension,
         Role,
         StatusCode,
         TextPart;
@@ -53,6 +54,8 @@ import 'code_execution_service.dart';
 import 'deepseek_web_service.dart';
 import 'image_service.dart';
 import 'mcp_connection_service.dart';
+import 'mcp_app_surface.dart';
+import 'tool_execution.dart';
 import 'store.dart';
 
 const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
@@ -364,6 +367,8 @@ class XiaoqiApi {
   late final GenkitRouter _agentRouter;
   late final Agent<Map<String, dynamic>> _remoteAgent;
   final _controllers = <String, CancellationController>{};
+  final _appControllers =
+      <String, ({String callId, CancellationController controller})>{};
   static const _uuid = Uuid();
   static const _maxJsonBytes = 22 * 1024 * 1024;
   static const _maxCapabilityBytes = 2 * 1024 * 1024;
@@ -781,6 +786,27 @@ class XiaoqiApi {
         (request, task, artifact) => _authenticated(
           request,
           (device) => _downloadArtifact(device, task, artifact),
+        ),
+      )
+      ..get(
+        '/v1/agent/tasks/<task>/apps/<app>',
+        (request, task, app) => _authenticated(
+          request,
+          (device) => _mcpApp(request, device, task, app),
+        ),
+      )
+      ..post(
+        '/v1/agent/tasks/<task>/apps/<app>',
+        (request, task, app) => _authenticated(
+          request,
+          (device) => _mcpApp(request, device, task, app),
+        ),
+      )
+      ..post(
+        '/v1/agent/tasks/<task>/apps/<app>/cancel',
+        (request, task, app) => _authenticated(
+          request,
+          (device) => _cancelMcpApp(request, device, task, app),
         ),
       );
     return router;
@@ -2276,6 +2302,226 @@ class XiaoqiApi {
       );
     } on Object {
       // Logging must not change the task result.
+    }
+  }
+
+  void _checkMcpAppSource(String tenant, Map record) {
+    final source = record['source'] as Map?;
+    if (source == null || source['capability_id'] is! String)
+      throw StateError('插件面板没有已绑定的来源');
+    final cap = store.get('cap/$tenant/${source['capability_id']}')?.value;
+    if (cap == null ||
+        cap['enabled'] == false ||
+        cap['deleted_at'] != null ||
+        !(cap['versions'] as List? ?? const []).whereType<Map>().any(
+          (version) =>
+              version['id'] == source['version_id'] &&
+              version['artifact_key'] == source['artifact_key'],
+        )) {
+      throw StateError('插件已撤回或绑定版本已变化');
+    }
+  }
+
+  Future<Response> _mcpApp(
+    Request request,
+    _Device device,
+    String task,
+    String app,
+  ) async {
+    String? controllerKey;
+    CancellationController? cancellation;
+    try {
+      final taskId = _safeId(task, '任务 ID');
+      final surfaces = McpAppSurfaceStore(store, device.tenant, taskId);
+      final surface = surfaces.load(
+        app,
+        check: (record) => _checkMcpAppSource(device.tenant, record),
+      );
+      final taskKey = 'task/${device.tenant}/$taskId';
+      final taskValue = store.get(taskKey)!.value;
+      final ready = const {
+        'completed',
+        'partially_completed',
+      }.contains(taskValue['status']);
+      if (request.method == 'GET') {
+        final pending = store
+            .list(
+              'private_mcp_app_calls/${device.tenant}/$taskId/$app/',
+              limit: 256,
+            )
+            .map((row) => row.$2.value)
+            .where(
+              (value) => const {'pending', 'unknown'}.contains(value['phase']),
+            )
+            .firstOrNull;
+        return _json({
+          'app_id': app,
+          'task_id': taskId,
+          'html': surface['html'],
+          'title':
+              (surface['tool'] as Map)['title'] ??
+              (surface['tool'] as Map)['name'],
+          'input': surface['input'],
+          'result': surface['result'],
+          'enabled': ready,
+          'protocol_version': '2026-01-26',
+          if (pending != null)
+            'pending_call': {
+              for (final field in ['call_id', 'tool_name', 'arguments'])
+                field: pending[field],
+            },
+        });
+      }
+      if (!ready ||
+          _controllers.containsKey(taskKey) ||
+          _appControllers.containsKey(taskKey))
+        return _error('任务仍在执行，请等待当前操作完成', 409);
+      final body = await _body(request, 128 * 1024);
+      if (_controllers.containsKey(taskKey) ||
+          _appControllers.containsKey(taskKey))
+        return _error('请等待当前面板操作完成', 409);
+      final tool = body['tool_name'];
+      final arguments = body['arguments'];
+      final call = body['call_id'];
+      if (tool is! String ||
+          tool.isEmpty ||
+          tool.length > 256 ||
+          arguments is! Map<String, dynamic> ||
+          call is! String ||
+          !RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(call))
+        return _error('插件面板请求格式无效', 400);
+      final binding = ToolExecution.digest([app, tool, arguments]);
+      final actionKey =
+          'private_mcp_app_calls/${device.tenant}/$taskId/$app/${ToolExecution.digest(call)}';
+      final saved = store.get(actionKey);
+      if (saved != null && saved.value['binding'] != binding)
+        return _error('原面板请求的参数已变化', 409);
+      if (saved?.value['phase'] == 'completed')
+        return _json(saved!.value['response'] as Map);
+      final priorCalls = store.list(
+        'private_mcp_app_calls/${device.tenant}/$taskId/$app/',
+        limit: 257,
+      );
+      if (saved == null && priorCalls.length >= 256)
+        return _error('此面板的请求预算已用完', 429);
+      if (saved == null &&
+          priorCalls.any(
+            (row) =>
+                const {'pending', 'unknown'}.contains(row.$2.value['phase']),
+          )) {
+        return _error('上次面板操作的结果尚未确认，请先核实原请求', 409);
+      }
+      if (saved == null)
+        store.put(actionKey, {
+          'phase': 'pending',
+          'binding': binding,
+          'call_id': call,
+          'tool_name': tool,
+          'arguments': arguments,
+        }, null);
+      final active = runtime;
+      if (active is! GenkitXiaoqiAgentRuntime)
+        return _error('当前运行时未提供插件面板执行入口', 503);
+      cancellation = CancellationController();
+      controllerKey = taskKey;
+      _appControllers[taskKey] = (
+        callId: '$app:$call',
+        controller: cancellation,
+      );
+      final approval = body['approval'];
+      if (approval != null &&
+          (approval is! Map ||
+              approval['approved'] is! bool ||
+              approval['approval_hash'] is! String))
+        return _error('插件操作确认格式无效', 400);
+      final result = await active.runMcpAppAction(
+        tenantId: device.tenant,
+        taskId: taskId,
+        surface: surface,
+        tool: tool,
+        arguments: arguments,
+        callId: call,
+        approval: approval == null
+            ? null
+            : Map<String, dynamic>.from(approval as Map),
+        cancellation: cancellation.token,
+        onProcessEvent: (event) => _appendEvent(taskKey, event),
+      );
+      if (result.finishReason == AgentFinishReason.interrupted) {
+        final pending = result.messages
+            .expand((message) => message.content)
+            .where((part) => part.isToolRequest)
+            .where((part) => part.metadata?['interrupt'] is Map)
+            .toList();
+        if (pending.isEmpty) throw StateError('面板操作被中断但没有可恢复的确认结果');
+        return _json({
+          'status': 'approval_required',
+          'approval': pending.first.metadata!['interrupt'],
+        });
+      }
+      final output = jsonDecode(result.text);
+      if (output is! Map<String, dynamic> ||
+          utf8.encode(result.text).length > 2 * 1024 * 1024)
+        throw const FormatException('面板操作结果格式或大小无效');
+      final response = {'status': 'completed', 'result': output};
+      final unknown = const {
+        'workspace_result_unknown',
+        'external_result_unknown',
+      }.contains(output['status']);
+      if (unknown) response['status'] = 'pending';
+      final current = store.get(actionKey)!;
+      store.put(actionKey, {
+        ...current.value,
+        'phase': unknown ? 'unknown' : 'completed',
+        'response': response,
+      }, current.revision);
+      cancellation.token.throwIfCancelled();
+      surfaces.load(
+        app,
+        check: (record) => _checkMcpAppSource(device.tenant, record),
+      );
+      if (tool == (surface['tool'] as Map)['name'] &&
+          output['status'] == 'completed') {
+        surfaces.updateResult(
+          app,
+          output,
+          check: (record) => _checkMcpAppSource(device.tenant, record),
+        );
+      }
+      return _json(response);
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on RevisionConflict {
+      return _error('面板操作状态已变化，请核实原结果', 409);
+    } on Object {
+      return _error(
+        cancellation?.isCancelled == true
+            ? '面板操作已取消；已完成结果会保留'
+            : '面板来源或执行结果不可用；请核实原结果，不要重复提交',
+        409,
+      );
+    } finally {
+      if (controllerKey != null &&
+          identical(_appControllers[controllerKey]?.controller, cancellation))
+        _appControllers.remove(controllerKey);
+    }
+  }
+
+  Future<Response> _cancelMcpApp(
+    Request request,
+    _Device device,
+    String task,
+    String app,
+  ) async {
+    try {
+      final body = await _body(request, 2048);
+      final key = 'task/${device.tenant}/${_safeId(task, '任务 ID')}';
+      final active = _appControllers[key];
+      if (active != null && active.callId == '$app:${body['call_id']}')
+        active.controller.cancel('用户收起或取消插件面板操作');
+      return _json({'ok': true});
+    } on Object {
+      return _error('面板取消请求无效', 400);
     }
   }
 

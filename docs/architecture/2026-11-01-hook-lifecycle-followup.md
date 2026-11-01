@@ -84,7 +84,17 @@ checks, without making sandbox runtime validation optional. Probe generation
 shares one identical launcher instead of repeating it per case, keeping code
 admission bounded. All 11 native probe cases passed, UTF-8 explicitly decoded on
 Windows; payload 26119 bytes, below 64 KiB. Five native condition tests passed.
-The replacement exact-main CI/container/deployment are still pending.
+The replacement exact-main `f42434bb9ca30ba4c467d565288e52834b879d76`
+CI `41304862195` / job `124843084510` succeeded: 529 Dart passed,
+6 native-only skips; 95 runner, 30 deployment, 2 bridge and 2 image tests;
+actual isolated stdio gate and image export/import roundtrip passed.
+Standard deployment controller exited 0 for `20261101-200636-f42434b`.
+Its log `.codex-artifacts/deploy/20261101-200636-f42434b.log` records exact
+artifact/image verification, runtime probe, health/data verification, traffic
+resume and cleanup. Final controller verification found healthy current release,
+one latest-good restore point with data, product `2026-10-27-agent-tools-2`,
+API 24 and public HTTPS 200 through Cloud Assistant. Local public TLS failed;
+the independent remote HTTPS verification succeeded. No duplicate deploy started.
 Additional external SDK/account requirements
 of the pinned security-guidance stress sample are distinct from event dispatch;
 no provider credential is passed into a sandbox. Necessary Apps/extensions and

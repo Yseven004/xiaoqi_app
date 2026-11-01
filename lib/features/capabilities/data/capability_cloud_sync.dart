@@ -1094,6 +1094,67 @@ class CapabilityCloudSync {
     );
   }
 
+  Future<Map<String, dynamic>> openMcpApp(String task, String app) async {
+    final token = await _requireToken();
+    final response = await _client
+        .get(
+          Uri.parse(
+            '$_baseUrl/agent/tasks/${Uri.encodeComponent(task)}/apps/${Uri.encodeComponent(app)}',
+          ),
+          headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 30));
+    final body = _decode(response);
+    if (response.statusCode != 200)
+      throw StateError(_errorMessage(body, '插件面板暂不可用'));
+    return body;
+  }
+
+  Future<Map<String, dynamic>> callMcpApp({
+    required String task,
+    required String app,
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> arguments,
+    Map<String, dynamic>? approval,
+  }) async {
+    final token = await _requireToken();
+    // One original call ID is retained by the caller after a transport error.
+    // Never retry a mutating request automatically with a fresh identity.
+    final response = await _client
+        .post(
+          Uri.parse(
+            '$_baseUrl/agent/tasks/${Uri.encodeComponent(task)}/apps/${Uri.encodeComponent(app)}',
+          ),
+          headers: _headers(token),
+          body: jsonEncode({
+            'call_id': callId,
+            'tool_name': tool,
+            'arguments': arguments,
+            if (approval != null) 'approval': approval,
+          }),
+        )
+        .timeout(const Duration(minutes: 3));
+    final body = _decode(response);
+    if (response.statusCode != 200)
+      throw StateError(_errorMessage(body, '插件面板操作未确认，请核实原结果'));
+    return body;
+  }
+
+  Future<void> cancelMcpApp(String task, String app, String callId) async {
+    final token = await _requireToken();
+    final response = await _client
+        .post(
+          Uri.parse(
+            '$_baseUrl/agent/tasks/${Uri.encodeComponent(task)}/apps/${Uri.encodeComponent(app)}/cancel',
+          ),
+          headers: _headers(token),
+          body: jsonEncode({'call_id': callId}),
+        )
+        .timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) throw StateError('面板取消状态未确认');
+  }
+
   Future<String?> cancelTask(String taskId) async {
     final token = await _requireToken();
     final response = await _client

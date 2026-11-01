@@ -39,6 +39,7 @@ import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../features/capabilities/data/skill_creator_adapter.dart';
 import '../features/capabilities/presentation/capability_tag_text_controller.dart';
 import '../features/capabilities/presentation/skills_plugins_composer_controls.dart';
+import '../features/capabilities/presentation/mcp_app_card.dart';
 import '../models/book_library_item.dart';
 import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
@@ -2588,7 +2589,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return prepared;
   }
 
-  Future<void> _sendMessage() async {
+  Future<bool> _sendMcpAppMessage(String text, String conversationId) async {
+    if (!mounted ||
+        _conversation?.id != conversationId ||
+        _isGenerating ||
+        _isPreparingToSend ||
+        _composerController.messageText.trim().isNotEmpty ||
+        _attachments.isNotEmpty ||
+        _annotations.isNotEmpty ||
+        _editingQuestion != null)
+      return false;
+    _composerController.setMessage(text, _composerController.messageMetadata());
+    final queued = Completer<bool>();
+    unawaited(
+      _sendMessage(
+            onQueued: () {
+              if (!queued.isCompleted) queued.complete(true);
+            },
+          )
+          .catchError((Object _) {
+            if (!queued.isCompleted) queued.complete(false);
+          })
+          .whenComplete(() {
+            if (!queued.isCompleted) queued.complete(false);
+          }),
+    );
+    return queued.future;
+  }
+
+  Future<void> _sendMessage({VoidCallback? onQueued}) async {
     if (_space != _HomeSpace.reading) return;
     if (_isSelectingAnswerVersion || _isSelectingQuestionVersion) {
       _showReplyError('版本正在保存，请稍后发送');
@@ -2763,6 +2792,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
     unawaited(_persistAttachments());
     _scrollToLatest();
+    onQueued?.call();
     try {
       await _historyService.saveTransactional(withUserMessage);
     } catch (error) {
@@ -7152,6 +7182,8 @@ $text''';
                                         fit: StackFit.expand,
                                         children: [
                                           _ConversationMessages(
+                                            onSendMcpAppMessage:
+                                                _sendMcpAppMessage,
                                             annotations: _annotations,
                                             annotationBottomPadding:
                                                 _textAnnotationEditorVisible
@@ -9538,6 +9570,7 @@ class _ScrollToBottomRingPainter extends CustomPainter {
 
 class _ConversationMessages extends StatefulWidget {
   const _ConversationMessages({
+    required this.onSendMcpAppMessage,
     required this.attachmentPreparationStates,
     required this.onRetryAttachment,
     required this.record,
@@ -9581,6 +9614,7 @@ class _ConversationMessages extends StatefulWidget {
   });
 
   final AiConversationRecord record;
+  final Future<bool> Function(String, String) onSendMcpAppMessage;
   final int presentationRevision;
   final String? targetMessageId;
   final List<AiConversationMessage> messages;
@@ -10183,6 +10217,15 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     Map<String, Object?> artifact, {
     List<Map<String, Object?>>? imageGroup,
   }) {
+    if (artifact['media_type'] == 'application/vnd.xiaoqi.mcp-app+json') {
+      final conversationId = widget.record.id;
+      return McpAppCard(
+        key: ValueKey('mcp-app-${artifact['task_id']}-${artifact['id']}'),
+        artifact: artifact,
+        onSendMessage: (text) =>
+            widget.onSendMcpAppMessage(text, conversationId),
+      );
+    }
     final name = artifact['name']!.toString();
     final artifactId = artifact['id']!.toString();
     final taskId = artifact['task_id']?.toString() ?? '';

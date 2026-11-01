@@ -475,11 +475,12 @@ class ToolExecution {
   /// They still share the task's operation budget and cancellation checks.
   Future<Map<String, dynamic>> query({
     required String slot,
+    String? originalInvocation,
     required Map<String, dynamic> arguments,
     required Future<Map<String, dynamic>> Function(String id) invoke,
   }) => _operation(
     effect: 'read',
-    slot: '$slot:${const Uuid().v4()}',
+    slot: '$slot:${originalInvocation ?? const Uuid().v4()}',
     arguments: arguments,
     limit: limits.toolOperations,
     invoke: invoke,
@@ -488,11 +489,12 @@ class ToolExecution {
   /// Isolated workspace calls are fresh; prior writes must not stale later reads.
   Future<Map<String, dynamic>> workspace({
     required String slot,
+    String? originalInvocation,
     required Map<String, dynamic> arguments,
     required Future<Map<String, dynamic>> Function(String id) invoke,
   }) => _operation(
     effect: 'workspace',
-    slot: '$slot:${const Uuid().v4()}',
+    slot: '$slot:${originalInvocation ?? const Uuid().v4()}',
     arguments: arguments,
     limit: limits.toolOperations,
     invoke: invoke,

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'mcp_app_surface.dart';
 
 /// Keeps the complete discovered catalog outside the model's tool definitions.
 /// Large connectors expose bounded search plus a schema-validated call gateway.
@@ -30,6 +31,7 @@ class McpToolDirectory {
         .toList();
     final matches =
         tools.where((tool) {
+          if (!McpAppMetadata.visible(tool, 'model')) return false;
           final text = '${tool['name']} ${tool['description'] ?? ''}'
               .toLowerCase();
           return terms.every(text.contains);

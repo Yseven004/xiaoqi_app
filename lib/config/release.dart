@@ -1,2 +1,2 @@
-const releaseId = '2026-10-27-agent-tools-2';
-const apiContractVersion = '24';
+const releaseId = '2026-11-01-agent-tools-apps';
+const apiContractVersion = '25';
