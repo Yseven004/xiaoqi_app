@@ -104,6 +104,17 @@ Future<void> verifyStdioAgent(
         if (skill == null)
           throw StateError('Selected skill was not exposed alongside MCP');
         bool called(String tool) => serialized.contains('"name":"$tool"');
+        bool calledWith(String tool, String key, String value) =>
+            (body['messages'] as List).whereType<Map>().any(
+              (message) =>
+                  (message['tool_calls'] as List? ?? []).whereType<Map>().any(
+                    (call) =>
+                        call['function']['name'] == tool &&
+                        (jsonDecode(call['function']['arguments'] as String)
+                                as Map)[key] ==
+                            value,
+                  ),
+            );
         if (!called('set_task_deliverables')) {
           name = 'set_task_deliverables';
           input = {
@@ -172,6 +183,24 @@ Future<void> verifyStdioAgent(
             'task':
                 'Read agent.txt and report its original content without writing files.',
           };
+        } else if (readOnlyDelegate &&
+            !calledWith('search_plugin_commands', 'query', 'fork-read')) {
+          name = 'search_plugin_commands';
+          input = {'query': 'fork-read'};
+        } else if (readOnlyDelegate &&
+            !calledWith('run_plugin_command', 'arguments', 'FORK_READ_GATE')) {
+          final command = (body['messages'] as List)
+              .whereType<Map>()
+              .where((message) => message['role'] == 'tool')
+              .map((message) => message['content'].toString())
+              .lastWhere((content) => content.contains('fork-read'));
+          name = 'run_plugin_command';
+          input = {
+            'command_id': RegExp(
+              r'command-[a-f0-9]{24}',
+            ).firstMatch(command)!.group(0),
+            'arguments': 'FORK_READ_GATE',
+          };
         }
       }
       final delta = name == null
@@ -239,6 +268,10 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
     'SKILL.md': utf8.encode(
       '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n',
     ),
+    if (readOnlyDelegate)
+      'commands/fork-read.md': utf8.encode(
+        '---\ndescription: fork-read isolated verification\ncontext: fork\nagent: readonly-verifier\n---\nRead agent.txt without writing files. \$ARGUMENTS\n',
+      ),
     if (readOnlyDelegate)
       'agents/readonly-verifier.md': utf8.encode(
         '---\nname: readonly-verifier\ndescription: Read the verified task file\ntools: [Read]\npermissionMode: plan\n---\nREAD_ONLY_HOOK_GATE_AGENT: Read agent.txt and report its contents.\n',
@@ -425,7 +458,7 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
     // The same task budget charges one MCP process, one Shell helper, one
     // installed script and (when enabled) the two real command hooks.
     final expectedCodeRuns =
-        3 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 2 : 0);
+        3 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 4 : 0);
     if ((store.get('task/$tenant/$task')!.value['code_execution_runs'] !=
             expectedCodeRuns) ||
         (rootHooks &&
@@ -436,7 +469,7 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
                               e['tool'] == 'plugin_hook',
                         )
                         .length !=
-                    (readOnlyDelegate ? 4 : 2) ||
+                    (readOnlyDelegate ? 6 : 2) ||
                 artifacts.length != 4))) {
       throw StateError(
         'Real Agent hook execution, budget or protocol artifact boundary failed; '
@@ -451,6 +484,12 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
                         {})
                     .length !=
                 1 ||
+            (store.get('task/$tenant/$task')!.value['completed_plugin_commands']
+                            as Map? ??
+                        {})
+                    .length !=
+                1 ||
+            store.list('private_plugin_agent/$tenant/$task/').length != 2 ||
             utf8.decode(store.getImmutable(package)['SKILL.md']!) !=
                 '---\nname: file-workflow\ndescription: Use filesystem MCP and a Shell helper to deliver verified files\n---\nWrite and read the file with the filesystem MCP. Then use execute_shell to read the task input manifest and produce the verified helper file.\n')) {
       throw StateError(

@@ -27,6 +27,9 @@ void main() {
     'fork-custom',
     'fork-approval',
     'fork-denied',
+    'fork-disabled',
+    'fork-source-changed',
+    'fork-unknown',
   ]) {
     test(
       'real runtime agent $scenario preserves task tools, budget and completion evidence',
@@ -36,6 +39,7 @@ void main() {
         final rootHooks = scenario.startsWith('root-hook-');
         final fork = scenario.startsWith('fork-');
         final childToolSets = <Set<String>>[];
+        var childHistoryLeaked = false;
         final mcp = const {
           'approval',
           'ignored-plugin-fields-approval',
@@ -46,6 +50,8 @@ void main() {
           'root-hook-approval',
           'fork-approval',
           'fork-denied',
+          'fork-disabled',
+          'fork-source-changed',
         }.contains(scenario);
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final serving = server.listen((request) async {
@@ -108,6 +114,9 @@ void main() {
           String? tool;
           Map<String, dynamic> input = {};
           if (child) {
+            childHistoryLeaked |= serialized.contains(
+              'PARENT_ONLY_PRIVATE_HISTORY',
+            );
             childToolSets.add(tools);
             if (scenario.startsWith('ignored-plugin-fields')) {
               expect(system, contains('按插件源协议忽略 Agent 的 mcpServers'));
@@ -295,7 +304,9 @@ void main() {
             expect(value['external_calls'], 0);
             expect(value['script_runs'], 0);
           }
-          expect(childToolSets, isNotEmpty);
+          expect(childHistoryLeaked, isFalse);
+          if (scenario != 'fork-unknown') expect(childToolSets, isNotEmpty);
+          if (scenario == 'fork-unknown') expect(childToolSets, isEmpty);
           for (final names in childToolSets) {
             if (!mcp &&
                 !scriptNetwork &&
@@ -312,8 +323,13 @@ void main() {
               expect(names, isNot(contains('write_task_text_file')));
           }
           if (fork) {
-            final success =
-                scenario != 'fork-plan' && scenario != 'fork-denied';
+            final success = !const {
+              'fork-plan',
+              'fork-denied',
+              'fork-disabled',
+              'fork-source-changed',
+              'fork-unknown',
+            }.contains(scenario);
             expect(value['command_completed'], success ? 1 : 0);
             expect(value['missing'], !success);
             if (mcp) {

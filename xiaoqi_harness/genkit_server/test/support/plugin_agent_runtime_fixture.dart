@@ -107,6 +107,8 @@ else:
     'root-hook-approval',
     'fork-approval',
     'fork-denied',
+    'fork-disabled',
+    'fork-source-changed',
   }.contains(scenario);
   final rpc = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   var calls = 0;
@@ -188,6 +190,8 @@ else:
             ? 'agent: Explore\n'
             : scenario == 'fork-custom'
             ? 'agent: writer\n'
+            : scenario == 'fork-unknown'
+            ? 'agent: missing-agent\n'
             : ''}'
         '---\nFORK_COMMAND_BODY: Write report.txt containing verified child output. Arguments=\$ARGUMENTS',
       ),
@@ -339,6 +343,11 @@ else:
         ],
       },
       messages: [
+        if (fork)
+          Message(
+            role: Role.user,
+            content: [TextPart(text: 'PARENT_ONLY_PRIVATE_HISTORY')],
+          ),
         Message(
           role: Role.user,
           content: [TextPart(text: '请使用 writer Agent 完成任务笔记')],
@@ -371,11 +380,27 @@ else:
           )
           .single;
       final permission = pending.metadata!['interrupt'] as Map;
-      if (scenario == 'disabled') {
+      if (scenario == 'disabled' || scenario == 'fork-disabled') {
         final source = store.get('cap/personal/agents')!;
         store.put('cap/personal/agents', {
           ...source.value,
           'enabled': false,
+        }, source.revision);
+      }
+      if (scenario == 'fork-source-changed') {
+        final source = store.get('cap/personal/agents')!;
+        store.putImmutable('packages/agents-changed', {
+          ...files,
+          'commands/work.md': utf8.encode(
+            '---\ncontext: fork\n---\nChanged command',
+          ),
+        });
+        store.put('cap/personal/agents', {
+          ...source.value,
+          'versions': [
+            for (final version in source.value['versions'] as List)
+              {...version as Map, 'artifact_key': 'packages/agents-changed'},
+          ],
         }, source.revision);
       }
       result = await runtime().runAgentTurn(

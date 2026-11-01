@@ -1,0 +1,37 @@
+{
+  "main_commit": "67e29ef1777dc4a8c915b02be1acdf95d3c0c6b6",
+  "release": "20261101-102152-67e29ef",
+  "verification_profile": "non-image",
+  "ci_run": "https://github.com/Yseven004/xiaoqi_app/actions/runs/40977584323",
+  "preflight_read_only": {
+    "invoke_id": "t-hk071ra1rvben7k",
+    "prior_release": "20261030-073514-eeb173c",
+    "active_deploy_jobs": false,
+    "health": "healthy",
+    "restore_point": "latest-good",
+    "restore_data": "present"
+  },
+  "deployment": {
+    "entry_point": "xiaoqi_harness/deploy/deploy_current.ps1 -VerificationProfile non-image",
+    "remote_log_result": "DEPLOY_OK",
+    "runtime_probe": true,
+    "health_and_data": true,
+    "traffic_resumed": true,
+    "cleanup": true,
+    "current_release": "20261101-102152-67e29ef",
+    "current_health": "healthy",
+    "restore_point": "latest-good",
+    "restore_data": "present",
+    "public_https": 200,
+    "public_verification_source": "cloud_assistant",
+    "product_release": "2026-10-27-agent-tools-2",
+    "api_contract": "24",
+    "log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261101-102152-67e29ef.log"
+  },
+  "limitations": [
+    "Intermittent local ECS endpoint/TLS failures were recovered by existing bounded read retries and remote HTTPS verification; no system network configuration changed.",
+    "Fork implementation is not included in this release.",
+    "No paid image service was invoked.",
+    "Client device validation remains user-owned and unperformed."
+  ]
+}

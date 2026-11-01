@@ -100,6 +100,23 @@ class PluginCommand {
           if (candidate != null &&
               current.value['current_version_id'] == version['id'])
             'compatibility': candidate,
+          if (candidate == null &&
+              current.value['current_version_id'] == version['id'] &&
+              current.value['compatibility'] is Map &&
+              inspect(
+                files,
+                '',
+                const {},
+              ).every((c) => c['status'] == 'supported'))
+            'compatibility': {
+              ...current.value['compatibility'] as Map,
+              'warnings': [
+                for (final warning
+                    in (current.value['compatibility']['warnings'] as List? ??
+                        const []))
+                  if (warning != 'commands 组件暂不支持') warning,
+              ],
+            },
         }, current.revision);
         return updated;
       } on RevisionConflict {

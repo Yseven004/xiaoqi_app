@@ -8,6 +8,60 @@ import 'package:xiaoqi_genkit_server/src/store.dart';
 
 void main() {
   test(
+    'legacy root commands reindex preserves ids and restores fork siblings',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('legacy-fork-');
+      final store = CloudStore(root: directory.path);
+      try {
+        final files = {
+          'commands/plain.md': utf8.encode('Plain task'),
+          'commands/fork.md': utf8.encode('---\ncontext: fork\n---\nFork task'),
+        };
+        store.putImmutable('legacy-commands', files);
+        final components = PluginCommand.inspect(files, '', {});
+        final plain = components.singleWhere((c) => c['name'] == 'plain');
+        final fork = components.singleWhere((c) => c['name'] == 'fork');
+        store.put('cap/alice/legacy', {
+          'id': 'legacy',
+          'kind': 'plugin',
+          'enabled': true,
+          'current_version_id': 'v1',
+          'compatibility': {
+            'warnings': ['commands 组件暂不支持'],
+          },
+          'versions': [
+            {
+              'id': 'v1',
+              'artifact_key': 'legacy-commands',
+              'plugin_command_profile': 1,
+              'components': [
+                {...plain, 'id': 'preserved-plain'},
+                {...fork, 'id': 'preserved-fork', 'status': 'unsupported'},
+              ],
+            },
+          ],
+        }, null);
+        final selected = SelectedPluginCommands(store, 'alice', [
+          {'id': 'legacy', 'version_id': 'v1'},
+        ]);
+        expect(
+          selected.entries.values.map((c) => c['component_id']),
+          unorderedEquals(['preserved-plain', 'preserved-fork']),
+        );
+        final current = store.get('cap/alice/legacy')!.value;
+        expect((current['compatibility'] as Map)['warnings'], isEmpty);
+        expect(store.getImmutable('legacy-commands'), files);
+        expect(
+          (current['versions'] as List).single['artifact_key'],
+          'legacy-commands',
+        );
+      } finally {
+        store.close();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+  test(
     'command arguments preserve quotes and never recursively expand inserted text',
     () {
       final command = PluginCommand.parse(
