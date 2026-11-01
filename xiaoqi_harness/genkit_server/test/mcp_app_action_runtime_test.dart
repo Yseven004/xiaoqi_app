@@ -5,6 +5,7 @@ import 'package:genkit/genkit.dart';
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
+import 'package:xiaoqi_genkit_server/src/execution_limits.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'package:xiaoqi_genkit_server/src/tool_execution.dart';
 import 'package:xiaoqi_genkit_server/src/turn_contract.dart';
@@ -191,6 +192,33 @@ void main() {
             final refreshed = await run('two');
             expect(calls, 2);
             expect(jsonDecode(refreshed.text)['structuredContent']['count'], 2);
+            final task = store.get('task/personal/task')!;
+            store.put('task/personal/task', {
+              ...task.value,
+              'code_execution_runs': const ExecutionLimits().toolOperations,
+            }, task.revision);
+            await expectLater(
+              run('three'),
+              throwsA(
+                predicate<Object>(
+                  (error) => error.toString().contains('已达到本轮操作数量上限'),
+                ),
+              ),
+            );
+            expect(calls, 2);
+            final beforeModel = store.get('task/personal/task')!;
+            store.put('task/personal/task', {
+              ...beforeModel.value,
+              'code_execution_runs': 0,
+              'model_request_runs': const ExecutionLimits().modelRequests,
+            }, beforeModel.revision);
+            final noProvider = await run('four');
+            expect(jsonDecode(noProvider.text)['status'], 'completed');
+            expect(calls, 3);
+            expect(
+              store.get('task/personal/task')!.value['model_request_runs'],
+              const ExecutionLimits().modelRequests,
+            );
           }
         } finally {
           await serving.cancel();

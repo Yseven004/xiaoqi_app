@@ -42,6 +42,9 @@ void main() {
     'mcp-partial-startup',
     'mcp-error',
     'mcp-read',
+    'mcp-resource-large',
+    'mcp-resource-oversize',
+    'mcp-resource-revoked',
     'mcp-slow-read',
     'mcp-public-read',
     'mcp-large',
@@ -196,7 +199,8 @@ void main() {
                         'mcp-disabled',
                         'mcp-reconfigured',
                       }.contains(scenario) ||
-                      scenario.startsWith('text-only')
+                      scenario.startsWith('text-only') ||
+                      scenario.startsWith('mcp-resource-')
                   ? 0
                   : scenario.startsWith('mcp-')
                   ? 1
@@ -408,15 +412,16 @@ void main() {
                   {'name': remoteName, 'count': 1},
                 ],
                 'artifacts': [
-                  if (!const {
-                    'mcp-read',
-                    'mcp-slow-read',
-                    'mcp-public-read',
-                    'mcp-large',
-                    'mcp-large-refresh',
-                    'mcp-disabled',
-                    'mcp-reconfigured',
-                  }.contains(scenario))
+                  if (!scenario.startsWith('mcp-resource-') &&
+                      !const {
+                        'mcp-read',
+                        'mcp-slow-read',
+                        'mcp-public-read',
+                        'mcp-large',
+                        'mcp-large-refresh',
+                        'mcp-disabled',
+                        'mcp-reconfigured',
+                      }.contains(scenario))
                     {'media_type': 'image/*', 'count': 1},
                 ],
               };
@@ -475,6 +480,13 @@ void main() {
                   : scenario == 'mcp-user-send'
                   ? {'destination': 'A'}
                   : {};
+            } else if (scenario.startsWith('mcp-resource-') &&
+                !called('read_mcp_resource')) {
+              tool = 'read_mcp_resource';
+              input = {
+                'connection_id': 'library',
+                'uri': 'fixture://card/large',
+              };
             }
           } else if (preparing && scenario != 'missing') {
             if ((scenario == 'implicit' ||
@@ -700,6 +712,30 @@ void main() {
             return;
           }
           expect(requests, isNotEmpty);
+          if (scenario.startsWith('mcp-resource-')) {
+            final resourceLine = process.stdout
+                .toString()
+                .split('\n')
+                .singleWhere((line) => line.startsWith('RESOURCE_RESULT:'));
+            final resource =
+                jsonDecode(resourceLine.substring('RESOURCE_RESULT:'.length))
+                    as Map;
+            expect(result['mcp_calls'], 1);
+            expect(resource['reads'], 1);
+            expect(result['approval_events'], 0);
+            final delivered = scenario == 'mcp-resource-large';
+            expect(result['artifacts'], delivered ? 1 : 0);
+            expect(resource['sizes'], delivered ? [100000] : isEmpty);
+            expect(resource['integrity'], true);
+            final resourceOutputs = requests
+                .expand((r) => (r['messages'] as List).whereType<Map>())
+                .where((m) => m['role'] == 'tool')
+                .map((m) => m['content'].toString())
+                .join();
+            expect(resourceOutputs.length, lessThan(200000));
+            if (!delivered) expect(resourceOutputs, contains('MCP 资源读取失败'));
+            return;
+          }
           if (!scenario.startsWith('mcp-')) {
             final firstToolNames = (requests.first['tools'] as List)
                 .whereType<Map>()

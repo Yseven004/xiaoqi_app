@@ -14,6 +14,7 @@ Future<void> main(List<String> args) async {
   final root = await Directory.systemTemp.createTemp('plugin-agent-runtime-');
   final store = CloudStore(root: root.path);
   final scenario = args.single;
+  final officialReviewer = scenario == 'official-skill-reviewer';
   final fork = scenario.startsWith('fork-');
   final rootHooks = scenario.startsWith('root-hook-');
   final rootLifecycle = scenario.startsWith('root-life-');
@@ -295,13 +296,17 @@ else:
           },
         }),
       ),
-    'agents/writer.md': utf8.encode(
-      '---\nname: writer\ndescription: Write task notes\n${scenario.startsWith('model-alias') ? 'model: sonnet\n' : ''}${mcp ? '' : toolHeader}${preloadSkill ? 'skills: [note]\n' : ''}${scenario == 'plan' || scenario == 'readonly' || scenario == 'root-hook-readonly'
-          ? 'permissionMode: plan\n'
-          : scenario == 'dontask'
-          ? 'permissionMode: dontAsk\n'
-          : ''}${scenario.startsWith('ignored-plugin-fields') ? 'mcpServers: [not-a-root-server]\nhooks: {PreToolUse: [{command: never-execute-this-field}]}\n' : ''}---\nAGENT_RUNTIME_WRITER: Write report.txt containing verified child output.',
-    ),
+    'agents/writer.md': officialReviewer
+        ? File(
+            'test/fixtures/official-plugin-dev/skill-reviewer.md',
+          ).readAsBytesSync()
+        : utf8.encode(
+            '---\nname: writer\ndescription: Write task notes\n${scenario.startsWith('model-alias') ? 'model: sonnet\n' : ''}${mcp ? '' : toolHeader}${preloadSkill ? 'skills: [note]\n' : ''}${scenario == 'plan' || scenario == 'readonly' || scenario == 'root-hook-readonly'
+                ? 'permissionMode: plan\n'
+                : scenario == 'dontask'
+                ? 'permissionMode: dontAsk\n'
+                : ''}${scenario.startsWith('ignored-plugin-fields') ? 'mcpServers: [not-a-root-server]\nhooks: {PreToolUse: [{command: never-execute-this-field}]}\n' : ''}---\nAGENT_RUNTIME_WRITER: Write report.txt containing verified child output.',
+          ),
     'agents/helper.md': utf8.encode(
       '---\nname: helper\ndescription: Write delegated notes\ntools: [Read, Write]\n---\nAGENT_RUNTIME_HELPER: Write report.txt containing verified child output.',
     ),
@@ -363,7 +368,7 @@ else:
     ],
   }, null);
   store.put('task/personal/turn', {'artifacts': []}, null);
-  if (scenario == 'root-hook-readonly') {
+  if (scenario == 'root-hook-readonly' || officialReviewer) {
     const key = 'tenants/personal/tasks/turn/artifacts/readonly-seed';
     final bytes = utf8.encode('original task note');
     store.putTaskBlob(key, bytes);
@@ -391,7 +396,13 @@ else:
       'catalog_id': 'fixture',
     }, null);
   final selected = components.singleWhere(
-    (entry) => entry['name'] == (fork ? 'work' : 'writer'),
+    (entry) =>
+        entry['name'] ==
+        (fork
+            ? 'work'
+            : officialReviewer
+            ? 'skill-reviewer'
+            : 'writer'),
   );
   final events = <Map<String, Object?>>[];
   try {

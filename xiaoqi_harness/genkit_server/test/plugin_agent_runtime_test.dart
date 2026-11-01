@@ -5,6 +5,7 @@ import 'package:test/test.dart';
 void main() {
   for (final scenario in [
     'write',
+    'official-skill-reviewer',
     'model-alias',
     'model-alias-nested',
     'ignored-plugin-fields',
@@ -119,7 +120,10 @@ void main() {
               .join();
           var child =
               system.contains('AGENT_RUNTIME_WRITER') ||
-              system.contains('AGENT_RUNTIME_HELPER');
+              system.contains('AGENT_RUNTIME_HELPER') ||
+              system.contains(
+                'You are an expert skill architect specializing in reviewing',
+              );
           final tools = (body['tools'] as List? ?? [])
               .whereType<Map>()
               .map((t) => t['function']['name'].toString())
@@ -213,7 +217,8 @@ void main() {
                   'task': 'Write the verified task note',
                 };
               }
-            } else if (scenario == 'root-hook-readonly') {
+            } else if (scenario == 'root-hook-readonly' ||
+                scenario == 'official-skill-reviewer') {
               if (!called('read_task_text_file')) {
                 tool = 'read_task_text_file';
                 input = {'path': 'report.txt'};
@@ -264,6 +269,7 @@ void main() {
                 'artifacts':
                     scenario == 'plan' ||
                         scenario == 'root-hook-readonly' ||
+                        scenario == 'official-skill-reviewer' ||
                         mcp ||
                         scriptNetwork
                     ? []
@@ -275,7 +281,13 @@ void main() {
               fork ? 'search_plugin_commands' : 'search_plugin_agents',
             )) {
               tool = fork ? 'search_plugin_commands' : 'search_plugin_agents';
-              input = {'query': fork ? 'work' : 'writer'};
+              input = {
+                'query': fork
+                    ? 'work'
+                    : scenario == 'official-skill-reviewer'
+                    ? 'skill-reviewer'
+                    : 'writer',
+              };
             } else if (!called(
               fork ? 'run_plugin_command' : 'run_plugin_agent',
             )) {
@@ -393,7 +405,8 @@ void main() {
             expect(names, isNot(contains('set_task_deliverables')));
             if (scenario == 'plan' ||
                 scenario.endsWith('-plan') ||
-                scenario == 'root-hook-readonly')
+                scenario == 'root-hook-readonly' ||
+                scenario == 'official-skill-reviewer')
               expect(names, isNot(contains('write_task_text_file')));
           }
           if (fork) {
@@ -445,7 +458,8 @@ void main() {
             expect(value['contents'], isEmpty);
             expect(value['completed'], 0);
             expect(value['missing'], isTrue);
-          } else if (scenario == 'root-hook-readonly') {
+          } else if (scenario == 'root-hook-readonly' ||
+              scenario == 'official-skill-reviewer') {
             expect(value['contents'], ['original task note']);
             expect(value['missing'], isFalse);
             expect(value['completed'], 1);

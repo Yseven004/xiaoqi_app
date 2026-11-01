@@ -85,15 +85,18 @@ Future<void> main(List<String> args) async {
   final userAuthorized = args.single.startsWith('mcp-user-send');
   final generatedContent = args.single.startsWith('mcp-user-send-generated');
   final publicRead = args.single == 'mcp-public-read';
-  final readOnly = const {
-    'mcp-read',
-    'mcp-slow-read',
-    'mcp-public-read',
-    'mcp-large',
-    'mcp-large-refresh',
-    'mcp-disabled',
-    'mcp-reconfigured',
-  }.contains(args.single);
+  final resourceCase = args.single.startsWith('mcp-resource-');
+  final readOnly =
+      resourceCase ||
+      const {
+        'mcp-read',
+        'mcp-slow-read',
+        'mcp-public-read',
+        'mcp-large',
+        'mcp-large-refresh',
+        'mcp-disabled',
+        'mcp-reconfigured',
+      }.contains(args.single);
   final refreshCatalog = args.single == 'mcp-large-refresh';
   final toolCount = refreshCatalog
       ? 121
@@ -111,6 +114,7 @@ Future<void> main(List<String> args) async {
   final store = CloudStore(root: root.path);
   final rpc = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   var calls = 0;
+  var resourceReads = 0;
   var catalogReads = 0;
   final calledTools = <String>[];
   final calledArguments = <Map>[];
@@ -131,6 +135,7 @@ Future<void> main(List<String> args) async {
       'tools/list',
       'tools/call',
       'ping',
+      'resources/read',
     }.contains(body['method'])) {
       request.response.headers.contentType = ContentType.json;
       request.response.write(
@@ -189,8 +194,32 @@ Future<void> main(List<String> args) async {
             },
         ],
       },
+      'resources/read' => {
+        'contents': [
+          {
+            'uri': 'fixture://card/large',
+            'mimeType': 'text/plain',
+            'text':
+                'x' *
+                (args.single == 'mcp-resource-oversize'
+                    ? 33 * 1024 * 1024
+                    : 100000),
+          },
+        ],
+      },
       'tools/call' =>
-        args.single == 'mcp-error'
+        resourceCase
+            ? {
+                'content': [
+                  {
+                    'type': 'resource_link',
+                    'uri': 'fixture://card/large',
+                    'name': 'large card',
+                    'mimeType': 'text/plain',
+                  },
+                ],
+              }
+            : args.single == 'mcp-error'
             ? {
                 'isError': true,
                 'content': [
@@ -221,6 +250,16 @@ Future<void> main(List<String> args) async {
         request.response.statusCode = 503;
         await request.response.close();
         return;
+      }
+    }
+    if (body['method'] == 'resources/read') {
+      resourceReads++;
+      if (args.single == 'mcp-resource-revoked') {
+        final record = store.get('mcp/personal/library')!;
+        store.put('mcp/personal/library', {
+          ...record.value,
+          'enabled': false,
+        }, record.revision);
       }
     }
     if (body['method'] == 'tools/list' &&
@@ -342,6 +381,10 @@ Future<void> main(List<String> args) async {
           );
     final artifacts =
         store.get('task/personal/turn')!.value['artifacts'] as List;
+    if (resourceCase)
+      stdout.writeln(
+        'RESOURCE_RESULT:${jsonEncode({'reads': resourceReads, 'sizes': artifacts.map((a) => a['size']).toList(), 'integrity': artifacts.every((a) => utf8.decode(store.getObject(a['object_key'])) == 'x' * 100000)})}',
+      );
     final lastMcp = process.rows.where((row) => row['tool'] == 'mcp_tool').last;
     final task = store.get('task/personal/turn')!.value;
     final succeeded =
