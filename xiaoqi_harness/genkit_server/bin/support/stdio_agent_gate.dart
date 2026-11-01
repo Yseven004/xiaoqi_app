@@ -108,6 +108,13 @@ Future<void> verifyStdioAgent(
           input = {'path': 'agent.txt'};
         }
       } else if (preparing) {
+        if (readOnlyDelegate &&
+            (!serialized.contains('ROOT_STARTUP_CONTEXT') ||
+                !serialized.contains('ROOT_PROMPT_CONTEXT'))) {
+          throw StateError(
+            'Root lifecycle context did not reach the parent Agent',
+          );
+        }
         final write = alias('write_file');
         final read = alias('read_text_file');
         final skill = RegExp(
@@ -324,16 +331,31 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additional
       'hooks/hooks.json': utf8.encode(
         jsonEncode({
           'hooks': {
-            for (final event in ['PreToolUse', 'PostToolUse'])
+            for (final event in [
+              'PreToolUse',
+              'PostToolUse',
+              if (readOnlyDelegate) ...['SessionStart', 'UserPromptSubmit'],
+            ])
               event: [
                 {
-                  'matcher': readOnlyDelegate ? r'^Bash$|^Read$' : r'^Bash$',
+                  'matcher':
+                      event == 'SessionStart' || event == 'UserPromptSubmit'
+                      ? null
+                      : readOnlyDelegate
+                      ? r'^Bash$|^Read$'
+                      : r'^Bash$',
                   'hooks': [
                     {
                       'type': 'command',
                       'onFailure': 'block',
                       'command':
-                          'python3 "\$CLAUDE_PLUGIN_ROOT/hooks/${event == 'PreToolUse' ? 'pre' : 'post'}.py"',
+                          'python3 "\$CLAUDE_PLUGIN_ROOT/hooks/${event == 'SessionStart'
+                              ? 'start'
+                              : event == 'UserPromptSubmit'
+                              ? 'prompt'
+                              : event == 'PreToolUse'
+                              ? 'pre'
+                              : 'post'}.py"',
                     },
                   ],
                 },
@@ -347,6 +369,20 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additional
             ? hookGateWithReadOnly(hookGatePreScript)
             : hookGatePreScript,
       ),
+    if (readOnlyDelegate)
+      'hooks/start.py': utf8.encode(r'''
+import json,sys
+i=json.load(sys.stdin)
+assert i['hook_event_name']=='SessionStart' and i['source']=='startup'
+print('ROOT_STARTUP_CONTEXT')
+'''),
+    if (readOnlyDelegate)
+      'hooks/prompt.py': utf8.encode(r'''
+import json,sys
+i=json.load(sys.stdin)
+assert i['hook_event_name']=='UserPromptSubmit' and i['prompt']
+print('ROOT_PROMPT_CONTEXT')
+'''),
     if (rootHooks)
       'hooks/post.py': utf8.encode(
         readOnlyDelegate
@@ -503,7 +539,7 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additional
     // delegations including the fork's private dynamic context, plus one
     // independent once skill Hook in the parent and each private child.
     final expectedCodeRuns =
-        4 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 8 : 0);
+        4 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 10 : 0);
     if ((store.get('task/$tenant/$task')!.value['code_execution_runs'] !=
             expectedCodeRuns) ||
         (rootHooks &&
@@ -514,7 +550,7 @@ print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additional
                               e['tool'] == 'plugin_hook',
                         )
                         .length !=
-                    (readOnlyDelegate ? 9 : 2) ||
+                    (readOnlyDelegate ? 11 : 2) ||
                 artifacts.length != 4))) {
       throw StateError(
         'Real Agent hook execution, budget or protocol artifact boundary failed; '

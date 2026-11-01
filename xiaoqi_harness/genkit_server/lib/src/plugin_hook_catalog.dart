@@ -7,8 +7,9 @@ import 'plugin_hooks.dart';
 import 'store.dart';
 
 class PluginHookCatalog {
-  static const profileVersion = 2;
+  static const profileVersion = 3;
   static const toolEvents = {'PreToolUse', 'PostToolUse', 'PostToolUseFailure'};
+  static const rootEvents = {...toolEvents, 'SessionStart', 'UserPromptSubmit'};
   static List<String> skillIssues(Map metadata) {
     final parsed = PluginHooks.skill(metadata);
     return [
@@ -58,15 +59,18 @@ class PluginHookCatalog {
           'description': '插件 ${hook.event} 处理器',
           'hook_event': hook.event,
           'status':
-              toolEvents.contains(hook.event) &&
+              rootEvents.contains(hook.event) &&
                   PluginHookCommand.unsupported(hook) == null
               ? 'partial'
               : 'unsupported',
           'issues': [
-            if (!toolEvents.contains(hook.event)) '此生命周期事件尚待映射',
+            if (!rootEvents.contains(hook.event)) '此生命周期事件尚待映射',
             if (PluginHookCommand.unsupported(hook) case final String issue)
               issue,
-            '工具事件已映射；ask/defer 等高级控制仅在宿主已有对应流程时执行',
+            if (toolEvents.contains(hook.event))
+              '工具事件已映射；ask/defer 等高级控制仅在宿主已有对应流程时执行'
+            else if (rootEvents.contains(hook.event))
+              '生命周期映射到当前任务；插件声明不新增权限',
           ],
           'has_dependencies': dependencies,
         },

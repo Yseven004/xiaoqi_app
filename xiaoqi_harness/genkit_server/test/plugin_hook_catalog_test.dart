@@ -91,7 +91,7 @@ void main() {
       (plugin['components'] as List).whereType<Map>().where(
         (c) => c['type'] == 'hook' && c['status'] == 'partial',
       ),
-      hasLength(1),
+      hasLength(2),
     );
   });
   test(
@@ -105,8 +105,8 @@ void main() {
       );
       final hooks = components.where((c) => c['type'] == 'hook').toList();
       expect(hooks, hasLength(4));
-      expect(hooks.where((h) => h['status'] == 'partial'), hasLength(1));
-      expect(hooks.where((h) => h['status'] == 'unsupported'), hasLength(3));
+      expect(hooks.where((h) => h['status'] == 'partial'), hasLength(2));
+      expect(hooks.where((h) => h['status'] == 'unsupported'), hasLength(2));
       expect(plugin['status'], 'partial');
     },
   );
@@ -144,8 +144,10 @@ void main() {
           {'id': 'plugin', 'version_id': 'v1', 'component_id': 'healthy'},
         ];
         final hooks = SelectedPluginHooks(store, 'alice', selection);
-        expect(hooks.entries, hasLength(1));
-        final alias = hooks.entries.keys.single;
+        expect(hooks.entries, hasLength(2));
+        final alias = hooks.entries.keys.singleWhere(
+          (id) => hooks.hook(id).event == 'PreToolUse',
+        );
         expect(hooks.hook(alias).event, 'PreToolUse');
         final fingerprint = hooks.fingerprint(alias);
         final record = store.get('cap/alice/plugin')!;

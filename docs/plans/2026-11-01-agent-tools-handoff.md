@@ -1,6 +1,21 @@
 # Agent 工具权限修复：暂停与跨窗口交接
 
-更新时间：2026-11-01（Asia/Shanghai）。用户明确要求暂停当前窗口，整理交接，在新窗口继续。目标状态已经设置为 paused；不等于完成。此次仅整理交接，不继续编码、部署或调用付费服务。
+更新时间：2026-11-01（Asia/Shanghai）。用户已恢复实施授权，并要求持续推进，不逐小步等待确认。下面旧窗口的暂停状态及未完成清单是历史基线，以本段和较新证据为准。
+
+## 最新接续状态（先读本段）
+
+- 正式 main 当前为 `4ce890b5314b10d7c8231ea6c7fd24dc9c1b045d`，已推送，正式目录干净。
+- 最新已完整部署验证：`20261101-152921-4ce890b`，CI `41284972600` / job `124784897257`。508 Dart 通过、1 跳过；95 runner、30 部署、2 bridge、2 image 检查通过，真实 stdio gate 与镜像导入导出通过。发布控制器退出 0，运行探针、健康/数据、流量恢复、清理、公开 HTTPS 200、API 24 与唯一 latest-good/data 均验证。
+- 已完成发布核实和旧 `67e29ef` 补部署；fork、DeepSeek V4.1 Flash（`deepseek-flash`）别名映射、动态命令上下文、会话级 skill tool Hooks/once 均已部署。不要按旧清单重新实现。
+- 工作区已提交技能 Hook 发布证据 `620e6ca`，并接续 root SessionStart/UserPromptSubmit 生命周期实现与测试；本地源码以实际 git log/status 为准，尚未同步 main 或部署。
+- 生命周期本地：18 项 catalog/lifecycle/journal/skill 状态检查、3 个实际 SDK 场景通过，随后完整定向回归 114 项通过，静态分析通过。日志 `%TEMP%/xiaoqi-lifecycle-regression.log`；会话 `33331` 已退出 0，无测试进程需继续等待。不要重复运行已通过检查，除非后续修改相关代码。
+- 新 root 生命周期实现位于 `plugin_hook_lifecycle.dart`、`plugin_hook_event_journal.dart`；skill once 复用后者且保留原私有记录格式。真实 gate 已扩展到 16 code jobs / 11 Hook 成功，但此扩展未跑 CI。当前线上技能 Hook gate 是 14 jobs / 9 Hook 成功 / 3 独立 once。
+- Stop/async 尚未实现；必要 Apps/extensions、真实代表组合、跨入口剩余验收和最终矩阵仍开放。客户端未执行验证，待用户真机验证。不得把剩余项当作全部重新开发，也不得凭现有局部成功关闭 P01–P14。
+- `2026-11-01-agent-tools-current-matrix.md`、各批 acceptance 文档及 `docs/architecture/evidence/2026-11-01-*-release.json` 为当前证据。
+- 远端网络已用现有 `127.0.0.1:7890` 的进程级 HTTP(S)_PROXY 恢复稳定；不要启动新加速器或改系统配置。发布用 `pwsh -NoProfile`，避免旧 PowerShell 的 NativeCommandError；仍以 `deploy_current.ps1 -VerificationProfile non-image` 为唯一入口。
+- 当前发布进程已退出 0，没有需要重复启动的部署。工作区后续改动未部署。不要移动 main 触发无必要的文档单独构建；将发布证据与下一批完整改动一起正常同步，确保下一批用精确 main 产物发布。
+
+## 旧窗口基线（以下状态可能已被上述证据替代）
 
 ## 1. 目标、授权和范围
 

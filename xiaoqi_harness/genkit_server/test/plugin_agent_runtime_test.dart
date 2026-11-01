@@ -27,6 +27,9 @@ void main() {
     'root-hook-invalid',
     'root-hook-approval',
     'root-hook-readonly',
+    'root-life-context',
+    'root-life-approval',
+    'root-life-deny',
     'fork-write',
     'fork-plan',
     'fork-custom',
@@ -46,6 +49,7 @@ void main() {
         var providerCalls = 0;
         final scriptNetwork = scenario.endsWith('script-network');
         final rootHooks = scenario.startsWith('root-hook-');
+        final rootLifecycle = scenario.startsWith('root-life-');
         final skillHooks = scenario.startsWith('skill-hook-');
         final fork = scenario.startsWith('fork-');
         final childToolSets = <Set<String>>[];
@@ -61,6 +65,7 @@ void main() {
           'readonly',
           'root-hook-approval',
           'skill-hook-approval',
+          'root-life-approval',
           'fork-approval',
           'fork-denied',
           'fork-disabled',
@@ -232,6 +237,10 @@ void main() {
               input = {'path': 'report.txt', 'text': 'verified child output'};
             }
           } else if (tools.contains('set_task_deliverables')) {
+            if (rootLifecycle) {
+              expect(system, contains('ROOT_STARTUP_CONTEXT'));
+              expect(system, contains('ROOT_PROMPT_CONTEXT'));
+            }
             if (!called('set_task_deliverables')) {
               tool = 'set_task_deliverables';
               input = {
@@ -332,6 +341,13 @@ void main() {
             stdoutEncoding: utf8,
             stderrEncoding: utf8,
           );
+          if (scenario == 'root-life-deny') {
+            expect(result.exitCode, isNot(0));
+            expect(result.stderr, contains('prompt blocked'));
+            expect(childToolSets, isEmpty);
+            expect(providerCalls, 1);
+            return;
+          }
           expect(
             result.exitCode,
             0,
@@ -412,6 +428,7 @@ void main() {
               'ignored-plugin-fields-approval',
               'root-hook-approval',
               'skill-hook-approval',
+              'root-life-approval',
             }.contains(scenario);
             expect(value['external_calls'], approved ? 1 : 0);
             expect(value['completed'], approved ? 1 : 0);
@@ -481,6 +498,16 @@ void main() {
             expect(value['code_runs'], hooks.length);
             expect(hooks.every((h) => h['session_id'] != 'turn'), isTrue);
             expect(value['contents'], contains('parent output'));
+          }
+          if (rootLifecycle) {
+            final hooks = (value['hook_runs'] as List)
+                .whereType<Map>()
+                .toList();
+            expect(hooks.map((h) => h['hook_event_name']), [
+              'SessionStart',
+              'UserPromptSubmit',
+            ]);
+            expect(value['code_runs'], 2);
           }
         } finally {
           await serving.cancel();

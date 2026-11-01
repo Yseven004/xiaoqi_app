@@ -2,6 +2,7 @@ import 'plugin_hooks.dart';
 import 'plugin_hook_output.dart';
 import 'store.dart';
 import 'tool_execution.dart';
+import 'plugin_hook_event_journal.dart';
 
 /// Task-owned skill registrations. Private child session IDs never activate a
 /// parent's handlers. Only currently authorized, identical sources can reappear.
@@ -9,7 +10,6 @@ class ScopedSkillHooks {
   ScopedSkillHooks(this.store, this.tenant, this.task);
   final CloudStore store;
   final String tenant, task;
-  static final _running = <String>{};
 
   String _key(String session) =>
       'private_skill_hooks/$tenant/$task/${ToolExecution.digest(session)}';
@@ -69,58 +69,11 @@ class ScopedSkillHooks {
     }
     final key =
         '${_key(session)}/once/${ToolExecution.digest([binding, hook.id])}';
-    final runningKey = '${store.root.absolute.path}/$key';
-    if (!_running.add(runningKey)) {
-      throw UnconfirmedToolOperation('技能 once hook 的原事件仍在执行');
-    }
-    try {
-      var claimed = false;
-      for (var attempt = 0; attempt < 8; attempt++) {
-        check();
-        final saved = store.get(key);
-        if (saved?.value['invocation'] == invocation &&
-            saved?.value['input_binding'] != inputBinding) {
-          throw StateError('技能 once hook 的原事件参数已变化');
-        }
-        if (saved?.value['phase'] == 'succeeded') {
-          if (saved?.value['invocation'] != invocation) return null;
-          // Resume must keep the original rewrite/ask/context verdict, while a
-          // distinct later event skips this once handler entirely.
-          return PluginHookOutput.restore(saved!.value['result'] as Map);
-        }
-        if (saved?.value['phase'] == 'pending' &&
-            saved?.value['invocation'] != invocation) {
-          throw UnconfirmedToolOperation('技能 once hook 的原执行结果未确认');
-        }
-        try {
-          store.put(key, {
-            'phase': 'pending',
-            'invocation': invocation,
-            'input_binding': inputBinding,
-          }, saved?.revision);
-          claimed = true;
-          break;
-        } on RevisionConflict {
-          continue;
-        }
-      }
-      if (!claimed) throw StateError('技能 once hook 事件竞争');
-      final result = await execute();
-      check();
-      final saved = store.get(key)!;
-      if (saved.value['invocation'] != invocation ||
-          saved.value['phase'] != 'pending') {
-        throw StateError('技能 once hook 的原事件已变化');
-      }
-      store.put(key, {
-        'phase': result?.successful == true ? 'succeeded' : 'ready',
-        'invocation': invocation,
-        'input_binding': inputBinding,
-        if (result?.successful == true) 'result': result!.toJson(),
-      }, saved.revision);
-      return result;
-    } finally {
-      _running.remove(runningKey);
-    }
+    return PluginHookEventJournal(store, key).run(
+      invocation: invocation,
+      inputBinding: inputBinding,
+      check: check,
+      execute: execute,
+    );
   }
 }

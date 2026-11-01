@@ -16,6 +16,7 @@ Future<void> main(List<String> args) async {
   final scenario = args.single;
   final fork = scenario.startsWith('fork-');
   final rootHooks = scenario.startsWith('root-hook-');
+  final rootLifecycle = scenario.startsWith('root-life-');
   final skillHooks = scenario.startsWith('skill-hook-');
   final hookCounter = File('${root.path}/hook-count.json');
   final scriptNetwork = scenario.endsWith('script-network');
@@ -50,11 +51,15 @@ else:
           (Platform.isWindows ? 'python' : 'python3'),
     );
   }
-  if (rootHooks || skillHooks) {
+  if (rootHooks || skillHooks || rootLifecycle) {
     final worker = File('${root.path}/hook_worker.py');
     worker.writeAsStringSync('''
-import json,pathlib,sys
-r=json.loads(sys.stdin.readline())
+import json,pathlib,sys,traceback
+def report_error(kind,error,tb):
+ pathlib.Path(${jsonEncode('${root.path}/hook-worker-error.log')}).write_text(''.join(traceback.format_exception(kind,error,tb))+'\\nINPUT='+json.dumps(globals().get('i')),encoding='utf-8')
+ sys.__excepthook__(kind,error,tb)
+sys.excepthook=report_error
+r=json.loads(sys.stdin.buffer.readline().decode('utf-8'))
 if r.get('action'):
  assert r['action'] != 'network_token'
  print(json.dumps({'ok':True,'acknowledged':True}))
@@ -68,10 +73,21 @@ else:
  spec=json.loads(json.loads(line.split('JSON.parse(',1)[1].rsplit(');',1)[0]))
  if ${skillHooks ? 'True' : 'False'}: assert spec['skillDirectory']=='/workspace/skill/skills/note'
  i=spec['input']; event=i['hook_event_name']
- assert i['cwd']=='/workspace/work' and i['tool_use_id']
+ assert i['cwd']=='/workspace/work'
+ if not ${rootLifecycle ? 'True' : 'False'}: assert i['tool_use_id']
  counter=pathlib.Path(${jsonEncode(hookCounter.path)})
  records=json.loads(counter.read_text()) if counter.exists() else []
  records.append(i); counter.write_text(json.dumps(records))
+ if ${rootLifecycle ? 'True' : 'False'}:
+  assert event in ('SessionStart','UserPromptSubmit')
+  if event=='SessionStart': assert i['source']=='startup'
+  else: assert i['prompt']=='请使用 writer Agent 完成任务笔记'
+  envelope={'xiaoqi_hook_command_v1':{'matched':True,'timed_out':False,
+   'exit_code':2 if ${jsonEncode(scenario)}=='root-life-deny' and event=='UserPromptSubmit' else 0,
+   'stdout':'ROOT_STARTUP_CONTEXT' if event=='SessionStart' else 'ROOT_PROMPT_CONTEXT',
+   'stderr':'prompt blocked'}}
+  print(json.dumps({'type':'result','ok':True,'execution_id':r['execution_id'],'stdout':json.dumps(envelope),'artifacts':[],'cleanup_pending':False}))
+  sys.exit(0)
  specific={'hookEventName':event}
  exit_code=0
  if event=='PreToolUse':
@@ -146,6 +162,7 @@ else:
     'readonly',
     'root-hook-approval',
     'skill-hook-approval',
+    'root-life-approval',
     'fork-approval',
     'fork-denied',
     'fork-disabled',
@@ -240,18 +257,19 @@ else:
         'FORK_COMMAND_BODY: Write report.txt containing verified child output. Arguments=\$ARGUMENTS',
       ),
     '.claude-plugin/plugin.json': utf8.encode('{"name":"agent-fixture"}'),
-    if (rootHooks)
+    if (rootHooks || rootLifecycle)
       'hooks/hooks.json': utf8.encode(
         jsonEncode({
           'hooks': {
-            for (final event in [
-              'PreToolUse',
-              'PostToolUse',
-              'PostToolUseFailure',
-            ])
+            for (final event
+                in (rootLifecycle
+                    ? ['SessionStart', 'UserPromptSubmit']
+                    : ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']))
               event: [
                 {
-                  'matcher': scenario == 'root-hook-approval'
+                  'matcher': rootLifecycle
+                      ? null
+                      : scenario == 'root-hook-approval'
                       ? r'^mcp__Library__make_card$'
                       : scenario == 'root-hook-readonly'
                       ? r'^Read$'
@@ -518,11 +536,14 @@ else:
         'script_runs': scriptCounter.existsSync() ? int.parse(scriptCounter.readAsStringSync()) : 0,
         'code_runs': task['code_execution_runs'],
         'network_grants': task['authorized_network_domains'],
-        if (rootHooks || skillHooks) 'hook_runs': hookCounter.existsSync() ? jsonDecode(hookCounter.readAsStringSync()) : [],
+        if (rootHooks || skillHooks || rootLifecycle) 'hook_runs': hookCounter.existsSync() ? jsonDecode(hookCounter.readAsStringSync()) : [],
         'events': events,
       })}',
     );
   } finally {
+    final workerError = File('${root.path}/hook-worker-error.log');
+    if (workerError.existsSync())
+      stderr.writeln(workerError.readAsStringSync());
     await serving.cancel();
     await rpc.close(force: true);
     store.close();
