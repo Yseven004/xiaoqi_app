@@ -40,6 +40,14 @@ and no write/code tools exposed to the read-only children.
 The host has no Docker; CI must execute this gate and the full server regression
 before this batch is deployed. No local fixture is presented as container proof.
 
+CI `41265757169` passed full image build/tests, then failed the container gate:
+the pre-existing gate wrote `commands/verify.md` while manually describing it as
+`verify-command`. Profile reindex correctly derived `verify` from source, so the
+gate's `verify-command` search returned nothing. The fixture now uses
+`commands/verify-command.md` consistently in source and metadata. This changes
+neither production indexing nor the expected effect/budget/artifact assertions.
+The failed attempt never activated production. A new exact-main CI run is required.
+
 ## Prior release verified
 
 `67e29ef` was not running and no deploy job was active in read-only inspection

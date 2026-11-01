@@ -257,7 +257,7 @@ Future<void> verifyStdioAgent(
   };
   store.putImmutable(package, {
     ...installedFiles,
-    'commands/verify.md': utf8.encode(
+    'commands/verify-command.md': utf8.encode(
       '---\ndescription: Verify a literal command script handoff\n---\nRun scripts/verify-command.py using execute_skill_script. \$ARGUMENTS',
     ),
     'scripts/verify-command.py': utf8.encode(r'''
@@ -363,7 +363,7 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
             'id': 'command',
             'type': 'command',
             'root': '',
-            'source_path': 'commands/verify.md',
+            'source_path': 'commands/verify-command.md',
             'name': 'verify-command',
             'description': 'Verify a literal command script handoff',
             'status': 'supported',
