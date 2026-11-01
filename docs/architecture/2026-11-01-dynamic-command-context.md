@@ -51,5 +51,13 @@ exactly four original artifacts. A file written by read-only preprocessing must
 not be exported. Immutable SKILL bytes must remain unchanged.
 
 All 5 ordinary-command SDK compatibility cases also passed; `dart analyze`
-reported no issues and `git diff --check` passed. Exact-main CI/container evidence
-and deployment are pending at this checkpoint. Client 未执行验证，待用户真机验证。
+reported no issues and `git diff --check` passed. Exact-main CI `41272581892`
+passed 489 Dart tests (one native-launcher skip in the build stage), 95 runner,
+30 deployment, 2 bridge and 2 image tests. The actual launcher passed the full
+real-container gate, including both new dynamic-context assertions and image
+export/import roundtrip. Standard deployment `20261101-121830-7cec098` exited 0;
+runtime probe, health/data, traffic resumption, cleanup, public HTTPS 200 and API
+24 verification passed. One latest-good restore point and its data remain.
+This batch is server deployed and verified. See
+`evidence/2026-11-01-dynamic-command-release.json`.
+Client 未执行验证，待用户真机验证。

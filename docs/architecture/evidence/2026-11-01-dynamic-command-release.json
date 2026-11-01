@@ -1,0 +1,51 @@
+{
+  "main_commit": "7cec098fb3be360b0ecf6ab37c5acb3051919b30",
+  "release": "20261101-121830-7cec098",
+  "verification_profile": "non-image",
+  "ci": {
+    "run_id": 41272581892,
+    "job_id": 124748208346,
+    "conclusion": "success",
+    "dart_passed": 489,
+    "dart_skipped": 1,
+    "runner_tests": 95,
+    "deployment_python_tests": 30,
+    "bridge_tests": 2,
+    "sandbox_image_tests": 2,
+    "stdio_runtime_gate": true,
+    "image_export_import_roundtrip": true
+  },
+  "container_assertions": {
+    "ordinary_dynamic_context": true,
+    "fork_dynamic_read_only_context": true,
+    "read_only_context_files_not_persisted": true,
+    "mixed_code_jobs": 11,
+    "hook_successes": 6,
+    "private_child_sessions": 2,
+    "original_artifacts": 4,
+    "immutable_skill_unchanged": true
+  },
+  "deployment": {
+    "controller_exit_code": 0,
+    "runtime_probe": true,
+    "health_and_data": true,
+    "traffic_resumed": true,
+    "cleanup": true,
+    "current_release": "20261101-121830-7cec098",
+    "current_health": "healthy",
+    "restore_point": "latest-good",
+    "restore_data": "present",
+    "public_https": 200,
+    "public_verification_source": "cloud_assistant",
+    "product_release": "2026-10-27-agent-tools-2",
+    "api_contract": "24",
+    "log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261101-121830-7cec098.log"
+  },
+  "limitations": [
+    "Native launcher test skipped in the Dart build stage without Node/Bash; it passed locally and the actual launcher passed the real-container gate.",
+    "Seven additional authority/recovery tests passed locally after the release commit was frozen; not included in this artifact.",
+    "Pinned real Git command plugin end-to-end acceptance and remaining Hook/Apps protocols are still open.",
+    "No paid image service invoked.",
+    "Client: 未执行验证，待用户真机验证。"
+  ]
+}
