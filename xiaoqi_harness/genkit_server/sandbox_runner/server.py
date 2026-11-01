@@ -470,7 +470,7 @@ def _reconcile_restarted_cleanup(client: docker.DockerClient) -> None:
 
 
 def _execution_artifacts(container: Any, profile: str) -> list[dict[str, str]]:
-    if profile == 'plugin_hook_read_only':
+    if profile in {'plugin_hook_read_only', 'plugin_command_context_read_only'}:
         return []
     if profile == 'dependency_build':
         return _safe_artifacts(container, dependency_build=True)
@@ -539,16 +539,16 @@ def _decode_logs(container: Any, stream: str) -> str:
 
 def _execution_run_seconds(request: dict[str, Any], stdio: StdioChannel | None = None) -> int:
     profile = request.get('execution_profile', 'code')
-    if not isinstance(profile, str) or profile not in {'code', 'dependency_build', 'plugin_hook', 'plugin_hook_read_only'}:
+    if not isinstance(profile, str) or profile not in {'code', 'dependency_build', 'plugin_hook', 'plugin_hook_read_only', 'plugin_command_context', 'plugin_command_context_read_only'}:
         raise RequestError('Invalid sandbox execution profile')
     if profile == 'dependency_build':
         if stdio is not None or request.get('language') != 'python' or 'script_path' in request or 'command' in request:
             raise RequestError('Dependency build profile requires the trusted Python installer')
         return MAX_BUILD_SECONDS
-    if profile in {'plugin_hook', 'plugin_hook_read_only'} and (stdio is not None or request.get('language') != 'javascript'
+    if profile in {'plugin_hook', 'plugin_hook_read_only', 'plugin_command_context', 'plugin_command_context_read_only'} and (stdio is not None or request.get('language') != 'javascript'
             or 'script_path' in request or 'command' in request):
         raise RequestError('Plugin hook profile requires the host JavaScript launcher')
-    if profile == 'plugin_hook_read_only' and request.get('authorized_domains'):
+    if profile in {'plugin_hook_read_only', 'plugin_command_context', 'plugin_command_context_read_only'} and request.get('authorized_domains'):
         raise RequestError('Read-only hook cannot authorize outbound network access')
     return MAX_RUN_SECONDS
 
@@ -557,7 +557,7 @@ def _stdout_limit(request: dict[str, Any]) -> int:
     # A hook envelope can contain 128 KiB of child data escaped up to six times.
     # Do not slice a valid JSON verdict into an invalid tail. Both the Docker
     # log decoder and the private response remain bounded to the existing MiB.
-    return MAX_LOG_BYTES if request.get('execution_profile') in {'plugin_hook', 'plugin_hook_read_only'} else 40000
+    return MAX_LOG_BYTES if request.get('execution_profile') in {'plugin_hook', 'plugin_hook_read_only', 'plugin_command_context', 'plugin_command_context_read_only'} else 40000
 
 
 def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None = None, cancellation: threading.Event | None = None, checkpoint: Any = None) -> dict[str, Any]:
@@ -597,7 +597,7 @@ def _run_sandbox(request: dict[str, Any], send: Any, stdio: StdioChannel | None 
     if stdio is not None and stdio.lease_id:
         labels.update({'com.xiaoqi.mcp-lease': stdio.lease_id,
                        'com.xiaoqi.mcp-fingerprint': stdio.fingerprint})
-    if request.get('execution_profile') in {'plugin_hook', 'plugin_hook_read_only', 'dependency_build'}:
+    if request.get('execution_profile') in {'plugin_hook', 'plugin_hook_read_only', 'plugin_command_context', 'plugin_command_context_read_only', 'dependency_build'}:
         labels['com.xiaoqi.execution-profile'] = request['execution_profile']
     if stdio is None and isinstance(request.get('execution_id'), str) and re.fullmatch(r'[a-f0-9]{32}', request['execution_id']):
         labels['com.xiaoqi.execution-id'] = request['execution_id']

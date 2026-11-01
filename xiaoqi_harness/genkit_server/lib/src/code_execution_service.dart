@@ -16,6 +16,8 @@ enum SandboxExecutionProfile {
   code('code', 120),
   pluginHook('plugin_hook', 120),
   pluginHookReadOnly('plugin_hook_read_only', 120),
+  pluginCommandContext('plugin_command_context', 120),
+  pluginCommandContextReadOnly('plugin_command_context_read_only', 120),
   dependencyBuild('dependency_build', 600);
 
   const SandboxExecutionProfile(this.wireName, this.runSeconds);
@@ -23,6 +25,8 @@ enum SandboxExecutionProfile {
   final int runSeconds;
   Duration get bridgeDeadline => Duration(seconds: 180 + runSeconds + 30);
   Duration get apiDeadline => bridgeDeadline + const Duration(seconds: 20);
+  bool get readOnly =>
+      this == pluginHookReadOnly || this == pluginCommandContextReadOnly;
 }
 
 class NetworkPermissionRequired implements Exception {
@@ -490,11 +494,14 @@ class DockerCodeExecutionService {
     if (const {
           SandboxExecutionProfile.pluginHook,
           SandboxExecutionProfile.pluginHookReadOnly,
+          SandboxExecutionProfile.pluginCommandContext,
+          SandboxExecutionProfile.pluginCommandContextReadOnly,
         }.contains(profile) &&
         (language != 'javascript' || scriptPath != null)) {
       throw StateError('hook 协议通道只接受宿主生成的 JavaScript 启动器');
     }
-    if (profile == SandboxExecutionProfile.pluginHookReadOnly &&
+    if ((profile.readOnly ||
+            profile == SandboxExecutionProfile.pluginCommandContext) &&
         authorizedDomains.isNotEmpty) {
       throw StateError('只读 hook 不允许外部联网');
     }
@@ -696,9 +703,7 @@ class DockerCodeExecutionService {
       final artifactNames = await _saveArtifacts(
         tenantId,
         taskId,
-        profile == SandboxExecutionProfile.pluginHookReadOnly
-            ? const []
-            : result['artifacts'],
+        profile.readOnly ? const [] : result['artifacts'],
         operationId: executionId,
         dependencyBuild: profile == SandboxExecutionProfile.dependencyBuild,
       );
@@ -1135,8 +1140,10 @@ class DockerCodeExecutionService {
       final artifactNames = await _saveArtifacts(
         tenantId,
         taskId,
-        operation['execution_profile'] ==
-                SandboxExecutionProfile.pluginHookReadOnly.wireName
+        const {
+              'plugin_hook_read_only',
+              'plugin_command_context_read_only',
+            }.contains(operation['execution_profile'])
             ? const []
             : result['artifacts'],
         operationId: entry.key as String,

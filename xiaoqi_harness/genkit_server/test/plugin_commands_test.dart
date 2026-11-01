@@ -85,7 +85,7 @@ void main() {
       );
     },
   );
-  test('unsupported dynamic shell stays separate from a healthy command', () {
+  test('dynamic shell remains source data until its context is executed', () {
     final files = <String, List<int>>{
       'commands/healthy.md': utf8.encode('Explain \$ARGUMENTS'),
       'commands/dynamic.md': utf8.encode('!`touch marker`'),
@@ -94,9 +94,19 @@ void main() {
     final inspected = PluginCommand.inspect(files, '', {});
     expect(
       inspected.where((c) => c['status'] == 'supported').map((c) => c['name']),
-      unorderedEquals(['healthy', 'agent']),
+      unorderedEquals(['healthy', 'agent', 'dynamic']),
     );
-    expect(inspected.where((c) => c['status'] == 'unsupported'), hasLength(1));
+    expect(inspected.where((c) => c['status'] == 'unsupported'), isEmpty);
+    final command = PluginCommand.parse(
+      'commands/dynamic.md',
+      files['commands/dynamic.md']!,
+    );
+    expect(command.contextCommands, ['touch marker']);
+    expect(() => command.render(''), throwsStateError);
+    expect(
+      command.render('unused', contextOutputs: [r'!`never run` $ARGUMENTS']),
+      r'!`never run` $ARGUMENTS',
+    );
   });
   test(
     'fork context validates agent and preserves standalone task arguments',

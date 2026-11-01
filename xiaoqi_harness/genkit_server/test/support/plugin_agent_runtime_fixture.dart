@@ -94,6 +94,31 @@ else:
           (Platform.isWindows ? 'python' : 'python3'),
     );
   }
+  if (scenario.startsWith('fork-dynamic')) {
+    final worker = File('${root.path}/context_worker.py');
+    worker.writeAsStringSync('''
+import json,sys
+r=json.loads(sys.stdin.readline())
+if r.get('action'):
+ print(json.dumps({'ok':True,'acknowledged':True}))
+else:
+ assert r['execution_profile'] == ${jsonEncode(scenario.endsWith('-plan') ? 'plugin_command_context_read_only' : 'plugin_command_context')}
+ assert r['authorized_domains']==[] and r['language']=='javascript'
+ line=r['code'].splitlines()[0]
+ spec=json.loads(json.loads(line.split('JSON.parse(',1)[1].rsplit(');',1)[0]))
+ assert spec['commands']==["printf 'DYNAMIC_%s' CONTEXT_VERIFIED"]
+ assert spec['arguments']=='literal; \$(no-shell)'
+ output={'xiaoqi_command_context_v1':{'ok':True,'outputs':['DYNAMIC_CONTEXT_VERIFIED']}}
+ print(json.dumps({'type':'result','ok':True,'execution_id':r['execution_id'],'stdout':json.dumps(output),'artifacts':[],'cleanup_pending':False}))
+''');
+    codeExecutor = DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable:
+          Platform.environment['XIAOQI_TEST_PYTHON'] ??
+          (Platform.isWindows ? 'python' : 'python3'),
+    );
+  }
   final toolHeader = scriptNetwork
       ? 'tools: [Read, Bash]\n'
       : 'tools: [Read, Write, Agent]\n';
@@ -109,6 +134,8 @@ else:
     'fork-denied',
     'fork-disabled',
     'fork-source-changed',
+    'fork-dynamic-approval',
+    'fork-dynamic-denied',
   }.contains(scenario);
   final rpc = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   var calls = 0;
@@ -186,14 +213,15 @@ else:
     if (fork)
       'commands/work.md': utf8.encode(
         '---\ndescription: Execute standalone command task\ncontext: fork\nbackground: false\n'
-        '${scenario == 'fork-plan'
+        '${scenario.endsWith('-plan')
             ? 'agent: Explore\n'
             : scenario == 'fork-custom'
             ? 'agent: writer\n'
             : scenario == 'fork-unknown'
             ? 'agent: missing-agent\n'
             : ''}'
-        '---\nFORK_COMMAND_BODY: Write report.txt containing verified child output. Arguments=\$ARGUMENTS',
+        '---\n${scenario.startsWith('fork-dynamic') ? "!`printf 'DYNAMIC_%s' CONTEXT_VERIFIED`\n" : ''}'
+        'FORK_COMMAND_BODY: Write report.txt containing verified child output. Arguments=\$ARGUMENTS',
       ),
     '.claude-plugin/plugin.json': utf8.encode('{"name":"agent-fixture"}'),
     if (rootHooks)
@@ -410,7 +438,10 @@ else:
         messages: result.messages,
         restart: [
           pending.restart({
-            'approved': scenario != 'denied' && scenario != 'fork-denied',
+            'approved':
+                scenario != 'denied' &&
+                scenario != 'fork-denied' &&
+                scenario != 'fork-dynamic-denied',
             'approval_hash': permission['approval_hash'],
             if (permission['domains'] != null) 'domains': permission['domains'],
           }),

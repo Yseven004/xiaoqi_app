@@ -75,6 +75,12 @@ Future<void> verifyStdioAgent(
                 ),
           );
       if (preparing && child) {
+        if (serialized.contains('FORK_READ_GATE') &&
+            !serialized.contains('READ_ONLY_CONTEXT_READY')) {
+          throw StateError(
+            'Fork child did not receive its executed dynamic context',
+          );
+        }
         final names = tools.map((tool) => tool['function']['name']).toSet();
         if (names.any(
           const {
@@ -162,6 +168,11 @@ Future<void> verifyStdioAgent(
             'arguments': 'Verify script handoff',
           };
         } else if (!called('execute_skill_script')) {
+          if (!serialized.contains('COMMAND_CONTEXT_READY')) {
+            throw StateError(
+              'Command script started without executed dynamic context',
+            );
+          }
           name = 'execute_skill_script';
           input = {
             'skill_id': RegExp(
@@ -258,7 +269,7 @@ Future<void> verifyStdioAgent(
   store.putImmutable(package, {
     ...installedFiles,
     'commands/verify-command.md': utf8.encode(
-      '---\ndescription: Verify a literal command script handoff\n---\nRun scripts/verify-command.py using execute_skill_script. \$ARGUMENTS',
+      "---\ndescription: Verify a literal command script handoff\n---\n!`printf 'COMMAND_%s' CONTEXT_READY`\nRun scripts/verify-command.py using execute_skill_script. \$ARGUMENTS",
     ),
     'scripts/verify-command.py': utf8.encode(r'''
 import pathlib,sys
@@ -270,7 +281,7 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
     ),
     if (readOnlyDelegate)
       'commands/fork-read.md': utf8.encode(
-        '---\ndescription: fork-read isolated verification\ncontext: fork\nagent: readonly-verifier\n---\nRead agent.txt without writing files. \$ARGUMENTS\n',
+        "---\ndescription: fork-read isolated verification\ncontext: fork\nagent: readonly-verifier\n---\n!`printf private > /workspace/output/context-private.txt; printf 'READ_ONLY_%s' CONTEXT_READY`\nRead agent.txt without writing files. \$ARGUMENTS\n",
       ),
     if (readOnlyDelegate)
       'agents/readonly-verifier.md': utf8.encode(
@@ -455,10 +466,10 @@ pathlib.Path('/workspace/output/plugin-command.txt').write_text('plugin-command-
       if (utf8.decode(store.getObject(item['object_key'])) != expected.value)
         throw StateError('Agent artifact integrity failed');
     }
-    // The same task budget charges one MCP process, one Shell helper, one
-    // installed script and (when enabled) the two real command hooks.
+    // Charge MCP, Shell, command context, script, root hooks and both read-only
+    // delegations including the fork's private dynamic context.
     final expectedCodeRuns =
-        3 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 4 : 0);
+        4 + (rootHooks ? 2 : 0) + (readOnlyDelegate ? 5 : 0);
     if ((store.get('task/$tenant/$task')!.value['code_execution_runs'] !=
             expectedCodeRuns) ||
         (rootHooks &&

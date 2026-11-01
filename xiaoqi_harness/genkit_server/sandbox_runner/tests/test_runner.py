@@ -548,6 +548,25 @@ class RunnerValidationTests(unittest.TestCase):
                 server._execution_run_seconds(request, Mock())
             client.assert_not_called()
 
+    def test_command_context_profiles_are_bounded_host_launchers_without_network(self):
+        for profile in ['plugin_command_context', 'plugin_command_context_read_only']:
+            request = {'execution_profile': profile, 'language': 'javascript', 'code': 'process.exit(0)'}
+            self.assertEqual(server._execution_run_seconds(request), server.MAX_RUN_SECONDS)
+            self.assertEqual(server._stdout_limit(request), server.MAX_LOG_BYTES)
+            for extra in [{'language': 'shell'}, {'script_path': 'scripts/run.js'},
+                          {'command': ['node', 'run.js']}, {'authorized_domains': ['example.com']}]:
+                with patch.object(server, '_get_client') as client, self.assertRaises(server.RequestError):
+                    server._run_sandbox({'task_id': 'context-guard', **request, **extra}, Mock())
+                client.assert_not_called()
+            with self.assertRaises(server.RequestError):
+                server._execution_run_seconds(request, Mock())
+
+    def test_read_only_command_context_does_not_export_private_computation(self):
+        container = Mock()
+        with patch.object(server, '_safe_artifacts') as export:
+            self.assertEqual(server._execution_artifacts(container, 'plugin_command_context_read_only'), [])
+            export.assert_not_called()
+
     def test_read_only_hook_never_exports_ephemeral_files_or_grants_network(self):
         request = {'task_id': 'readonly-hook', 'execution_id': 'a' * 32,
                    'execution_profile': 'plugin_hook_read_only',

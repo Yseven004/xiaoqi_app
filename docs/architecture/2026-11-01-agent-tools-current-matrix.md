@@ -1,7 +1,7 @@
 # P01–P14 current acceptance matrix
 
-As of 2026-11-01, after verifying fork deployment `20261101-105322-56f94d5`
-and successful CI `41266979666`. This is an interim matrix,
+As of 2026-11-01, after verifying DeepSeek deployment `20261101-113206-281cd51`
+and successful CI `41269309017`. This is an interim matrix,
 not the final closure report. Historical todo tables do not override newer proof.
 
 | Item | Existing implementation/evidence | Remaining acceptance |
@@ -16,10 +16,10 @@ not the final closure report. Historical todo tables do not override newer proof
 | P08 Shell | Literal argv, installed scripts, MCP file handoff, process cleanup | Selected protocol composition and client validation; ECS representative resource measurement already exists |
 | P09 existing hosts | Independent component health, task/version isolation; no generic device-control scope | Actual target host declarations, dependency failure/recovery, no fabricated host execution |
 | P10 installation/build | Real npm/Python/combined builds, offline reuse, execution modes, old task-copy source compatibility, original install recovery | Full chosen-sample combinations; preserve immutable archives |
-| P11 plugin protocols | Basic commands, custom child Agents, preloaded skills, root tool Hooks and fork deployed; fork has local and real-container/CI evidence | User-selected DeepSeek model mapping CI/deploy; dynamic command preprocessing, skill Hooks, necessary lifecycle/async behavior, actual Apps/client extension protocol and required design confirmation |
+| P11 plugin protocols | Basic commands, custom child Agents, preloaded skills, root tool Hooks, fork and user-selected DeepSeek V4.1 Flash mapping deployed; fork has local and real-container/CI evidence | Dynamic command preprocessing local checks in progress; then skill Hooks, necessary lifecycle/async behavior, actual Apps/client extension protocol and required design confirmation |
 | P12 budgets | Shared persisted tool/code/model counters, failed/resumed work, no plan-count hard block; provider-count comparisons | Cross-entry concurrency/failure/recovery matrix. Existing ECS sample is not arbitrary concurrency/load proof |
 | P13 lifecycle | Source/operation identity, unknown-effect no replay, correlated result/file preservation, real restart/cleanup gates | Cross-entry revoke/cancel/restart combinations not already proven |
-| P14 release | `56f94d5` standard deployment verified health/data/API/public HTTPS/restore/cleanup and fork container gate | Remaining scope completion and final current-release deployment; client 未执行验证，待用户真机验证 |
+| P14 release | `281cd51` standard deployment verified health/data/API/public HTTPS/restore/cleanup and fork container gate | Remaining scope completion and final current-release deployment; client 未执行验证，待用户真机验证 |
 
 ## Evidence anchors
 

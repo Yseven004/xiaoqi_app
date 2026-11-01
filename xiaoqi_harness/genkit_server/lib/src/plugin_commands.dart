@@ -8,7 +8,8 @@ import 'plugin_components.dart';
 
 /// Prompt commands are data, not host shell commands or authorization policies.
 class PluginCommand {
-  static const profileVersion = 2;
+  static const profileVersion = 3;
+  static final _context = RegExp(r'!`((?:\\[\s\S]|[^`\\])*)`');
   PluginCommand(
     this.path,
     this.description,
@@ -23,6 +24,9 @@ class PluginCommand {
   final bool userOnly;
   final bool fork;
   final String agent;
+  List<String> get contextCommands =>
+      _context.allMatches(body).map((match) => match.group(1)!).toList();
+  List<String> argumentWords(String arguments) => _words(arguments);
 
   /// Reindex old installed metadata from the same immutable source bytes. This
   /// neither changes the pinned source version nor executes an installer.
@@ -136,8 +140,11 @@ class PluginCommand {
     if (metadata is! Map) throw const FormatException('命令 YAML 格式无效');
     final body = header == null ? text : text.substring(header.end);
     if (body.trim().isEmpty) throw const FormatException('命令正文为空');
-    if (RegExp(r'!`').hasMatch(body)) {
-      throw const FormatException('命令包含动态 Shell 插值，需要额外执行适配');
+    final contexts = _context.allMatches(body).toList();
+    if (body.replaceAll(_context, '').contains('!`') ||
+        contexts.length > 16 ||
+        contexts.any((match) => match.group(1)!.trim().isEmpty)) {
+      throw const FormatException('动态命令需要完整、非空的上下文块，最多 16 个');
     }
     if (metadata['context'] != null && metadata['context'] != 'fork') {
       throw const FormatException('命令 context 需要 fork');
@@ -178,18 +185,28 @@ class PluginCommand {
     );
   }
 
-  String render(String arguments, {String pluginRoot = '.'}) {
+  String render(
+    String arguments, {
+    String pluginRoot = '.',
+    List<String> contextOutputs = const [],
+  }) {
     if (utf8.encode(arguments).length > 16 * 1024) {
       throw const FormatException('命令参数超过 16 KB');
     }
     // Tokenize the original template once; inserted arguments cannot recursively
     // become templates, shell expansion, or a second command invocation.
     final words = _words(arguments);
+    if (contextOutputs.length != contextCommands.length) {
+      throw StateError('动态上下文尚未完整执行，不能展开命令');
+    }
+    var contextIndex = 0;
     return body.replaceAllMapped(
       RegExp(
-        r'\$\{CLAUDE_PLUGIN_ROOT\}|\$ARGUMENTS(?:\[([0-9]+)\])?|\$([0-9]+)',
+        r'!`(?:\\[\s\S]|[^`\\])*`|\$\{CLAUDE_PLUGIN_ROOT\}|\$ARGUMENTS(?:\[([0-9]+)\])?|\$([0-9]+)',
       ),
       (match) {
+        if (match.group(0)!.startsWith('!`'))
+          return contextOutputs[contextIndex++];
         if (match.group(0) == r'${CLAUDE_PLUGIN_ROOT}') return pluginRoot;
         final index = match.group(1) ?? match.group(2);
         if (index == null) return arguments;

@@ -32,6 +32,10 @@ void main() {
     'fork-disabled',
     'fork-source-changed',
     'fork-unknown',
+    'fork-dynamic',
+    'fork-dynamic-plan',
+    'fork-dynamic-approval',
+    'fork-dynamic-denied',
   ]) {
     test(
       'real runtime agent $scenario preserves task tools, budget and completion evidence',
@@ -56,6 +60,8 @@ void main() {
           'fork-denied',
           'fork-disabled',
           'fork-source-changed',
+          'fork-dynamic-approval',
+          'fork-dynamic-denied',
         }.contains(scenario);
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final serving = server.listen((request) async {
@@ -121,6 +127,10 @@ void main() {
           String? tool;
           Map<String, dynamic> input = {};
           if (child) {
+            if (scenario.startsWith('fork-dynamic')) {
+              expect(serialized, contains('DYNAMIC_CONTEXT_VERIFIED'));
+              expect(serialized, isNot(contains('!`printf')));
+            }
             childModels.add(body['model'].toString());
             childHistoryLeaked |= serialized.contains(
               'PARENT_ONLY_PRIVATE_HISTORY',
@@ -327,20 +337,22 @@ void main() {
             if (!mcp &&
                 !scriptNetwork &&
                 (!fork ||
-                    scenario == 'fork-plan' ||
+                    scenario.endsWith('-plan') ||
                     scenario == 'fork-custom')) {
               expect(names, isNot(contains('execute_shell')));
               expect(names, isNot(contains('execute_python')));
             }
             expect(names, isNot(contains('set_task_deliverables')));
             if (scenario == 'plan' ||
-                scenario == 'fork-plan' ||
+                scenario.endsWith('-plan') ||
                 scenario == 'root-hook-readonly')
               expect(names, isNot(contains('write_task_text_file')));
           }
           if (fork) {
             final success = !const {
               'fork-plan',
+              'fork-dynamic-plan',
+              'fork-dynamic-denied',
               'fork-denied',
               'fork-disabled',
               'fork-source-changed',
@@ -348,10 +360,13 @@ void main() {
             }.contains(scenario);
             expect(value['command_completed'], success ? 1 : 0);
             expect(value['missing'], !success);
+            if (scenario.startsWith('fork-dynamic')) {
+              expect(value['code_runs'], 1);
+            }
             if (mcp) {
               expect(
                 value['external_calls'],
-                scenario == 'fork-approval' ? 1 : 0,
+                scenario.endsWith('approval') ? 1 : 0,
               );
               expect(value['before_approval'], 0);
             } else {

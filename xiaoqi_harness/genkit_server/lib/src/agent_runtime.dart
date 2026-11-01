@@ -35,6 +35,7 @@ import 'history_context.dart';
 import 'tool_execution.dart';
 import 'user_action_authorization.dart';
 import 'plugin_commands.dart';
+import 'plugin_command_context.dart';
 import 'plugin_agents.dart';
 import 'plugin_agent_policy.dart';
 import 'plugin_agent_session.dart';
@@ -2499,6 +2500,46 @@ class GenkitXiaoqiAgentRuntime
       ToolFnArg context,
     )
     delegateAgent;
+    Future<String> commandInstructions(
+      String id,
+      PluginCommand command,
+      String arguments,
+      ToolFnArg context, {
+      bool readOnly = false,
+    }) async {
+      if (utf8.encode(arguments).length > 16 * 1024) {
+        throw const FormatException('命令参数超过 16 KB');
+      }
+      final argv = command.argumentWords(arguments);
+      final commands = command.contextCommands;
+      final outputs = <String>[];
+      if (commands.isNotEmpty) {
+        if (!codeExecutor.isConfigured) {
+          throw PluginCommandContextFailure('动态命令需要已配置的隔离代码执行器');
+        }
+        outputs.addAll(
+          await PluginCommandContext.expand(
+            executor: codeExecutor,
+            execution: execution,
+            sourceBinding: pluginCommands.fingerprint(id),
+            invocation: context.toolRequest?.toolRequest.ref ?? '',
+            commands: commands,
+            arguments: arguments,
+            argv: argv,
+            sourceFiles: () => pluginCommands.files(id),
+            cancellation: cancellation,
+            materials: await _scriptMaterials(tenantId, request['materials']),
+            readOnly: readOnly,
+          ),
+        );
+      }
+      return command.render(
+        arguments,
+        pluginRoot: 'plugin-command://$id',
+        contextOutputs: outputs,
+      );
+    }
+
     Map<String, String> executionCapability(Map<String, dynamic> input) {
       var id = input['skill_id']?.toString() ?? '';
       if (id.isEmpty) {
@@ -2848,7 +2889,7 @@ class GenkitXiaoqiAgentRuntime
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'run_plugin_command',
       description:
-          '加载并展开插件 Markdown 命令及参数，随后按返回说明使用本轮真实工具完成任务。加载不代表命令要求的工作已完成。',
+          '执行插件命令：在隔离沙箱展开动态上下文；fork 命令在私有子 Agent 中运行，普通命令返回指引供本轮工具执行。加载不代表任务已完成。',
       inputSchema: _objectToolSchema(
         const {
           'command_id': {'type': 'string'},
@@ -2901,10 +2942,6 @@ class GenkitXiaoqiAgentRuntime
               }),
             );
           }
-          final instructions = command.render(
-            arguments,
-            pluginRoot: 'plugin-command://$id',
-          );
           var invoked = false;
           onProcessEvent({
             'type': 'tool_started',
@@ -2914,7 +2951,7 @@ class GenkitXiaoqiAgentRuntime
           if (command.fork) {
             owner.recordLoadedPluginCommand(id, pluginCommands.fingerprint(id));
             loadedPluginCommands.add(id);
-            final forked = await delegateAgent(id, instructions, context);
+            final forked = await delegateAgent(id, arguments, context);
             if (forked.interrupt != null)
               return ToolResult.interrupt(forked.interrupt!);
             onProcessEvent({
@@ -2929,6 +2966,13 @@ class GenkitXiaoqiAgentRuntime
             });
             return ToolResult.response(jsonEncode(forked.result));
           }
+          final instructions = await commandInstructions(
+            id,
+            command,
+            arguments,
+            context,
+            readOnly: context.context?['xiaoqi_plugin_agent_read_only'] == true,
+          );
           final result = await owner.workspace(
             slot: 'plugin-command:$id:${ToolExecution.digest(arguments)}',
             arguments: {
@@ -2970,10 +3014,13 @@ class GenkitXiaoqiAgentRuntime
           rethrow;
         } on Object catch (error) {
           cancellation.throwIfCancelled();
+          final message = error is PluginCommandContextFailure
+              ? error.message
+              : '插件命令不可用，请检查版本、参数或命令调用方式';
           onProcessEvent({
             'type': 'tool_failed',
             'tool': 'run_plugin_command',
-            'message': '插件命令不可用，请检查版本、参数或命令调用方式',
+            'message': message,
           });
           return ToolResult.response(
             jsonEncode({
@@ -2982,7 +3029,7 @@ class GenkitXiaoqiAgentRuntime
               'status': error is UnconfirmedToolOperation
                   ? 'workspace_result_unknown'
                   : 'unavailable',
-              'error': '插件命令不可用，请检查版本、参数或命令调用方式',
+              'error': message,
             }),
           );
         }
@@ -5457,6 +5504,15 @@ class GenkitXiaoqiAgentRuntime
           'status': 'failed',
           'error': 'Agent 循环委派或嵌套深度超过上限',
         });
+      final effectiveTask = forkCommand == null
+          ? delegatedTask
+          : await commandInstructions(
+              id,
+              forkCommand,
+              delegatedTask,
+              context,
+              readOnly: policy.readOnly,
+            );
       _logAgentRuntime('plugin_agent_model_selected', taskId, {
         'component_id': id,
         'declared_model': definition.model,
@@ -5535,7 +5591,7 @@ class GenkitXiaoqiAgentRuntime
           policy.maxTurns,
           childSelection.modelId,
         ]),
-        task: delegatedTask,
+        task: effectiveTask,
         cancellation: cancellation,
         resumed: resumed is Map && resumed['approved'] is bool
             ? Map<String, dynamic>.from(resumed)
