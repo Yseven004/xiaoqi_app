@@ -21,6 +21,27 @@ The security-guidance sample has a real lifecycle and asynchronous requirement;
 it cannot be replaced with a basic synthetic PreToolUse Hook and called complete.
 Its model-based branches have not been executed. No paid image service is involved.
 
+Current Dart parser/policy probe was also run against those exact downloaded
+source bytes (no plugin script or external model execution): commit parsing
+rejects dynamic Shell interpolation; code-explorer parses but policy reports
+missing `sonnet`, `LS`, `NotebookRead`, `TodoWrite`, `KillShell`, `BashOutput`
+for the available read/search host tools; security-guidance produces seven Hook
+components, only its synchronous PostToolUse handler currently usable/partial.
+SessionStart, UserPromptSubmit, three asyncRewake PostToolUse handlers and the
+asynchronous Stop handler remain unavailable. Probe source is local diagnostics
+at `.codex-artifacts/inspect_pinned_protocols.dart`, not production code or a
+successful install/execute acceptance fixture.
+
+The user asked why a model-selection decision was being introduced. No model
+substitution was authorized by that discussion. The existing strict policy stays
+unchanged; this sample-specific requirement must not block fork acceptance or
+require the user to purchase/configure a new provider.
+
+Subsequent explicit decision supersedes that interim state: use DeepSeek V4.1
+Flash (`deepseek-flash`). See `2026-11-01-plugin-model-mapping.md` for the bounded
+host mapping, actual-provider request test and release status. This does not
+resolve the sample's separate legacy tool or lifecycle requirements.
+
 ## Apps and client extension protocol
 
 Repository: [modelcontextprotocol/ext-apps](https://github.com/modelcontextprotocol/ext-apps/tree/cf599cc462406accc90ec3ca7879e3a22a9fc2a8),

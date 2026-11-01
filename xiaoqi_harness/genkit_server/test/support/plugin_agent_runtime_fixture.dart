@@ -221,7 +221,7 @@ else:
         }),
       ),
     'agents/writer.md': utf8.encode(
-      '---\nname: writer\ndescription: Write task notes\n${mcp ? '' : toolHeader}${preloadSkill ? 'skills: [note]\n' : ''}${scenario == 'plan' || scenario == 'readonly' || scenario == 'root-hook-readonly'
+      '---\nname: writer\ndescription: Write task notes\n${scenario.startsWith('model-alias') ? 'model: sonnet\n' : ''}${mcp ? '' : toolHeader}${preloadSkill ? 'skills: [note]\n' : ''}${scenario == 'plan' || scenario == 'readonly' || scenario == 'root-hook-readonly'
           ? 'permissionMode: plan\n'
           : scenario == 'dontask'
           ? 'permissionMode: dontAsk\n'

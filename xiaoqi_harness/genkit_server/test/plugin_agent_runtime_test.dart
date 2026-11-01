@@ -5,6 +5,8 @@ import 'package:test/test.dart';
 void main() {
   for (final scenario in [
     'write',
+    'model-alias',
+    'model-alias-nested',
     'ignored-plugin-fields',
     'ignored-plugin-fields-approval',
     'preload',
@@ -40,6 +42,8 @@ void main() {
         final fork = scenario.startsWith('fork-');
         final childToolSets = <Set<String>>[];
         var childHistoryLeaked = false;
+        final childModels = <String>{};
+        var modelMappingRecorded = false;
         final mcp = const {
           'approval',
           'ignored-plugin-fields-approval',
@@ -59,6 +63,9 @@ void main() {
               jsonDecode(await utf8.decoder.bind(request).join()) as Map;
           providerCalls++;
           final serialized = jsonEncode(body);
+          modelMappingRecorded |=
+              serialized.contains('插件声明模型 sonnet') &&
+              serialized.contains('deepseek-flash');
           request.response.headers.contentType = ContentType.json;
           if (serialized.contains('XIAOQI_TURN_INTENT_V1')) {
             request.response.write(
@@ -114,6 +121,7 @@ void main() {
           String? tool;
           Map<String, dynamic> input = {};
           if (child) {
+            childModels.add(body['model'].toString());
             childHistoryLeaked |= serialized.contains(
               'PARENT_ONLY_PRIVATE_HISTORY',
             );
@@ -167,7 +175,7 @@ void main() {
                 tool = remote;
                 input = rootHooks ? {'recipient': 'original'} : {};
               }
-            } else if (scenario == 'nested' &&
+            } else if (scenario.endsWith('nested') &&
                 system.contains('AGENT_RUNTIME_WRITER')) {
               if (!called('search_plugin_agents')) {
                 tool = 'search_plugin_agents';
@@ -282,6 +290,10 @@ void main() {
               'MIMO_API_KEY': 'fixture-only',
               'MIMO_BASE_URL': 'http://127.0.0.1:${server.port}/v1',
               'XIAOQI_CAPTURE_TRACES': '0',
+              if (scenario.startsWith('model-alias')) ...{
+                'DEEPSEEK_API_KEY': 'fixture-only',
+                'DEEPSEEK_BASE_URL': 'http://127.0.0.1:${server.port}/v1',
+              },
             },
             stdoutEncoding: utf8,
             stderrEncoding: utf8,
@@ -300,6 +312,10 @@ void main() {
               .singleWhere((line) => line.startsWith('RESULT:'));
           final value = jsonDecode(line.substring(7)) as Map;
           expect(value['provider_calls'], providerCalls);
+          if (scenario.startsWith('model-alias')) {
+            expect(childModels, {'deepseek-flash'});
+            expect(modelMappingRecorded, isTrue);
+          }
           if (scenario == 'ignored-plugin-fields') {
             expect(value['external_calls'], 0);
             expect(value['script_runs'], 0);
@@ -378,7 +394,7 @@ void main() {
             expect(value['missing'], scenario != 'root-hook-rewrite');
           } else {
             expect(value['contents'], ['verified child output']);
-            expect(value['completed'], scenario == 'nested' ? 2 : 1);
+            expect(value['completed'], scenario.endsWith('nested') ? 2 : 1);
             expect(value['missing'], isFalse);
           }
           if (rootHooks) {

@@ -20,6 +20,19 @@ class PluginAgentPolicy {
   final bool readOnly, dontAsk;
   final int maxTurns;
 
+  static String executionModel(
+    PluginAgentDefinition definition,
+    String parent,
+  ) =>
+      const {
+        'sonnet',
+        'haiku',
+        'opus',
+        'deepseek-flash',
+      }.contains(definition.model)
+      ? 'deepseek-flash'
+      : parent;
+
   static const _control = {'set_task_deliverables'};
   static const _readTools = {
     'list_task_files',
@@ -82,8 +95,18 @@ class PluginAgentPolicy {
         .where((tool) => !_control.contains(tool))
         .toSet();
     final issues = <String>[];
-    if (definition.model != 'inherit' && definition.model != model)
-      issues.add('需要配置 Agent 指定的模型 ${definition.model}；不会静默替换当前模型');
+    final notes = <String>[];
+    if (definition.model != 'inherit' && definition.model != model) {
+      // The product owner selected V4.1 Flash for imported Claude model aliases.
+      if (model == 'deepseek-flash' &&
+          const {'sonnet', 'haiku', 'opus'}.contains(definition.model)) {
+        notes.add(
+          '插件声明模型 ${definition.model}，按宿主配置实际使用 DeepSeek V4.1 Flash（deepseek-flash）。',
+        );
+      } else {
+        issues.add('需要配置 Agent 指定的模型 ${definition.model}；不会静默替换当前模型');
+      }
+    }
     final metadata = definition.metadata;
     const known = {
       'name',
@@ -103,7 +126,6 @@ class PluginAgentPolicy {
     };
     for (final key in metadata.keys.where((key) => !known.contains(key)))
       issues.add('Agent 字段 $key 需要对应宿主适配');
-    final notes = <String>[];
     // These are plugin agents, not standalone project/user agents. The source
     // plugin protocol ignores these fields; they cannot launch inline effects
     // and must not make an otherwise usable child unavailable.

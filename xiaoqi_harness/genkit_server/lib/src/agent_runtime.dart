@@ -2386,6 +2386,14 @@ class GenkitXiaoqiAgentRuntime
             httpClient: TaskModelClient.current,
             models: [CustomModelDefinition(name: selection.modelId)],
           ),
+        if (selection.namespace != 'deepseek' && searchApiKey.isNotEmpty)
+          deepSeek(
+            name: 'deepseek',
+            apiKey: searchApiKey,
+            baseUrl: _modelSelection('deepseek-flash').baseUrl,
+            httpClient: TaskModelClient.current,
+            models: [CustomModelDefinition(name: 'deepseek-flash')],
+          ),
         SkillsPlugin(),
         A2uiPlugin(),
       ],
@@ -5175,6 +5183,7 @@ class GenkitXiaoqiAgentRuntime
       apiKey,
       searchApiKey,
       selection.baseUrl,
+      _modelSelection('deepseek-flash').baseUrl,
       stagedSkills.directory.path,
     ];
     final preparationPresentation = ai.defineGenerateMiddleware<void>(
@@ -5407,12 +5416,26 @@ class GenkitXiaoqiAgentRuntime
       }
       final inherited = context.context ?? const <String, dynamic>{};
       final inheritedTools = inherited['xiaoqi_plugin_agent_tools'];
+      final childSelection = _modelSelection(
+        PluginAgentPolicy.executionModel(
+          definition,
+          inherited['xiaoqi_plugin_agent_model'] as String? ??
+              selection.modelId,
+        ),
+      );
+      if ((Platform.environment[childSelection.keyName] ?? '').isEmpty) {
+        return PluginAgentSessionResult({
+          'ok': false,
+          'status': 'unavailable',
+          'issues': ['服务器未配置 ${childSelection.keyName}，未启动子 Agent'],
+        });
+      }
       final policy = PluginAgentPolicy.resolve(
         definition,
         parentTools: inheritedTools is List
             ? inheritedTools.cast<String>()
             : toolNames,
-        model: selection.modelId,
+        model: childSelection.modelId,
         ancestorReadOnly: inherited['xiaoqi_plugin_agent_read_only'] == true,
         ancestorDontAsk: inherited['xiaoqi_plugin_agent_dont_ask'] == true,
         skillsPrepared: true,
@@ -5434,6 +5457,12 @@ class GenkitXiaoqiAgentRuntime
           'status': 'failed',
           'error': 'Agent 循环委派或嵌套深度超过上限',
         });
+      _logAgentRuntime('plugin_agent_model_selected', taskId, {
+        'component_id': id,
+        'declared_model': definition.model,
+        'model_id': childSelection.modelId,
+        'provider': childSelection.namespace,
+      });
       void validateSource() {
         if (forkCommand != null &&
             pluginCommands.fingerprint(id) != commandFingerprint) {
@@ -5459,8 +5488,18 @@ class GenkitXiaoqiAgentRuntime
       final child = ai.defineAgent(
         name:
             'xiaoqi_plugin_agent_${ToolExecution.digest([id, ref]).substring(0, 24)}',
-        model: model,
-        config: modelOptions,
+        model: openAI.model(
+          childSelection.modelId,
+          namespace: childSelection.namespace,
+        ),
+        config: OpenAIChatOptions(
+          maxTokens: ModelLimits.forModel(
+            childSelection.modelId,
+          ).maxOutputTokens,
+          reasoningEffort: childSelection.namespace == 'deepseek'
+              ? request['reasoning_level']?.toString() ?? 'medium'
+              : null,
+        ),
         maxTurns: policy.maxTurns,
         toolNames: policy.tools,
         system:
@@ -5494,7 +5533,7 @@ class GenkitXiaoqiAgentRuntime
           policy.readOnly,
           policy.dontAsk,
           policy.maxTurns,
-          selection.modelId,
+          childSelection.modelId,
         ]),
         task: delegatedTask,
         cancellation: cancellation,
@@ -5502,6 +5541,7 @@ class GenkitXiaoqiAgentRuntime
             ? Map<String, dynamic>.from(resumed)
             : null,
         context: {
+          'xiaoqi_plugin_agent_model': childSelection.modelId,
           'xiaoqi_plugin_agent_tools': policy.tools,
           'xiaoqi_plugin_agent_read_only': policy.readOnly,
           'xiaoqi_plugin_agent_dont_ask': policy.dontAsk,
@@ -6305,7 +6345,9 @@ class GenkitXiaoqiAgentRuntime
     return _ModelSelection(
       namespace: 'deepseek',
       keyName: 'DEEPSEEK_API_KEY',
-      baseUrl: 'https://api.deepseek.com/v1',
+      baseUrl:
+          Platform.environment['DEEPSEEK_BASE_URL'] ??
+          'https://api.deepseek.com/v1',
       modelId: model.isEmpty ? 'deepseek-flash' : model,
     );
   }

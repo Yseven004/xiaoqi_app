@@ -89,6 +89,42 @@ void main() {
     },
   );
   test(
+    'Claude model aliases use the configured V4.1 Flash without widening tools',
+    () {
+      for (final alias in ['sonnet', 'haiku', 'opus']) {
+        expect(
+          PluginAgentPolicy.executionModel(
+            definition('model: $alias\n'),
+            'mimo-v2.6-flash',
+          ),
+          'deepseek-flash',
+        );
+        final policy = PluginAgentPolicy.resolve(
+          definition('tools: [Read]\nmodel: $alias\n'),
+          parentTools: tools,
+          model: 'deepseek-flash',
+        );
+        expect(policy.issues, isEmpty);
+        expect(policy.tools, ['list_task_files', 'read_task_text_file']);
+        expect(policy.notes.single, contains(alias));
+        expect(policy.notes.single, contains('deepseek-flash'));
+        expect(resolve('model: $alias\n').issues, isNotEmpty);
+      }
+      expect(
+        PluginAgentPolicy.executionModel(definition(''), 'deepseek-flash'),
+        'deepseek-flash',
+      );
+      expect(
+        PluginAgentPolicy.resolve(
+          definition('model: unknown-provider-model\n'),
+          parentTools: tools,
+          model: 'deepseek-flash',
+        ).issues,
+        isNotEmpty,
+      );
+    },
+  );
+  test(
     'plugin-only ignored fields neither disable the child nor launch or grant tools',
     () {
       final policy = resolve(
