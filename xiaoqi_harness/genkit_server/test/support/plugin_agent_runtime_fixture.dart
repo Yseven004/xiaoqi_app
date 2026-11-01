@@ -6,6 +6,7 @@ import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
 import 'package:xiaoqi_genkit_server/src/plugin_agents.dart';
+import 'package:xiaoqi_genkit_server/src/plugin_commands.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 import 'mcp_runtime_fixture.dart' show FixtureMcpConnections;
 
@@ -13,6 +14,7 @@ Future<void> main(List<String> args) async {
   final root = await Directory.systemTemp.createTemp('plugin-agent-runtime-');
   final store = CloudStore(root: root.path);
   final scenario = args.single;
+  final fork = scenario.startsWith('fork-');
   final rootHooks = scenario.startsWith('root-hook-');
   final hookCounter = File('${root.path}/hook-count.json');
   final scriptNetwork = scenario.endsWith('script-network');
@@ -103,6 +105,8 @@ else:
     'disabled',
     'readonly',
     'root-hook-approval',
+    'fork-approval',
+    'fork-denied',
   }.contains(scenario);
   final rpc = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   var calls = 0;
@@ -177,6 +181,16 @@ else:
     await request.response.close();
   });
   final files = <String, List<int>>{
+    if (fork)
+      'commands/work.md': utf8.encode(
+        '---\ndescription: Execute standalone command task\ncontext: fork\nbackground: false\n'
+        '${scenario == 'fork-plan'
+            ? 'agent: Explore\n'
+            : scenario == 'fork-custom'
+            ? 'agent: writer\n'
+            : ''}'
+        '---\nFORK_COMMAND_BODY: Write report.txt containing verified child output. Arguments=\$ARGUMENTS',
+      ),
     '.claude-plugin/plugin.json': utf8.encode('{"name":"agent-fixture"}'),
     if (rootHooks)
       'hooks/hooks.json': utf8.encode(
@@ -229,6 +243,7 @@ else:
   };
   final components = <Map<String, dynamic>>[
     ...PluginAgentDefinition.inspect(files, '', {}),
+    if (fork) ...PluginCommand.inspect(files, '', {}),
     if (preloadSkill)
       {
         'id': 'note',
@@ -285,7 +300,9 @@ else:
       'url': 'https://example.com/mcp',
       'catalog_id': 'fixture',
     }, null);
-  final selected = components.singleWhere((entry) => entry['name'] == 'writer');
+  final selected = components.singleWhere(
+    (entry) => entry['name'] == (fork ? 'work' : 'writer'),
+  );
   final events = <Map<String, Object?>>[];
   try {
     GenkitXiaoqiAgentRuntime runtime() => GenkitXiaoqiAgentRuntime(
@@ -368,7 +385,7 @@ else:
         messages: result.messages,
         restart: [
           pending.restart({
-            'approved': scenario != 'denied',
+            'approved': scenario != 'denied' && scenario != 'fork-denied',
             'approval_hash': permission['approval_hash'],
             if (permission['domains'] != null) 'domains': permission['domains'],
           }),
@@ -387,6 +404,7 @@ else:
         'contents': [for (final artifact in artifacts) utf8.decode(store.getObject(artifact['object_key'].toString()))],
         'loaded': (task['loaded_plugin_agents'] as Map? ?? {}).length,
         'completed': (task['completed_plugin_agents'] as Map? ?? {}).length,
+        if (fork) 'command_completed': (task['completed_plugin_commands'] as Map? ?? {}).length,
         'provider_calls': task['model_request_runs'],
         'external_calls': calls,
         'before_approval': beforeApproval,

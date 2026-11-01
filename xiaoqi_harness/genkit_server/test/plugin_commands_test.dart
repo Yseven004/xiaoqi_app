@@ -39,11 +39,42 @@ void main() {
     };
     final inspected = PluginCommand.inspect(files, '', {});
     expect(
-      inspected.where((c) => c['status'] == 'supported').single['name'],
-      'healthy',
+      inspected.where((c) => c['status'] == 'supported').map((c) => c['name']),
+      unorderedEquals(['healthy', 'agent']),
     );
-    expect(inspected.where((c) => c['status'] == 'unsupported'), hasLength(2));
+    expect(inspected.where((c) => c['status'] == 'unsupported'), hasLength(1));
   });
+  test(
+    'fork context validates agent and preserves standalone task arguments',
+    () {
+      final command = PluginCommand.parse(
+        'commands/work.md',
+        utf8.encode(
+          '---\ncontext: fork\nagent: Explore\nbackground: false\n---\nRead \$ARGUMENTS',
+        ),
+      );
+      expect(command.fork, isTrue);
+      expect(command.agent, 'Explore');
+      expect(
+        command.render('literal; \$(no-shell)'),
+        'Read literal; \$(no-shell)',
+      );
+      for (final header in [
+        'context: other',
+        'agent: Explore',
+        'context: fork\nagent: 7',
+        'context: fork\nbackground: yes',
+      ]) {
+        expect(
+          () => PluginCommand.parse(
+            'commands/work.md',
+            utf8.encode('---\n$header\n---\nTask'),
+          ),
+          throwsFormatException,
+        );
+      }
+    },
+  );
   test('custom command locations stay inside the immutable plugin package', () {
     final files = {'custom/nested.md': utf8.encode('Command')};
     expect(

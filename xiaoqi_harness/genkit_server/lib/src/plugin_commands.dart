@@ -8,12 +8,21 @@ import 'plugin_components.dart';
 
 /// Prompt commands are data, not host shell commands or authorization policies.
 class PluginCommand {
-  static const profileVersion = 1;
-  PluginCommand(this.path, this.description, this.body, this.userOnly);
+  static const profileVersion = 2;
+  PluginCommand(
+    this.path,
+    this.description,
+    this.body,
+    this.userOnly, {
+    this.fork = false,
+    this.agent = 'general-purpose',
+  });
   final String path;
   final String description;
   final String body;
   final bool userOnly;
+  final bool fork;
+  final String agent;
 
   /// Reindex old installed metadata from the same immutable source bytes. This
   /// neither changes the pinned source version nor executes an installer.
@@ -23,34 +32,36 @@ class PluginCommand {
     String id,
     Map version,
   ) {
-    if (version['plugin_command_profile'] == profileVersion ||
-        (version['components'] as List? ?? const []).whereType<Map>().any(
-          (c) => c['type'] == 'command',
-        ))
-      return version;
+    if (version['plugin_command_profile'] == profileVersion) return version;
     final key = 'cap/$tenant/$id';
     final initial = store.get(key)?.value;
     if (initial == null) return version;
-    final compatibility = initial['compatibility'];
-    final knownNoCommands =
-        initial['current_version_id'] == version['id'] &&
-        compatibility is Map &&
-        compatibility['warnings'] is List &&
-        !(compatibility['warnings'] as List).any(
-          (w) => w.toString().startsWith('commands '),
-        );
-    Map? candidate;
-    if (!knownNoCommands) {
-      final files = store.getImmutable(version['artifact_key'].toString());
-      candidate = CapabilityImportService.discover(
-        files,
-        '',
-      ).where((c) => c['kind'] == 'plugin' && c['root'] == '').firstOrNull;
-    }
-    final commands = (candidate?['components'] as List? ?? const [])
+    final files = store.getImmutable(version['artifact_key'].toString());
+    final candidate = CapabilityImportService.discover(
+      files,
+      '',
+    ).where((c) => c['kind'] == 'plugin' && c['root'] == '').firstOrNull;
+    final priorCommands = (version['components'] as List? ?? const [])
         .whereType<Map>()
-        .where((c) => c['type'] == 'command' && c['status'] != 'unsupported')
+        .where((c) => c['type'] == 'command')
         .toList();
+    final commands =
+        (candidate?['components'] as List? ?? inspect(files, '', const {}))
+            .whereType<Map>()
+            .where(
+              (c) => c['type'] == 'command' && c['status'] != 'unsupported',
+            )
+            .map((command) {
+              final prior = priorCommands
+                  .where(
+                    (c) =>
+                        c['source_path'] == command['source_path'] &&
+                        (c['root'] ?? '') == (command['root'] ?? ''),
+                  )
+                  .firstOrNull;
+              return {...command, if (prior != null) 'id': prior['id']};
+            })
+            .toList();
     for (var attempt = 0; attempt < 8; attempt++) {
       final current = store.get(key);
       if (current == null ||
@@ -111,9 +122,19 @@ class PluginCommand {
     if (RegExp(r'!`').hasMatch(body)) {
       throw const FormatException('命令包含动态 Shell 插值，需要额外执行适配');
     }
-    if (metadata['context'] != null ||
-        metadata['agent'] != null ||
-        metadata['hooks'] != null ||
+    if (metadata['context'] != null && metadata['context'] != 'fork') {
+      throw const FormatException('命令 context 需要 fork');
+    }
+    if (metadata['agent'] != null &&
+        (metadata['context'] != 'fork' ||
+            metadata['agent'] is! String ||
+            (metadata['agent'] as String).trim().isEmpty)) {
+      throw const FormatException('命令 agent 必须配合 context: fork 并提供名称');
+    }
+    if (metadata['background'] != null && metadata['background'] is! bool) {
+      throw const FormatException('命令 background 必须是布尔值');
+    }
+    if (metadata['hooks'] != null ||
         metadata['permissionMode'] != null ||
         metadata['skills'] != null ||
         metadata['mcpServers'] != null ||
@@ -135,6 +156,8 @@ class PluginCommand {
       metadata['description']?.toString() ?? path,
       body,
       metadata['disable-model-invocation'] == true,
+      fork: metadata['context'] == 'fork',
+      agent: (metadata['agent'] as String? ?? 'general-purpose').trim(),
     );
   }
 

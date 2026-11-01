@@ -22,6 +22,11 @@ void main() {
     'root-hook-invalid',
     'root-hook-approval',
     'root-hook-readonly',
+    'fork-write',
+    'fork-plan',
+    'fork-custom',
+    'fork-approval',
+    'fork-denied',
   ]) {
     test(
       'real runtime agent $scenario preserves task tools, budget and completion evidence',
@@ -29,6 +34,7 @@ void main() {
         var providerCalls = 0;
         final scriptNetwork = scenario.endsWith('script-network');
         final rootHooks = scenario.startsWith('root-hook-');
+        final fork = scenario.startsWith('fork-');
         final childToolSets = <Set<String>>[];
         final mcp = const {
           'approval',
@@ -38,6 +44,8 @@ void main() {
           'disabled',
           'readonly',
           'root-hook-approval',
+          'fork-approval',
+          'fork-denied',
         }.contains(scenario);
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         final serving = server.listen((request) async {
@@ -78,13 +86,18 @@ void main() {
               .where((m) => m['role'] == 'system')
               .map((m) => m['content'])
               .join();
-          final child =
+          var child =
               system.contains('AGENT_RUNTIME_WRITER') ||
               system.contains('AGENT_RUNTIME_HELPER');
           final tools = (body['tools'] as List? ?? [])
               .whereType<Map>()
               .map((t) => t['function']['name'].toString())
               .toSet();
+          child =
+              child ||
+              (fork &&
+                  tools.isNotEmpty &&
+                  !tools.contains('set_task_deliverables'));
           bool called(String name) => messages.any(
             (m) =>
                 m['role'] == 'assistant' &&
@@ -178,7 +191,10 @@ void main() {
                 'skill_ids': [],
                 'no_skill_reason': 'Use selected plugin Agent',
                 'tools': [
-                  {'name': 'run_plugin_agent', 'count': 1},
+                  {
+                    'name': fork ? 'run_plugin_command' : 'run_plugin_agent',
+                    'count': 1,
+                  },
                 ],
                 'artifacts':
                     scenario == 'plan' ||
@@ -190,17 +206,28 @@ void main() {
                         {'media_type': 'text/plain', 'count': 1},
                       ],
               };
-            } else if (!called('search_plugin_agents')) {
-              tool = 'search_plugin_agents';
-              input = {'query': 'writer'};
-            } else if (!called('run_plugin_agent')) {
-              tool = 'run_plugin_agent';
-              input = {
-                'agent_id': RegExp(
-                  r'agent-[a-f0-9]{24}',
-                ).allMatches(serialized).last.group(0),
-                'task': 'Write the verified task note',
-              };
+            } else if (!called(
+              fork ? 'search_plugin_commands' : 'search_plugin_agents',
+            )) {
+              tool = fork ? 'search_plugin_commands' : 'search_plugin_agents';
+              input = {'query': fork ? 'work' : 'writer'};
+            } else if (!called(
+              fork ? 'run_plugin_command' : 'run_plugin_agent',
+            )) {
+              tool = fork ? 'run_plugin_command' : 'run_plugin_agent';
+              input = fork
+                  ? {
+                      'command_id': RegExp(
+                        r'command-[a-f0-9]{24}',
+                      ).allMatches(serialized).last.group(0),
+                      'arguments': r'literal; $(no-shell)',
+                    }
+                  : {
+                      'agent_id': RegExp(
+                        r'agent-[a-f0-9]{24}',
+                      ).allMatches(serialized).last.group(0),
+                      'task': 'Write the verified task note',
+                    };
             }
           }
           final delta = tool == null
@@ -270,15 +297,38 @@ void main() {
           }
           expect(childToolSets, isNotEmpty);
           for (final names in childToolSets) {
-            if (!mcp && !scriptNetwork) {
+            if (!mcp &&
+                !scriptNetwork &&
+                (!fork ||
+                    scenario == 'fork-plan' ||
+                    scenario == 'fork-custom')) {
               expect(names, isNot(contains('execute_shell')));
               expect(names, isNot(contains('execute_python')));
             }
             expect(names, isNot(contains('set_task_deliverables')));
-            if (scenario == 'plan' || scenario == 'root-hook-readonly')
+            if (scenario == 'plan' ||
+                scenario == 'fork-plan' ||
+                scenario == 'root-hook-readonly')
               expect(names, isNot(contains('write_task_text_file')));
           }
-          if (scriptNetwork) {
+          if (fork) {
+            final success =
+                scenario != 'fork-plan' && scenario != 'fork-denied';
+            expect(value['command_completed'], success ? 1 : 0);
+            expect(value['missing'], !success);
+            if (mcp) {
+              expect(
+                value['external_calls'],
+                scenario == 'fork-approval' ? 1 : 0,
+              );
+              expect(value['before_approval'], 0);
+            } else {
+              expect(
+                value['contents'],
+                success ? ['verified child output'] : isEmpty,
+              );
+            }
+          } else if (scriptNetwork) {
             expect(value['before_approval'], 0);
             expect(value['script_runs'], 1);
             expect(value['network_grants'], isEmpty);

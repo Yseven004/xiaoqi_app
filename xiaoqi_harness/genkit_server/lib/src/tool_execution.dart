@@ -125,6 +125,7 @@ class ToolExecution {
         'user_action_intents': <String, dynamic>{},
         'tool_authorization_sources': <String, dynamic>{},
         'loaded_plugin_commands': <String, dynamic>{},
+        'completed_plugin_commands': <String, dynamic>{},
         'loaded_plugin_agents': <String, dynamic>{},
         'completed_plugin_agents': <String, dynamic>{},
         'authorized_network_domains': <String>[],
@@ -180,6 +181,8 @@ class ToolExecution {
 
   Map<String, dynamic> get loadedPluginCommandBindings =>
       _componentBindings('loaded_plugin_commands');
+  Map<String, dynamic> get completedPluginCommandBindings =>
+      _componentBindings('completed_plugin_commands');
 
   Map<String, dynamic> get loadedPluginAgentBindings =>
       _componentBindings('loaded_plugin_agents');
@@ -202,8 +205,14 @@ class ToolExecution {
     );
   }
 
-  void recordLoadedPluginCommand(String alias, String fingerprint) {
+  void recordLoadedPluginCommand(
+    String alias,
+    String fingerprint, {
+    bool completed = false,
+  }) {
     _recordComponentBinding('loaded_plugin_commands', alias, fingerprint);
+    if (completed)
+      _recordComponentBinding('completed_plugin_commands', alias, fingerprint);
   }
 
   void recordPluginAgent(
