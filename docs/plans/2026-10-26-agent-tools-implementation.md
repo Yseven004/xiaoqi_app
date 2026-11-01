@@ -1,5 +1,23 @@
 # Agent 工具全链路实施记录
 
+## 2026-11-01 最终服务端收尾（覆盖历史未完成状态）
+
+范围内 P01–P14 服务端修复与选定样本自动验收完成，最终矩阵见
+`docs/architecture/2026-11-01-agent-tools-current-matrix.md`，跨入口证据见
+`docs/architecture/2026-11-01-cross-entry-acceptance.md`。运行时 main
+`1d160891871c4aaacf9f354538aebcf84790aea1` 的 CI `41310016481` 成功：
+541 Dart 通过、6 个原生依赖跳过，95 runner、30 部署、2 bridge、2 image，
+真实官方 Apps/stdio/组合门禁与镜像导入导出通过。标准发布
+`20261101-211115-1d16089` 已验证精确产物、运行探针、数据与健康、公开 HTTPS 200、
+恢复流量、清理和唯一应急恢复点。server deployed and verified。
+产品 `2026-11-01-agent-tools-apps`，Flutter/server 契约均为 25。
+
+本地完整回归 547 项、后续资源/官方 Agent/面板预算定向检查、静态分析、Android
+debug APK 及 23 项客户端既有测试通过。后续测试文档不改变服务端运行行为，无需
+重复部署。`docs/architecture/evidence/2026-11-01-mcp-apps-release.json` 保存发布证据。
+必要 MCP Apps 按已确认聊天内展开范围实现；未知专有清单和整个外部宿主产品不
+冒充兼容。欠费生图未调用，按用户要求后置。客户端真机未执行验证，待用户真机验证。
+
 ## 2026-10-30 Hook / Python MCP / 只读临时执行 / 安装包容量（已部署并验证）
 
 main eeb173c7c45e86743c5c50117cbb89c16ff451c3 的 CI 40974111602/job 123797795496 成功：467 Dart、93 runner、30 部署 Python、2 bridge 检查、2 沙箱镜像检查、真实 stdio/重启门禁与镜像往返通过。真实 Python MCP 时区转换、根 Hook Agent 组合和只读临时计算不导出均已通过。标准部署 20261030-073514-eeb173c 退出 0，目标探针、暂停写入/备份/切换、健康与数据、恢复流量、清理完成；运行健康，唯一 latest-good 恢复点数据存在，公开 HTTPS 经 Cloud Assistant 验证 200，product 2026-10-27-agent-tools-2/API 24 匹配。服务器已部署并验证（server deployed and verified）。

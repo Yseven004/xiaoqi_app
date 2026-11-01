@@ -28,7 +28,8 @@ These test additions change no server runtime behavior after `1d16089`.
 - Official Python time MCP and actual npm/Python build/reinstall/recovery gates
   remain valid; do not replace their evidence with mocks.
 - Published official MCP App 2.0.4: actual stdio and browser SDK refresh, selected
-  real-container gate included in Apps CI 41310016481 (pending result here).
+  real-container gate passed in Apps CI 41310016481. Standard deployment
+  `20261101-211115-1d16089` verified; see Apps release evidence.
 - Official `plugin-dev@0.1.1` skill-reviewer at commit
   `a7ba5b93db0c7c8d17f3f1d25853adca79598a1a`: unchanged Apache-2.0 source in
   `test/fixtures/official-plugin-dev`, actual Agent runtime reads task data and

@@ -65,7 +65,21 @@ Local full server regression passed 547 tests. Final twelve resource/API/actual-
 tests passed after the resource authority/budget boundary changes. Final server
 static analysis passed including the real-container gate implementation. New shell
 and card have no static issues; the existing cloud sync file reports twelve
-pre-existing style infos, no errors. Android build, exact-main CI isolated
-container gate and next standard deployment remain pending.
+pre-existing style infos, no errors. Android debug APK built; 23 existing client
+regressions passed. APK SHA-256
+`20d8fb589fccd944569d97dc5cc652cba60fae6323928dd6bf588634a322aa0f`;
+its debug kernel contains this product release identifier.
+
+Exact runtime main `1d160891871c4aaacf9f354538aebcf84790aea1`, CI
+`41310016481` / job `124858224605` succeeded: 541 Dart passed, 6 native-only
+skips, 95 runner, 30 deployment, 2 bridge and 2 image checks. Official App
+isolated offline stdio gate verified package integrity, declared resource,
+owned surface and revocation; 243831 HTML bytes. Image export/import passed.
+Standard deployment `20261101-211115-1d16089` exited 0: exact artifact/images,
+runtime probes, data/health, traffic resume and cleanup passed. Final controller
+verified healthy current release, one latest-good restore point with data,
+product `2026-11-01-agent-tools-apps`, API 25, and public HTTPS 200 through Cloud
+Assistant. Local public TLS failed; independent remote HTTPS succeeded.
+See `evidence/2026-11-01-mcp-apps-release.json`.
 The browser run above uses a controlled native bridge shim, so it does not prove
 Flutter WebView/native approval behavior. 客户端未执行验证，待用户真机验证。

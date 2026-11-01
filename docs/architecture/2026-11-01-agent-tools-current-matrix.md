@@ -1,25 +1,30 @@
 # P01–P14 current acceptance matrix
 
-As of 2026-11-01, after verifying scoped skill Hook deployment `20261101-152921-4ce890b`
-and successful CI `41284972600`. This is an interim matrix,
-not the final closure report. Historical todo tables do not override newer proof.
+As of 2026-11-01, selected-scope server fixes and automatic acceptance are complete.
+Apps runtime source `1d160891871c4aaacf9f354538aebcf84790aea1`, CI `41310016481`,
+is deployed and verified as `20261101-211115-1d16089`, product
+`2026-11-01-agent-tools-apps`, API 25. Runtime probe, data/health, public HTTPS 200,
+traffic resume, cleanup and one latest-good restore point with data passed.
+Subsequent test/documentation commits do not change deployed runtime behavior.
+Historical todo tables do not override newer executable proof. Client validation
+remains user-owned; this is not a claim that all device/visual checks passed.
 
-| Item | Existing implementation/evidence | Remaining acceptance |
+| Item | Current executable evidence | Boundary / pending verification |
 | --- | --- | --- |
-| P01 action authorization | Bound action parameters, connection authority, pre-submit recheck, persisted approval/denial; fork approval/revocation SDK checks | Cross-entry and representative account effects; no arbitrary real service rule invented |
-| P02 coexistence | Real filesystem MCP + Shell + skill/command/Agent/fork/Hook composition | Further selected samples |
-| P03 intent/discovery | Discovery remains available outside initial recommendation; task/source withdrawal handling | Connection-health change refresh and cross-entry cancellation |
-| P04 network lifecycle | Exact network action approval, original request resume, short-lived task grant, revision ordering; no per-call task-wide disconnect in inspected production call graph | Real shared-network end-of-call versus explicit revocation, all selected entry points |
-| P05 large catalogs | 121-tool SDK scenario, pagination/search/schema recheck, notification refresh and failed refresh tests | Final representative composition; do not rebuild the existing gateway |
-| P06 artifacts | Real XLSX/DOCX/PDF/PNG multi-step edits, old/latest same-name versions, cross-task isolation | Resource read entry/size boundaries and final delivery flow |
-| P07 stdio MCP | Original lease/process/RPC runner and API restart gates; install/start/call/end/cancel/cleanup | Verify exact coverage of remaining promises and old unbound file recovery; historical artifact-only API gap is superseded by newer response-recovery gates |
-| P08 Shell | Literal argv, installed scripts, MCP file handoff, process cleanup | Selected protocol composition and client validation; ECS representative resource measurement already exists |
-| P09 existing hosts | Independent component health, task/version isolation; no generic device-control scope | Actual target host declarations, dependency failure/recovery, no fabricated host execution |
-| P10 installation/build | Real npm/Python/combined builds, offline reuse, execution modes, old task-copy source compatibility, original install recovery | Full chosen-sample combinations; preserve immutable archives |
-| P11 plugin protocols | Commands, child Agents, preloaded skills, root tool Hooks, fork, DeepSeek V4.1 Flash, dynamic context and session-scoped skill tool Hooks/once deployed with real-container evidence; startup/prompt/Stop/asyncRewake/conditional follow-up locally checked (531 full tests, final targeted checks and SDK rerun) | Exact-main container CI and deployment of lifecycle follow-up; necessary Apps/client extension implementation (inline-card scope now user-confirmed); real selected plugin combinations |
-| P12 budgets | Shared persisted tool/code/model counters, failed/resumed work, no plan-count hard block; provider-count comparisons | Cross-entry concurrency/failure/recovery matrix. Existing ECS sample is not arbitrary concurrency/load proof |
-| P13 lifecycle | Source/operation identity, unknown-effect no replay, correlated result/file preservation, real restart/cleanup gates | Cross-entry revoke/cancel/restart combinations not already proven |
-| P14 release | `4ce890b` standard deployment verified health/data/API/public HTTPS/restore/cleanup and scoped skill/fork/container gate | Remaining scope completion and final current-release deployment; client 未执行验证，待用户真机验证 |
+| P01 action authorization | Bound parameters/connection/source, pre-submit recheck, persisted grant/denial; actual SDK direct/gateway/fork/App account-action fixtures | No fabricated authority for unknown external services or real third-party account-effect claim |
+| P02 coexistence | Real filesystem MCP + Shell + installed skill/command/Agent/fork/Hook combination; official reviewer SDK and published App browser/stdout; official App exact-container gate passed | Controlled-provider dispatch does not prove real-model semantic review quality |
+| P03 intent/discovery | Discovery beyond initial recommendation; live source withdrawal; catalog refresh/failure recovery; cross-entry cancellation | Existing selected connectors, not every future service |
+| P04 network lifecycle | Exact action grants, pre-submit withdrawal, token/revision binding, original request resume; actual live proxy revoke/immediate regrant/delayed-off gate; cleanup scoped to owned execution | Source output never grants network; no new browser/device host |
+| P05 large catalogs | 121-tool actual SDK; 240-tool directory pagination/search/schema checks, notification refresh and failed refresh recovery | Representative bounded catalog evidence, no unlimited-size claim |
+| P06 artifacts | Real binary edit/re-export/version/ownership gates; actual resource SDK 100000-byte full data + bounded context, 33 MiB refusal and mid-read revocation | Native file opening remains user device verification |
+| P07 stdio MCP | Original lease/process/RPC runner and API restart gates; original unbound file recovery, acknowledgement retry/dedupe, wrong tenant/runner refusal; install/start/call/end/cancel/cleanup | Original `mcp_lease_recovery_test.dart` supersedes old unbound-recovery todo |
+| P08 Shell | Literal argv, immutable installed scripts, MCP file handoff, child process cleanup and dynamic command context in real combined gate | Native UI verification remains user-owned |
+| P09 existing hosts | Current ECS isolated stdio/code hosts, actual declarations; independent unhealthy/healthy component handling; dependency repair and original-install recovery | User excluded generic computer/phone control and new equipment; host absence is not faked execution |
+| P10 installation/build | Actual npm/Python/combined lifecycle builds, offline installed reuse, executable modes, old task-copy compatibility, failed update preservation and original install recovery | Immutable archives/locked dependencies retained |
+| P11 plugin protocols | Deployed command/Agent/preload/fork/model aliases, skill/root Hooks including startup/prompt/Stop/async/conditions; real official reviewer source; necessary negotiated MCP Apps bridge/resources/calls; official App exact-container gate and deployment passed | Unknown proprietary apps/extensions manifests are not silently declared compatible; native UI remains user validation |
+| P12 budgets | Persisted tool/code/model counters, failed/resumed/steered work, concurrent reservations; App SDK inherits tool limit and does not create provider calls for direct refresh | ECS 24 overlapping samples is not arbitrary load/SLA proof |
+| P13 lifecycle | Source/operation identity, unknown-effect no replay, correlated response/files, real runner/API restart/cleanup; App original-ID recovery/cancel/revoke/known outcome tests | Native confirmation/focus behavior remains device validation |
+| P14 release | `1d16089` standard deployment verified exact artifact/image identity, runtime probe, health/data/API25/public HTTPS/sole restore point/cleanup; Android debug build and 23 existing client tests passed | Client 未执行验证，待用户真机验证; image service explicitly deferred by user |
 
 ## Evidence anchors
 
@@ -28,6 +33,8 @@ not the final closure report. Historical todo tables do not override newer proof
 - `evidence/2026-10-30-hooks-python-mcp-release.json`: preceding full container/restart/image-roundtrip evidence.
 - `evidence/2026-10-29-ecs-task-resources.json`: 24 overlapping MCP/code samples, about 1.01 GiB minimum host memory available; zero probe resources remaining.
 - `2026-11-01-plugin-protocol-sources.md`: newly pinned reference samples and protocol/license limitations, not executable acceptance.
+- `2026-11-01-cross-entry-acceptance.md`: selected sources, entry matrix, exact resource/budget/recovery checks and verification limits.
+- `2026-11-01-mcp-apps-acceptance.md`: published sample, actual browser/stdio observations, server/client checks and pending deployment.
 
 No paid image service is called or awaited. No new hardware, server purchase or
 generic desktop/mobile control is required. No item is closed merely because

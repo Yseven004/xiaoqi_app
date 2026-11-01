@@ -4,7 +4,8 @@ Latest executable evidence supersedes the historical inspection-only statuses
 below: `2026-11-01-mcp-apps-acceptance.md` and
 `2026-11-01-cross-entry-acceptance.md`. Root lifecycle is deployed as
 `20261101-200636-f42434b`. Official published Apps 2.0.4 has run via actual local
-stdio and its bundled browser SDK; exact-container CI remains pending here.
+stdio and its bundled browser SDK; exact-container CI 41310016481 and standard
+deployment `20261101-211115-1d16089` passed, product/API 25 verified.
 Official plugin-dev 0.1.1 skill-reviewer (same pinned repository commit below)
 has an unchanged-source actual Agent SDK test, Apache-2.0 fixture/license/notice
 retained. Code-explorer and security-guidance remain stress references rather
