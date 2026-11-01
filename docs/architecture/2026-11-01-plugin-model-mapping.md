@@ -42,6 +42,12 @@ The targeted policy and real SDK scenario passed (2 tests). The complete policy
 and Agent regression then passed 32 tests, with `dart analyze` reporting no
 issues. A subsequent direct/nested model SDK run passed both scenarios, proving
 that a mapped child passes its actual DeepSeek model to an inheriting grandchild.
-Exact-main CI and standard server deployment remain required before this change
-is described as deployed. A local model fixture is
-not a live provider or real-device check. No paid image service was called.
+Exact-main CI `41269309017` passed 483 Dart, 93 runner, 30 deployment, 2 bridge
+and 2 sandbox image tests, real-container gates and image roundtrip. Standard
+deployment `20261101-113206-281cd51` completed with exit 0, runtime probe,
+health/data, traffic resumption, cleanup and independent public HTTPS/API 24
+verification. The service is healthy with one restore point and data.
+This change is server deployed and verified. See
+`evidence/2026-11-01-deepseek-plugin-release.json`.
+A local model fixture is not a live alias-specific plugin or real-device check.
+No paid image service was called.

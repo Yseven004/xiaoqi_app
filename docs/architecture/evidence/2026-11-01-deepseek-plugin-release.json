@@ -1,0 +1,57 @@
+{
+  "main_commit": "281cd512437ff2d581ecb0ef69aef3a21ac9c2b2",
+  "release": "20261101-113206-281cd51",
+  "verification_profile": "non-image",
+  "ci": {
+    "run_id": 41269309017,
+    "job_id": 124738590987,
+    "conclusion": "success",
+    "dart_tests": 483,
+    "runner_tests": 93,
+    "deployment_python_tests": 30,
+    "bridge_tests": 2,
+    "sandbox_image_tests": 2,
+    "stdio_runtime_gate": true,
+    "image_export_import_roundtrip": true
+  },
+  "model_routing_evidence": {
+    "sdk_parent_model": "mimo-v2.6-flash",
+    "plugin_declared_model": "sonnet",
+    "sdk_child_actual_http_model": "deepseek-flash",
+    "nested_actual_http_model": "deepseek-flash",
+    "original_and_actual_model_recorded": true,
+    "observed_provider_requests_match_persisted_budget": true,
+    "live_alias_specific_plugin_call": false
+  },
+  "deployment": {
+    "controller_exit_code": 0,
+    "runtime_probe": true,
+    "health_and_data": true,
+    "traffic_resumed": true,
+    "cleanup": true,
+    "current_release": "20261101-113206-281cd51",
+    "current_health": "healthy",
+    "restore_point": "latest-good",
+    "restore_data": "present",
+    "public_https": 200,
+    "public_verification_source": "cloud_assistant",
+    "product_release": "2026-10-27-agent-tools-2",
+    "api_contract": "24",
+    "log": "C:/Users/20833/Desktop/xiaoqi_app/.codex-artifacts/deploy/20261101-113206-281cd51.log"
+  },
+  "local_network_recovery": {
+    "existing_process_proxy": "http://127.0.0.1:7890",
+    "system_configuration_changed": false,
+    "new_proxy_service_started": false,
+    "deepseek_key_presence_check": "t-hk071rggf3h50qo",
+    "key_value_disclosed": false,
+    "failed_ci_upload_cleanup": "t-hk071rgjikniby8",
+    "failed_ci_upload_cleanup_result": "Success/0"
+  },
+  "limitations": [
+    "Alias routing is proven using actual SDK HTTP requests to local provider fixtures; the specific third-party alias plugin has not been executed against a live provider.",
+    "Dynamic command follow-up and remaining P11 protocols are not included in this release.",
+    "No paid image service was invoked.",
+    "Client: 未执行验证，待用户真机验证。"
+  ]
+}

@@ -21,7 +21,7 @@ The security-guidance sample has a real lifecycle and asynchronous requirement;
 it cannot be replaced with a basic synthetic PreToolUse Hook and called complete.
 Its model-based branches have not been executed. No paid image service is involved.
 
-Current Dart parser/policy probe was also run against those exact downloaded
+Before the model mapping change, a Dart parser/policy probe ran against those exact downloaded
 source bytes (no plugin script or external model execution): commit parsing
 rejects dynamic Shell interpolation; code-explorer parses but policy reports
 missing `sonnet`, `LS`, `NotebookRead`, `TodoWrite`, `KillShell`, `BashOutput`
