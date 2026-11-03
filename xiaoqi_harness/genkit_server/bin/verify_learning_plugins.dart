@@ -111,20 +111,46 @@ Future<void> main() async {
             .map((e) => e['tool'])
             .toList();
         final bool verified;
+        var annotationChecks = <String, bool>{};
         if (annotation) {
           final images = artifacts
               .where((a) => a['media_type'] == 'image/png')
               .toList();
-          verified =
-              images.length == 1 &&
-              tools.where((t) => t == 'execute_skill_script').length >= 2 &&
-              !tools.contains('generate_image') &&
-              task['native_annotation'] == true &&
-              artifacts
-                  .where(
-                    (a) => a['name'].toString().startsWith('annotation-ocr-'),
-                  )
-                  .every((a) => a['internal'] == true);
+          final skillScriptCount = tools
+              .where((t) => t == 'execute_skill_script')
+              .length;
+          final usedImageGeneration = tools.contains('generate_image');
+          final nativeAnnotation = task['native_annotation'] == true;
+          final ocrArtifacts = artifacts
+              .where((a) => a['name'].toString().startsWith('annotation-ocr-'))
+              .toList();
+          final allOcrArtifactsAreInternal = ocrArtifacts.every(
+            (a) => a['internal'] == true,
+          );
+          final checks = <String, bool>{
+            'exactly_one_png': images.length == 1,
+            'at_least_two_skill_script_calls': skillScriptCount >= 2,
+            'no_image_generation': !usedImageGeneration,
+            'native_annotation_enabled': nativeAnnotation,
+            'ocr_evidence_internal': allOcrArtifactsAreInternal,
+          };
+          annotationChecks = checks;
+          verified = checks.values.every((passed) => passed);
+          stdout.writeln(
+            jsonEncode({
+              'annotation_checks': checks,
+              'png_artifact_count': images.length,
+              'skill_script_call_count': skillScriptCount,
+              'used_image_generation': usedImageGeneration,
+              'native_annotation_enabled': nativeAnnotation,
+              'ocr_evidence_count': ocrArtifacts.length,
+              'ocr_evidence_internal': allOcrArtifactsAreInternal,
+              'artifact_media_types': artifacts
+                  .map((a) => a['media_type']?.toString() ?? 'missing')
+                  .toSet()
+                  .toList(),
+            }),
+          );
         } else {
           final updates = task['learning_notes'] as List? ?? const [];
           verified =
@@ -147,10 +173,17 @@ Future<void> main() async {
             'extension_evidence_missing': result.extensionEvidenceMissing,
           }),
         );
-        if (!verified || result.extensionEvidenceMissing)
+        if (!verified || result.extensionEvidenceMissing) {
+          final failedChecks = annotationChecks.entries
+              .where((entry) => !entry.value)
+              .map((entry) => entry.key)
+              .join(',');
           throw StateError(
-            'Native learning plugin live verification failed: $id',
+            'Native learning plugin live verification failed: $id; '
+            'failed_checks=$failedChecks; '
+            'extension_evidence_missing=${result.extensionEvidenceMissing}',
           );
+        }
       } finally {
         timer.cancel();
       }
