@@ -25,7 +25,7 @@ class StoreVerificationTests(unittest.TestCase):
         baseline = {'documents': [['private/note', 1]], 'document_hashes': {'private/note': '1'*64},
                     'object_keys': ['private/file'], 'object_file_hashes': {'private/file': '2'*64},
                     'counts': {'documents': 1, 'objects': 1, 'object_files': 1}}
-        names = ['book-to-skill', 'study-notes-studio']
+        names = ['book-to-skill', 'study-notes-studio', 'original-reading-annotations', 'learning-notes-manager']
         keys = ['skill-market/' + hashlib.sha256(f'_official-curated/{name}'.encode()).hexdigest() for name in names]
         objects = [f'official-catalog/{name}/' + 'a'*64 + '.zip' for name in names]
         changes = {'schema': 1, 'documents': [[key, 1] for key in keys],
@@ -34,7 +34,7 @@ class StoreVerificationTests(unittest.TestCase):
         expected = with_catalog_changes(baseline, changes)
         self.assertEqual(expected['document_hashes']['private/note'], '1'*64)
         self.assertEqual(expected['object_file_hashes']['private/file'], '2'*64)
-        self.assertEqual(expected['counts'], {'documents': 3, 'objects': 3, 'object_files': 3})
+        self.assertEqual(expected['counts'], {'documents': 5, 'objects': 5, 'object_files': 5})
         actual = dict(expected, document_hashes=dict(expected['document_hashes'], **{'private/note': '5'*64}))
         self.assertNotEqual(actual, expected)
         forged = dict(changes, documents=[['private/note', 2], changes['documents'][1]])

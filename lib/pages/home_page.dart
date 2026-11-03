@@ -45,6 +45,8 @@ import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
 import '../services/book_library_service.dart';
 import '../services/ai_service.dart';
+import '../services/learning_notes_service.dart';
+import '../widgets/learning_notes_status_bar.dart';
 import '../services/home_chat_attachment_preparer.dart';
 import '../services/home_chat_drawing_draft_store.dart';
 import '../models/chat_annotation.dart';
@@ -595,7 +597,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     unawaited(_modelPreferences.load().catchError((_) {}));
     _conversation = AiConversationRecord.empty(enableAutoTitle: true);
     unawaited(_refreshEmailSession());
-    unawaited(_syncCapabilitiesAtStartup());
+    unawaited(
+      _syncCapabilitiesAtStartup().whenComplete(
+        () => LearningNotesService.instance.catchUp(),
+      ),
+    );
     _lastKeyboardInset = _currentKeyboardInset;
     _composerController.addListener(_cacheCurrentDraft);
     _composerFocusNode.addListener(_onComposerFocusChanged);
@@ -3439,7 +3445,13 @@ $materialIndex
               ? 'attachment_only'
               : null
         : null;
+    final notesService = LearningNotesService.instance;
+    final notesScope = await notesService.accountScope();
+    final nativeNotesEnabled = await notesService.selected(capability);
+    if (nativeNotesEnabled) notesService.processing(conversationId);
     final turnMetadata = <String, dynamic>{
+      if (nativeNotesEnabled)
+        'learning_note_topics': await notesService.topics(),
       'task_id': taskId,
       'workflow_id': conversationId,
       'user_message_id': question.id,
@@ -3721,6 +3733,15 @@ $materialIndex
         );
       }
 
+      if (response.state?['learning_notes_task_id'] == taskId) {
+        await notesService.accept(
+          response.state?['learning_notes'],
+          conversationId: conversationId,
+          messageId: question.id,
+          expectedScope: notesScope,
+        );
+      }
+      notesService.finishWithoutUpdates(conversationId);
       final finalText = response.text.trimRight();
       if (finalText.isNotEmpty) {
         _streamingReplyBuffer
@@ -3791,6 +3812,7 @@ $materialIndex
       if (_isCurrentRequest(generation, conversationId)) {
         _abortActiveAgentTurn = null;
       }
+      notesService.finishWithoutUpdates(conversationId);
       if (_activeRemoteAgentTaskId == taskId) {
         _activeRemoteAgentTaskId = null;
         _activeRemoteAgentConversationId = null;
@@ -5004,6 +5026,12 @@ $text''';
         return;
       }
       final result = completedText ?? _streamingReplyBuffer.toString();
+      await LearningNotesService.instance.collectTask(
+        taskId,
+        conversationId: conversationId,
+        messageId: messageId,
+        expectedScope: await LearningNotesService.instance.accountScope(),
+      );
       if (result.trim().isEmpty) {
         throw const AiException('任务已结束，但没有返回可恢复的结果');
       }
@@ -5048,6 +5076,7 @@ $text''';
   List<Map<String, Object?>> _taskArtifacts(Object? value) => value is List
       ? value
             .whereType<Map>()
+            .where((item) => item['internal'] != true)
             .map((item) => Map<String, Object?>.from(item))
             .toList(growable: false)
       : const [];
@@ -7333,6 +7362,9 @@ $text''';
                                             ),
                                         ],
                                       ),
+                              ),
+                              LearningNotesStatusBar(
+                                conversationId: _conversation?.id,
                               ),
                               ValueListenableBuilder<bool>(
                                 valueListenable: _keyboardInsetsChanging,

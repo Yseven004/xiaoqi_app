@@ -1,2 +1,2 @@
-const releaseId = '2026-11-03-agent-resume';
-const apiContractVersion = '26';
+const releaseId = '2026-11-03-learning-plugins';
+const apiContractVersion = '27';

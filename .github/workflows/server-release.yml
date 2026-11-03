@@ -68,6 +68,9 @@ jobs:
             esac
             docker build --platform linux/amd64 --provenance=false -f "$dockerfile" -t "$image:local" "$context" 2>&1 | tee "$RUNNER_TEMP/build-logs/$name.log"
           done
+      - name: Verify native annotations with real Chinese OCR
+        run: |
+          docker run --rm --network none --memory 384m --cpus 0.5 -v "$GITHUB_WORKSPACE:/source:ro" xiaoqi-code-sandbox:local python3 /source/xiaoqi_harness/genkit_server/test/annotation_engine_test.py
       - name: Verify isolated stdio MCP without paid services
         run: bash xiaoqi_harness/deploy/run_stdio_gate.sh
       - name: Export verified release

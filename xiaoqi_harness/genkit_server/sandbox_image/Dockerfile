@@ -2,7 +2,8 @@ FROM node:24-bookworm-slim
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      python3 python3-pip ca-certificates poppler-utils \
+      python3 python3-pip python3-pil ca-certificates poppler-utils \
+      tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
       fontconfig fonts-noto-cjk latexmk texlive-lang-chinese texlive-xetex \
  && rm -rf /var/lib/apt/lists/* \
  && command -v xelatex >/dev/null \
@@ -13,6 +14,9 @@ RUN apt-get update \
  && useradd --uid 10001 --gid 10001 --create-home --home-dir /tmp/home --shell /usr/sbin/nologin sandbox \
  && mkdir -p /workspace \
  && chmod 0755 /workspace
+
+COPY fonts/ /usr/local/share/fonts/
+RUN fc-cache -f && test -f /usr/local/share/fonts/LongCang-Regular.ttf
 
 WORKDIR /workspace
 ENV HOME=/tmp/home \

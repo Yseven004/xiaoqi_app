@@ -1271,6 +1271,21 @@ class XiaoqiApi {
             return {...custom, 'web_sources': webSources};
           });
         }
+        session.updateCustom(
+          (current) => {
+            ...?current,
+            'learning_notes_task_id': taskId,
+            'learning_notes':
+                result.finishReason == AgentFinishReason.interrupted ||
+                    result.finishReason == AgentFinishReason.aborted ||
+                    result.extensionEvidenceMissing
+                ? const []
+                : store
+                          .get('task/$tenantId/$taskId')
+                          ?.value['learning_notes'] ??
+                      const [],
+          },
+        );
         final latestResultUserIndex = resultMessages.lastIndexWhere(
           (message) => message.role == Role.user,
         );
@@ -2662,6 +2677,9 @@ class XiaoqiApi {
         'partial_reason': value['partial_reason'],
         'image_failure': value['image_failure'],
         'result': value['result'],
+        'learning_notes': value['status'] == 'completed'
+            ? value['learning_notes'] ?? const []
+            : const [],
         'draft': files['SKILL.md'],
         'files': encoded,
         'artifacts': [
@@ -3445,7 +3463,14 @@ class XiaoqiApi {
     String taskId,
   ) => {
     'task_id': taskId,
-    for (final field in const ['id', 'name', 'media_type', 'size', 'sha256'])
+    for (final field in const [
+      'id',
+      'name',
+      'media_type',
+      'size',
+      'sha256',
+      'internal',
+    ])
       if (item.containsKey(field)) field: item[field],
   };
 

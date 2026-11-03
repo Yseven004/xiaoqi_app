@@ -81,7 +81,9 @@ class SelectedSkills {
         .where((v) => v['id'] == versionId)
         .firstOrNull;
     if (version == null) throw StateError('扩展版本不存在，请刷新后重新选择');
-    final components = const {'github', 'upload'}.contains(record['origin'])
+    final components =
+        version['components'] is List &&
+            (version['components'] as List).isNotEmpty
         ? (version['components'] as List).whereType<Map>().toList()
         : <Map>[
             {
@@ -132,6 +134,19 @@ class SelectedSkills {
   final unavailableIds = <String>[];
   final unavailableSelections = <Map<String, String>>[];
   final _packages = <String, Map<String, List<int>>>{};
+
+  bool isOfficialActive(
+    String name,
+    Iterable<String> aliases, {
+    bool explicitOnly = false,
+  }) => aliases.any(
+    (alias) =>
+        (!explicitOnly || explicitIds.contains(alias)) &&
+        entries[alias]?['artifact_key']?.startsWith(
+              'official-catalog/$name/',
+            ) ==
+            true,
+  );
 
   void _unavailable(String id, {String? componentId, String? versionId}) {
     final record = store.get('cap/$tenant/$id')?.value;

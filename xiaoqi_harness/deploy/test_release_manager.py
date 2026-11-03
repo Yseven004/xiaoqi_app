@@ -36,6 +36,8 @@ elif a[0] == 'run':
         if os.environ.get('FAIL_PROBE') == '1': sys.exit(8)
     elif '/app/bin/verify_official_catalog' in a:
         if os.environ.get('FAIL_CURATED_PROBE') == '1': sys.exit(8)
+    elif '/app/bin/verify_learning_plugins' in a:
+        if os.environ.get('FAIL_LEARNING_PROBE') == '1': sys.exit(8)
     elif '--seed-official-catalog' in a:
         if os.environ.get('FAIL_CATALOG_SEED') == '1': sys.exit(8)
         print('{}')
@@ -153,6 +155,12 @@ class ManagerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
         self.assertFalse((self.root/'restore/next').exists())
+        self.assertNotIn(' stop app', (self.root/'docker.calls').read_text())
+
+    def test_failed_learning_probe_never_stops_running_service(self):
+        result = self.deploy(FAIL_LEARNING_PROBE='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
         self.assertNotIn(' stop app', (self.root/'docker.calls').read_text())
 
     def test_failed_catalog_seed_restores_source_version_and_data(self):

@@ -1325,6 +1325,11 @@ class DockerCodeExecutionService {
     for (final raw in rawArtifacts.whereType<Map>()) {
       final rawName = raw['name']?.toString() ?? '';
       final name = _safeArtifactName(rawName);
+      final internal =
+          store.get('task/$tenantId/$taskId')?.value['native_annotation'] ==
+              true &&
+          (RegExp(r'^annotation-ocr-[a-f0-9]{16}\.json$').hasMatch(name) ||
+              name == 'annotation-receipt.json');
       final encoded = raw['base64']?.toString() ?? '';
       final bytes = base64Decode(encoded);
       final maximum = dependencyBuild && name == 'dependencies.zip'
@@ -1354,6 +1359,7 @@ class DockerCodeExecutionService {
         'size': bytes.length,
         'sha256': sha256.convert(bytes).toString(),
         'object_key': objectKey,
+        if (internal) 'internal': true,
       });
     }
     if (pending.isEmpty) return const [];
@@ -1467,6 +1473,7 @@ class DockerCodeExecutionService {
   static Map<String, dynamic> _publicArtifact(Map<String, dynamic> item) => {
     for (final key in const ['id', 'name', 'media_type', 'size', 'sha256'])
       key: item[key],
+    if (item['internal'] == true) 'internal': true,
   };
 
   static String _safeArtifactName(String value) {

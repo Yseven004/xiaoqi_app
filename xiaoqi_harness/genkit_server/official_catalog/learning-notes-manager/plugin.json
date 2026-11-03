@@ -1,0 +1,1 @@
+{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"learning-notes-manager","version":"1.0.0","description":"聊天学习时自动整理到小七原生可编辑笔记，追加知识并保留手工修改。","author":{"name":"第七世界"},"license":"MIT"}

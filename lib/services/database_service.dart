@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import '../models/chat_note_capture.dart';
 import '../models/note_attachment.dart';
 import '../models/note.dart';
+import '../models/learning_note_delta.dart';
 import '../models/notebook.dart';
 import '../models/user.dart';
 
@@ -20,7 +21,7 @@ class DatabaseService {
 
   static Database? _database;
   static const String _dbName = 'xiaoqi.db';
-  static const int _dbVersion = 34;
+  static const int _dbVersion = 35;
   static const int homeNotebookLimit = 7;
   static const int pinnedNotebookLimit = 10;
   static const Duration deletedNotebookRetention = Duration(days: 30);
@@ -150,6 +151,7 @@ class DatabaseService {
       ON notes(book_id, is_deleted, is_pinned, pinned_at, updated_at)
     ''');
     await _createChatNoteSourceTable(db);
+    await _createLearningNoteTables(db);
     await _createNoteAttachmentTable(db);
     await _createNoteRelationTables(db);
     await db.execute(
@@ -711,6 +713,18 @@ class DatabaseService {
       await _createNotebookBookIndexes(db);
       await _defaultNotebookId(db);
     }
+    if (oldVersion < 35 && newVersion >= 35) {
+      await _createLearningNoteTables(db);
+    }
+  }
+
+  static Future<void> _createLearningNoteTables(DatabaseExecutor db) async {
+    await db.execute(
+      'CREATE TABLE IF NOT EXISTS learning_note_topics (scope TEXT NOT NULL, topic_id TEXT NOT NULL, note_id INTEGER NOT NULL, PRIMARY KEY(scope, topic_id))',
+    );
+    await db.execute(
+      'CREATE TABLE IF NOT EXISTS learning_note_queue (scope TEXT NOT NULL, receipt_id TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT \'pending\', error TEXT, note_id INTEGER, applied_at TEXT, PRIMARY KEY(scope, receipt_id))',
+    );
   }
 
   static Future<void> _createNotebookBookIndexes(DatabaseExecutor db) async {
@@ -1127,6 +1141,9 @@ class DatabaseService {
     _database = db;
   }
 
+  @visibleForTesting
+  Future<void> createForTesting(Database db) => _onCreate(db, _dbVersion);
+
   // ========================
   // 通用插入
   // ========================
@@ -1427,6 +1444,210 @@ class DatabaseService {
     });
   }
 
+  Future<List<Map<String, dynamic>>> learningNoteTopics(String scope) async {
+    final db = await database;
+    return db.rawQuery(
+      'SELECT t.topic_id AS id, n.title FROM learning_note_topics t JOIN notes n ON n.id=t.note_id WHERE t.scope=? AND n.is_deleted=0 ORDER BY n.updated_at DESC LIMIT 100',
+      [scope],
+    );
+  }
+
+  Future<void> enqueueLearningNotes(
+    String scope,
+    List<Map<String, dynamic>> updates,
+  ) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      for (final update in updates) {
+        final delta = LearningNoteDelta.fromJson(update);
+        await txn.insert('learning_note_queue', {
+          'scope': scope,
+          'receipt_id': delta.receiptId,
+          'payload': jsonEncode(update),
+          'status': 'pending',
+        }, conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+    });
+  }
+
+  Future<List<({int noteId, String title, String conversationId})>>
+  applyLearningNotes(
+    String scope,
+    Set<int> editingIds, {
+    bool Function()? shouldContinue,
+    Set<String>? enabledConversations,
+  }) async {
+    final db = await database;
+    final pending = await db.query(
+      'learning_note_queue',
+      where: 'scope=? AND status=?',
+      whereArgs: [scope, 'pending'],
+      limit: 50,
+    );
+    final saved = <({int noteId, String title, String conversationId})>[];
+    for (final row in pending) {
+      if (shouldContinue?.call() == false) break;
+      try {
+        final result = await db.transaction((txn) async {
+          final fresh = await txn.query(
+            'learning_note_queue',
+            where: 'scope=? AND receipt_id=? AND status=?',
+            whereArgs: [scope, row['receipt_id'], 'pending'],
+          );
+          if (fresh.isEmpty) return null;
+          final payload = Map<String, dynamic>.from(
+            jsonDecode(fresh.single['payload'] as String) as Map,
+          );
+          final delta = LearningNoteDelta.fromJson(payload);
+          if (enabledConversations != null &&
+              !enabledConversations.contains(payload['conversation_id'])) {
+            return null;
+          }
+          final links = await txn.query(
+            'learning_note_topics',
+            where: 'scope=? AND topic_id=?',
+            whereArgs: [scope, delta.topicId],
+          );
+          final oldId = links.isEmpty ? null : links.single['note_id'] as int;
+          if (oldId != null && editingIds.contains(oldId)) return null;
+          final rows = oldId == null
+              ? <Map<String, Object?>>[]
+              : await txn.query('notes', where: 'id=?', whereArgs: [oldId]);
+          if (shouldContinue?.call() == false ||
+              (oldId != null && editingIds.contains(oldId))) {
+            return null;
+          }
+          if (oldId != null &&
+              (rows.isEmpty || rows.single['is_deleted'] != 0)) {
+            await txn.update(
+              'learning_note_queue',
+              {'status': 'deleted', 'error': '目标笔记已删除，本次未追加'},
+              where: 'scope=? AND receipt_id=?',
+              whereArgs: [scope, delta.receiptId],
+            );
+            return null;
+          }
+          final now = DateTime.now().toIso8601String();
+          final old = rows.isEmpty
+              ? null
+              : Note.fromMap(Map<String, dynamic>.from(rows.single));
+          final content = delta.append(
+            content: old?.content ?? '',
+            delta: old?.contentDelta ?? '',
+            existing: old != null,
+          );
+          final int noteId;
+          if (old == null) {
+            final note = Note(
+              type: 'text',
+              title: delta.title,
+              content: content.content,
+              contentDelta: content.delta,
+              createdAt: now,
+              updatedAt: now,
+            );
+            final map = await _noteMap(txn, note);
+            noteId = await txn.insert('notes', map);
+            await _syncNoteRelations(txn, noteId, map);
+            await _touchNotebook(txn, map['notebook_id'] as int?, now);
+            await txn.insert('learning_note_topics', {
+              'scope': scope,
+              'topic_id': delta.topicId,
+              'note_id': noteId,
+            });
+          } else {
+            noteId = old.id!;
+            await txn.update(
+              'notes',
+              {
+                'content': content.content,
+                'content_delta': content.delta,
+                'updated_at': now,
+              },
+              where: 'id=? AND is_deleted=0',
+              whereArgs: [noteId],
+            );
+            await _touchNotebook(txn, old.notebookId, now);
+          }
+          await txn.insert(
+            'note_chat_sources',
+            ChatNoteSourceRecord(
+              conversationId: payload['conversation_id'] as String,
+              messageId: payload['message_id'] as String,
+              captureKind: 'learning_note',
+              sourceText: payload['source_text'] as String,
+              capturedAt: now,
+            ).toMap(noteId),
+          );
+          await txn.update(
+            'learning_note_queue',
+            {
+              'status': 'applied',
+              'note_id': noteId,
+              'error': null,
+              'applied_at': now,
+            },
+            where: 'scope=? AND receipt_id=?',
+            whereArgs: [scope, delta.receiptId],
+          );
+          return (
+            noteId: noteId,
+            title: old?.title ?? delta.title,
+            conversationId: payload['conversation_id'] as String,
+          );
+        });
+        if (result != null) saved.add(result);
+      } on Object catch (error) {
+        await db.update(
+          'learning_note_queue',
+          {
+            'status': 'error',
+            'error': error is FormatException
+                ? error.message
+                : '本次整理未保存，原聊天和笔记已保留',
+          },
+          where: 'scope=? AND receipt_id=?',
+          whereArgs: [scope, row['receipt_id']],
+        );
+      }
+    }
+    return saved;
+  }
+
+  Future<({String message, bool retry, String conversationId})?>
+  learningNoteError(String scope, {String? conversationId}) async {
+    final db = await database;
+    final rows = await db.query(
+      'learning_note_queue',
+      columns: ['error', 'status', 'payload'],
+      where: 'scope=? AND status IN (?,?)',
+      whereArgs: [scope, 'error', 'deleted'],
+      limit: 50,
+    );
+    for (final row in rows) {
+      final source =
+          (jsonDecode(row['payload'] as String) as Map)['conversation_id']
+              as String;
+      if (conversationId == null || source == conversationId)
+        return (
+          message: row['error'] as String? ?? '本次整理未完成',
+          retry: row['status'] == 'error',
+          conversationId: source,
+        );
+    }
+    return null;
+  }
+
+  Future<void> retryLearningNotes(String scope) async {
+    final db = await database;
+    await db.update(
+      'learning_note_queue',
+      {'status': 'pending', 'error': null},
+      where: 'scope=? AND status=?',
+      whereArgs: [scope, 'error'],
+    );
+  }
+
   Future<(Note, List<NoteAttachment>)> saveNoteEditorSnapshot(
     Note note, {
     ChatNoteSourceRecord? source,
@@ -1434,10 +1655,36 @@ class DatabaseService {
     int? autoNotebookBookId,
     int? supplementalBookId,
     String supplementalBookName = '',
+    String? learningNotesBaseline,
   }) async {
     final db = await database;
     return db.transaction((txn) async {
       final map = note.toMap();
+      if (note.id != null &&
+          learningNotesBaseline != null &&
+          learningNotesBaseline.isNotEmpty) {
+        final additions = await txn.query(
+          'learning_note_queue',
+          columns: ['payload'],
+          where: 'note_id=? AND status=? AND applied_at>?',
+          whereArgs: [note.id, 'applied', learningNotesBaseline],
+          orderBy: 'applied_at, receipt_id',
+        );
+        for (final row in additions) {
+          final addition = LearningNoteDelta.fromJson(
+            Map<String, dynamic>.from(
+              jsonDecode(row['payload'] as String) as Map,
+            ),
+          );
+          final merged = addition.append(
+            content: map['content'] as String,
+            delta: map['content_delta'] as String,
+            existing: true,
+          );
+          map['content'] = merged.content;
+          map['content_delta'] = merged.delta;
+        }
+      }
       map['notebook_id'] ??= autoNotebookBookId != null
           ? await _bookNotebookId(txn, autoNotebookBookId)
           : await _defaultNotebookId(txn);

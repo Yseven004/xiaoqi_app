@@ -25,11 +25,11 @@ void main() {
     'curated packages install, resolve all runtime resources and seed once',
     () {
       final changes = seedOfficialCatalog(store);
-      expect(changes['documents'], hasLength(2));
-      expect(changes['object_keys'], hasLength(2));
+      expect(changes['documents'], hasLength(4));
+      expect(changes['object_keys'], hasLength(4));
       final market = SkillMarket(store);
       final publications = store.list('skill-market/');
-      expect(publications, hasLength(2));
+      expect(publications, hasLength(4));
       for (final (_, publication) in publications) {
         final listing = market.listing(publication, 'alice', detail: true);
         final key = 'skill-market/${listing['id']}';
@@ -37,8 +37,9 @@ void main() {
           (changes['document_hashes'] as Map)[key],
           sha256.convert(utf8.encode(jsonEncode(publication.value))).toString(),
         );
-        expect(listing['curated_by'], '第七世界');
-        expect(listing['author'], isNot('第七世界'));
+        final original = (listing['provenance'] as Map)['original'] == true;
+        expect(listing['curated_by'], original ? isNull : '第七世界');
+        expect(listing['author'], original ? '第七世界' : isNot('第七世界'));
         expect((listing['provenance'] as Map)['license'], 'MIT');
         final installed = market.install(
           'alice',
@@ -52,6 +53,26 @@ void main() {
           },
         ]);
         final files = selected.files(selected.entries.values.single);
+        if (original) {
+          expect(installed.value['kind'], 'plugin');
+          expect(files['SKILL.md'], isNotEmpty);
+          expect(
+            selected.isOfficialActive(
+              installed.value['name'],
+              selected.explicitIds,
+              explicitOnly: true,
+            ),
+            isTrue,
+          );
+          expect(
+            selected.isOfficialActive(installed.value['name'], const []),
+            isFalse,
+          );
+          if (installed.value['name'] == 'original-reading-annotations') {
+            expect(files['scripts/annotate.py'], isNotEmpty);
+          }
+          continue;
+        }
         expect(
           selected.permitsGeneratedCode(selected.entries.keys),
           installed.value['name'] == 'book-to-skill',

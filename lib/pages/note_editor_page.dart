@@ -29,6 +29,7 @@ import '../models/note_editor_result.dart';
 import '../models/notebook.dart';
 import '../services/ai_service.dart';
 import '../services/database_service.dart';
+import '../services/learning_notes_service.dart';
 import '../services/note_actions.dart';
 import '../services/speech_recognition_service.dart';
 import '../widgets/app_toast.dart';
@@ -91,6 +92,7 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   Notebook? _selectedNotebook;
   String _notebookBookTitle = '';
   Note? _note;
+  String? _learningNotesBaseline;
   List<Notebook> _notebooks = const [];
   Timer? _saveTimer;
   Future<Note?>? _pendingSave;
@@ -200,6 +202,8 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     WidgetsBinding.instance.addObserver(this);
     _lastKeyboardInset = _currentKeyboardInset;
     _note = widget.existingNote;
+    _learningNotesBaseline = _note?.updatedAt;
+    LearningNotesService.instance.beginEditing(_note?.id);
     _notebookId = widget.existingNote?.notebookId ?? widget.notebookId;
     _sourcePhotoPath = widget.existingNote?.sourcePhotoPath.isNotEmpty == true
         ? widget.existingNote!.sourcePhotoPath
@@ -936,6 +940,7 @@ class _NoteEditorPageState extends State<NoteEditorPage>
             ? widget.bookId
             : null,
         supplementalBookName: widget.bookName,
+        learningNotesBaseline: _learningNotesBaseline,
       );
       _note = result.$1;
       _notebookId = _note!.notebookId;
@@ -951,8 +956,24 @@ class _NoteEditorPageState extends State<NoteEditorPage>
         _attachments = [..._attachments, ...result.$2]
           ..sort((first, second) => first.position.compareTo(second.position));
       }
-      _lastSavedSignature = signature;
       final changedWhileSaving = _signature() != signature;
+      if (!changedWhileSaving) {
+        if (_note!.contentDelta != jsonEncode(delta)) {
+          final selection = _quillController.selection;
+          _quillController.document = _initialDocument(_note);
+          _quillController.updateSelection(
+            TextSelection.collapsed(
+              offset: selection.extentOffset.clamp(
+                0,
+                _quillController.document.length - 1,
+              ),
+            ),
+            quill.ChangeSource.local,
+          );
+        }
+        _learningNotesBaseline = _note!.updatedAt;
+      }
+      _lastSavedSignature = changedWhileSaving ? signature : _signature();
       if (mounted) {
         setState(
           () => _saveState = changedWhileSaving
@@ -3599,6 +3620,7 @@ class _NoteEditorPageState extends State<NoteEditorPage>
 
   @override
   void dispose() {
+    LearningNotesService.instance.endEditing(_note?.id);
     WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
     _chatSourcePromptTimer?.cancel();

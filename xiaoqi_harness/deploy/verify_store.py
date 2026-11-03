@@ -70,7 +70,7 @@ def manifest(root: Path) -> dict[str, object]:
 
 def with_catalog_changes(expected: dict, changes: dict) -> dict:
     """Apply only the exact deployment-owned catalog delta to the baseline."""
-    names = ("study-notes-studio", "book-to-skill")
+    names = ("study-notes-studio", "book-to-skill", "original-reading-annotations", "learning-notes-manager")
     allowed = {
         "skill-market/" + hashlib.sha256(f"_official-curated/{name}".encode()).hexdigest()
         for name in names
@@ -84,7 +84,7 @@ def with_catalog_changes(expected: dict, changes: dict) -> dict:
         raise ValueError("Unexpected catalog document delta")
     if len(objects) != len(names) or set(objects) != set(files):
         raise ValueError("Unexpected catalog object delta")
-    pattern = r"official-catalog/(study-notes-studio|book-to-skill)/[a-f0-9]{64}\.zip"
+    pattern = r"official-catalog/(study-notes-studio|book-to-skill|original-reading-annotations|learning-notes-manager)/[a-f0-9]{64}\.zip"
     if any(not re.fullmatch(pattern, key) for key in objects):
         raise ValueError("Catalog object outside the declared namespace")
     if any(type(revision) is not int or revision < 1 for revision in documents.values()):
