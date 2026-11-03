@@ -343,23 +343,6 @@ class XiaoqiApi {
           'message': '服务器重启中断了操作，请重新检查或安装；原安装版本未变。',
         }, doc.revision);
     }
-    String? afterTask;
-    while (true) {
-      final tasks = store.list('task/', limit: 200, afterKey: afterTask);
-      for (final (key, doc) in tasks) {
-        if (doc.value['remote_agent_turn'] == true &&
-            const {'running', 'pausing'}.contains(doc.value['status'])) {
-          store.put(key, {
-            ...doc.value,
-            'status': 'failed',
-            'error_code': 'execution_interrupted',
-            'updated_at': _now(),
-          }, doc.revision);
-        }
-      }
-      if (tasks.length < 200) break;
-      afterTask = tasks.last.$1;
-    }
     _agentRouter = GenkitRouter();
     final genkit = Genkit();
     _remoteAgent = genkit.defineCustomAgent<Map<String, dynamic>>(
@@ -2656,7 +2639,8 @@ class XiaoqiApi {
   Future<Response> _getTask(_Device device, String id) async {
     try {
       final taskId = _safeId(id, '任务 ID');
-      final doc = store.get('task/${device.tenant}/$taskId');
+      final key = 'task/${device.tenant}/$taskId';
+      final doc = _recoverInterruptedRemoteAgentTask(key);
       if (doc == null) return _error('任务不存在', 404);
       final value = doc.value;
       final files = Map<String, dynamic>.from(
@@ -3028,7 +3012,7 @@ class XiaoqiApi {
     try {
       final taskId = _safeId(id, '任务 ID');
       final key = 'task/${device.tenant}/$taskId';
-      final task = store.get(key);
+      final task = _recoverInterruptedRemoteAgentTask(key);
       if (task == null) return _error('任务不存在', 404);
       if (!const {
         'failed',
@@ -3456,6 +3440,25 @@ class XiaoqiApi {
       }
     }
     throw StateError('任务更新冲突过多');
+  }
+
+  StoredDocument? _recoverInterruptedRemoteAgentTask(String key) {
+    final current = store.get(key);
+    if (current == null ||
+        _controllers.containsKey(key) ||
+        current.value['remote_agent_turn'] != true ||
+        !const {'running', 'pausing'}.contains(current.value['status'])) {
+      return current;
+    }
+    return _mutateTask(
+      key,
+      (value) => {
+        ...value,
+        'status': 'failed',
+        'error_code': 'execution_interrupted',
+        'updated_at': _now(),
+      },
+    );
   }
 
   Map<String, dynamic> _publicArtifact(

@@ -239,6 +239,50 @@ void main() {
     directory.deleteSync(recursive: true);
   });
 
+  test(
+    'recovers interrupted tasks on read without mutating startup data',
+    () async {
+      const taskId = 'interrupted-after-restart';
+      final key = 'task/personal/$taskId';
+      final seeded = store.put(key, {
+        'remote_agent_turn': true,
+        'status': 'pausing',
+        'attempt': 2,
+        'agent_snapshot_id': 'snapshot-before-restart',
+      }, null);
+
+      await server.close(force: true);
+      server = await shelf_io.serve(
+        XiaoqiApi(store, _StreamingRuntime()).handler,
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      expect(store.get(key)!.revision, seeded.revision);
+      expect(store.get(key)!.value['status'], 'pausing');
+
+      final http = HttpClient();
+      try {
+        final request = await http.getUrl(
+          Uri.parse('http://127.0.0.1:${server.port}/v1/agent/tasks/$taskId'),
+        );
+        request.headers.set('authorization', 'Bearer $ownerToken');
+        request.headers.set('x-xiaoqi-contract', apiContractVersion);
+        final response = await request.close();
+        final payload =
+            jsonDecode(await response.transform(utf8.decoder).join())
+                as Map<String, dynamic>;
+
+        expect(response.statusCode, 200);
+        expect(payload['status'], 'failed');
+        expect(payload['error_code'], 'execution_interrupted');
+        expect(payload['agent_snapshot_id'], 'snapshot-before-restart');
+        expect(store.get(key)!.value['status'], 'failed');
+      } finally {
+        http.close(force: true);
+      }
+    },
+  );
+
   Message userMessage(String text, String taskId) => Message(
     role: Role.user,
     content: [TextPart(text: text)],
