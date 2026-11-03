@@ -4,6 +4,8 @@ $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'deploy_current.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
+$endpointParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Endpoint' }
+if ($endpointParameter.DefaultValue.Value -ne '') { throw 'The default endpoint must follow Region.' }
 $verificationParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'VerificationProfile' }
 if ($verificationParameter.DefaultValue.Value -ne 'full') { throw 'Full verification must remain the default.' }
 $validation = $verificationParameter.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' }
@@ -67,3 +69,19 @@ try {
     }
 } finally { Remove-Item -LiteralPath $logFile -Force }
 Write-Output 'Controller checks passed: missing fields, terminal errors, no mutation retries, and complete multi-chunk UTF-8 logs.'
+
+$definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-EcsConnection'}, $true)
+. ([ScriptBlock]::Create($definition.Extent.Text))
+$script:connectionFails = $false
+function Invoke-AliyunJson {
+    param([string[]]$Arguments)
+    if ($Arguments[1] -ne 'DescribeInstances') { throw 'Connectivity probe attempted a write.' }
+    if ($script:connectionFails) { throw 'dial tcp: i/o timeout' }
+    [pscustomobject]@{Instances=[pscustomobject]@{Instance=@([pscustomobject]@{InstanceId=$InstanceId})}}
+}
+Test-EcsConnection
+$script:connectionFails = $true
+$rejected = $false
+try { Test-EcsConnection } catch { $rejected = $_.Exception.Message -match 'before any remote changes' }
+if (-not $rejected) { throw 'Connectivity failure did not stop before remote changes.' }
+Write-Output 'Connectivity checks passed: authenticated read only and actionable failure before writes.'

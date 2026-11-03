@@ -3,13 +3,14 @@ param(
     [string]$Region = 'cn-hongkong',
     [string]$InstanceId = 'i-j6cdji1nji415swaliji',
     [string]$Profile = 'xiaoqi-remote-deploy',
-    [string]$Endpoint = 'ecs.aliyuncs.com',
+    [string]$Endpoint = '',
     [string]$PublicHealthUrl = 'https://47-76-60-77.sslip.io/health',
     [ValidateSet('full', 'non-image')][string]$VerificationProfile = 'full'
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (-not $Endpoint) { $Endpoint = "ecs.$Region.aliyuncs.com" }
 
 $RemoteRoot = '/opt/xiaoqi-single-server'
 $DeployDir = $PSScriptRoot
@@ -53,6 +54,23 @@ function Get-OptionalField {
         if ($null -ne $property) { return $property.Value }
     }
     return $Default
+}
+
+function Test-EcsConnection {
+    # Only this read can be retried. Never probe connectivity with RunCommand.
+    try {
+        $result = Invoke-AliyunJson -Arguments @(
+            'ecs', 'DescribeInstances', '--profile', $Profile,
+            '--region', $Region, '--RegionId', $Region,
+            '--InstanceIds', ('["' + $InstanceId + '"]')
+        )
+        $instances = @(Get-OptionalField (Get-OptionalField $result 'Instances') 'Instance')
+        if ($instances.Count -ne 1 -or $instances[0].InstanceId -ne $InstanceId) {
+            throw 'The authenticated ECS query did not return the deployment target.'
+        }
+    } catch {
+        throw "ECS read-only connectivity check failed before any remote changes ($Endpoint). Check local VPN/proxy DNS and routes: synthetic DNS addresses must stay on their tunnel rather than the Wi-Fi gateway. No deployment was started. $($_.Exception.Message)"
+    }
 }
 
 function Wait-RemoteCommand {
@@ -259,12 +277,15 @@ $localLockPath = Join-Path ([IO.Path]::GetTempPath()) 'xiaoqi-deploy-current.loc
 $localLock = $null
 $jobStarted = $false
 $jobFinished = $false
+$remotePrepared = $false
 $logDir = Join-Path (Split-Path -Parent $HarnessDir) '.codex-artifacts/deploy'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $localLog = Join-Path $logDir "$releaseId.log"
 try {
     $localLock = [IO.File]::Open($localLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     Write-Host '[1/5] Checking the current server before building'
+    Test-EcsConnection
+    $remotePrepared = $true
     Invoke-RemoteCommand -Script "set -eu; install -d -m 700 '$RemoteRoot/incoming' '$incomingDir' '$RemoteRoot/logs'" -TimeoutSeconds 60 | Out-Null
     foreach ($name in @('release_manager.sh', 'release_artifact.py', 'run_release_job.sh')) {
         $source = (Get-Content -Raw -LiteralPath (Join-Path $DeployDir $name)) -replace "`r`n", "`n"
@@ -303,7 +324,7 @@ try {
     Write-Host "DEPLOYMENT_VERIFIED public_health=200 via=$($health.verification_source) release=$releaseId product=$productRelease contract=$contractVersion"
 }
 finally {
-    if (-not $jobStarted -or $jobFinished) {
+    if ($remotePrepared -and (-not $jobStarted -or $jobFinished)) {
         try {
             Invoke-RemoteCommand -Script "set -eu; test -d '$incomingDir' && find '$incomingDir' -mindepth 1 -maxdepth 1 -type f -delete || true; rmdir '$incomingDir' 2>/dev/null || true" -TimeoutSeconds 60 | Out-Null
         } catch {
