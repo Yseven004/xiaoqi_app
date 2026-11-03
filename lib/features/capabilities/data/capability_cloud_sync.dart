@@ -1247,31 +1247,6 @@ class CapabilityCloudSync {
     _checked(response);
   }
 
-  Future<bool> updateAgentTaskNetworkMode(String taskId, String mode) async {
-    if (!const {'on', 'off'}.contains(mode)) {
-      throw const FormatException('联网模式无效');
-    }
-    final token = await _requireToken();
-    for (var attempt = 0; attempt < 6; attempt++) {
-      final response = await _client.post(
-        Uri.parse('$_baseUrl/agent/tasks/$taskId/network-mode'),
-        headers: _headers(token),
-        body: jsonEncode({'mode': mode}),
-      );
-      if (response.statusCode == 404 && attempt < 5) {
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-        continue;
-      }
-      if (response.statusCode == 409 &&
-          _errorMessage(_decode(response), '云端请求失败').startsWith('任务已结束')) {
-        return false;
-      }
-      _checked(response);
-      return true;
-    }
-    throw StateError('同步联网模式失败');
-  }
-
   Future<bool> sendAgentTaskSteering({
     required String taskId,
     required String messageId,

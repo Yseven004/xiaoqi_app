@@ -200,7 +200,7 @@ void main() {
     },
   );
 
-  test('defaults new and legacy auto agent tasks to network off', () async {
+  test('new tasks discard the removed network flag', () async {
     Future<void> createTask(String taskId, {String? networkMode}) async {
       final body = <String, Object?>{
         'task_id': taskId,
@@ -214,11 +214,15 @@ void main() {
       };
       final response = await call('POST', '/v1/agent/tasks', body: body);
       expect(response.statusCode, 202);
-      expect(store.get('task/personal/$taskId')!.value['network_mode'], 'off');
+      expect(
+        store.get('task/personal/$taskId')!.value.containsKey('network_mode'),
+        isFalse,
+      );
     }
 
     await createTask('task-network-default');
     await createTask('task-network-legacy', networkMode: 'auto');
+    await createTask('task-network-legacy-on', networkMode: 'on');
   });
 
   test('requires owner device authentication for chat completions', () async {

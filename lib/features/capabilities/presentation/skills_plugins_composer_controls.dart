@@ -25,8 +25,6 @@ class SkillsPluginsComposerControls extends StatefulWidget {
     this.onManageMcp,
     required this.isSignedIn,
     required this.onSessionChanged,
-    required this.networkMode,
-    required this.onNetworkModeChanged,
     this.reviewDraft,
     this.leadingControl,
     super.key,
@@ -45,8 +43,6 @@ class SkillsPluginsComposerControls extends StatefulWidget {
   final VoidCallback? onManageMcp;
   final bool isSignedIn;
   final ValueChanged<bool> onSessionChanged;
-  final String networkMode;
-  final ValueChanged<String> onNetworkModeChanged;
   final Widget? leadingControl;
 
   @override
@@ -301,7 +297,11 @@ class _SkillsPluginsComposerControlsState
               });
               _closeMenu();
             },
-            leading: SkillPresentationIcon(connection.icon, size: 29, defaultAsset: 'mcp'),
+            leading: SkillPresentationIcon(
+              connection.icon,
+              size: 29,
+              defaultAsset: 'mcp',
+            ),
           ),
       const Divider(height: 12),
       TextButton.icon(
@@ -453,82 +453,6 @@ class _SkillsPluginsComposerControlsState
     ),
   );
 
-  Widget _networkFeatureRow() {
-    final enabled = widget.networkMode == 'on';
-    void toggle() => widget.onNetworkModeChanged(enabled ? 'off' : 'on');
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(10),
-                onTap: toggle,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 7),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 34,
-                        child: Center(child: _icon('web_search', size: 29)),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              '联网搜索',
-                              style: TextStyle(
-                                color: Color(0xFF111111),
-                                fontSize: 16,
-                                height: 1.2,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              enabled ? '优先搜索实时资料' : '技能需要时可临时联网',
-                              style: const TextStyle(
-                                color: Color(0xFF758099),
-                                fontSize: 13,
-                                height: 1.25,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          MergeSemantics(
-            child: Semantics(
-              label: '联网搜索',
-              child: Transform.scale(
-                scale: 0.82,
-                child: Switch(
-                  value: enabled,
-                  activeTrackColor: const Color(0xCC5B82F6),
-                  activeThumbColor: Colors.white,
-                  inactiveTrackColor: const Color(0xBDECE7E2),
-                  inactiveThumbColor: const Color(0xFF9F958C),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  onChanged: (value) =>
-                      widget.onNetworkModeChanged(value ? 'on' : 'off'),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _recordRow(
     CapabilityRecord record, {
     required bool managing,
@@ -651,7 +575,6 @@ class _SkillsPluginsComposerControlsState
             '可视化呈现任何内容',
             () => _selectAction('create-image', '创建图像'),
           ),
-          _networkFeatureRow(),
           _featureRow('brush', '绘图', '用绘图更直观地表达想法', () {
             _closeMenu();
             widget.onDrawingSelected();

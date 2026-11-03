@@ -181,7 +181,7 @@ void main() {
       webSearchAvailable: true,
       skillsAvailable: true,
     );
-    expect(ordinary, ['web_search']);
+    expect(ordinary, ['web_search', 'web_fetch']);
     expect(
       agentToolNamesForRequest(
         latestUserText: '普通问答',

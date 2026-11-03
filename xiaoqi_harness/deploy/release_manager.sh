@@ -335,6 +335,7 @@ cleanup_candidate_runner() {
   local resource
   docker rm -f xiaoqi-curated-release-probe >/dev/null 2>&1 || true
   docker rm -f xiaoqi-native-learning-probe >/dev/null 2>&1 || true
+  docker rm -f xiaoqi-web-tools-probe >/dev/null 2>&1 || true
   if [[ -n "${DEPLOY_CANDIDATE_RUNNER:-}" ]]; then
     docker rm -f "$DEPLOY_CANDIDATE_RUNNER" >/dev/null 2>&1 || true
   fi
@@ -501,6 +502,10 @@ PY
     --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
     --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
     --entrypoint /app/bin/verify_learning_plugins "xiaoqi-genkit-server:build-$commit"
+  timeout --kill-after=30s 900 docker run --rm --name xiaoqi-web-tools-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
+    --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
+    --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
+    --entrypoint /app/bin/verify_web_tools "xiaoqi-genkit-server:build-$commit"
   cleanup_candidate_runner
 
   phase HOLD_WRITES

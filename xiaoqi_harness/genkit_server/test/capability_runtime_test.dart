@@ -572,7 +572,6 @@ void main() {
                   tool = 'web_search';
                   input = {
                     'query': 'fixture search ${attempts + 1}',
-                    'skill_id': alias,
                     'purpose': '核验当前步骤的公开来源',
                   };
                 }

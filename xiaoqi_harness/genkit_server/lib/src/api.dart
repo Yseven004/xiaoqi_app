@@ -53,7 +53,7 @@ import 'public_agent_transport.dart';
 import 'attachment_service.dart';
 import 'chat_completion_service.dart';
 import 'code_execution_service.dart';
-import 'deepseek_web_service.dart';
+import 'web_service.dart';
 import 'image_service.dart';
 import 'mcp_connection_service.dart';
 import 'mcp_app_surface.dart';
@@ -66,11 +66,6 @@ final _deepSeekBaseUrl =
     Platform.environment['DEEPSEEK_SEARCH_BASE_URL']?.trim().isNotEmpty == true
     ? Platform.environment['DEEPSEEK_SEARCH_BASE_URL']!.trim()
     : 'https://api.deepseek.com/v1';
-
-String _networkMode(Object? value) => switch (value?.toString()) {
-  'on' => 'on',
-  _ => 'off',
-};
 
 ({String code, String message, String details}) _taskFailurePresentation(
   Object error, {
@@ -319,15 +314,16 @@ class XiaoqiApi {
     this.store,
     this.runtime, {
     ChatCompletionService? chatCompletions,
-    DeepSeekWebFetchService? webFetch,
+    WebService? webFetch,
     AttachmentService? attachments,
   }) : chatCompletions = chatCompletions ?? ChatCompletionService(),
        _attachments = attachments,
        webFetch =
            webFetch ??
-           DeepSeekWebFetchService(
-             apiKey: _deepSeekApiKey,
-             baseUrl: _deepSeekBaseUrl,
+           WebService(
+             tinyFishKey: Platform.environment['TINYFISH_API_KEY'] ?? '',
+             deepSeekKey: _deepSeekApiKey,
+             deepSeekBaseUrl: _deepSeekBaseUrl,
            ) {
     imports = CapabilityImportService(
       store,
@@ -360,7 +356,7 @@ class XiaoqiApi {
   final CloudStore store;
   final XiaoqiAgentRuntime runtime;
   final ChatCompletionService chatCompletions;
-  final DeepSeekWebFetchService webFetch;
+  final WebService webFetch;
   AttachmentService? _attachments;
   AttachmentService get attachments =>
       _attachments ??= AttachmentService(store);
@@ -779,13 +775,6 @@ class XiaoqiApi {
         ),
       )
       ..post(
-        '/v1/agent/tasks/<id>/network-mode',
-        (request, id) => _authenticated(
-          request,
-          (device) => _setAgentTaskNetworkMode(request, device, id),
-        ),
-      )
-      ..post(
         '/v1/agent/tasks/<id>/instructions',
         (request, id) => _authenticated(
           request,
@@ -979,12 +968,7 @@ class XiaoqiApi {
               .whereType<Map>()
               .map((m) => m['task_id']?.toString() ?? ''),
         );
-      _ensureRemoteAgentTask(
-        tenantId,
-        taskId,
-        context['device_id'],
-        request['network_mode'],
-      );
+      _ensureRemoteAgentTask(tenantId, taskId, context['device_id']);
       try {
         _bindRemoteUserMessage(tenantId, taskId, request);
       } on FormatException catch (error) {
@@ -1404,7 +1388,6 @@ class XiaoqiApi {
     String tenantId,
     String taskId,
     Object? deviceId,
-    Object? rawNetworkMode,
   ) {
     final key = 'task/$tenantId/$taskId';
     final current = store.get(key);
@@ -1420,7 +1403,6 @@ class XiaoqiApi {
       'device_id': deviceId,
       'remote_agent_turn': true,
       'status': 'running',
-      'network_mode': _networkMode(rawNetworkMode),
       'authorized_network_domains': <String>[],
       'requested_network_domains': <String>[],
       'steering_instructions': <Map<String, dynamic>>[],
@@ -1978,14 +1960,8 @@ class XiaoqiApi {
       return _json(await webFetch.fetch(body['url']?.toString() ?? ''));
     } on FormatException catch (error) {
       return _error(error.message, 400);
-    } on DeepSeekWebException catch (error) {
-      final status = error.statusCode;
-      final normalizedStatus = status == null || status < 400 || status > 599
-          ? 502
-          : status;
-      return _error(error.message, normalizedStatus);
     } on Object {
-      return _error('DeepSeek 网页抓取失败，请稍后重试', 502);
+      return _error('网页抓取失败，请稍后重试', 502);
     }
   }
 
@@ -2167,7 +2143,6 @@ class XiaoqiApi {
         'device_id': device.value['device_id'],
         'status': 'queued',
         'attempt': 1,
-        'network_mode': _networkMode(body['network_mode']),
         'events': [
           {'seq': 0, 'type': 'status', 'status': 'queued', 'created_at': now},
         ],
@@ -2838,91 +2813,6 @@ class XiaoqiApi {
       return _error('联网确认已失效，请刷新任务状态', 409);
     } on Object {
       return _error('授权联网失败', 503);
-    }
-  }
-
-  Future<Response> _setAgentTaskNetworkMode(
-    Request request,
-    _Device device,
-    String id,
-  ) async {
-    try {
-      final body = await _body(request, 1024);
-      final rawMode = body['mode']?.toString();
-      if (!const {'auto', 'on', 'off'}.contains(rawMode)) {
-        return _error('联网模式无效', 400);
-      }
-      final mode = _networkMode(rawMode);
-      final taskId = _safeId(id, '任务 ID');
-      final key = 'task/${device.tenant}/$taskId';
-      final current = store.get(key);
-      if (current == null || current.value['remote_agent_turn'] != true) {
-        return _error('Agent 任务不存在', 404);
-      }
-      if (!const {'queued', 'running'}.contains(current.value['status'])) {
-        return _error('任务已结束，无法修改联网模式', 409);
-      }
-      final updated = _mutateTask(
-        key,
-        (value) => {
-          ...value,
-          'network_mode': mode,
-          'network_policy_revision':
-              (value['network_policy_revision'] as num? ?? 0).toInt() + 1,
-          'updated_at': _now(),
-        },
-      );
-      if (updated == null) return _error('Agent 任务不存在', 404);
-      final networkRevision = (updated.value['network_policy_revision'] as num)
-          .toInt();
-      _appendEvent(key, {'type': 'network_mode', 'mode': mode});
-      if (mode == 'off') {
-        final controller = runtime;
-        if (controller is! XiaoqiTaskNetworkController) {
-          _appendEvent(key, {
-            'type': 'network_revocation_failed',
-            'reason': 'runtime_control_unavailable',
-          });
-          return _json({
-            'ok': false,
-            'mode': mode,
-            'network_revoked': false,
-            'error': '联网模式已关闭，但服务不支持撤销运行中脚本的公网代理',
-          }, 503);
-        }
-        try {
-          await (controller as XiaoqiTaskNetworkController).disableTaskNetwork(
-            tenantId: device.tenant,
-            taskId: taskId,
-            networkRevision: networkRevision,
-          );
-        } on Object {
-          _appendEvent(key, {
-            'type': 'network_revocation_failed',
-            'reason': 'sandbox_control_failed',
-          });
-          return _json({
-            'ok': false,
-            'mode': mode,
-            'network_revoked': false,
-            'error': '联网模式已关闭，但运行中脚本的公网代理未能撤销',
-          }, 503);
-        }
-        _appendEvent(key, {
-          'type': 'network_revoked',
-          'mode': mode,
-          'scope': 'running_script_proxy',
-        });
-      }
-      return _json({
-        'ok': true,
-        'mode': mode,
-        if (mode == 'off') 'network_revoked': true,
-      });
-    } on FormatException catch (error) {
-      return _error(error.message, 400);
-    } on Object {
-      return _error('更新任务联网模式失败', 503);
     }
   }
 

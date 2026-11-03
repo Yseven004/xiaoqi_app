@@ -9,6 +9,7 @@ RUN dart analyze && dart test --concurrency=1 && dart build cli --target bin/ser
  && dart build cli --target bin/verify_capability_chain.dart --output /probe \
  && dart build cli --target bin/verify_official_catalog.dart --output /curated-probe \
  && dart build cli --target bin/verify_learning_plugins.dart --output /learning-probe \
+ && dart build cli --target bin/verify_web_tools.dart --output /web-probe \
  && dart build cli --target bin/verify_stdio_runtime.dart --output /stdio-probe
 
 FROM debian:bookworm-slim
@@ -21,6 +22,7 @@ WORKDIR /app
 COPY --from=build /out/bundle/ /app/
 COPY --from=build /probe/bundle/bin/verify_capability_chain /app/bin/verify_capability_chain
 COPY --from=build /probe/bundle/lib/ /app/lib/
+COPY --from=build /web-probe/bundle/bin/verify_web_tools /app/bin/verify_web_tools
 COPY --from=build /curated-probe/bundle/bin/verify_official_catalog /app/bin/verify_official_catalog
 COPY --from=build /learning-probe/bundle/bin/verify_learning_plugins /app/bin/verify_learning_plugins
 COPY genkit_server/test/fixtures/learning-annotation.png /app/learning-probe.png

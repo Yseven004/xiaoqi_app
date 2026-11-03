@@ -46,6 +46,7 @@ class PluginAgentPolicy {
     'search_plugin_commands',
     'use_skill',
     'web_search',
+    'web_fetch',
     'run_plugin_agent',
   };
   static const _mapping = <String, List<String>>{

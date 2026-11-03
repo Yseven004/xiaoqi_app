@@ -4,6 +4,33 @@ import 'package:xiaoqi_genkit_server/src/plugin_agents.dart';
 import 'package:xiaoqi_genkit_server/src/plugin_agent_policy.dart';
 
 void main() {
+  test(
+    'read-only agents retain permitted web tools and honor explicit denial',
+    () {
+      PluginAgentDefinition webAgent(
+        String extra,
+      ) => PluginAgentDefinition.parse(
+        'agents/research.md',
+        utf8.encode(
+          '---\nname: research\ndescription: Research\ntools: [WebSearch, WebFetch]\n$extra---\nRead public sources.',
+        ),
+      );
+      final allowed = PluginAgentPolicy.resolve(
+        webAgent(''),
+        parentTools: ['web_search', 'web_fetch'],
+        model: 'configured-model',
+        ancestorReadOnly: true,
+      );
+      expect(allowed.tools, containsAll(['web_search', 'web_fetch']));
+      final denied = PluginAgentPolicy.resolve(
+        webAgent('disallowedTools: [WebFetch]\n'),
+        parentTools: ['web_search', 'web_fetch'],
+        model: 'configured-model',
+      );
+      expect(denied.tools, contains('web_search'));
+      expect(denied.tools, isNot(contains('web_fetch')));
+    },
+  );
   PluginAgentDefinition definition(
     String header,
   ) => PluginAgentDefinition.parse(

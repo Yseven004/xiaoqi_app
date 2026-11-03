@@ -2204,40 +2204,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  void _setNetworkMode(String mode) {
-    if (_space != _HomeSpace.reading) return;
-    if (!const {'on', 'off'}.contains(mode)) return;
-    final current =
-        _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
-    if (current.networkMode == mode) return;
-    final updated = current.copyWith(
-      networkMode: mode,
-      updatedAt: current.messages.isEmpty ? current.updatedAt : DateTime.now(),
-    );
-    setState(() => _conversation = updated);
-    if (updated.bookId != null) {
-      _bookConversationFallbacks[updated.bookId!] = updated;
-    }
-    if (updated.messages.isNotEmpty) {
-      unawaited(
-        _historyService.save(updated).catchError((_) {
-          if (mounted) AppToast.show(context, '联网设置保存失败');
-        }),
-      );
-    }
-    final taskId = _activeRemoteAgentTaskId;
-    if (taskId != null) {
-      unawaited(
-        CapabilityCloudSync.instance
-            .updateAgentTaskNetworkMode(taskId, mode)
-            .catchError((error) {
-              if (mounted) AppToast.show(context, '联网设置同步失败：$error');
-              return false;
-            }),
-      );
-    }
-  }
-
   void _beginMessageEdit(AiConversationMessage question) {
     final current = _conversation;
     if (current == null ||
@@ -3458,7 +3424,6 @@ $materialIndex
       'capability_scope_operation': question.capabilityScopeOperation,
       'model_id': modelId,
       'reasoning_level': reasoningLevel,
-      'network_mode': _conversation?.networkMode ?? 'off',
       'capability': ?capability,
       'selected_capabilities':
           capability == null || capability['type'] == 'action'
@@ -7423,11 +7388,6 @@ $text''';
                                             controller: _composerController,
                                             focusNode: _composerFocusNode,
                                             modelSelection: _selectedModel,
-                                            networkMode:
-                                                _conversation?.networkMode ??
-                                                'off',
-                                            onNetworkModeChanged:
-                                                _setNetworkMode,
                                             onDrawingSelected: () =>
                                                 unawaited(_openDrawingBoard()),
                                             onCapabilitySelected: (capability) {
@@ -7902,8 +7862,6 @@ class _HomeComposer extends StatefulWidget {
     required this.controller,
     required this.focusNode,
     required this.modelSelection,
-    required this.networkMode,
-    required this.onNetworkModeChanged,
     required this.onCapabilitySelected,
     required this.onOpenExtensionMarket,
     required this.onDrawingSelected,
@@ -7964,8 +7922,6 @@ class _HomeComposer extends StatefulWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final HomeChatModelSelection modelSelection;
-  final String networkMode;
-  final ValueChanged<String> onNetworkModeChanged;
   final ValueChanged<Map<String, Object?>> onCapabilitySelected;
   final VoidCallback onOpenExtensionMarket;
   final VoidCallback onDrawingSelected;
@@ -8621,8 +8577,6 @@ class _HomeComposerState extends State<_HomeComposer> {
             onRequestLogin: widget.onRequestLogin,
             isSignedIn: widget.isSignedIn,
             onSessionChanged: widget.onSessionChanged,
-            networkMode: widget.networkMode,
-            onNetworkModeChanged: widget.onNetworkModeChanged,
             onCapabilitySelected: widget.onCapabilitySelected,
             onDrawingSelected: widget.onDrawingSelected,
             reviewDraft: widget.showReadingTasks
