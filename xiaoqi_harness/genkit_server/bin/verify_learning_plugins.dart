@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:genkit/genkit.dart';
+import 'package:shelf/shelf.dart' show Request;
 import '../lib/src/agent_runtime.dart';
+import '../lib/src/attachment_service.dart';
 import '../lib/src/image_service.dart';
 import '../lib/src/learning_notes.dart';
 import '../lib/src/official_catalog.dart';
@@ -12,6 +14,7 @@ import '../lib/src/store.dart';
 Future<void> main() async {
   final root = await Directory.systemTemp.createTemp('native-learning-probe-');
   final store = CloudStore(root: root.path);
+  final attachments = AttachmentService(store);
   const tenant = 'native-learning-probe';
   try {
     seedOfficialCatalog(store);
@@ -20,6 +23,28 @@ Future<void> main() async {
       'original-reading-annotations',
     ]) {
       final annotation = id == 'original-reading-annotations';
+      Map<String, dynamic>? preparedImage;
+      if (annotation) {
+        final bytes = File('learning-probe.png').readAsBytesSync();
+        final upload = await attachments.upload(
+          Request(
+            'POST',
+            Uri.parse('http://probe/attachments'),
+            headers: {
+              'content-type': 'image/png',
+              'content-length': '${bytes.length}',
+              'x-xiaoqi-filename': 'learning-annotation.png',
+            },
+            body: bytes,
+          ),
+          tenant,
+        );
+        preparedImage = Map<String, dynamic>.from(
+          jsonDecode(await upload.readAsString()) as Map,
+        );
+        if (upload.statusCode != 202 || preparedImage['ready'] != true)
+          throw StateError('Probe image preparation failed');
+      }
       final publicId = SkillMarket.publicationId('_official-curated', id);
       final publication = store.get('skill-market/$publicId')!;
       final installed = SkillMarket(
@@ -37,6 +62,7 @@ Future<void> main() async {
             await GenkitXiaoqiAgentRuntime(
               store,
               ImageService(store),
+              attachments: attachments,
             ).runAgentTurn(
               tenantId: tenant,
               taskId: id,
@@ -60,9 +86,8 @@ Future<void> main() async {
                         {
                           'id': 'source',
                           'name': 'learning-annotation.png',
-                          'base64': base64Encode(
-                            File('learning-probe.png').readAsBytesSync(),
-                          ),
+                          'attachment_id': preparedImage!['id'],
+                          'kind': 'image',
                         },
                       ]
                     : const [],
@@ -131,6 +156,7 @@ Future<void> main() async {
       }
     }
   } finally {
+    await attachments.close();
     store.close();
     await root.delete(recursive: true);
   }

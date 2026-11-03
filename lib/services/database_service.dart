@@ -1482,7 +1482,6 @@ class DatabaseService {
       'learning_note_queue',
       where: 'scope=? AND status=?',
       whereArgs: [scope, 'pending'],
-      limit: 50,
     );
     final saved = <({int noteId, String title, String conversationId})>[];
     for (final row in pending) {
