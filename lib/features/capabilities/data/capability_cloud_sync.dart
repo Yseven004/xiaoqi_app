@@ -916,6 +916,23 @@ class CapabilityCloudSync {
     return _checked(response);
   }
 
+  Future<String> getMessageTaskId(
+    String conversationId,
+    String messageId,
+  ) async {
+    final token = await _requireToken();
+    final response = await _client
+        .get(
+          Uri.parse(
+            '$_baseUrl/agent/message-task/${Uri.encodeComponent(conversationId)}/${Uri.encodeComponent(messageId)}',
+          ),
+          headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 20));
+    final result = _checked(response);
+    return result['task_id'] as String;
+  }
+
   Future<Map<String, dynamic>> getTaskEvents(String taskId, int after) async {
     final token = await _requireToken();
     final response = await _client
@@ -1157,12 +1174,26 @@ class CapabilityCloudSync {
 
   Future<String?> cancelTask(String taskId) async {
     final token = await _requireToken();
-    final response = await _client
+    var response = await _client
         .post(
           Uri.parse('$_baseUrl/agent/tasks/$taskId/cancel'),
           headers: _headers(token),
         )
         .timeout(const Duration(seconds: 20));
+    // Stop can race the first HTTP turn's task registration.
+    for (
+      var attempt = 0;
+      response.statusCode == 404 && attempt < 8;
+      attempt++
+    ) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      response = await _client
+          .post(
+            Uri.parse('$_baseUrl/agent/tasks/$taskId/cancel'),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 20));
+    }
     final decoded = _decode(response);
     final accepted =
         (response.statusCode >= 200 && response.statusCode < 300) ||

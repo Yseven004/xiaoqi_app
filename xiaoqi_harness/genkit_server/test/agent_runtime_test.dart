@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:genkit/genkit.dart' show CancellationController;
+import 'package:genkit/genkit.dart'
+    show CancellationController, Message, Role, TextPart;
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
@@ -34,6 +35,7 @@ class _RecordingImageService extends ImageService {
   String? prompt;
   int? count;
   String? imageUrl;
+  int submissions = 0;
 
   @override
   Future<Map<String, dynamic>> generate({
@@ -46,6 +48,7 @@ class _RecordingImageService extends ImageService {
     String? idempotencyKey,
     ArtifactRecorder? recordArtifact,
   }) async {
+    submissions++;
     this.prompt = prompt;
     this.count = count;
     this.imageUrl = imageUrl;
@@ -54,6 +57,70 @@ class _RecordingImageService extends ImageService {
 }
 
 void main() {
+  test(
+    'text checkpoint resumes only the missing image and reuses its receipt',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'xiaoqi-text-checkpoint-',
+      );
+      final store = CloudStore(root: directory.path);
+      final images = _RecordingImageService(store);
+      const task = 'text-checkpoint';
+      const prompt = '解释第一性原理并配图';
+      final messages = [
+        Message(
+          role: Role.user,
+          content: [TextPart(text: prompt)],
+        ),
+        Message(
+          role: Role.model,
+          content: [TextPart(text: '已完成的完整解释')],
+        ),
+      ];
+      final identity = ToolExecution.digest([task, prompt]);
+      final execution = ToolExecution(
+        store,
+        'personal',
+        task,
+        TurnContract(mode: 'create', imageLimit: 1, answerRequired: true),
+        requestIdentity: identity,
+        requestText: prompt,
+      )..bind();
+      execution.saveTextCheckpoint({
+        'request_identity': identity,
+        'text': '已完成的完整解释',
+        'messages': messages.map((m) => m.toJson()).toList(),
+        'image_arguments': {
+          'prompt': '基本事实到新方案的概念图',
+          'model': images.modelId,
+          'image_url': null,
+        },
+      });
+      try {
+        for (var attempt = 0; attempt < 2; attempt++) {
+          final result = await GenkitXiaoqiAgentRuntime(store, images)
+              .runAgentTurn(
+                tenantId: 'personal',
+                taskId: task,
+                request: {
+                  'model_id': 'deepseek-flash',
+                  'current_turn_text': prompt,
+                },
+                messages: [messages.first],
+                cancellation: CancellationController().token,
+                onChunk: (_) {},
+                onProcessEvent: (_) {},
+              );
+          expect(result.text, '已完成的完整解释');
+        }
+        expect(images.submissions, 1);
+      } finally {
+        store.close();
+        directory.deleteSync(recursive: true);
+      }
+    },
+  );
+
   test(
     'keeps explanations for requests that ask for an accompanying image',
     () {

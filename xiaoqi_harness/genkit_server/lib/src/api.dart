@@ -23,6 +23,8 @@ import 'package:genkit/experimental.dart'
         Artifact,
         GenkitAgents,
         SessionRunner,
+        SessionSnapshot,
+        SnapshotStatus,
         TurnResult;
 import 'package:genkit/experimental_io.dart' show GenkitRouterAgents;
 import 'package:genkit/genkit.dart'
@@ -340,6 +342,23 @@ class XiaoqiApi {
           'status': 'failed',
           'message': '服务器重启中断了操作，请重新检查或安装；原安装版本未变。',
         }, doc.revision);
+    }
+    String? afterTask;
+    while (true) {
+      final tasks = store.list('task/', limit: 200, afterKey: afterTask);
+      for (final (key, doc) in tasks) {
+        if (doc.value['remote_agent_turn'] == true &&
+            const {'running', 'pausing'}.contains(doc.value['status'])) {
+          store.put(key, {
+            ...doc.value,
+            'status': 'failed',
+            'error_code': 'execution_interrupted',
+            'updated_at': _now(),
+          }, doc.revision);
+        }
+      }
+      if (tasks.length < 200) break;
+      afterTask = tasks.last.$1;
     }
     _agentRouter = GenkitRouter();
     final genkit = Genkit();
@@ -739,6 +758,20 @@ class XiaoqiApi {
         (request) => _authenticated(request, (_) => _fetchWebPage(request)),
       )
       ..get(
+        '/v1/agent/message-task/<workflow>/<message>',
+        (request, workflow, message) => _authenticated(request, (device) async {
+          try {
+            final binding = store.get(
+              'message-operation/${device.tenant}/${_safeId(workflow, '会话 ID')}/${_safeId(message, '消息 ID')}',
+            );
+            if (binding == null) return _error('原任务不存在，请重新发送消息', 404);
+            return _json({'task_id': binding.value['task_id']});
+          } on FormatException catch (error) {
+            return _error(error.message, 400);
+          }
+        }),
+      )
+      ..get(
         '/v1/agent/tasks/<id>',
         (request, id) =>
             _authenticated(request, (device) => _getTask(device, id)),
@@ -969,273 +1002,350 @@ class XiaoqiApi {
         context['device_id'],
         request['network_mode'],
       );
-      _bindRemoteUserMessage(tenantId, taskId, request);
-      final binding = _canonical(request['selected_capabilities'] ?? const []);
-      final taskKey = 'task/$tenantId/$taskId';
-      final boundTask = store.get(taskKey)!;
-      if (boundTask.value['selection_binding'] != null &&
-          boundTask.value['selection_binding'] != binding) {
-        throw const FormatException('不能在同一次任务中更换扩展版本，请新建一轮对话');
-      }
-      if (boundTask.value['selection_binding'] == null) {
-        store.put(taskKey, {
-          ...boundTask.value,
-          'selection_binding': binding,
-        }, boundTask.revision);
-      }
-      session.updateCustom(
-        (_) => {
-          'agent_process': <Map<String, dynamic>>[],
-          'process_phase': 'thinking',
-          'current_step': '正在思考',
-          'answer_started': false,
-          'process_status': 'thinking',
-          'web_sources': <Map<String, Object?>>[],
-        },
-      );
-
-      final publicProcess = PublicAgentProcess(_uuid.v4());
-      void addProcessEvent(Map<String, Object?> rawEvent) {
-        final firstTokenMs = rawEvent['model_first_token_ms'];
-        if (rawEvent['type'] == 'answer_started' && firstTokenMs is num) {
-          _logTaskEvent('model_first_token', taskId, {
-            'duration_ms': firstTokenMs.toInt(),
-          });
+      try {
+        _bindRemoteUserMessage(tenantId, taskId, request);
+      } on FormatException catch (error) {
+        if (store
+                .get('task/$tenantId/$taskId')
+                ?.value['user_message_binding'] ==
+            null) {
+          _setRemoteAgentTaskStatus(tenantId, taskId, 'failed');
         }
-        final event = publicProcess.add(rawEvent);
-        if (event != null) _appendEvent(taskKey, event);
-        if (rawEvent['type'] == 'answer_started')
-          publicProcess.finish('completed');
-        final labelEvent = <String, dynamic>{
-          'type': rawEvent['type'],
-          'tool': publicToolName(rawEvent['tool']?.toString() ?? ''),
-        };
-        session.updateCustom((current) {
-          final custom = current == null
-              ? <String, dynamic>{}
-              : Map<String, dynamic>.from(current);
-          return {
-            ...custom,
-            'agent_process': publicProcess.rows,
-            'process_phase': _agentProcessPhase(labelEvent),
-            'current_step': _agentProcessLabel(labelEvent),
-            'answer_started':
-                custom['answer_started'] == true ||
-                rawEvent['type'] == 'answer_started',
-            if (firstTokenMs is num)
-              'model_first_token_ms': firstTokenMs.toInt(),
-          };
-        });
+        throw GenkitException(
+          error.message,
+          status: StatusCode.failedPrecondition,
+        );
       }
-
-      void finishProcess(String status) {
-        publicProcess.finish(status);
-        session.updateCustom(
-          (current) => {
-            ...?current,
-            'agent_process': publicProcess.rows,
-            'process_status': status,
-            'current_step': switch (status) {
-              'completed' => '已完成',
-              'stopped' => '已停止',
-              'waiting' => '等待操作确认',
-              _ => '生成未完成',
-            },
+      final executionKey = 'task/$tenantId/$taskId';
+      final settled = store.get(executionKey)!.value;
+      if (input.message == null && settled['status'] == 'completed') {
+        session.setMessages([
+          ...messages,
+          Message(
+            role: Role.model,
+            content: [TextPart(text: settled['result']?.toString() ?? '')],
+          ),
+        ]);
+        session.addArtifacts(_remoteAgentArtifacts(tenantId, taskId));
+        return TurnResult(finishReason: AgentFinishReason.stop);
+      }
+      if (_controllers.containsKey(executionKey)) {
+        throw GenkitException(
+          '任务仍在执行或暂停中，请等待确认',
+          status: StatusCode.failedPrecondition,
+        );
+      }
+      final executionCancellation = CancellationController();
+      final unlinkCancellation = options.cancel?.link(executionCancellation);
+      _controllers[executionKey] = executionCancellation;
+      try {
+        final checkpoint = SessionSnapshot(
+          snapshotId: _uuid.v4(),
+          status: SnapshotStatus.completed,
+          createdAt: DateTime.now().toUtc().toIso8601String(),
+          state: session.getState(),
+        );
+        final checkpointId = await CloudSessionStore(
+          store,
+        ).saveSnapshot(null, (_) => checkpoint, context: options.context);
+        _mutateTask(
+          executionKey,
+          (value) => {
+            ...value,
+            'agent_snapshot_id': checkpointId,
+            'status': 'running',
+            'cancel_requested': false,
+            'attempt': (value['attempt'] as num? ?? 0).toInt() + 1,
           },
         );
-      }
+        final binding = _canonical(
+          request['selected_capabilities'] ?? const [],
+        );
+        final taskKey = 'task/$tenantId/$taskId';
+        final boundTask = store.get(taskKey)!;
+        if (boundTask.value['selection_binding'] != null &&
+            boundTask.value['selection_binding'] != binding) {
+          throw const FormatException('不能在同一次任务中更换扩展版本，请新建一轮对话');
+        }
+        if (boundTask.value['selection_binding'] == null) {
+          store.put(taskKey, {
+            ...boundTask.value,
+            'selection_binding': binding,
+          }, boundTask.revision);
+        }
+        session.updateCustom(
+          (_) => {
+            'agent_process': <Map<String, dynamic>>[],
+            'process_phase': 'thinking',
+            'current_step': '正在思考',
+            'answer_started': false,
+            'process_status': 'thinking',
+            'web_sources': <Map<String, Object?>>[],
+          },
+        );
 
-      final modelMessages = messages.map(_withoutTurnMetadata).toList();
-      late final XiaoqiAgentTurnResult result;
-      try {
-        final activeRuntime = runtime;
-        if (activeRuntime is XiaoqiStreamingAgentRuntime) {
-          result = await (activeRuntime as XiaoqiStreamingAgentRuntime)
-              .runAgentTurn(
-                tenantId: tenantId,
-                taskId: taskId,
-                request: {
-                  ...request,
-                  'messages': [
-                    for (final message in modelMessages)
-                      _legacyMessageFor(message),
-                  ],
-                },
-                messages: modelMessages,
-                respond: input.resume?.respond,
-                restart: input.resume?.restart,
-                onChunk: options.sendChunk,
-                onProcessEvent: addProcessEvent,
-                cancellation: options.cancel ?? CancellationController().token,
-                onImageGenerationStarted: () => addProcessEvent({
-                  'type': 'image_generation_started',
-                  'tool': 'generate_image',
-                }),
-              );
-        } else {
-          final output = StringBuffer();
-          var answerStarted = false;
-          final text = await activeRuntime.run(
-            tenantId: tenantId,
-            taskId: taskId,
-            request: {
-              ...request,
-              'messages': [
-                for (final message in modelMessages) _legacyMessageFor(message),
-              ],
+        final publicProcess = PublicAgentProcess(_uuid.v4());
+        void addProcessEvent(Map<String, Object?> rawEvent) {
+          final firstTokenMs = rawEvent['model_first_token_ms'];
+          if (rawEvent['type'] == 'answer_started' && firstTokenMs is num) {
+            _logTaskEvent('model_first_token', taskId, {
+              'duration_ms': firstTokenMs.toInt(),
+            });
+          }
+          final event = publicProcess.add(rawEvent);
+          if (event != null) _appendEvent(taskKey, event);
+          if (rawEvent['type'] == 'answer_started')
+            publicProcess.finish('completed');
+          final labelEvent = <String, dynamic>{
+            'type': rawEvent['type'],
+            'tool': publicToolName(rawEvent['tool']?.toString() ?? ''),
+          };
+          session.updateCustom((current) {
+            final custom = current == null
+                ? <String, dynamic>{}
+                : Map<String, dynamic>.from(current);
+            return {
+              ...custom,
+              'agent_process': publicProcess.rows,
+              'process_phase': _agentProcessPhase(labelEvent),
+              'current_step': _agentProcessLabel(labelEvent),
+              'answer_started':
+                  custom['answer_started'] == true ||
+                  rawEvent['type'] == 'answer_started',
+              if (firstTokenMs is num)
+                'model_first_token_ms': firstTokenMs.toInt(),
+            };
+          });
+        }
+
+        void finishProcess(String status) {
+          publicProcess.finish(status);
+          session.updateCustom(
+            (current) => {
+              ...?current,
+              'agent_process': publicProcess.rows,
+              'process_status': status,
+              'current_step': switch (status) {
+                'completed' => '已完成',
+                'stopped' => '已停止',
+                'waiting' => '等待操作确认',
+                _ => '生成未完成',
+              },
             },
-            cancellation: options.cancel ?? CancellationController().token,
-            onDelta: (delta) {
-              if (delta.isEmpty) return;
-              if (!answerStarted) {
-                answerStarted = true;
-                addProcessEvent({'type': 'answer_started'});
-              }
-              output.write(delta);
-              options.sendChunk(
-                AgentStreamChunk(
-                  modelChunk: ModelResponseChunk(
-                    role: Role.model,
-                    content: [TextPart(text: delta)],
-                  ),
-                ),
-              );
-            },
-            onImageGenerationStarted: () => addProcessEvent({
-              'type': 'image_generation_started',
-              'tool': 'generate_image',
-            }),
-          );
-          final reply = text.isEmpty ? output.toString() : text;
-          result = XiaoqiAgentTurnResult(
-            text: reply,
-            messages: [
-              ...modelMessages,
-              Message(
-                role: Role.model,
-                content: [TextPart(text: reply)],
-              ),
-            ],
           );
         }
-      } on Object {
-        finishProcess(
-          options.cancel?.isCancelled == true ? 'stopped' : 'failed',
+
+        final modelMessages = messages.map(_withoutTurnMetadata).toList();
+        late final XiaoqiAgentTurnResult result;
+        try {
+          final activeRuntime = runtime;
+          if (activeRuntime is XiaoqiStreamingAgentRuntime) {
+            result = await (activeRuntime as XiaoqiStreamingAgentRuntime)
+                .runAgentTurn(
+                  tenantId: tenantId,
+                  taskId: taskId,
+                  request: {
+                    ...request,
+                    'messages': [
+                      for (final message in modelMessages)
+                        _legacyMessageFor(message),
+                    ],
+                  },
+                  messages: modelMessages,
+                  respond: input.resume?.respond,
+                  restart: input.resume?.restart,
+                  onChunk: options.sendChunk,
+                  onProcessEvent: addProcessEvent,
+                  cancellation: executionCancellation.token,
+                  onImageGenerationStarted: () => addProcessEvent({
+                    'type': 'image_generation_started',
+                    'tool': 'generate_image',
+                  }),
+                );
+          } else {
+            final output = StringBuffer();
+            var answerStarted = false;
+            final text = await activeRuntime.run(
+              tenantId: tenantId,
+              taskId: taskId,
+              request: {
+                ...request,
+                'messages': [
+                  for (final message in modelMessages)
+                    _legacyMessageFor(message),
+                ],
+              },
+              cancellation: executionCancellation.token,
+              onDelta: (delta) {
+                if (delta.isEmpty) return;
+                if (!answerStarted) {
+                  answerStarted = true;
+                  addProcessEvent({'type': 'answer_started'});
+                }
+                output.write(delta);
+                options.sendChunk(
+                  AgentStreamChunk(
+                    modelChunk: ModelResponseChunk(
+                      role: Role.model,
+                      content: [TextPart(text: delta)],
+                    ),
+                  ),
+                );
+              },
+              onImageGenerationStarted: () => addProcessEvent({
+                'type': 'image_generation_started',
+                'tool': 'generate_image',
+              }),
+            );
+            final reply = text.isEmpty ? output.toString() : text;
+            result = XiaoqiAgentTurnResult(
+              text: reply,
+              messages: [
+                ...modelMessages,
+                Message(
+                  role: Role.model,
+                  content: [TextPart(text: reply)],
+                ),
+              ],
+            );
+          }
+        } on Object {
+          finishProcess(
+            executionCancellation.isCancelled ? 'stopped' : 'failed',
+          );
+          _setRemoteAgentTaskStatus(
+            tenantId,
+            taskId,
+            executionCancellation.isCancelled ? 'cancelled' : 'failed',
+          );
+          rethrow;
+        }
+
+        finishProcess(switch (result.finishReason) {
+          AgentFinishReason.aborted => 'stopped',
+          AgentFinishReason.interrupted => 'waiting',
+          _ => 'completed',
+        });
+        final resultMessages = result.messages.toList();
+        // Activation belongs to this task. It must never become a user-selected
+        // preference merely because the model loaded a skill or connector.
+        cleanConfig['task_active_capabilities'] =
+            result.activeCapabilities ?? const [];
+        cleanConfig['task_active_mcp_connections'] =
+            result.activeMcpConnections ?? const [];
+        // Implicit activation belongs to this runtime, so an approved resume must
+        // compare against the newly bound versions rather than the initial list.
+        _mutateTask(
+          taskKey,
+          (value) => {
+            ...value,
+            'selection_binding': _canonical(
+              cleanConfig['selected_capabilities'] ?? const [],
+            ),
+            'task_active_capabilities': cleanConfig['task_active_capabilities'],
+            'task_active_mcp_connections':
+                cleanConfig['task_active_mcp_connections'],
+          },
         );
+        final webSources =
+            (store.get('task/$tenantId/$taskId')?.value['web_sources']
+                        as List? ??
+                    const [])
+                .whereType<Map>()
+                .map((source) => Map<String, Object?>.from(source))
+                .where(
+                  (source) =>
+                      source['url'] is String && source['title'] is String,
+                )
+                .toList(growable: false);
+        if (webSources.isNotEmpty &&
+            result.finishReason != AgentFinishReason.interrupted) {
+          // Stream sources through the agent's custom state. An empty model
+          // chunk is transport-dependent and may be discarded before it reaches
+          // the Flutter client; customPatch is the protocol's reliable state
+          // channel and is already consumed by AgentApi as `chunk.custom`.
+          session.updateCustom((current) {
+            final custom = current == null
+                ? <String, dynamic>{}
+                : Map<String, dynamic>.from(current);
+            return {...custom, 'web_sources': webSources};
+          });
+        }
+        final latestResultUserIndex = resultMessages.lastIndexWhere(
+          (message) => message.role == Role.user,
+        );
+        if (latestResultUserIndex >= 0) {
+          final resultUser = resultMessages[latestResultUserIndex];
+          resultMessages[latestResultUserIndex] = Message(
+            role: resultUser.role,
+            content: resultUser.content,
+            metadata: {
+              ...?resultUser.metadata,
+              _remoteAgentTurnMetadataKey: cleanConfig,
+            },
+          );
+        }
+        session.setMessages(resultMessages);
+
+        final artifacts = _remoteAgentArtifacts(tenantId, taskId);
+        if (artifacts.isNotEmpty) {
+          session.addArtifacts(artifacts);
+          for (final artifact in artifacts) {
+            options.sendChunk(AgentStreamChunk(artifact: artifact));
+          }
+        }
+        final taskValue =
+            store.get('task/$tenantId/$taskId')?.value ?? const {};
+        final resolvedScope = taskValue['turn_scope'];
+        final requestedImage = resolvedScope is Map
+            ? (resolvedScope['image_limit'] as num? ?? 0) > 0
+            : false;
+        final storedArtifacts = (taskValue['artifacts'] as List? ?? const [])
+            .whereType<Map>()
+            .toList();
+        final partialImage =
+            result.finishReason != AgentFinishReason.interrupted &&
+            requestedImage &&
+            storedArtifacts.isEmpty;
+        final resultText = partialImage
+            ? '${result.text}\n\n图片未生成，文字内容已完成。你可以单独重试图片。'
+            : result.text;
         _setRemoteAgentTaskStatus(
           tenantId,
           taskId,
-          options.cancel?.isCancelled == true ? 'cancelled' : 'failed',
+          result.finishReason == AgentFinishReason.aborted
+              ? 'cancelled'
+              : result.finishReason == AgentFinishReason.interrupted
+              ? 'awaiting_network_permission'
+              : partialImage || result.extensionEvidenceMissing
+              ? 'partially_completed'
+              : 'completed',
+          result: resultText,
+          partialReason: partialImage
+              ? ((taskValue['image_failure'] as Map?)?['category']
+                        ?.toString() ??
+                    'requested_image_missing')
+              : result.extensionEvidenceMissing
+              ? 'extension_execution_unverified'
+              : null,
         );
+        return TurnResult(finishReason: result.finishReason);
+      } on Object {
+        final status = store.get(executionKey)?.value['status'];
+        if (status == 'running' || status == 'pausing') {
+          _setRemoteAgentTaskStatus(
+            tenantId,
+            taskId,
+            executionCancellation.isCancelled ? 'cancelled' : 'failed',
+          );
+        }
         rethrow;
-      }
-
-      finishProcess(switch (result.finishReason) {
-        AgentFinishReason.aborted => 'stopped',
-        AgentFinishReason.interrupted => 'waiting',
-        _ => 'completed',
-      });
-      final resultMessages = result.messages.toList();
-      // Activation belongs to this task. It must never become a user-selected
-      // preference merely because the model loaded a skill or connector.
-      cleanConfig['task_active_capabilities'] =
-          result.activeCapabilities ?? const [];
-      cleanConfig['task_active_mcp_connections'] =
-          result.activeMcpConnections ?? const [];
-      // Implicit activation belongs to this runtime, so an approved resume must
-      // compare against the newly bound versions rather than the initial list.
-      _mutateTask(
-        taskKey,
-        (value) => {
-          ...value,
-          'selection_binding': _canonical(
-            cleanConfig['selected_capabilities'] ?? const [],
-          ),
-          'task_active_capabilities': cleanConfig['task_active_capabilities'],
-          'task_active_mcp_connections':
-              cleanConfig['task_active_mcp_connections'],
-        },
-      );
-      final webSources =
-          (store.get('task/$tenantId/$taskId')?.value['web_sources'] as List? ??
-                  const [])
-              .whereType<Map>()
-              .map((source) => Map<String, Object?>.from(source))
-              .where(
-                (source) =>
-                    source['url'] is String && source['title'] is String,
-              )
-              .toList(growable: false);
-      if (webSources.isNotEmpty &&
-          result.finishReason != AgentFinishReason.interrupted) {
-        // Stream sources through the agent's custom state. An empty model
-        // chunk is transport-dependent and may be discarded before it reaches
-        // the Flutter client; customPatch is the protocol's reliable state
-        // channel and is already consumed by AgentApi as `chunk.custom`.
-        session.updateCustom((current) {
-          final custom = current == null
-              ? <String, dynamic>{}
-              : Map<String, dynamic>.from(current);
-          return {...custom, 'web_sources': webSources};
-        });
-      }
-      final latestResultUserIndex = resultMessages.lastIndexWhere(
-        (message) => message.role == Role.user,
-      );
-      if (latestResultUserIndex >= 0) {
-        final resultUser = resultMessages[latestResultUserIndex];
-        resultMessages[latestResultUserIndex] = Message(
-          role: resultUser.role,
-          content: resultUser.content,
-          metadata: {
-            ...?resultUser.metadata,
-            _remoteAgentTurnMetadataKey: cleanConfig,
-          },
-        );
-      }
-      session.setMessages(resultMessages);
-
-      final artifacts = _remoteAgentArtifacts(tenantId, taskId);
-      if (artifacts.isNotEmpty) {
-        session.addArtifacts(artifacts);
-        for (final artifact in artifacts) {
-          options.sendChunk(AgentStreamChunk(artifact: artifact));
+      } finally {
+        unlinkCancellation?.call();
+        if (identical(_controllers[executionKey], executionCancellation)) {
+          _controllers.remove(executionKey);
         }
       }
-      final taskValue = store.get('task/$tenantId/$taskId')?.value ?? const {};
-      final resolvedScope = taskValue['turn_scope'];
-      final requestedImage = resolvedScope is Map
-          ? (resolvedScope['image_limit'] as num? ?? 0) > 0
-          : false;
-      final storedArtifacts = (taskValue['artifacts'] as List? ?? const [])
-          .whereType<Map>()
-          .toList();
-      final partialImage =
-          result.finishReason != AgentFinishReason.interrupted &&
-          requestedImage &&
-          storedArtifacts.isEmpty;
-      final resultText = partialImage
-          ? '${result.text}\n\n图片未生成，文字内容已完成。你可以单独重试图片。'
-          : result.text;
-      _setRemoteAgentTaskStatus(
-        tenantId,
-        taskId,
-        result.finishReason == AgentFinishReason.aborted
-            ? 'cancelled'
-            : result.finishReason == AgentFinishReason.interrupted
-            ? 'awaiting_network_permission'
-            : partialImage || result.extensionEvidenceMissing
-            ? 'partially_completed'
-            : 'completed',
-        result: resultText,
-        partialReason: partialImage
-            ? ((taskValue['image_failure'] as Map?)?['category']?.toString() ??
-                  'requested_image_missing')
-            : result.extensionEvidenceMissing
-            ? 'extension_execution_unverified'
-            : null,
-      );
-      return TurnResult(finishReason: result.finishReason);
     });
 
     final messages = session.getMessages();
@@ -2142,7 +2252,10 @@ class XiaoqiApi {
           key,
           (value) => {...value, 'status': 'cancelled', 'updated_at': _now()},
         );
-        _appendEvent(key, {'type': 'status', 'status': 'cancelled'});
+        _appendEvent(key, {
+          'type': 'status',
+          'status': store.get(key)!.value['status'],
+        });
         _logTaskEvent('finished', taskId, {
           'status': 'cancelled',
           'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
@@ -2542,6 +2655,7 @@ class XiaoqiApi {
         'task_id': taskId,
         'status': _publicTaskStatus(value['status']),
         'attempt': value['attempt'] ?? 1,
+        'agent_snapshot_id': value['agent_snapshot_id'],
         'error': value['error'],
         'error_code': value['error_code'],
         'error_details': value['error_details'],
@@ -2612,7 +2726,11 @@ class XiaoqiApi {
           (value) => {
             ...value,
             'cancel_requested': true,
-            'status': 'cancelled',
+            'status':
+                current.value['remote_agent_turn'] == true &&
+                    _controllers.containsKey(key)
+                ? 'pausing'
+                : 'cancelled',
             'updated_at': _now(),
           },
         );

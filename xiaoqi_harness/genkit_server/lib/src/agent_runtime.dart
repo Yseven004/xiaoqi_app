@@ -1997,6 +1997,68 @@ class GenkitXiaoqiAgentRuntime
       requestText: latestUserText,
     );
     execution.bind();
+    final textCheckpoint = store.get(execution.key)?.value['text_checkpoint'];
+    if (textCheckpoint is Map &&
+        textCheckpoint['request_identity'] == requestIdentity &&
+        turnContract.permitsImages) {
+      final arguments = Map<String, dynamic>.from(
+        textCheckpoint['image_arguments'] as Map,
+      );
+      if (arguments['model'] != images.modelId) {
+        throw StateError('图片模型配置已变化，不能重放原操作');
+      }
+      final text = textCheckpoint['text'] as String;
+      onProcessEvent({'type': 'answer_started'});
+      onChunk(
+        AgentStreamChunk(
+          modelChunk: ModelResponseChunk(
+            role: Role.model,
+            content: [TextPart(text: text)],
+          ),
+        ),
+      );
+      cancellation.throwIfCancelled();
+      onImageGenerationStarted?.call();
+      onProcessEvent({'type': 'tool_started', 'tool': 'generate_image'});
+      try {
+        await execution.image(
+          slot: '1',
+          arguments: arguments,
+          invoke: (id) => images.generate(
+            taskId: taskId,
+            tenantId: tenantId,
+            prompt: arguments['prompt'] as String,
+            idempotencyKey: id,
+            count: 1,
+            imageUrl: arguments['image_url'] as String?,
+          ),
+        );
+        onProcessEvent({'type': 'tool_succeeded', 'tool': 'generate_image'});
+      } on Object catch (error) {
+        cancellation.throwIfCancelled();
+        _recordImageFailure(tenantId, taskId, error);
+        onProcessEvent({
+          'type': 'tool_failed',
+          'tool': 'generate_image',
+          ..._imageFailureEvent(error),
+        });
+      }
+      cancellation.throwIfCancelled();
+      return XiaoqiAgentTurnResult(
+        text: text,
+        messages: (textCheckpoint['messages'] as List)
+            .map(
+              (value) =>
+                  Message.fromJson(Map<String, dynamic>.from(value as Map)),
+            )
+            .toList(),
+        activeCapabilities: (textCheckpoint['active_capabilities'] as List?)
+            ?.map((value) => Map<String, dynamic>.from(value as Map))
+            .toList(),
+        activeMcpConnections:
+            (textCheckpoint['active_mcp_connections'] as List?)?.cast<String>(),
+      );
+    }
     final currentDelivery = store
         .get('task/$tenantId/$taskId')
         ?.value['delivery_evidence'];
@@ -6696,6 +6758,24 @@ class GenkitXiaoqiAgentRuntime
         // The text deliverable is complete before the dependent media step.
         // Consumers can persist this checkpoint and render the image as a
         // later artifact without replacing or hiding the answer.
+        final checkpointBrief = compileVisualBrief(
+          latestUserText,
+          supplementalExplanation: true,
+        );
+        execution.saveTextCheckpoint({
+          'request_identity': requestIdentity,
+          'text': answer,
+          'messages': resultMessages
+              .map((message) => message.toJson())
+              .toList(),
+          'active_capabilities': activeCapabilities,
+          'active_mcp_connections': activeMcpIds.toList(),
+          'image_arguments': {
+            'prompt': checkpointBrief.providerPrompt,
+            'model': images.modelId,
+            'image_url': referenceImageUrl,
+          },
+        });
         onProcessEvent({'type': 'text_completed'});
         cancellation.throwIfCancelled();
         _logAgentRuntime('tool_called', taskId, {
@@ -6744,6 +6824,7 @@ class GenkitXiaoqiAgentRuntime
           });
         }
       }
+      cancellation.throwIfCancelled();
       return XiaoqiAgentTurnResult(
         text: answer,
         messages: resultMessages,

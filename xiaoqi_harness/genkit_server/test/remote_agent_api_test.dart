@@ -23,6 +23,8 @@ import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/api.dart';
 import 'package:xiaoqi_genkit_server/src/release.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
+import 'package:xiaoqi_genkit_server/src/tool_execution.dart';
+import 'package:xiaoqi_genkit_server/src/turn_contract.dart';
 
 class _StreamingRuntime
     implements
@@ -43,6 +45,9 @@ class _StreamingRuntime
   Completer<void>? finishNetworkDisable;
   final preparationEvents = <Map<String, Object?>>[];
   bool failAfterPreparation = false;
+  bool waitForCancellation = false;
+  CloudStore? effectStore;
+  int imageSubmissions = 0;
 
   @override
   Future<void> disableTaskNetwork({
@@ -84,6 +89,23 @@ class _StreamingRuntime
     turnCount++;
     lastRestart = restart;
     lastRequest = Map<String, dynamic>.from(request);
+    if (effectStore != null) {
+      final execution = ToolExecution(
+        effectStore!,
+        tenantId,
+        taskId,
+        TurnContract(mode: 'workflow', imageLimit: 0),
+        requestIdentity: 'pause-question',
+      )..bind();
+      await execution.authorizedExternal(
+        slot: '1',
+        arguments: {'prompt': 'same illustration'},
+        invoke: (_) async {
+          imageSubmissions++;
+          return {'artifact_id': 'original-image'};
+        },
+      );
+    }
 
     if (interruptFirstTurn && restart == null) {
       final permissionRequest = ToolRequestPart(
@@ -144,6 +166,10 @@ class _StreamingRuntime
       ),
     );
     turnStarted?.complete();
+    if (waitForCancellation) {
+      await cancellation.whenCancelled;
+      cancellation.throwIfCancelled();
+    }
     await pauseBeforeReturn?.future;
     return XiaoqiAgentTurnResult(
       text: '你好',
@@ -218,6 +244,85 @@ void main() {
     content: [TextPart(text: text)],
     metadata: {
       'xiaoqi_agent_turn': {'task_id': taskId, 'model': 'test-model'},
+    },
+  );
+
+  test(
+    'pause confirms cancellation and restores the same task from its checkpoint',
+    () async {
+      runtime.waitForCancellation = true;
+      runtime.effectStore = store;
+      runtime.turnStarted = Completer<void>();
+      const taskId = 'pause-resume-task';
+      final initial = ownerAgent.chat().sendStream(
+        message: Message(
+          role: Role.user,
+          content: [TextPart(text: 'explain and draw')],
+          metadata: {
+            'xiaoqi_agent_turn': {
+              'task_id': taskId,
+              'workflow_id': 'pause-conversation',
+              'user_message_id': 'pause-question',
+              'current_turn_text': 'explain and draw',
+            },
+          },
+        ),
+      );
+      final response = initial.response.then<Object?>(
+        (v) => v,
+        onError: (Object e) => e,
+      );
+      final drained = initial.stream.drain<void>().then<Object?>(
+        (_) => null,
+        onError: (Object e) => e,
+      );
+      await runtime.turnStarted!.future.timeout(const Duration(seconds: 5));
+      final task = store.get('task/personal/$taskId')!.value;
+      final checkpoint = task['agent_snapshot_id'] as String;
+      final duplicate = ownerAgent.chat(snapshotId: checkpoint).sendStream();
+      final duplicateResponse = duplicate.response.then<Object?>(
+        (v) => v,
+        onError: (Object e) => e,
+      );
+      await expectLater(duplicate.stream.drain<void>(), throwsA(anything));
+      await duplicateResponse;
+      expect(runtime.turnCount, 1);
+      final http = HttpClient();
+      try {
+        final request = await http.postUrl(
+          Uri.parse(
+            'http://127.0.0.1:${server.port}/v1/agent/tasks/$taskId/cancel',
+          ),
+        );
+        request.headers.set('authorization', 'Bearer $ownerToken');
+        request.headers.set('x-xiaoqi-contract', apiContractVersion);
+        final result = await request.close();
+        expect(result.statusCode, 200);
+        await result.drain<void>();
+      } finally {
+        http.close(force: true);
+      }
+      await Future.wait([
+        response,
+        drained,
+      ]).timeout(const Duration(seconds: 5));
+      expect(store.get('task/personal/$taskId')!.value['status'], 'cancelled');
+      runtime.waitForCancellation = false;
+      runtime.turnStarted = null;
+      final restored = ownerAgent.chat(snapshotId: checkpoint).sendStream();
+      await restored.stream.drain<void>();
+      expect((await restored.response).text, '你好');
+      expect(runtime.turnCount, 2);
+      expect(runtime.lastRequest!['task_id'], taskId);
+      expect(runtime.lastRequest!['user_message_id'], 'pause-question');
+      expect(runtime.imageSubmissions, 1);
+      final completedRetry = ownerAgent
+          .chat(snapshotId: checkpoint)
+          .sendStream();
+      await completedRetry.stream.drain<void>();
+      expect((await completedRetry.response).text, '你好');
+      expect(runtime.turnCount, 2);
+      expect(runtime.imageSubmissions, 1);
     },
   );
 

@@ -3367,6 +3367,7 @@ $materialIndex
     required List<Map<String, Object?>> aiMessages,
     required String modelId,
     required String reasoningLevel,
+    String? resumeTaskId,
   }) async {
     final materials = await _agentTaskMaterials(history);
     final taskMessages = _agentTaskMessages(aiMessages, materials);
@@ -3375,7 +3376,19 @@ $materialIndex
         capability?['type'] == 'action' && capability?['id'] == 'create-image';
     if (!_isCurrentRequest(generation, conversationId)) return null;
 
-    final taskId = CapabilityCloudSync.newTaskId();
+    final taskId = resumeTaskId ?? CapabilityCloudSync.newTaskId();
+    Map<String, dynamic>? recovery;
+    if (resumeTaskId != null) {
+      recovery = await CapabilityCloudSync.instance.getTask(taskId);
+      if (recovery['status'] == 'running' || recovery['status'] == 'pausing') {
+        throw const AiException('云端仍在确认暂停，请稍后继续');
+      }
+      if (recovery['agent_snapshot_id'] == null) {
+        throw const AiException('原任务没有可用恢复快照，请重新发送消息');
+      }
+    }
+    await _persistCapabilityTaskId(conversationId, question.id, taskId);
+    if (!_isCurrentRequest(generation, conversationId)) return null;
     _activeRemoteAgentTaskId = taskId;
     _activeRemoteAgentConversationId = conversationId;
     if (mounted) setState(() {});
@@ -3461,8 +3474,10 @@ $materialIndex
     );
     final agent = CapabilityCloudSync.instance.createRemoteAgent();
     final chat = agent.chat(
-      snapshotId: startSnapshotId,
-      sessionId: startSnapshotId == null ? startSessionId : null,
+      snapshotId: recovery?['agent_snapshot_id'] as String? ?? startSnapshotId,
+      sessionId: recovery == null && startSnapshotId == null
+          ? startSessionId
+          : null,
     );
     final surfaceController = genui.SurfaceController(
       catalogs: [_agentClarificationCatalog],
@@ -3494,7 +3509,9 @@ $materialIndex
         }
       }
     });
-    var turn = chat.sendStream(message: userMessage);
+    var turn = resumeTaskId == null
+        ? chat.sendStream(message: userMessage)
+        : chat.sendStream();
     try {
       late genkit_client.AgentResponse<Map<String, dynamic>> response;
       while (true) {
@@ -4869,6 +4886,28 @@ $text''';
       return;
     }
     if (_isGenerating && _activeCapabilityTaskId == taskId) return;
+    Map<String, dynamic> task;
+    try {
+      task = await CapabilityCloudSync.instance.getTask(taskId);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || _conversation?.id != record.id) return;
+    if (task['agent_snapshot_id'] != null &&
+        const {'cancelled', 'failed'}.contains(task['status'])) {
+      if (!record.nodes.any(
+        (node) =>
+            node.parentMessageId == message.id &&
+            !node.isUser &&
+            node.isIncomplete,
+      )) {
+        setState(() {
+          _stoppedEmptyReplyConversationId = record.id;
+          _stoppedEmptyReplyParentId = message.id;
+        });
+      }
+      return;
+    }
 
     final generation = ++_requestGeneration;
     _pendingReplyParentId = message.id;
@@ -5150,7 +5189,7 @@ $text''';
           ),
         )
         .copyWith(updatedAt: now);
-    if (clearAgentTaskId || (!isIncomplete && replyTaskId != null)) {
+    if (!isIncomplete && (clearAgentTaskId || replyTaskId != null)) {
       updated = updated.copyWith(
         nodes: updated.nodes
             .map(
@@ -5304,7 +5343,7 @@ $text''';
           .toList(growable: false),
       updatedAt: now,
     );
-    if (clearAgentTaskId || (!isIncomplete && replyTaskId != null)) {
+    if (!isIncomplete && (clearAgentTaskId || replyTaskId != null)) {
       updated = updated.copyWith(
         nodes: updated.nodes
             .map(
@@ -5485,7 +5524,9 @@ $text''';
       _cancelAttachmentPreparation(attachment);
     }
     final capabilityTaskId =
-        _activeCapabilityTaskId ?? pendingMessage?.agentTaskId;
+        _activeRemoteAgentTaskId ??
+        _activeCapabilityTaskId ??
+        pendingMessage?.agentTaskId;
     final continuationMessageId = _pendingContinuationMessageId;
     final stoppedGeneration = ++_requestGeneration;
     _abortActiveAgentTurn?.call();
@@ -5596,7 +5637,9 @@ $text''';
           (partialReply.trim().isNotEmpty || _agentProcessDetails.isNotEmpty)) {
         answerWasSaved = await _updateIncompleteReply(
           continuationMessageId,
-          '${answer.text}$partialReply',
+          _conversation?.nodeById(parentMessageId ?? '')?.agentTaskId != null
+              ? (partialReply.trim().isEmpty ? answer.text : partialReply)
+              : '${answer.text}$partialReply',
           isIncomplete: true,
           clearAgentTaskId: true,
           agentProcessSummary: _agentProcessSummary(),
@@ -6345,7 +6388,7 @@ $text''';
     setState(() {
       _isGenerating = true;
       _continuingReplyId = messageId;
-      _isContinuingReply = true;
+      _isContinuingReply = false;
       _messages
         ..clear()
         ..addAll(current.messages);
@@ -6362,7 +6405,9 @@ $text''';
       if (answer != null) {
         return _updateIncompleteReply(
           answer.id,
-          '${answer.text}$addedText',
+          question.agentTaskId != null
+              ? (addedText.trim().isEmpty ? answer.text : addedText)
+              : '${answer.text}$addedText',
           isIncomplete: true,
           clearAgentTaskId: true,
           agentProcessSummary: _agentProcessSummary(),
@@ -6397,6 +6442,12 @@ $text''';
         aiMessages.add({'role': 'assistant', 'content': answer.text});
         aiMessages.add({'role': 'user', 'content': '请从这段已生成内容之后继续，不要重复已有内容。'});
       }
+      final resumeTaskId =
+          question.agentTaskId ??
+          await CapabilityCloudSync.instance.getMessageTaskId(
+            conversationId,
+            question.id,
+          );
       final taskReply = await _runAgentTaskReply(
         generation: requestGeneration,
         conversationId: conversationId,
@@ -6405,6 +6456,7 @@ $text''';
         aiMessages: aiMessages,
         modelId: selection.model.id,
         reasoningLevel: selection.reasoningLevel.name,
+        resumeTaskId: resumeTaskId,
       );
       if (taskReply == null ||
           !_isCurrentRequest(requestGeneration, conversationId)) {
@@ -6413,7 +6465,7 @@ $text''';
       if (answer != null) {
         await _updateIncompleteReply(
           answer.id,
-          '${answer.text}${taskReply.reply}',
+          taskReply.reply,
           isIncomplete: false,
           clearAgentTaskId: true,
           outputArtifacts: taskReply.artifacts,

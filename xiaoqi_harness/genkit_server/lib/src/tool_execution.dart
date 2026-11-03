@@ -64,6 +64,9 @@ class ToolExecution {
   final ExecutionLimits limits;
   String get key => 'task/$tenantId/$taskId';
 
+  void saveTextCheckpoint(Map<String, dynamic> checkpoint) =>
+      _update((value) => {...value, 'text_checkpoint': checkpoint});
+
   static String digest(Object value) =>
       sha256.convert(utf8.encode(jsonEncode(value))).toString();
 
