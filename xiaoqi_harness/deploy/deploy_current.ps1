@@ -27,14 +27,40 @@ if (-not $productRelease -or -not $contractVersion -or
     throw 'Client and server release/contract identifiers must match before deployment.'
 }
 
+function Get-EcsLocalProxy {
+    if ($env:HTTPS_PROXY -or $env:HTTP_PROXY -or $env:https_proxy -or $env:http_proxy) { return $null }
+    if ($env:OS -ne 'Windows_NT') { return $null }
+    $settings = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+    if (-not $settings -or -not $settings.ProxyEnable -or -not $settings.ProxyServer) { return $null }
+    $server = [string]$settings.ProxyServer
+    if ($server -match '(?:^|;)https=([^;]+)') { $server = $Matches[1] }
+    elseif ($server.Contains('=')) { return $null }
+    # Reuse an already enabled local proxy; never start a proxy or send credentials.
+    if ($server -match '^(?:http://)?(127\.0\.0\.1|localhost):([0-9]{1,5})$' -and
+        [int]$Matches[2] -ge 1 -and [int]$Matches[2] -le 65535) {
+        return "http://$($Matches[1]):$($Matches[2])"
+    }
+    return $null
+}
+
 function Invoke-AliyunJson {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
     $cliArguments = @($Arguments + @('--endpoint', $Endpoint))
     $maxAttempts = if ($Arguments[1] -like 'Describe*') { 4 } else { 1 }
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        $output = & aliyun @cliArguments 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0) {
+        $localProxy = Get-EcsLocalProxy
+        $previousHttpProxy = $env:HTTP_PROXY
+        $previousHttpsProxy = $env:HTTPS_PROXY
+        try {
+            if ($localProxy) { $env:HTTP_PROXY = $localProxy; $env:HTTPS_PROXY = $localProxy }
+            $output = & aliyun @cliArguments 2>&1 | Out-String
+            $cliExitCode = $LASTEXITCODE
+        } finally {
+            $env:HTTP_PROXY = $previousHttpProxy
+            $env:HTTPS_PROXY = $previousHttpsProxy
+        }
+        if ($cliExitCode -eq 0) {
             $parsed = $output | ConvertFrom-Json
             if (-not ($parsed.PSObject.Properties.Name -contains 'message' -and $parsed.PSObject.Properties.Name -contains 'schemaVersion')) {
                 return $parsed

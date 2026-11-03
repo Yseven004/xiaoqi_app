@@ -12,7 +12,7 @@ $validation = $verificationParameter.Attributes | Where-Object { $_.TypeName.Nam
 if (($validation.PositionalArguments.Value -join ',') -ne 'full,non-image') { throw 'Unexpected verification profile choices.' }
 $launchAssignment = $ast.Find({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$launch'}, $true)
 if ($launchAssignment.Right.Extent.Text -notmatch 'XIAOQI_RELEASE_VERIFICATION_PROFILE=') { throw 'The selected verification profile is not forwarded to the remote job.' }
-foreach ($name in @('Get-OptionalField', 'Wait-RemoteCommand', 'Invoke-AliyunJson')) {
+foreach ($name in @('Get-OptionalField', 'Wait-RemoteCommand', 'Get-EcsLocalProxy', 'Invoke-AliyunJson')) {
     $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
     . ([ScriptBlock]::Create($definition.Extent.Text))
 }
@@ -40,9 +40,16 @@ $definition = $ast.Find({param($node) $node -is [System.Management.Automation.La
 . ([ScriptBlock]::Create($definition.Extent.Text))
 $script:calls = 0
 $Endpoint = 'example.com'
-function aliyun { $script:calls++; $global:LASTEXITCODE=1; 'ambiguous transport failure' }
+function Get-EcsLocalProxy { 'http://127.0.0.1:7890' }
+$originalHttpProxy = $env:HTTP_PROXY
+$originalHttpsProxy = $env:HTTPS_PROXY
+function aliyun {
+    if ($env:HTTPS_PROXY -ne 'http://127.0.0.1:7890') { throw 'Enabled local proxy was not forwarded.' }
+    $script:calls++; $global:LASTEXITCODE=1; 'ambiguous transport failure'
+}
 try { Invoke-AliyunJson -Arguments @('ecs','RunCommand') | Out-Null } catch { }
 if ($script:calls -ne 1) { throw 'Remote write was replayed.' }
+if ($env:HTTP_PROXY -ne $originalHttpProxy -or $env:HTTPS_PROXY -ne $originalHttpsProxy) { throw 'Proxy environment was not restored.' }
 
 $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-RemoteDeploymentLog'}, $true)
 . ([ScriptBlock]::Create($definition.Extent.Text))
