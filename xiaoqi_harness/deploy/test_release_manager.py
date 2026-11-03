@@ -163,6 +163,15 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
         self.assertNotIn(' stop app', (self.root/'docker.calls').read_text())
 
+    def test_explicit_learning_waiver_preserves_other_release_gates(self):
+        result = self.deploy(XIAOQI_SKIP_NATIVE_LEARNING_PROBE='1', FAIL_LEARNING_PROBE='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"status":"deferred_by_user","verified":false', result.stdout)
+        calls = (self.root/'docker.calls').read_text()
+        self.assertNotIn('/app/bin/verify_learning_plugins', calls)
+        self.assertIn('/app/bin/verify_web_tools', calls)
+        self.assertIn('--compare /backup/store.json', calls)
+
     def test_failed_catalog_seed_restores_source_version_and_data(self):
         result = self.deploy(FAIL_CATALOG_SEED='1')
         self.assertNotEqual(result.returncode, 0)

@@ -12,6 +12,8 @@ $validation = $verificationParameter.Attributes | Where-Object { $_.TypeName.Nam
 if (($validation.PositionalArguments.Value -join ',') -ne 'full,non-image') { throw 'Unexpected verification profile choices.' }
 $launchAssignment = $ast.Find({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$launch'}, $true)
 if ($launchAssignment.Right.Extent.Text -notmatch 'XIAOQI_RELEASE_VERIFICATION_PROFILE=') { throw 'The selected verification profile is not forwarded to the remote job.' }
+if ($launchAssignment.Right.Extent.Text -notmatch 'XIAOQI_SKIP_NATIVE_LEARNING_PROBE=') { throw 'The explicit single-deployment waiver is not forwarded.' }
+if (-not ($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'SkipNativeLearningProbe' -and $null -eq $_.DefaultValue })) { throw 'Native learning checks must remain enabled by default.' }
 foreach ($name in @('Get-OptionalField', 'Wait-RemoteCommand', 'Get-EcsLocalProxy', 'Invoke-AliyunJson')) {
     $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
     . ([ScriptBlock]::Create($definition.Extent.Text))

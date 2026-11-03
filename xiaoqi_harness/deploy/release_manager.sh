@@ -498,10 +498,14 @@ PY
     --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
     --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
     --entrypoint /app/bin/verify_official_catalog "xiaoqi-genkit-server:build-$commit" "${probe_options[@]}"
-  timeout --kill-after=30s 900 docker run --rm --name xiaoqi-native-learning-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
-    --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
-    --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
-    --entrypoint /app/bin/verify_learning_plugins "xiaoqi-genkit-server:build-$commit"
+  if [[ "${XIAOQI_SKIP_NATIVE_LEARNING_PROBE:-0}" == "1" ]]; then
+    printf '%s\n' '{"check":"native-learning-plugins","status":"deferred_by_user","verified":false,"reason":"explicit_deployment_waiver"}'
+  else
+    timeout --kill-after=30s 900 docker run --rm --name xiaoqi-native-learning-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
+      --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
+      --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
+      --entrypoint /app/bin/verify_learning_plugins "xiaoqi-genkit-server:build-$commit"
+  fi
   timeout --kill-after=30s 900 docker run --rm --name xiaoqi-web-tools-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
     --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
     --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \

@@ -5,7 +5,8 @@ param(
     [string]$Profile = 'xiaoqi-remote-deploy',
     [string]$Endpoint = '',
     [string]$PublicHealthUrl = 'https://47-76-60-77.sslip.io/health',
-    [ValidateSet('full', 'non-image')][string]$VerificationProfile = 'full'
+    [ValidateSet('full', 'non-image')][string]$VerificationProfile = 'full',
+    [switch]$SkipNativeLearningProbe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -330,7 +331,9 @@ try {
     $downloadConfig = 'url = "' + $build.DownloadUrl + '"' + "`n"
     Send-RemoteFile -TargetDir $incomingDir -Name 'download.conf' -Bytes ([Text.Encoding]::UTF8.GetBytes($downloadConfig))
     Write-Host "Live verification profile: $VerificationProfile. Deferred checks are not marked verified."
-    $launch = "set -eu; test ! -e '$incomingDir/started'; touch '$incomingDir/started'; XIAOQI_RELEASE_VERIFICATION_PROFILE='$VerificationProfile' nohup bash '$incomingDir/run_release_job.sh' '$releaseId' '$($build.Commit)' '$productRelease' '$contractVersion' </dev/null >/dev/null 2>&1 & echo JOB_STARTED"
+    $skipLearning = if ($SkipNativeLearningProbe) { '1' } else { '0' }
+    if ($SkipNativeLearningProbe) { Write-Warning 'Native learning probe explicitly waived for this deployment; it is not verified.' }
+    $launch = "set -eu; test ! -e '$incomingDir/started'; touch '$incomingDir/started'; XIAOQI_SKIP_NATIVE_LEARNING_PROBE='$skipLearning' XIAOQI_RELEASE_VERIFICATION_PROFILE='$VerificationProfile' nohup bash '$incomingDir/run_release_job.sh' '$releaseId' '$($build.Commit)' '$productRelease' '$contractVersion' </dev/null >/dev/null 2>&1 & echo JOB_STARTED"
     # Mark ambiguous dispatches as started so finally never removes active inputs.
     $jobStarted = $true
     Invoke-RemoteCommand -Script $launch -TimeoutSeconds 60 | Write-Host
