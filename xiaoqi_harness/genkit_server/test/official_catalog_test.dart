@@ -55,6 +55,10 @@ void main() {
         final files = selected.files(selected.entries.values.single);
         if (original) {
           expect(installed.value['kind'], 'plugin');
+          expect(
+            selected.entries.values.single['component_id'],
+            isNot('legacy'),
+          );
           expect(files['SKILL.md'], isNotEmpty);
           expect(
             selected.isOfficialActive(
@@ -85,6 +89,7 @@ void main() {
         );
         expect(files.keys.any((key) => key.startsWith('LICENSE')), isTrue);
         if (installed.value['name'] == 'book-to-skill') {
+          expect(selected.entries.values.single['component_id'], 'legacy');
           expect(files['scripts/extract.py'], isNotEmpty);
           expect(files['book_to_skill/cli.py'], isNotEmpty);
           expect(

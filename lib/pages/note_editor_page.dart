@@ -968,7 +968,7 @@ class _NoteEditorPageState extends State<NoteEditorPage>
                 _quillController.document.length - 1,
               ),
             ),
-            quill.ChangeSource.local,
+            quill.ChangeSource.remote,
           );
         }
         _learningNotesBaseline = _note!.updatedAt;

@@ -81,9 +81,12 @@ class SelectedSkills {
         .where((v) => v['id'] == versionId)
         .firstOrNull;
     if (version == null) throw StateError('扩展版本不存在，请刷新后重新选择');
+    // Root skills keep their existing alias in persisted task checkpoints.
     final components =
         version['components'] is List &&
-            (version['components'] as List).isNotEmpty
+            (version['components'] as List).isNotEmpty &&
+            (record['kind'] == 'plugin' ||
+                const {'github', 'upload'}.contains(record['origin']))
         ? (version['components'] as List).whereType<Map>().toList()
         : <Map>[
             {
