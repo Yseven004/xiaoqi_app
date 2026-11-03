@@ -30,11 +30,18 @@ Future<void> main() async {
     ]) {
       final calls = <String, int>{};
       final providers = <String>{};
+      store.put('task/isolated-web-probe/${scenario.$1}', {
+        'events': [],
+        'artifacts': [],
+      }, null);
       final result = await runtime
           .runAgentTurn(
             tenantId: 'isolated-web-probe',
             taskId: scenario.$1,
-            request: {'current_turn_text': scenario.$2},
+            request: {
+              'model_id': 'deepseek-flash',
+              'current_turn_text': scenario.$2,
+            },
             messages: [
               Message(
                 role: Role.user,
