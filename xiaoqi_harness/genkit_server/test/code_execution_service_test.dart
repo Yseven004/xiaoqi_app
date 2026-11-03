@@ -781,6 +781,58 @@ else:
   );
 
   test(
+    'annotation output re-export keeps one artifact without hiding revisions',
+    () async {
+      final task = store.get('task/personal/task-code')!;
+      store.put('task/personal/task-code', {
+        ...task.value,
+        'native_annotation': true,
+      }, task.revision);
+      worker.writeAsStringSync(
+        worker
+            .readAsStringSync()
+            .replaceAll('report.txt', 'annotated-reading.png')
+            .replaceAll('text/plain', 'image/png'),
+      );
+      final service = DockerCodeExecutionService(
+        store,
+        workerPath: worker.path,
+        pythonExecutable: pythonExecutable(),
+      );
+      Future<void> execute() async {
+        await service.execute(
+          tenantId: 'personal',
+          taskId: 'task-code',
+          code: 'render',
+          language: 'python',
+          authorizedDomains: [],
+          materials: [],
+          skillFiles: {},
+          cancellation: CancellationController().token,
+        );
+      }
+
+      await execute();
+      await execute();
+      expect(
+        store.get('task/personal/task-code')!.value['artifacts'],
+        hasLength(1),
+      );
+      worker.writeAsStringSync(
+        worker.readAsStringSync().replaceAll(
+          base64Encode(utf8.encode('saved')),
+          base64Encode(utf8.encode('revised')),
+        ),
+      );
+      await execute();
+      expect(
+        store.get('task/personal/task-code')!.value['artifacts'],
+        hasLength(2),
+      );
+    },
+  );
+
+  test(
     'code and query share one atomic task budget across resume and steering',
     () async {
       const limits = ExecutionLimits(toolOperations: 2);

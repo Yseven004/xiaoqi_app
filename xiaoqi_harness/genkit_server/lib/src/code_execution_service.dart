@@ -1325,9 +1325,11 @@ class DockerCodeExecutionService {
     for (final raw in rawArtifacts.whereType<Map>()) {
       final rawName = raw['name']?.toString() ?? '';
       final name = _safeArtifactName(rawName);
-      final internal =
+      final nativeAnnotation =
           store.get('task/$tenantId/$taskId')?.value['native_annotation'] ==
-              true &&
+          true;
+      final internal =
+          nativeAnnotation &&
           (RegExp(r'^annotation-ocr-[a-f0-9]{16}\.json$').hasMatch(name) ||
               name == 'annotation-receipt.json');
       final encoded = raw['base64']?.toString() ?? '';
@@ -1342,7 +1344,15 @@ class DockerCodeExecutionService {
       if (total > 20 * 1024 * 1024) {
         throw StateError('本次任务产物总大小超过 20 MB');
       }
-      final id = operationId == null
+      // Annotation scans/renders can return the unchanged output directory
+      // again. One unchanged file is one artifact across script operations.
+      final id = nativeAnnotation
+          ? sha256
+                .convert(
+                  utf8.encode('annotation/$name/${sha256.convert(bytes)}'),
+                )
+                .toString()
+          : operationId == null
           ? _uuid.v4().replaceAll('-', '')
           : sha256
                 .convert(
