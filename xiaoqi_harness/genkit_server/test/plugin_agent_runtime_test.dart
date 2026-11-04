@@ -12,6 +12,9 @@ void main() {
     'ignored-plugin-fields-approval',
     'preload',
     'preload-script-network',
+    'dependency-approved-script-network',
+    'dependency-denied-script-network',
+    'dependency-failed-script-network',
     'skill-hook-once',
     'skill-hook-block',
     'skill-hook-approval',
@@ -51,6 +54,7 @@ void main() {
       () async {
         var providerCalls = 0;
         final scriptNetwork = scenario.endsWith('script-network');
+        final dependencyScript = scenario.startsWith('dependency-');
         final rootHooks = scenario.startsWith('root-hook-');
         final rootLifecycle = scenario.startsWith('root-life-');
         final skillHooks = scenario.startsWith('skill-hook-');
@@ -207,8 +211,22 @@ void main() {
                   'script_path': 'scripts/check.py',
                   'language': 'python',
                   'arguments': [r'literal; $(not-a-host-command)'],
-                  'domains': ['example.com'],
+                  'domains': dependencyScript ? [] : ['example.com'],
+                  if (dependencyScript)
+                    'dependencies': {
+                      'python': ['sample==1.2.3'],
+                    },
                   'purpose': 'Fetch delegated task data',
+                };
+              } else if (scenario == 'dependency-approved-script-network' &&
+                  !called('execute_python')) {
+                tool = 'execute_python';
+                input = {
+                  'code': 'import sample',
+                  'dependencies': {
+                    'python': ['sample==1.2.3'],
+                  },
+                  'purpose': 'Reuse the skill dependency',
                 };
               }
             } else if (mcp) {
@@ -460,10 +478,21 @@ void main() {
             }
           } else if (scriptNetwork) {
             expect(value['before_approval'], 0);
-            expect(value['script_runs'], 1);
-            expect(value['network_grants'], isEmpty);
-            expect(value['completed'], 1);
-            expect(value['missing'], isFalse);
+            if (dependencyScript) {
+              final approved = scenario == 'dependency-approved-script-network';
+              expect(
+                value['dependency_runs'],
+                scenario.contains('denied') ? 0 : 1,
+              );
+              expect(value['script_runs'], approved ? 1 : 0);
+              expect(value['generic_runs'], approved ? 1 : 0);
+              expect(value['network_grants'], isEmpty);
+            } else {
+              expect(value['script_runs'], 1);
+              expect(value['network_grants'], isEmpty);
+              expect(value['completed'], 1);
+              expect(value['missing'], isFalse);
+            }
           } else if (mcp) {
             expect(value['before_approval'], 0);
             final approved = const {

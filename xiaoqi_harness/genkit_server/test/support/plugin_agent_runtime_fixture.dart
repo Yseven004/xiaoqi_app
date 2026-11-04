@@ -21,6 +21,9 @@ Future<void> main(List<String> args) async {
   final skillHooks = scenario.startsWith('skill-hook-');
   final hookCounter = File('${root.path}/hook-count.json');
   final scriptNetwork = scenario.endsWith('script-network');
+  final dependencyScript = scenario.startsWith('dependency-');
+  final dependencyCounter = File('${root.path}/dependency-count');
+  final genericCounter = File('${root.path}/generic-count');
   final preloadSkill =
       scenario == 'preload' ||
       scenario == 'preload-script-network' ||
@@ -30,20 +33,40 @@ Future<void> main(List<String> args) async {
   if (scriptNetwork) {
     final worker = File('${root.path}/network_worker.py');
     worker.writeAsStringSync('''
-import json,pathlib,sys
+import base64,io,json,pathlib,sys,zipfile
 r=json.loads(sys.stdin.readline())
 if r.get('action') == 'network_token':
  print(json.dumps({'ok':True,'network_token':'123456789.${'a' * 64}'}))
 elif r.get('action'):
  print(json.dumps({'ok':True}))
 else:
- assert r['authorized_domains'] == ['example.com']
- assert r['script_path'] == 'scripts/check.py'
- assert r['arguments'] == ['literal; \$(not-a-host-command)']
- counter=pathlib.Path(${jsonEncode(scriptCounter.path)})
+ dependency=${dependencyScript ? 'True' : 'False'}
+ if dependency and r.get('execution_profile') == 'dependency_build':
+  counter=pathlib.Path(${jsonEncode(dependencyCounter.path)})
+  counter.write_text(str(int(counter.read_text())+1 if counter.exists() else 1))
+  if ${scenario.contains('failed') ? 'True' : 'False'}:
+   print(json.dumps({'type':'result','ok':False,'stderr':'fixture install failed','artifacts':[],'cleanup_pending':False}))
+   sys.exit(0)
+  archive=io.BytesIO()
+  with zipfile.ZipFile(archive,'w') as z:
+   z.writestr('.xiaoqi/dependency-lock.json',json.dumps({'schema':1,'python':[{'name':'sample','version':'1.2.3','hashes':{'sha256':'abc'}}],'npm':{},'executables':[]}))
+   z.writestr('.xiaoqi/python/sample/__init__.py','VALUE=1')
+  print(json.dumps({'type':'result','ok':True,'stdout':'prepared','artifacts':[{'name':'dependencies.zip','media_type':'application/zip','base64':base64.b64encode(archive.getvalue()).decode()}],'cleanup_pending':False}))
+  sys.exit(0)
+ assert r['authorized_domains'] == ([] if dependency else ['example.com'])
+ if dependency:
+  assert '.xiaoqi/python/sample/__init__.py' in r['skill_files']
+ if r.get('script_path'):
+  assert r['script_path'] == 'scripts/check.py'
+  assert r['arguments'] == ['literal; \$(not-a-host-command)']
+ counter=pathlib.Path(${jsonEncode(scriptCounter.path)} if r.get('script_path') else ${jsonEncode(genericCounter.path)})
  counter.write_text(str(int(counter.read_text())+1 if counter.exists() else 1))
  print(json.dumps({'type':'result','ok':True,'stdout':'verified agent network script','artifacts':[],'cleanup_pending':False}))
 ''');
+    if (dependencyScript)
+      File(
+        '${root.path}/prepare_dependencies.py',
+      ).writeAsStringSync('# fixture installer');
     codeExecutor = DockerCodeExecutionService(
       store,
       workerPath: worker.path,
@@ -534,6 +557,7 @@ else:
             'approved':
                 scenario != 'denied' &&
                 scenario != 'fork-denied' &&
+                !scenario.contains('dependency-denied') &&
                 scenario != 'fork-dynamic-denied',
             'approval_hash': permission['approval_hash'],
             if (permission['domains'] != null) 'domains': permission['domains'],
@@ -558,6 +582,8 @@ else:
         'external_calls': calls,
         'before_approval': beforeApproval,
         'script_runs': scriptCounter.existsSync() ? int.parse(scriptCounter.readAsStringSync()) : 0,
+        'dependency_runs': dependencyCounter.existsSync() ? int.parse(dependencyCounter.readAsStringSync()) : 0,
+        'generic_runs': genericCounter.existsSync() ? int.parse(genericCounter.readAsStringSync()) : 0,
         'code_runs': task['code_execution_runs'],
         'network_grants': task['authorized_network_domains'],
         if (rootHooks || skillHooks || rootLifecycle) 'hook_runs': hookCounter.existsSync() ? jsonDecode(hookCounter.readAsStringSync()) : [],
