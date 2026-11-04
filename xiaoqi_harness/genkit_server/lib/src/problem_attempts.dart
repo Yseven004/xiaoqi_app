@@ -32,27 +32,8 @@ class ProblemAttemptBudget {
   final String issueContext;
   final void Function(Map<String, Object?> event) onEvent;
   final int limit;
-  final Map<String, Future<void>> _problemQueues = {};
 
   GenerateMiddleware middleware() => _ProblemAttemptMiddleware(this);
-
-  Future<T> serializeProblem<T>(
-    String problemId,
-    Future<T> Function() operation,
-  ) async {
-    final key = '$workflowId/$stageId/$problemId';
-    final previous = _problemQueues[key] ?? Future<void>.value();
-    final release = Completer<void>();
-    final queued = previous.then((_) => release.future);
-    _problemQueues[key] = queued;
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release.complete();
-      if (identical(_problemQueues[key], queued)) _problemQueues.remove(key);
-    }
-  }
 
   String get _taskKey => 'task/$tenantId/$taskId';
 
@@ -332,7 +313,10 @@ final class _ProblemAttemptMiddleware extends GenerateMiddleware {
       });
     }
     final problemId = budget._problemId(request.toolRequest.input);
-    return budget.serializeProblem(problemId, () async {
+    // Do not hold a per-problem lock across tool execution: a delegated Agent
+    // can call another tool for the same issue while its parent tool is still
+    // waiting for the delegated run, which would deadlock nested execution.
+    final Future<ToolResult> Function() run = () async {
       if (budget.taskStopped) {
         return ToolResult.response({
           'ok': false,
@@ -418,6 +402,7 @@ final class _ProblemAttemptMiddleware extends GenerateMiddleware {
         );
       }
       return result;
-    });
+    };
+    return run();
   }
 }
