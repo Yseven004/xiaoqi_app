@@ -928,6 +928,13 @@ class XiaoqiApi {
             .where((message) => message.role == Role.user)
             .map((message) => message.metadata?[_remoteAgentTurnMetadataKey])
             .whereType<Map>()
+            .where((value) {
+              final contextIds = config?['work_context_message_ids'] as List?;
+              return contextIds == null ||
+                  contextIds
+                      .map((id) => id.toString())
+                      .contains(value['user_message_id']?.toString());
+            })
             .map((value) => Map<String, dynamic>.from(value)),
       )..remove('legacy_history');
       currentUserIndex = messages.lastIndexWhere(
@@ -953,6 +960,49 @@ class XiaoqiApi {
           _remoteAgentTurnMetadataKey: cleanConfig,
         },
       );
+      final workContextIds = (cleanConfig['work_context_message_ids'] as List?)
+          ?.map((value) => value.toString())
+          .where((value) => value.isNotEmpty)
+          .toSet();
+      if (workContextIds != null && workContextIds.isNotEmpty) {
+        final scopedMessages = <Message>[];
+        String? currentContextMessageId;
+        for (final message in messages) {
+          if (message.role == Role.user) {
+            final turnMetadata = message.metadata?[_remoteAgentTurnMetadataKey];
+            if (turnMetadata is Map &&
+                turnMetadata['user_message_id'] != null) {
+              currentContextMessageId = turnMetadata['user_message_id']
+                  .toString();
+            } else if (message.metadata?['xiaoqi_work_message_id'] != null) {
+              currentContextMessageId = message
+                  .metadata!['xiaoqi_work_message_id']
+                  .toString();
+            }
+          } else if (message.metadata?['xiaoqi_work_parent_message_id'] !=
+              null) {
+            currentContextMessageId = message
+                .metadata!['xiaoqi_work_parent_message_id']
+                .toString();
+          }
+          if ((message.role == Role.system &&
+                  (message.metadata?['xiaoqi_work_message_id'] == null ||
+                      workContextIds.contains(
+                        message.metadata?['xiaoqi_work_message_id'].toString(),
+                      ))) ||
+              (currentContextMessageId != null &&
+                  workContextIds.contains(currentContextMessageId))) {
+            scopedMessages.add(message);
+          }
+        }
+        messages = scopedMessages;
+      }
+      currentUserIndex = messages.lastIndexWhere(
+        (message) => message.role == Role.user,
+      );
+      if (currentUserIndex < 0) {
+        throw const FormatException('当前工作上下文缺少用户消息');
+      }
       currentUser = messages[currentUserIndex];
       session.setMessages(messages);
 
@@ -1015,6 +1065,22 @@ class XiaoqiApi {
         final checkpointId = await CloudSessionStore(
           store,
         ).saveSnapshot(null, (_) => checkpoint, context: options.context);
+        final acceptedTask = store.get(executionKey);
+        if (input.message != null &&
+            acceptedTask?.value['cancel_requested'] == true) {
+          _mutateTask(
+            executionKey,
+            (value) => {
+              ...value,
+              'agent_snapshot_id': checkpointId,
+              'status': 'paused',
+              'updated_at': _now(),
+              'attempt': (value['attempt'] as num? ?? 0).toInt() + 1,
+            },
+          );
+          _appendEvent(executionKey, {'type': 'status', 'status': 'paused'});
+          return TurnResult(finishReason: AgentFinishReason.aborted);
+        }
         _mutateTask(
           executionKey,
           (value) => {
@@ -1180,10 +1246,14 @@ class XiaoqiApi {
           finishProcess(
             executionCancellation.isCancelled ? 'stopped' : 'failed',
           );
+          final currentTask = store.get(executionKey)?.value;
+          final paused =
+              currentTask?['status'] == 'pausing' ||
+              currentTask?['cancel_requested'] == true;
           _setRemoteAgentTaskStatus(
             tenantId,
             taskId,
-            executionCancellation.isCancelled ? 'cancelled' : 'failed',
+            paused ? 'paused' : 'failed',
           );
           rethrow;
         }
@@ -1194,6 +1264,28 @@ class XiaoqiApi {
           _ => 'completed',
         });
         final resultMessages = result.messages.toList();
+        for (
+          var index = 0;
+          index < messages.length && index < resultMessages.length;
+          index++
+        ) {
+          final internalMetadata = <String, dynamic>{
+            for (final key in const [
+              'xiaoqi_work_message_id',
+              'xiaoqi_work_parent_message_id',
+            ])
+              if (messages[index].metadata?[key] != null)
+                key: messages[index].metadata![key],
+          };
+          if (internalMetadata.isNotEmpty) {
+            final resultMessage = resultMessages[index];
+            resultMessages[index] = Message(
+              role: resultMessage.role,
+              content: resultMessage.content,
+              metadata: {...?resultMessage.metadata, ...internalMetadata},
+            );
+          }
+        }
         // Activation belongs to this task. It must never become a user-selected
         // preference merely because the model loaded a skill or connector.
         cleanConfig['task_active_capabilities'] =
@@ -1292,16 +1384,23 @@ class XiaoqiApi {
         final resultText = partialImage
             ? '${result.text}\n\n图片未生成，文字内容已完成。你可以单独重试图片。'
             : result.text;
+        final pauseRequested = taskValue['cancel_requested'] == true;
+        final problemLimitReached = taskValue['problem_attempt_limit'] is Map;
+        final finalTaskStatus = result.finishReason == AgentFinishReason.aborted
+            ? pauseRequested
+                  ? 'paused'
+                  : 'failed'
+            : result.finishReason == AgentFinishReason.interrupted
+            ? 'awaiting_network_permission'
+            : problemLimitReached || request['keep_work_open'] == true
+            ? 'waiting_for_user'
+            : partialImage || result.extensionEvidenceMissing
+            ? 'partially_completed'
+            : 'completed';
         _setRemoteAgentTaskStatus(
           tenantId,
           taskId,
-          result.finishReason == AgentFinishReason.aborted
-              ? 'cancelled'
-              : result.finishReason == AgentFinishReason.interrupted
-              ? 'awaiting_network_permission'
-              : partialImage || result.extensionEvidenceMissing
-              ? 'partially_completed'
-              : 'completed',
+          finalTaskStatus,
           result: resultText,
           partialReason: partialImage
               ? ((taskValue['image_failure'] as Map?)?['category']
@@ -1311,14 +1410,31 @@ class XiaoqiApi {
               ? 'extension_execution_unverified'
               : null,
         );
+        if (finalTaskStatus == 'waiting_for_user') {
+          final statusArtifact = Artifact(
+            name: 'xiaoqi-task-status-$taskId',
+            parts: const [],
+            metadata: {
+              'task_id': taskId,
+              'task_status': finalTaskStatus,
+              'problem_attempt_limit': taskValue['problem_attempt_limit'],
+            },
+          );
+          session.addArtifacts([statusArtifact]);
+          options.sendChunk(AgentStreamChunk(artifact: statusArtifact));
+        }
         return TurnResult(finishReason: result.finishReason);
       } on Object {
         final status = store.get(executionKey)?.value['status'];
         if (status == 'running' || status == 'pausing') {
+          final currentTask = store.get(executionKey)?.value;
+          final paused =
+              currentTask?['status'] == 'pausing' ||
+              currentTask?['cancel_requested'] == true;
           _setRemoteAgentTaskStatus(
             tenantId,
             taskId,
-            executionCancellation.isCancelled ? 'cancelled' : 'failed',
+            paused ? 'paused' : 'failed',
           );
         }
         rethrow;
@@ -1419,8 +1535,10 @@ class XiaoqiApi {
     String? result,
     String? partialReason,
   }) {
+    final key = 'task/$tenantId/$taskId';
+    final previous = store.get(key)?.value['status'];
     _mutateTask(
-      'task/$tenantId/$taskId',
+      key,
       (value) => {
         ...value,
         'status': status,
@@ -1429,6 +1547,9 @@ class XiaoqiApi {
         'updated_at': _now(),
       },
     );
+    if (previous != status) {
+      _appendEvent(key, {'type': 'status', 'status': status});
+    }
   }
 
   List<Artifact> _remoteAgentArtifacts(String tenantId, String taskId) {
@@ -1470,6 +1591,9 @@ class XiaoqiApi {
   static Message _withoutTurnMetadata(Message message) {
     final metadata = Map<String, dynamic>.from(message.metadata ?? const {})
       ..remove(_remoteAgentTurnMetadataKey);
+    metadata
+      ..remove('xiaoqi_work_message_id')
+      ..remove('xiaoqi_work_parent_message_id');
     return Message(
       role: message.role,
       content: message.content,
@@ -2286,11 +2410,14 @@ class XiaoqiApi {
       if (current != null) {
         if (cancellation.isCancelled ||
             current.value['cancel_requested'] == true) {
+          final status = current.value['remote_agent_turn'] == true
+              ? 'paused'
+              : 'cancelled';
           _mutateTask(
             key,
-            (value) => {...value, 'status': 'cancelled', 'updated_at': _now()},
+            (value) => {...value, 'status': status, 'updated_at': _now()},
           );
-          _appendEvent(key, {'type': 'status', 'status': 'cancelled'});
+          _appendEvent(key, {'type': 'status', 'status': status});
         } else {
           _mutateTask(
             key,
@@ -2341,7 +2468,11 @@ class XiaoqiApi {
           key,
           (value) => {
             ...value,
-            'status': cancelled ? 'cancelled' : 'failed',
+            'status': cancelled
+                ? current.value['remote_agent_turn'] == true
+                      ? 'paused'
+                      : 'cancelled'
+                : 'failed',
             if (!cancelled) 'error': failure.message,
             if (!cancelled) 'error_code': failure.code,
             if (!cancelled) 'error_details': failure.details,
@@ -2351,7 +2482,12 @@ class XiaoqiApi {
         _appendEvent(
           key,
           cancelled
-              ? {'type': 'status', 'status': 'cancelled'}
+              ? {
+                  'type': 'status',
+                  'status': current.value['remote_agent_turn'] == true
+                      ? 'paused'
+                      : 'cancelled',
+                }
               : {
                   'type': 'error',
                   'message': failure.message,
@@ -2636,6 +2772,7 @@ class XiaoqiApi {
         'error_details': value['error_details'],
         'partial_reason': value['partial_reason'],
         'image_failure': value['image_failure'],
+        'problem_attempt_limit': value['problem_attempt_limit'],
         'result': value['result'],
         'learning_notes': value['status'] == 'completed'
             ? value['learning_notes'] ?? const []
@@ -2669,7 +2806,9 @@ class XiaoqiApi {
       final taskId = _safeId(id, '任务 ID');
       final after =
           int.tryParse(request.url.queryParameters['after'] ?? '-1') ?? -1;
-      final doc = store.get('task/${device.tenant}/$taskId');
+      final doc = _recoverInterruptedRemoteAgentTask(
+        'task/${device.tenant}/$taskId',
+      );
       if (doc == null) return _error('任务不存在', 404);
       final events = (doc.value['events'] as List? ?? const [])
           .whereType<Map>()
@@ -2694,28 +2833,37 @@ class XiaoqiApi {
       final key = 'task/${device.tenant}/${_safeId(id, '任务 ID')}';
       final current = store.get(key);
       if (current == null) return _error('任务不存在', 404);
+      final remoteAgentTurn = current.value['remote_agent_turn'] == true;
       if (const {
         'queued',
         'running',
+        'pausing',
         'awaiting_network_permission',
       }.contains(current.value['status'])) {
+        final nextStatus =
+            remoteAgentTurn && current.value['status'] != 'pausing'
+            ? 'pausing'
+            : current.value['status'];
         _mutateTask(
           key,
           (value) => {
             ...value,
             'cancel_requested': true,
-            'status':
-                current.value['remote_agent_turn'] == true &&
-                    _controllers.containsKey(key)
-                ? 'pausing'
-                : 'cancelled',
+            'status': remoteAgentTurn ? nextStatus : 'cancelled',
             'updated_at': _now(),
           },
         );
-        _controllers[key]?.cancel('用户取消任务');
-        _appendEvent(key, {'type': 'status', 'status': 'cancelled'});
+        _controllers[key]?.cancel(remoteAgentTurn ? '用户暂停当前工作' : '用户取消任务');
+        _appendEvent(key, {
+          'type': 'status',
+          'status': remoteAgentTurn ? nextStatus : 'cancelled',
+        });
       }
-      return _json({'ok': true});
+      return _json({
+        'ok': true,
+        'cancel_requested': true,
+        'status': _publicTaskStatus(store.get(key)?.value['status']),
+      });
     } on Object {
       return _error('取消任务失败', 503);
     }
@@ -3341,15 +3489,21 @@ class XiaoqiApi {
         !const {'running', 'pausing'}.contains(current.value['status'])) {
       return current;
     }
-    return _mutateTask(
+    final paused =
+        current.value['status'] == 'pausing' ||
+        current.value['cancel_requested'] == true;
+    final status = paused ? 'paused' : 'failed';
+    final recovered = _mutateTask(
       key,
       (value) => {
         ...value,
-        'status': 'failed',
-        'error_code': 'execution_interrupted',
+        'status': status,
+        if (!paused) 'error_code': 'execution_interrupted',
         'updated_at': _now(),
       },
     );
+    _appendEvent(key, {'type': 'status', 'status': status});
+    return recovered;
   }
 
   Map<String, dynamic> _publicArtifact(

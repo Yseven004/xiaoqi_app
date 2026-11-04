@@ -23,6 +23,9 @@ class AiConversationMessage {
     required this.createdAt,
     String? id,
     this.parentMessageId,
+    this.workId,
+    this.problemAttemptStageId,
+    this.workReferenceQuestionId,
     this.pageLabel = '',
     this.attachments = const [],
     this.isDeletedMarker = false,
@@ -48,6 +51,9 @@ class AiConversationMessage {
 
   final String id;
   final String? parentMessageId;
+  final String? workId;
+  final String? problemAttemptStageId;
+  final String? workReferenceQuestionId;
   final String text;
   final bool isUser;
   final String pageLabel;
@@ -86,6 +92,9 @@ class AiConversationMessage {
   AiConversationMessage copyWith({
     String? id,
     String? parentMessageId,
+    String? workId,
+    String? problemAttemptStageId,
+    String? workReferenceQuestionId,
     bool clearParentMessageId = false,
     String? text,
     bool? isUser,
@@ -120,6 +129,10 @@ class AiConversationMessage {
     parentMessageId: clearParentMessageId
         ? null
         : parentMessageId ?? this.parentMessageId,
+    workId: workId ?? this.workId,
+    problemAttemptStageId: problemAttemptStageId ?? this.problemAttemptStageId,
+    workReferenceQuestionId:
+        workReferenceQuestionId ?? this.workReferenceQuestionId,
     text: text ?? this.text,
     displayText: displayText ?? this.displayText,
     annotations: annotations ?? this.annotations,
@@ -158,6 +171,11 @@ class AiConversationMessage {
   Map<String, Object?> toJson() => {
     'id': id,
     'parent_message_id': parentMessageId,
+    if (workId != null) 'work_id': workId,
+    if (problemAttemptStageId != null)
+      'problem_attempt_stage_id': problemAttemptStageId,
+    if (workReferenceQuestionId != null)
+      'work_reference_question_id': workReferenceQuestionId,
     'text': text,
     if (displayText != null) 'display_text': displayText,
     if (annotations.isNotEmpty)
@@ -212,6 +230,9 @@ class AiConversationMessage {
     return AiConversationMessage(
       id: raw['id']?.toString(),
       parentMessageId: raw['parent_message_id']?.toString(),
+      workId: raw['work_id']?.toString(),
+      problemAttemptStageId: raw['problem_attempt_stage_id']?.toString(),
+      workReferenceQuestionId: raw['work_reference_question_id']?.toString(),
       text: raw['text']?.toString() ?? '',
       displayText: raw['display_text'] as String?,
       annotations: raw['annotations'] is List
@@ -408,6 +429,75 @@ class AiConversationRecord {
     }
     return active;
   }
+
+  AiConversationMessage? get latestUserMessage => messages
+      .where((message) => message.isUser && !message.isDeletedMarker)
+      .lastOrNull;
+
+  String? get activeWorkId => latestUserMessage?.workId;
+
+  /// A stopped, failed, partial, or waiting turn remains the current work.
+  /// Only a completed assistant turn closes automatic capability inheritance.
+  bool get hasOpenWork {
+    final visible = messages;
+    final userIndex = visible.lastIndexWhere(
+      (message) => message.isUser && !message.isDeletedMarker,
+    );
+    if (userIndex < 0) return false;
+    final answer = visible
+        .skip(userIndex + 1)
+        .where((message) => !message.isUser && !message.isDeletedMarker)
+        .lastOrNull;
+    if (answer == null) return true;
+    if (answer.isIncomplete) return true;
+    if (answer.agentProcessStatus == null) return false;
+    return !const {
+      'completed',
+      'succeeded',
+    }.contains(answer.agentProcessStatus);
+  }
+
+  /// Adds a work identity to a legacy unfinished branch exactly once.
+  AiConversationRecord bindOpenWork(String workId) {
+    if (!hasOpenWork || activeWorkId != null) return this;
+    final visible = messages;
+    final lastUserIndex = visible.lastIndexWhere(
+      (message) => message.isUser && !message.isDeletedMarker,
+    );
+    var firstIndex = 0;
+    for (var index = lastUserIndex - 1; index >= 0; index--) {
+      final message = visible[index];
+      if (!message.isUser &&
+          !message.isDeletedMarker &&
+          !message.isIncomplete &&
+          (message.agentProcessStatus == null ||
+              const {
+                'completed',
+                'succeeded',
+              }.contains(message.agentProcessStatus))) {
+        firstIndex = index + 1;
+        break;
+      }
+    }
+    final ids = visible
+        .skip(firstIndex)
+        .take(lastUserIndex - firstIndex + 1)
+        .map((message) => message.id)
+        .toSet();
+    return copyWith(
+      nodes: nodes
+          .map(
+            (message) => ids.contains(message.id)
+                ? message.copyWith(workId: workId)
+                : message,
+          )
+          .toList(growable: false),
+    );
+  }
+
+  List<AiConversationMessage> messagesForWork(String workId) => messages
+      .where((message) => message.workId == workId)
+      .toList(growable: false);
 
   List<AiConversationMessage> answerVersionsFor(AiConversationMessage answer) {
     if (answer.isUser ||

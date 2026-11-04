@@ -24,6 +24,7 @@ String visibleChatAssistantText(String text) {
 String savedChatProcessStatus(String? status, {required bool isIncomplete}) =>
     switch (status) {
       'completed' => 'completed',
+      'waiting_for_user' => 'waiting',
       'stopped' => 'stopped',
       'failed' => 'failed',
       _ => isIncomplete ? 'stopped' : 'completed',

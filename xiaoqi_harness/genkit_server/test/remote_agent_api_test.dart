@@ -273,10 +273,10 @@ void main() {
                 as Map<String, dynamic>;
 
         expect(response.statusCode, 200);
-        expect(payload['status'], 'failed');
-        expect(payload['error_code'], 'execution_interrupted');
+        expect(payload['status'], 'paused');
+        expect(payload['error_code'], isNull);
         expect(payload['agent_snapshot_id'], 'snapshot-before-restart');
-        expect(store.get(key)!.value['status'], 'failed');
+        expect(store.get(key)!.value['status'], 'paused');
       } finally {
         http.close(force: true);
       }
@@ -291,84 +291,76 @@ void main() {
     },
   );
 
-  test(
-    'pause confirms cancellation and restores the same task from its checkpoint',
-    () async {
-      runtime.waitForCancellation = true;
-      runtime.effectStore = store;
-      runtime.turnStarted = Completer<void>();
-      const taskId = 'pause-resume-task';
-      final initial = ownerAgent.chat().sendStream(
-        message: Message(
-          role: Role.user,
-          content: [TextPart(text: 'explain and draw')],
-          metadata: {
-            'xiaoqi_agent_turn': {
-              'task_id': taskId,
-              'workflow_id': 'pause-conversation',
-              'user_message_id': 'pause-question',
-              'current_turn_text': 'explain and draw',
-            },
+  test('stop pauses and restores the same task from its checkpoint', () async {
+    runtime.waitForCancellation = true;
+    runtime.effectStore = store;
+    runtime.turnStarted = Completer<void>();
+    const taskId = 'pause-resume-task';
+    final initial = ownerAgent.chat().sendStream(
+      message: Message(
+        role: Role.user,
+        content: [TextPart(text: 'explain and draw')],
+        metadata: {
+          'xiaoqi_agent_turn': {
+            'task_id': taskId,
+            'workflow_id': 'pause-conversation',
+            'user_message_id': 'pause-question',
+            'current_turn_text': 'explain and draw',
           },
+        },
+      ),
+    );
+    final response = initial.response.then<Object?>(
+      (v) => v,
+      onError: (Object e) => e,
+    );
+    final drained = initial.stream.drain<void>().then<Object?>(
+      (_) => null,
+      onError: (Object e) => e,
+    );
+    await runtime.turnStarted!.future.timeout(const Duration(seconds: 5));
+    final task = store.get('task/personal/$taskId')!.value;
+    final checkpoint = task['agent_snapshot_id'] as String;
+    final duplicate = ownerAgent.chat(snapshotId: checkpoint).sendStream();
+    final duplicateResponse = duplicate.response.then<Object?>(
+      (v) => v,
+      onError: (Object e) => e,
+    );
+    await expectLater(duplicate.stream.drain<void>(), throwsA(anything));
+    await duplicateResponse;
+    expect(runtime.turnCount, 1);
+    final http = HttpClient();
+    try {
+      final request = await http.postUrl(
+        Uri.parse(
+          'http://127.0.0.1:${server.port}/v1/agent/tasks/$taskId/cancel',
         ),
       );
-      final response = initial.response.then<Object?>(
-        (v) => v,
-        onError: (Object e) => e,
-      );
-      final drained = initial.stream.drain<void>().then<Object?>(
-        (_) => null,
-        onError: (Object e) => e,
-      );
-      await runtime.turnStarted!.future.timeout(const Duration(seconds: 5));
-      final task = store.get('task/personal/$taskId')!.value;
-      final checkpoint = task['agent_snapshot_id'] as String;
-      final duplicate = ownerAgent.chat(snapshotId: checkpoint).sendStream();
-      final duplicateResponse = duplicate.response.then<Object?>(
-        (v) => v,
-        onError: (Object e) => e,
-      );
-      await expectLater(duplicate.stream.drain<void>(), throwsA(anything));
-      await duplicateResponse;
-      expect(runtime.turnCount, 1);
-      final http = HttpClient();
-      try {
-        final request = await http.postUrl(
-          Uri.parse(
-            'http://127.0.0.1:${server.port}/v1/agent/tasks/$taskId/cancel',
-          ),
-        );
-        request.headers.set('authorization', 'Bearer $ownerToken');
-        request.headers.set('x-xiaoqi-contract', apiContractVersion);
-        final result = await request.close();
-        expect(result.statusCode, 200);
-        await result.drain<void>();
-      } finally {
-        http.close(force: true);
-      }
-      await Future.wait([
-        response,
-        drained,
-      ]).timeout(const Duration(seconds: 5));
-      expect(store.get('task/personal/$taskId')!.value['status'], 'cancelled');
-      runtime.waitForCancellation = false;
-      runtime.turnStarted = null;
-      final restored = ownerAgent.chat(snapshotId: checkpoint).sendStream();
-      await restored.stream.drain<void>();
-      expect((await restored.response).text, '你好');
-      expect(runtime.turnCount, 2);
-      expect(runtime.lastRequest!['task_id'], taskId);
-      expect(runtime.lastRequest!['user_message_id'], 'pause-question');
-      expect(runtime.imageSubmissions, 1);
-      final completedRetry = ownerAgent
-          .chat(snapshotId: checkpoint)
-          .sendStream();
-      await completedRetry.stream.drain<void>();
-      expect((await completedRetry.response).text, '你好');
-      expect(runtime.turnCount, 2);
-      expect(runtime.imageSubmissions, 1);
-    },
-  );
+      request.headers.set('authorization', 'Bearer $ownerToken');
+      request.headers.set('x-xiaoqi-contract', apiContractVersion);
+      final result = await request.close();
+      expect(result.statusCode, 200);
+      await result.drain<void>();
+    } finally {
+      http.close(force: true);
+    }
+    await Future.wait([response, drained]).timeout(const Duration(seconds: 5));
+    expect(store.get('task/personal/$taskId')!.value['status'], 'paused');
+    runtime.waitForCancellation = false;
+    runtime.turnStarted = null;
+    final restored = ownerAgent.chat(snapshotId: checkpoint).sendStream();
+    await restored.stream.drain<void>();
+    expect((await restored.response).text, '你好');
+    expect(runtime.turnCount, 2);
+    expect(runtime.lastRequest!['task_id'], taskId);
+    expect(runtime.lastRequest!['user_message_id'], 'pause-question');
+    expect(runtime.imageSubmissions, 1);
+    final completedRetry = ownerAgent.chat(snapshotId: checkpoint).sendStream();
+    await completedRetry.stream.drain<void>();
+    expect((await completedRetry.response).text, '你好');
+    expect(runtime.turnCount, 2);
+    expect(runtime.imageSubmissions, 1);
+  });
 
   test(
     'ordinary followups preserve capabilities while removal and branches isolate scope',

@@ -47,4 +47,42 @@ void main() {
       expect(first.copyWith(text: '重新提问').capabilityMetadata, selected);
     },
   );
+
+  test('paused and waiting work stays open; completed work starts fresh', () {
+    final question = AiConversationMessage(
+      id: 'question',
+      text: '分析资料',
+      isUser: true,
+      workId: 'work-1',
+      problemAttemptStageId: 'stage-1',
+      createdAt: now,
+      capabilityMetadata: selected,
+      capabilityScopeOperation: 'replace',
+    );
+    AiConversationRecord conversationWith(String status) {
+      final answer = AiConversationMessage(
+        id: 'answer-$status',
+        text: '进度说明',
+        isUser: false,
+        parentMessageId: question.id,
+        workId: question.workId,
+        problemAttemptStageId: question.problemAttemptStageId,
+        createdAt: now,
+        agentProcessStatus: status,
+      );
+      final record = AiConversationRecord.empty()
+          .copyWith(nodes: [question])
+          .appendAnswerVersion(question.id, answer);
+      return AiConversationRecord.fromJson(record.toJson());
+    }
+
+    final paused = conversationWith('paused');
+    expect(paused.hasOpenWork, isTrue);
+    expect(paused.activeWorkId, 'work-1');
+    expect(paused.latestUserMessage!.problemAttemptStageId, 'stage-1');
+    expect(paused.activeCapabilityMetadata, selected);
+
+    expect(conversationWith('waiting_for_user').hasOpenWork, isTrue);
+    expect(conversationWith('completed').hasOpenWork, isFalse);
+  });
 }

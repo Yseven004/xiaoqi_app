@@ -80,6 +80,22 @@ void main() {
     expect(restored.messageText, '请处理材料');
   });
 
+  test(
+    'sent capability can be cleared while a failed message remains editable',
+    () {
+      final controller = CapabilityTagTextController()..text = '请用技能处理材料';
+      addTearDown(controller.dispose);
+      controller.insertCapability(selection('reader'));
+
+      final sentText = controller.messageText;
+      controller.setMessage(sentText, null, isExplicit: false);
+
+      expect(controller.messageText, sentText);
+      expect(controller.messageMetadata(), isNull);
+      expect(controller.hasExplicitCapability, isFalse);
+    },
+  );
+
   test('MCP connectors coexist with version-pinned skills in one message', () {
     final controller = CapabilityTagTextController()..text = '整理我的资料';
     addTearDown(controller.dispose);

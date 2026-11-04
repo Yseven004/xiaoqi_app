@@ -224,6 +224,133 @@ void main() {
     },
   );
 
+  test(
+    'bounded inference keeps the original goal and newest complete turns',
+    () {
+      final messages = <Message>[
+        Message(
+          role: Role.user,
+          content: [TextPart(text: 'initial work goal')],
+        ),
+        Message(
+          role: Role.model,
+          content: [TextPart(text: List.filled(80, 'old response ').join())],
+        ),
+        for (var turn = 1; turn < 10; turn++) ...[
+          Message(
+            role: Role.user,
+            content: [TextPart(text: 'turn-$turn question')],
+          ),
+          Message(
+            role: Role.model,
+            content: [
+              TextPart(text: List.filled(80, 'response-$turn ').join()),
+            ],
+          ),
+        ],
+      ];
+
+      final inference = boundedInferenceHistory(
+        messages,
+        maxCharacters: 2800,
+        recentTurns: 2,
+      );
+      final text = inference
+          .expand((message) => message.content)
+          .where((part) => part.isText)
+          .map((part) => part.text ?? '')
+          .join('\n');
+
+      expect(text, contains('initial work goal'));
+      expect(text, contains('turn-8 question'));
+      expect(text, contains('turn-9 question'));
+      expect(text, isNot(contains('turn-4 question')));
+      expect(text, contains('完整记录仍保存在会话中'));
+      expect(messages, hasLength(20));
+      expect(messages[1].content.single.text, contains('old response'));
+    },
+  );
+
+  test('oversized tool output is clipped only in the inference copy', () {
+    final messages = [
+      Message(
+        role: Role.tool,
+        content: [
+          ToolResponsePart(
+            toolResponse: ToolResponse(
+              name: 'read_task_material',
+              ref: 'read-1',
+              output: List.filled(1000, 'x').join(),
+            ),
+          ),
+        ],
+      ),
+    ];
+
+    final inference = boundedInferenceHistory(
+      messages,
+      maxCharacters: 5000,
+      historicalToolResponseCharacters: 100,
+    );
+    final compacted =
+        ToolResponsePart.fromJson(
+              inference.single.content.single.toJson(),
+            ).toolResponse.output
+            as String;
+    final persisted =
+        ToolResponsePart.fromJson(
+              messages.single.content.single.toJson(),
+            ).toolResponse.output
+            as String;
+
+    expect(compacted.length, lessThan(1000));
+    expect(compacted, contains('旧工具结果已截断'));
+    expect(persisted, hasLength(1000));
+  });
+
+  test(
+    'oversized structured tool output is omitted only in the inference copy',
+    () {
+      final messages = [
+        Message(
+          role: Role.tool,
+          content: [
+            ToolResponsePart(
+              toolResponse: ToolResponse(
+                name: 'mcp_lookup',
+                ref: 'lookup-1',
+                output: {
+                  'items': List.generate(
+                    100,
+                    (index) => {'title': 'result-$index'},
+                  ),
+                },
+              ),
+            ),
+          ],
+        ),
+      ];
+
+      final inference = boundedInferenceHistory(
+        messages,
+        maxCharacters: 5000,
+        historicalToolResponseCharacters: 100,
+      );
+      final compacted =
+          ToolResponsePart.fromJson(
+                inference.single.content.single.toJson(),
+              ).toolResponse.output
+              as String;
+      final persisted = ToolResponsePart.fromJson(
+        messages.single.content.single.toJson(),
+      ).toolResponse.output;
+
+      expect(compacted, contains('旧结构化工具结果因上下文限制省略'));
+      expect(persisted, isA<Map>());
+      expect((persisted as Map)['items'], hasLength(100));
+    },
+  );
+
   test('corrected scope persists its text and steering revision', () {
     final runner = ToolExecution(
       store,

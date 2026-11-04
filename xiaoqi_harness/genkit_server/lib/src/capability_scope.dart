@@ -5,7 +5,17 @@ Map<String, dynamic> resolveCapabilityScope(
 ) {
   Map<String, dynamic>? previous;
   for (final candidate in ancestors) {
-    if (candidate['workflow_id'] != current['workflow_id']) continue;
+    final workId = current['work_id']?.toString();
+    if (workId != null && workId.isNotEmpty) {
+      final sameWork = candidate['work_id'] == workId;
+      final legacyContinuation =
+          current['capability_scope_operation'] == 'inherit' &&
+          candidate['work_id'] == null &&
+          candidate['workflow_id'] == current['workflow_id'];
+      if (!sameWork && !legacyContinuation) continue;
+    } else if (candidate['workflow_id'] != current['workflow_id']) {
+      continue;
+    }
     previous = candidate;
     break;
   }

@@ -996,6 +996,10 @@ class CapabilityCloudSync {
           if (event['type'] == 'completed' || event['type'] == 'error') {
             return;
           }
+          if (event['type'] == 'status' &&
+              event['status'] == 'waiting_for_user') {
+            return;
+          }
         }
       }
       if (response['content_expired'] == true) return;
@@ -1005,8 +1009,10 @@ class CapabilityCloudSync {
           (status == 'completed' ||
               status == 'succeeded' ||
               status == 'partially_completed' ||
+              status == 'waiting_for_user' ||
               status == 'failed' ||
-              status == 'cancelled')) {
+              status == 'cancelled' ||
+              status == 'paused')) {
         if (!completionReceived &&
             (status == 'completed' ||
                 status == 'succeeded' ||
@@ -1030,6 +1036,8 @@ class CapabilityCloudSync {
               imageGeneration,
             );
           }
+        } else if (status == 'waiting_for_user') {
+          yield {'type': 'status', 'status': status};
         }
         return;
       }
@@ -1211,6 +1219,8 @@ class CapabilityCloudSync {
         value == 'completed' ||
         value == 'succeeded' ||
         value == 'partially_completed' ||
+        value == 'waiting_for_user' ||
+        value == 'paused' ||
         value == 'failed';
     while ((!isTerminal(status) || cleanupPending) &&
         DateTime.now().isBefore(deadline)) {
