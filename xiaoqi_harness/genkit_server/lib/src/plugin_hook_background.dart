@@ -49,6 +49,7 @@ class PluginHookBackground {
           'binding': binding,
           'descriptor': descriptor,
           'created_at': DateTime.now().microsecondsSinceEpoch,
+          'updated_at': DateTime.now().microsecondsSinceEpoch,
         }, null);
       }
       _checks[key] = check;
@@ -60,6 +61,13 @@ class PluginHookBackground {
           await previous;
           check();
           final current = store.get(key)!;
+          if (current.value['phase'] != 'succeeded') {
+            store.put(key, {
+              ...current.value,
+              'phase': 'running',
+              'updated_at': DateTime.now().microsecondsSinceEpoch,
+            }, current.revision);
+          }
           final result = current.value['phase'] == 'succeeded'
               ? current.value['result'] == null
                     ? null
@@ -71,7 +79,12 @@ class PluginHookBackground {
             store.put(key, {
               ...done.value,
               'phase': 'succeeded',
+              if (result?.error != null) 'result_status': 'failed',
+              if (result?.error == null) 'result_status': 'succeeded',
               'result': result?.toJson(),
+              'updated_at': DateTime.now().microsecondsSinceEpoch,
+              if (result?.error != null)
+                'error': '后台 hook 返回错误，检查来源和任务状态后再决定是否重试',
             }, done.revision);
           }
           onEvent?.call({
@@ -98,6 +111,15 @@ class PluginHookBackground {
           });
           _failure ??= error;
           _stack ??= stack;
+          final failed = store.get(key);
+          if (failed != null) {
+            store.put(key, {
+              ...failed.value,
+              'phase': 'failed',
+              'error': '后台 hook 未完成或来源已失效',
+              'updated_at': DateTime.now().microsecondsSinceEpoch,
+            }, failed.revision);
+          }
         }
       });
       if (serial != null) _tails[serial] = _jobs[identity]!;
@@ -178,4 +200,53 @@ class PluginHookBackground {
     }
     _ready.clear();
   }
+}
+
+Map<String, dynamic> taskBackgroundHookStatus(
+  CloudStore store,
+  String tenant,
+  String task,
+) {
+  final prefix = 'private_background_hooks/$tenant/$task/';
+  final records = <(String, StoredDocument)>[];
+  String? after;
+  while (true) {
+    final page = store.list(prefix, afterKey: after);
+    records.addAll(page);
+    if (page.length < 200) break;
+    after = page.last.$1;
+  }
+  records.sort((a, b) {
+    final left = a.$2.value['created_at'];
+    final right = b.$2.value['created_at'];
+    return (left is int ? left : 0).compareTo(right is int ? right : 0);
+  });
+  String? time(Object? value) => value is int
+      ? DateTime.fromMicrosecondsSinceEpoch(
+          value,
+          isUtc: true,
+        ).toIso8601String()
+      : null;
+  return {
+    'items': [
+      for (final (key, record) in records.reversed.take(20))
+        {
+          'job_id': key.substring(prefix.length),
+          'status':
+              record.value['result_status']?.toString() ??
+              record.value['phase']?.toString() ??
+              'unknown',
+          if (record.value['descriptor'] is Map &&
+              (record.value['descriptor'] as Map)['hook_event'] != null)
+            'event': (record.value['descriptor'] as Map)['hook_event'],
+          if (time(record.value['created_at']) case final String created)
+            'created_at': created,
+          if (time(record.value['updated_at'] ?? record.value['created_at'])
+              case final String updated)
+            'updated_at': updated,
+          if (record.value['error'] != null) 'error': record.value['error'],
+        },
+    ],
+    'truncated': records.length > 20,
+  };
 }

@@ -576,6 +576,125 @@ print(json.dumps({'type':'result','ok':True,'stdout':'','stderr':'','cleanup_pen
     },
   );
 
+  test('task dependencies merge, lock and reuse within one task', () async {
+    final dependencyLock = {
+      'schema': 1,
+      'python': [
+        {
+          'name': 'sample',
+          'version': '1.2.3',
+          'hashes': {'sha256': 'abc'},
+        },
+      ],
+      'npm': {
+        'lockfileVersion': 3,
+        'packages': {
+          '': {
+            'dependencies': {'@sample/cli': '*'},
+          },
+          'node_modules/@sample/cli': {'version': '1.2.3'},
+        },
+      },
+      'executables': ['node_modules/.bin/cli'],
+    };
+    final archive = Archive()
+      ..add(
+        ArchiveFile.string(
+          '.xiaoqi/dependency-lock.json',
+          jsonEncode(dependencyLock),
+        ),
+      )
+      ..add(
+        ArchiveFile.string('.xiaoqi/python/sample/__init__.py', 'VALUE = 1'),
+      )
+      ..add(ArchiveFile.string('node_modules/@sample/cli/index.js', '1'))
+      ..add(ArchiveFile.string('node_modules/.bin/cli', '#!/bin/sh\nexit 0\n'));
+    final encoded = base64Encode(ZipEncoder().encode(archive));
+    final requests = File('${directory.path}/task-dependency-requests.jsonl');
+    File(
+      '${directory.path}/prepare_dependencies.py',
+    ).writeAsStringSync('# trusted installer fixture');
+    worker.writeAsStringSync('''
+import json,pathlib,sys
+r=json.loads(sys.stdin.readline())
+if r.get('action') == 'network_token':
+ print(json.dumps({'ok':True,'network_token':'123456789.${'a' * 64}'}))
+elif r.get('action'):
+ print(json.dumps({'ok':True,'acknowledged':True,'cleanup_pending':False}))
+else:
+ with open(${jsonEncode(requests.path)}, 'a') as f: f.write(json.dumps(r)+'\\n')
+ print(json.dumps({'type':'sandbox_started','sandbox_id':'task-dependency-test'}),flush=True)
+ print(json.dumps({'type':'result','ok':True,'stdout':'prepared','stderr':'','execution_id':r['execution_id'],'cleanup_pending':False,'artifacts':[{'name':'dependencies.zip','media_type':'application/zip','base64':'$encoded'}]}),flush=True)
+''');
+    final service = DockerCodeExecutionService(
+      store,
+      workerPath: worker.path,
+      pythonExecutable: pythonExecutable(),
+    );
+
+    final first = await service.prepareTaskDependencies(
+      tenantId: 'personal',
+      taskId: 'task-code',
+      dependencies: {
+        'python': ['sample'],
+        'npm': ['@sample/cli'],
+      },
+      cancellation: CancellationController().token,
+    );
+    expect(first.keys, contains('.xiaoqi/dependency-lock.json'));
+    final firstObjectKey =
+        ((store.get('task/personal/task-code')!.value['task_dependencies'])
+            as Map)['object_key'];
+    expect(
+      service.taskDependenciesCover('personal', 'task-code', {
+        'python': ['sample==1.2.3'],
+        'npm': ['@sample/cli@1.2.3'],
+      }),
+      true,
+    );
+    await service.prepareTaskDependencies(
+      tenantId: 'personal',
+      taskId: 'task-code',
+      dependencies: {
+        'python': ['sample'],
+        'npm': ['@sample/cli'],
+      },
+      cancellation: CancellationController().token,
+    );
+    expect(requests.readAsLinesSync(), hasLength(1));
+
+    await service.prepareTaskDependencies(
+      tenantId: 'personal',
+      taskId: 'task-code',
+      dependencies: {
+        'python': ['other==2.0.0'],
+      },
+      cancellation: CancellationController().token,
+    );
+    final packageSet = service.taskDependencyInfo('personal', 'task-code');
+    expect(
+      (packageSet['packages'] as Map)['python'],
+      containsAll(['other==2.0.0', 'sample']),
+    );
+    await expectLater(
+      Future.sync(() => store.getObject(firstObjectKey.toString())),
+      throwsA(isA<FileSystemException>()),
+    );
+    final lastRequest = jsonDecode(requests.readAsLinesSync().last) as Map;
+    final skillFiles = Map<String, String>.from(
+      lastRequest['skill_files'] as Map,
+    );
+    final requirements = utf8.decode(
+      base64Decode(skillFiles['requirements.txt']!),
+    );
+    expect(requirements, contains('sample==1.2.3'));
+    expect(requirements, contains('other==2.0.0'));
+    final npmLock = jsonDecode(
+      utf8.decode(base64Decode(skillFiles['package-lock.json']!)),
+    );
+    expect(npmLock['packages']['node_modules/@sample/cli']['version'], '1.2.3');
+  });
+
   test(
     'dependency installation recovers the original build across restarts without replay',
     () async {

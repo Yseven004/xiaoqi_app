@@ -84,6 +84,42 @@ void main() {
   );
 
   test(
+    'text search uses the latest version and resumes by match offset',
+    () async {
+      final files = TaskTextFiles(owner());
+      final old =
+          (await files.write('notes/current.md', '旧版本内容'))['artifact'] as Map;
+      await files.write(
+        'notes/current.md',
+        '湖泊，' * 22,
+        baseArtifactId: old['id'],
+      );
+      await files.write('other.md', '湖泊');
+
+      final first = await files.search('湖泊', prefix: 'notes');
+      final data = first['data'] as Map;
+      final matches = data['matches'] as List;
+      expect(first['ok'], true);
+      expect(matches, hasLength(20));
+      expect(matches.first['path'], 'notes/current.md');
+      expect(matches.first['offset'], 0);
+      expect(data['next_offset'], 20);
+      expect(data['truncated'], false);
+
+      final next = await files.search('湖泊', prefix: 'notes', offset: 20);
+      final nextData = next['data'] as Map;
+      final remaining = nextData['matches'] as List;
+      expect(remaining, hasLength(2));
+      expect(remaining.first['offset'], 60);
+      expect(remaining.last['offset'], 63);
+      expect(nextData.containsKey('next_offset'), false);
+
+      final oldText = await files.search('旧版本内容', prefix: 'notes');
+      expect((oldText['data'] as Map)['matches'], isEmpty);
+    },
+  );
+
+  test(
     'literal edits reject ambiguous, missing and stale source text',
     () async {
       final files = TaskTextFiles(owner());

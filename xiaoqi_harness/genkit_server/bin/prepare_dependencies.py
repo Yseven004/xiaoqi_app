@@ -74,6 +74,7 @@ def npm_bin_shim(folder, path):
 source = pathlib.Path('/workspace/skill')
 output = pathlib.Path('/workspace/output/dependencies.zip')
 _build_deadline = time.monotonic() + 570  # Reserve 30 seconds for runner export/cleanup.
+task_dependency_mode = (source / '.xiaoqi' / 'task-dependencies.json').exists()
 with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
     root = pathlib.Path(temp)
     lock = {'schema': 1, 'python': [], 'npm': {}}
@@ -118,6 +119,8 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
         # Copy only this package's files. Registry/config/lock policy remains
         # installer-owned; lifecycle code runs solely in this sandbox.
         excluded = copy_package(source, target)
+        if task_dependency_mode and (source / 'package-lock.json').exists():
+            shutil.copy2(source / 'package-lock.json', target / 'package-lock.json')
         initial = {p.relative_to(target).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                    for p in target.rglob('*') if p.is_file() and not p.is_symlink()}
         normalized = {key: value for key, value in package.items()
@@ -137,16 +140,17 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
         run_dependency_command(['npm', 'ci', *common], cwd=target)
         # Newer npm versions use a per-package script policy. Derive it from
         # verified resolved identities, rather than bypassing all script policy.
-        normalized['allowScripts'] = {
-            name.rsplit('node_modules/', 1)[-1]: True
-            for name, value in npm_lock['packages'].items()
-            if name and value.get('hasInstallScript')
-        }
-        (target / 'package.json').write_text(json.dumps(normalized))
-        run_dependency_command(['npm', 'rebuild', '--offline', '--ignore-scripts=false', '--foreground-scripts',
-                        '--no-audit', '--no-fund'], cwd=target)
-        if 'build' in normalized['scripts']:
-            run_dependency_command(['npm', 'run', 'build', '--offline', '--ignore-scripts=false'], cwd=target)
+        if not task_dependency_mode:
+            normalized['allowScripts'] = {
+                name.rsplit('node_modules/', 1)[-1]: True
+                for name, value in npm_lock['packages'].items()
+                if name and value.get('hasInstallScript')
+            }
+            (target / 'package.json').write_text(json.dumps(normalized))
+            run_dependency_command(['npm', 'rebuild', '--offline', '--ignore-scripts=false', '--foreground-scripts',
+                            '--no-audit', '--no-fund'], cwd=target)
+            if 'build' in normalized['scripts']:
+                run_dependency_command(['npm', 'run', 'build', '--offline', '--ignore-scripts=false'], cwd=target)
         run_dependency_command(['npm', 'prune', '--omit=dev', '--ignore-scripts', '--offline', '--no-audit', '--no-fund'],
                        cwd=target)
         lock['npm'] = npm_lock
@@ -179,7 +183,8 @@ with tempfile.TemporaryDirectory(dir='/workspace/work') as temp:
             for path in sorted(target.rglob('*')):
                 relative = path.relative_to(target)
                 if (path.is_symlink() or not path.is_file() or
-                    any(part in excluded for part in relative.parts) or relative.as_posix() == 'package.json'):
+                    any(part in excluded for part in relative.parts) or relative.as_posix() == 'package.json' or
+                    (task_dependency_mode and relative.as_posix() == 'package-lock.json')):
                     continue
                 if initial.get(relative.as_posix()) == hashlib.sha256(path.read_bytes()).hexdigest():
                     continue

@@ -72,6 +72,7 @@ class DockerCodeExecutionService {
   final String? _runnerToken;
   final _uuid = const Uuid();
   static final _dependencyPreparations = <String>{};
+  static final _taskDependencyPreparations = <String>{};
 
   /// Keep the terminal error, not only the progress output before it.
   static String failureDetails(Object error) {
@@ -246,6 +247,470 @@ class DockerCodeExecutionService {
         _dependencyPreparations.remove(activeKey);
       }
     }
+  }
+
+  /// Installs task-requested packages once and keeps the verified archive for
+  /// later isolated sandboxes belonging to the same task.
+  Future<Map<String, List<int>>> prepareTaskDependencies({
+    required String tenantId,
+    required String taskId,
+    required Map<String, dynamic> dependencies,
+    required CancellationToken cancellation,
+  }) async {
+    final requestedPython = _dependencyList(dependencies['python'], 'Python');
+    final requestedNpm = _dependencyList(dependencies['npm'], 'npm');
+    if (requestedPython.isEmpty && requestedNpm.isEmpty) {
+      return taskDependencies(tenantId, taskId);
+    }
+    final key = 'task/$tenantId/$taskId';
+    final prior = store.get(key)?.value['task_dependencies'];
+    final priorReady = prior is Map && prior['status'] == 'ready';
+    final priorRequested = priorReady && prior['requested'] is Map
+        ? Map<String, dynamic>.from(prior['requested'] as Map)
+        : const <String, dynamic>{};
+    final python = _mergeDependencyList(
+      priorRequested['python'],
+      requestedPython,
+      python: true,
+    );
+    final npm = _mergeDependencyList(
+      priorRequested['npm'],
+      requestedNpm,
+      python: false,
+    );
+    if (python.length + npm.length > 20) {
+      throw const FormatException('每次最多声明 20 个直接依赖');
+    }
+    if (priorReady &&
+        _sameStrings(priorRequested['python'], python) &&
+        _sameStrings(priorRequested['npm'], npm)) {
+      return taskDependencies(tenantId, taskId);
+    }
+    final taskLockKey = '${store.root.absolute.path}/$key';
+    if (!_taskDependencyPreparations.add(taskLockKey)) {
+      throw StateError('当前任务已有一组依赖正在准备，请稍后查询任务状态');
+    }
+    try {
+      return await _prepareTaskDependencySet(
+        tenantId: tenantId,
+        taskId: taskId,
+        key: key,
+        priorReady: priorReady,
+        priorRequested: priorRequested,
+        requestedPython: requestedPython,
+        requestedNpm: requestedNpm,
+        python: python,
+        npm: npm,
+        cancellation: cancellation,
+      );
+    } finally {
+      _taskDependencyPreparations.remove(taskLockKey);
+    }
+  }
+
+  Future<Map<String, List<int>>> _prepareTaskDependencySet({
+    required String tenantId,
+    required String taskId,
+    required String key,
+    required bool priorReady,
+    required Map<String, dynamic> priorRequested,
+    required List<String> requestedPython,
+    required List<String> requestedNpm,
+    required List<String> python,
+    required List<String> npm,
+    required CancellationToken cancellation,
+  }) async {
+    final activeDependencies = store.get(key)?.value['task_dependencies'];
+    final previousObjectKey = priorReady && activeDependencies is Map
+        ? activeDependencies['object_key']?.toString()
+        : null;
+    final priorLock = priorReady
+        ? _taskDependencyLock(tenantId, taskId)
+        : const <String, dynamic>{};
+    final source = <String, List<int>>{};
+    if (python.isNotEmpty) {
+      final overridden = requestedPython
+          .where(_hasPythonVersion)
+          .map(_dependencyName)
+          .toSet();
+      final priorPins = (priorLock['python'] as List? ?? const [])
+          .whereType<Map>()
+          .where((package) {
+            final name = package['name']?.toString() ?? '';
+            return name.isNotEmpty &&
+                package['version'] != null &&
+                !overridden.contains(_normalizePythonName(name));
+          })
+          .map((package) => '${package['name']}==${package['version']}');
+      final requirements = {...priorPins, ...python}.toList()..sort();
+      source['requirements.txt'] = utf8.encode('${requirements.join('\n')}\n');
+    }
+    if (npm.isNotEmpty) {
+      source['package.json'] = utf8.encode(
+        jsonEncode({
+          'name': 'xiaoqi-task-dependencies',
+          'version': '1.0.0',
+          'dependencies': {
+            for (final value in npm) _npmName(value): _npmVersion(value),
+          },
+        }),
+      );
+      final npmLock = priorLock['npm'];
+      if (npmLock is Map && npmLock.isNotEmpty) {
+        source['package-lock.json'] = utf8.encode(jsonEncode(npmLock));
+      }
+    }
+    source['.xiaoqi/task-dependencies.json'] = utf8.encode('{}');
+    final digest = sha256
+        .convert(
+          utf8.encode(
+            jsonEncode({
+              for (final entry in source.entries)
+                entry.key: sha256.convert(entry.value).toString(),
+            }),
+          ),
+        )
+        .toString();
+    store.put(key, {
+      ...?store.get(key)?.value,
+      'task_dependency_preparation': {
+        'digest': digest,
+        'status': 'preparing',
+        'requested': {'python': python, 'npm': npm},
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      },
+    }, store.get(key)?.revision);
+    try {
+      cancellation.throwIfCancelled();
+      final files = await prepareDependencies(
+        tenantId,
+        source,
+        cancellation: cancellation,
+      );
+      final archive = Archive();
+      for (final entry in files.entries) {
+        archive.addFile(
+          ArchiveFile(entry.key, entry.value.length, entry.value),
+        );
+      }
+      final bytes = ZipEncoder().encode(archive);
+      if (bytes.length > 20 * 1024 * 1024) {
+        throw StateError('依赖包超过 20 MB 上限');
+      }
+      cancellation.throwIfCancelled();
+      final objectKey =
+          'tenants/$tenantId/tasks/$taskId/task-dependencies/$digest.zip';
+      store.putTaskBlob(objectKey, bytes);
+      final current = store.get(key);
+      store.put(key, {
+        ...?current?.value,
+        'task_dependencies': {
+          'digest': digest,
+          'status': 'ready',
+          'requested': {'python': python, 'npm': npm},
+          'resolved_versions': _resolvedVersionsFromFiles(
+            files,
+            python: python,
+            npm: npm,
+          ),
+          'object_key': objectKey,
+          'archive_sha256': sha256.convert(bytes).toString(),
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        },
+        'task_dependency_preparation': {
+          'digest': digest,
+          'status': 'ready',
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        },
+      }, current?.revision);
+      if (previousObjectKey != null && previousObjectKey != objectKey) {
+        store.deleteImmutable(previousObjectKey);
+      }
+      return files;
+    } on Object catch (error) {
+      final current = store.get(key);
+      store.put(key, {
+        ...?current?.value,
+        'task_dependency_preparation': {
+          'digest': digest,
+          'status': cancellation.isCancelled ? 'cancelled' : 'failed',
+          'requested': {'python': python, 'npm': npm},
+          'error': error.toString().substring(
+            0,
+            error.toString().length > 1000 ? 1000 : error.toString().length,
+          ),
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        },
+      }, current?.revision);
+      rethrow;
+    }
+  }
+
+  Map<String, List<int>> taskDependencies(String tenantId, String taskId) {
+    final value = store
+        .get('task/$tenantId/$taskId')
+        ?.value['task_dependencies'];
+    if (value is! Map || value['status'] != 'ready') return const {};
+    final bytes = _taskDependencyArchive(value, tenantId, taskId);
+    final result = <String, List<int>>{};
+    for (final file in ZipDecoder().decodeBytes(bytes).files) {
+      if (!file.isFile ||
+          file.isSymbolicLink ||
+          file.name.startsWith('/') ||
+          file.name.contains('\\') ||
+          file.name.split('/').any((part) => part == '..' || part.isEmpty) ||
+          (file.name != '.xiaoqi/dependency-lock.json' &&
+              !file.name.startsWith('.xiaoqi/python/') &&
+              !file.name.startsWith('node_modules/'))) {
+        throw StateError('已准备的任务依赖包含无效路径');
+      }
+      result[file.name] = file.content;
+    }
+    return result;
+  }
+
+  Map<String, dynamic> taskDependencyInfo(String tenantId, String taskId) {
+    final value = store
+        .get('task/$tenantId/$taskId')
+        ?.value['task_dependencies'];
+    if (value is! Map || value['status'] != 'ready') return const {};
+    final requested = value['requested'] is Map
+        ? Map<String, dynamic>.from(value['requested'] as Map)
+        : const <String, dynamic>{};
+    final resolvedVersions = value['resolved_versions'] is Map
+        ? Map<String, dynamic>.from(value['resolved_versions'] as Map)
+        : _resolvedVersionsFromLock(
+            _taskDependencyLock(tenantId, taskId),
+            requested,
+          );
+    return {
+      'status': 'ready',
+      'packages': requested,
+      'resolved_versions': resolvedVersions,
+    };
+  }
+
+  bool taskDependenciesCover(
+    String tenantId,
+    String taskId,
+    Map<String, dynamic> requested,
+  ) {
+    final python = _dependencyList(requested['python'], 'Python');
+    final npm = _dependencyList(requested['npm'], 'npm');
+    if (python.isEmpty && npm.isEmpty) return false;
+    final info = taskDependencyInfo(tenantId, taskId);
+    if (info.isEmpty) return false;
+    final installed = Map<String, dynamic>.from(info['packages'] as Map);
+    final resolved = Map<String, dynamic>.from(
+      info['resolved_versions'] as Map? ?? const {},
+    );
+    final resolvedPython = (resolved['python'] as List? ?? const [])
+        .whereType<Map>();
+    final resolvedNpm = Map<String, dynamic>.from(
+      resolved['npm'] as Map? ?? const {},
+    );
+    bool covers(
+      List<String> wanted,
+      Object? current, {
+      required bool isPython,
+    }) {
+      final values = _dependencyList(current, isPython ? 'Python' : 'npm');
+      final byName = <String, String>{
+        for (final value in values)
+          (isPython
+                  ? _normalizePythonName(_dependencyName(value))
+                  : _npmName(value)):
+              value,
+      };
+      for (final item in wanted) {
+        final name = isPython
+            ? _normalizePythonName(_dependencyName(item))
+            : _npmName(item);
+        final prior = byName[name];
+        if (prior == null) return false;
+        if (prior == item) continue;
+        if (isPython && _hasPythonVersion(item)) {
+          final version = item.substring(item.indexOf('==') + 2);
+          final resolvedPackage = resolvedPython
+              .where(
+                (value) =>
+                    _normalizePythonName(value['name'].toString()) == name,
+              )
+              .firstOrNull;
+          if (resolvedPackage?['version']?.toString() != version) return false;
+        } else if (!isPython && _hasNpmVersion(item)) {
+          if (resolvedNpm[name]?.toString() != _npmVersion(item)) return false;
+        }
+      }
+      return true;
+    }
+
+    return covers(python, installed['python'], isPython: true) &&
+        covers(npm, installed['npm'], isPython: false);
+  }
+
+  Map<String, dynamic> _resolvedVersionsFromFiles(
+    Map<String, List<int>> files, {
+    required List<String> python,
+    required List<String> npm,
+  }) {
+    final lockBytes = files['.xiaoqi/dependency-lock.json'];
+    if (lockBytes == null) throw StateError('依赖锁文件缺失');
+    final lock = jsonDecode(utf8.decode(lockBytes));
+    if (lock is! Map) throw StateError('依赖锁文件格式无效');
+    return _resolvedVersionsFromLock(Map<String, dynamic>.from(lock), {
+      'python': python,
+      'npm': npm,
+    });
+  }
+
+  Map<String, dynamic> _resolvedVersionsFromLock(
+    Map<String, dynamic> lock,
+    Map<String, dynamic> requested,
+  ) {
+    final pythonLock = (lock['python'] as List? ?? const []).whereType<Map>();
+    final npmLock = lock['npm'] is Map
+        ? Map<String, dynamic>.from(lock['npm'] as Map)
+        : const <String, dynamic>{};
+    final npmPackages = npmLock['packages'] is Map
+        ? Map<String, dynamic>.from(npmLock['packages'] as Map)
+        : const <String, dynamic>{};
+    final npmRoot = npmPackages[''] is Map
+        ? Map<String, dynamic>.from(npmPackages[''] as Map)
+        : const <String, dynamic>{};
+    final requestedNpm = npmRoot['dependencies'] is Map
+        ? Map<String, dynamic>.from(npmRoot['dependencies'] as Map)
+        : const <String, dynamic>{};
+    final resolvedPython = <Map<String, dynamic>>[];
+    for (final requestedPackage
+        in (requested['python'] as List? ?? const []).whereType<String>()) {
+      final name = _normalizePythonName(_dependencyName(requestedPackage));
+      final locked = pythonLock
+          .where(
+            (value) => _normalizePythonName(value['name'].toString()) == name,
+          )
+          .firstOrNull;
+      if (locked != null) {
+        resolvedPython.add({
+          'name': locked['name'],
+          'version': locked['version'],
+        });
+      }
+    }
+    final resolvedNpm = <String, dynamic>{};
+    for (final requestedPackage
+        in (requested['npm'] as List? ?? const []).whereType<String>()) {
+      final name = _npmName(requestedPackage);
+      final package = npmPackages['node_modules/$name'];
+      final version = package is Map ? package['version'] : requestedNpm[name];
+      if (version != null) resolvedNpm[name] = version;
+    }
+    return {'python': resolvedPython, 'npm': resolvedNpm};
+  }
+
+  Map<String, dynamic> _taskDependencyLock(String tenantId, String taskId) {
+    final value = store
+        .get('task/$tenantId/$taskId')
+        ?.value['task_dependencies'];
+    if (value is! Map || value['status'] != 'ready') return const {};
+    final bytes = _taskDependencyArchive(value, tenantId, taskId);
+    final archive = ZipDecoder().decodeBytes(bytes);
+    for (final file in archive.files) {
+      if (file.isFile && file.name == '.xiaoqi/dependency-lock.json') {
+        final decoded = jsonDecode(utf8.decode(file.content));
+        if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      }
+    }
+    throw StateError('已准备的任务依赖缺少锁定信息');
+  }
+
+  List<int> _taskDependencyArchive(Map value, String tenantId, String taskId) {
+    final key = value['object_key'];
+    final checksum = value['archive_sha256'];
+    final prefix = 'tenants/$tenantId/tasks/$taskId/task-dependencies/';
+    if (key is! String ||
+        !key.startsWith(prefix) ||
+        !key.endsWith('.zip') ||
+        checksum is! String) {
+      throw StateError('已准备的任务依赖记录无效');
+    }
+    final bytes = store.getObject(key);
+    if (sha256.convert(bytes).toString() != checksum) {
+      throw StateError('已准备的任务依赖校验失败');
+    }
+    return bytes;
+  }
+
+  List<String> _mergeDependencyList(
+    Object? priorValue,
+    List<String> requested, {
+    required bool python,
+  }) {
+    final prior = _dependencyList(priorValue, python ? 'Python' : 'npm');
+    final byName = <String, String>{
+      for (final item in prior)
+        (python ? _normalizePythonName(_dependencyName(item)) : _npmName(item)):
+            item,
+    };
+    for (final item in requested) {
+      final name = python
+          ? _normalizePythonName(_dependencyName(item))
+          : _npmName(item);
+      final hasVersion = python
+          ? _hasPythonVersion(item)
+          : _hasNpmVersion(item);
+      if (hasVersion || !byName.containsKey(name)) byName[name] = item;
+    }
+    return byName.values.toList()..sort();
+  }
+
+  bool _sameStrings(Object? previous, List<String> current) {
+    if (previous is! List) return current.isEmpty;
+    final values = previous.whereType<String>().toList()..sort();
+    return values.length == current.length &&
+        values.indexed.every((entry) => entry.$2 == current[entry.$1]);
+  }
+
+  String _dependencyName(String value) {
+    final marker = value.indexOf('==');
+    return marker < 0 ? value : value.substring(0, marker);
+  }
+
+  String _normalizePythonName(String value) =>
+      value.toLowerCase().replaceAll(RegExp(r'[-_.]+'), '-');
+
+  bool _hasPythonVersion(String value) => value.contains('==');
+
+  bool _hasNpmVersion(String value) =>
+      value.startsWith('@') ? value.indexOf('@', 1) >= 0 : value.contains('@');
+
+  List<String> _dependencyList(Object? value, String label) {
+    if (value == null) return const [];
+    if (value is! List || value.length > 20)
+      throw FormatException('$label 依赖必须是最多 20 项的列表');
+    final values = value.map((item) => item.toString().trim()).toList();
+    final pattern = label == 'Python'
+        ? RegExp(
+            r'^[A-Za-z0-9][A-Za-z0-9._-]*(?:==[A-Za-z0-9][A-Za-z0-9._+-]*)?$',
+          )
+        : RegExp(
+            r'^(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+(?:@\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?)?$',
+          );
+    if (values.any((item) => !pattern.hasMatch(item))) {
+      throw FormatException('$label 依赖仅支持包名和可选的固定版本，不接受 URL 或本地路径');
+    }
+    return values.toSet().toList()..sort();
+  }
+
+  String _npmName(String value) => value.startsWith('@')
+      ? (value.lastIndexOf('@') == 0
+            ? value
+            : value.substring(0, value.lastIndexOf('@')))
+      : value.split('@').first;
+
+  String _npmVersion(String value) {
+    final index = value.lastIndexOf('@');
+    return index <= 0 ? '*' : value.substring(index + 1);
   }
 
   bool get isConfigured {

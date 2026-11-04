@@ -83,6 +83,117 @@ class TaskTextFiles {
     };
   }
 
+  Future<Map<String, dynamic>> search(
+    String query, {
+    String prefix = '',
+    int offset = 0,
+    bool caseSensitive = false,
+  }) => owner.query(
+    slot: 'search_task_text',
+    arguments: {
+      'query': query,
+      'prefix': prefix,
+      'offset': offset,
+      'case_sensitive': caseSensitive,
+    },
+    invoke: (_) async => _search(
+      query,
+      prefix: prefix,
+      offset: offset,
+      caseSensitive: caseSensitive,
+    ),
+  );
+
+  Future<Map<String, dynamic>> _search(
+    String query, {
+    required String prefix,
+    required int offset,
+    required bool caseSensitive,
+  }) async {
+    owner.check('read');
+    query = query.trim();
+    if (query.isEmpty || query.length > 500 || offset < 0) {
+      throw const FormatException('检索词须为 1–500 个字符，offset 不得为负数');
+    }
+    if (prefix.isNotEmpty)
+      prefix = path(prefix.replaceFirst(RegExp(r'/$'), ''));
+    final heads = <String, Map<String, dynamic>>{};
+    for (final artifact in _artifacts().reversed) {
+      final name = _path(artifact);
+      if (name != null &&
+          (prefix.isEmpty || name == prefix || name.startsWith('$prefix/'))) {
+        heads.putIfAbsent(name, () => artifact);
+      }
+    }
+    final results = <Map<String, dynamic>>[];
+    var totalMatches = 0;
+    var scannedBytes = 0;
+    var scanned = 0;
+    final needle = caseSensitive ? query : query.toLowerCase();
+    for (final name in heads.keys.toList()..sort()) {
+      if (++scanned > 128) break;
+      final artifact = heads[name]!;
+      final size = artifact['size'];
+      final key = artifact['object_key'];
+      if (size is! int ||
+          size > maxBytes ||
+          key is! String ||
+          !key.startsWith(
+            'tenants/${owner.tenantId}/tasks/${owner.taskId}/artifacts/',
+          )) {
+        continue;
+      }
+      scannedBytes += size;
+      if (scannedBytes > 64 * 1024 * 1024) {
+        scanned--;
+        break;
+      }
+      late final String text;
+      try {
+        final bytes = owner.store.getObject(key);
+        final expected = artifact['sha256'];
+        if (expected is! String ||
+            sha256.convert(bytes).toString() != expected) {
+          throw StateError('任务文件校验失败');
+        }
+        text = utf8.decode(bytes, allowMalformed: false);
+      } on StateError {
+        rethrow;
+      } on FormatException {
+        continue;
+      }
+      final haystack = caseSensitive ? text : text.toLowerCase();
+      var at = 0;
+      while ((at = haystack.indexOf(needle, at)) >= 0) {
+        if (totalMatches++ >= offset && results.length < 21) {
+          final start = at > 160 ? at - 160 : 0;
+          final end = at + query.length + 160 < text.length
+              ? at + query.length + 160
+              : text.length;
+          results.add({
+            'path': name,
+            'artifact_id': artifact['id'],
+            'offset': text.substring(0, at).runes.length,
+            'match': text.substring(start, end),
+            'match_offset': text.substring(start, at).runes.length,
+          });
+        }
+        at += query.length;
+      }
+      owner.check('read');
+      if (results.length == 21) break;
+    }
+    return {
+      'ok': true,
+      'data': {
+        'matches': results.take(20).toList(),
+        'offset': offset,
+        if (results.length > 20) 'next_offset': offset + 20,
+        'truncated': scanned > 128 || scannedBytes >= 64 * 1024 * 1024,
+      },
+    };
+  }
+
   Future<Map<String, dynamic>> read(
     String name, {
     String? artifactId,

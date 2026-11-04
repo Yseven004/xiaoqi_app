@@ -1493,6 +1493,7 @@ class XiaoqiApi {
     final tool = event['tool']?.toString() ?? '';
     if (tool.startsWith('mcp_') || tool.startsWith('MCP')) return 'using_mcp';
     return switch (tool) {
+      'prepare_task_dependencies' => '正在准备任务依赖',
       'web_search' => 'searching',
       'web_fetch' => 'reading_web',
       'use_skill' ||

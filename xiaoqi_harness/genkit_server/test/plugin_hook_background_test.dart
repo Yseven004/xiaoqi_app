@@ -57,6 +57,14 @@ void main() {
         const PluginHookOutput(additionalContext: 'review finding'),
       );
       expect(await jobs.drain(), ['review finding']);
+      expect(
+        taskBackgroundHookStatus(
+          store,
+          'alice',
+          'task',
+        )['items'].single['status'],
+        'succeeded',
+      );
       jobs.acknowledge();
       var executions = 0;
       final resumed = queue();
@@ -147,7 +155,15 @@ void main() {
             .single
             .$2
             .value['phase'],
-        'pending',
+        'failed',
+      );
+      expect(
+        taskBackgroundHookStatus(
+          store,
+          'alice',
+          'task',
+        )['items'].single['error'],
+        isNotEmpty,
       );
     },
   );

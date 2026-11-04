@@ -3071,13 +3071,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     String purpose,
     List<String> domains, {
     Object? details,
+    bool dependencyInstall = false,
   }) async {
     if (!mounted || domains.isEmpty) return false;
     return await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
             backgroundColor: Colors.white,
-            title: const Text('允许本次脚本联网？'),
+            title: Text(dependencyInstall ? '允许为当前任务准备依赖？' : '允许本次脚本联网？'),
             content: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -3111,8 +3112,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       child: Text('• $domain'),
                     ),
                   const SizedBox(height: 10),
-                  const Text(
-                    '仅允许本次已确认的代码、参数和文件访问以上域名；不会给其他调用开放权限。',
+                  Text(
+                    dependencyInstall
+                        ? '仅用于从官方包源下载清单中的依赖，并供当前任务后续沙箱调用。任务代码仍保持断网。'
+                        : '仅允许本次已确认的代码、参数和文件访问以上域名；不会给其他调用开放权限。',
                     style: TextStyle(color: Color(0xFF666666), fontSize: 13),
                   ),
                 ],
@@ -3121,7 +3124,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(dialogContext).pop(false),
-                child: const Text('保持断网'),
+                child: Text(dependencyInstall ? '拒绝安装' : '保持断网'),
               ),
               TextButton(
                 onPressed: () => Navigator.of(dialogContext).pop(true),
@@ -3131,6 +3134,114 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ) ??
         false;
+  }
+
+  Future<Map<String, dynamic>?> _askAgentQuestions(List questions) async {
+    if (!mounted || questions.isEmpty || questions.length > 3) return null;
+    final controllers = <String, TextEditingController>{};
+    final answers = <String, String>{};
+    final formKey = GlobalKey<FormState>();
+    for (final raw in questions) {
+      final id = (raw as Map)['id'].toString();
+      controllers[id] = TextEditingController();
+    }
+    try {
+      return await showDialog<Map<String, dynamic>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('请补充信息'),
+            content: SingleChildScrollView(
+              child: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final raw in questions) ...[
+                      Builder(
+                        builder: (context) {
+                          final q = Map<String, dynamic>.from(raw as Map);
+                          final id = q['id'].toString();
+                          final options = (q['options'] as List? ?? const [])
+                              .map((v) => v.toString())
+                              .toList();
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  q['question'].toString(),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                if (options.isNotEmpty)
+                                  Wrap(
+                                    spacing: 8,
+                                    children: [
+                                      for (final option in options)
+                                        ChoiceChip(
+                                          label: Text(option),
+                                          selected: answers[id] == option,
+                                          onSelected: (_) => setDialogState(() {
+                                            answers[id] = option;
+                                            controllers[id]!.clear();
+                                          }),
+                                        ),
+                                    ],
+                                  ),
+                                TextFormField(
+                                  controller: controllers[id],
+                                  decoration: InputDecoration(
+                                    hintText: options.isEmpty
+                                        ? '请输入回答'
+                                        : '也可填写其他答案',
+                                  ),
+                                  onChanged: (value) => setDialogState(
+                                    () => answers[id] = value.trim(),
+                                  ),
+                                  validator: (value) =>
+                                      (answers[id]?.trim().isNotEmpty ?? false)
+                                      ? null
+                                      : '请回答此问题',
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(dialogContext).pop({'cancelled': true});
+                  _stopReply();
+                },
+                child: const Text('取消任务'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  if (formKey.currentState?.validate() != true) return;
+                  Navigator.of(dialogContext).pop({'answers': answers});
+                },
+                child: const Text('提交并继续'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } finally {
+      for (final controller in controllers.values) {
+        controller.dispose();
+      }
+    }
   }
 
   Future<List<Map<String, Object?>>> _buildAiMessages(
@@ -3642,6 +3753,20 @@ $materialIndex
         if (input is! Map) {
           throw const AiException('服务端返回了暂不支持的工具权限请求');
         }
+        if (input['type'] == 'user_questions') {
+          _agentStreamPresentation.value = _agentStreamPresentation.value
+              .copyWith(currentStep: '等待你补充信息');
+          final answer = await _askAgentQuestions(
+            input['questions'] as List? ?? const [],
+          );
+          if (!_isCurrentRequest(generation, conversationId)) return null;
+          turn = chat.resumeStream(
+            respond: [
+              interrupt.respond(answer ?? {'cancelled': true}),
+            ],
+          );
+          continue;
+        }
         if (input['type'] == 'mcp_tool_approval') {
           final connectionName =
               input['connection_name']?.toString().trim().isNotEmpty == true
@@ -3671,7 +3796,8 @@ $materialIndex
           );
           continue;
         }
-        if (input['type'] != 'network_permission') {
+        if (input['type'] != 'network_permission' &&
+            input['type'] != 'dependency_install_permission') {
           throw const AiException('服务端返回了暂不支持的工具权限请求');
         }
         final domains = (input['domains'] as List? ?? const [])
@@ -3679,12 +3805,19 @@ $materialIndex
             .where((value) => value.isNotEmpty)
             .toList(growable: false);
         final purpose = input['purpose']?.toString() ?? '脚本需要访问这些域名';
+        final dependencyInstall =
+            input['type'] == 'dependency_install_permission';
         _agentStreamPresentation.value = _agentStreamPresentation.value
-            .copyWith(currentStep: '等待你确认联网权限');
+            .copyWith(
+              currentStep: dependencyInstall ? '等待依赖安装确认' : '等待你确认联网权限',
+            );
         final allow = await _confirmAgentNetworkAccess(
           purpose,
           domains,
-          details: input['details'],
+          details: dependencyInstall
+              ? {'dependencies': input['dependencies'], 'scope': '仅当前任务'}
+              : input['details'],
+          dependencyInstall: dependencyInstall,
         );
         if (!_isCurrentRequest(generation, conversationId)) return null;
         turn = chat.resumeStream(

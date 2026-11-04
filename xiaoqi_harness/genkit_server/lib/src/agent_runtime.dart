@@ -473,6 +473,27 @@ final _executePythonSchema = _objectToolSchema(
       'items': {'type': 'string', 'minLength': 1},
       'maxItems': 64,
     },
+    'dependencies': {
+      'type': 'object',
+      'description':
+          '缺少包时声明所需的 Python 与 npm 包；批准后服务端准备，并在当前任务后续沙箱调用中复用。仅支持官方 PyPI/npm 包，不支持系统软件、URL、本地路径或安装脚本。',
+      'properties': {
+        'python': {
+          'type': 'array',
+          'items': {'type': 'string'},
+          'minItems': 1,
+          'maxItems': 20,
+        },
+        'npm': {
+          'type': 'array',
+          'items': {'type': 'string'},
+          'minItems': 1,
+          'maxItems': 20,
+        },
+      },
+      'minProperties': 1,
+      'additionalProperties': false,
+    },
     'domains': {
       'type': 'array',
       'items': {'type': 'string'},
@@ -2807,6 +2828,23 @@ class GenkitXiaoqiAgentRuntime
         const {'command', 'agent'}.contains(reference?['component_type'])
         ? reference!['name']!
         : _stagedSkillName(reference, stagedSkills.entries);
+    Map<String, dynamic> agentToolFailure(
+      String code,
+      String message, {
+      required bool retryable,
+      String? instruction,
+      Map<String, dynamic>? context,
+    }) => {
+      'ok': false,
+      'error': {
+        'code': code,
+        'message': message,
+        'retryable': retryable,
+        if (instruction != null) 'instruction': instruction,
+        if (context != null && context.isNotEmpty) 'context': context,
+      },
+    };
+
     Future<ToolResult<String>> agentToolResult(
       String name,
       Future<Map<String, dynamic>> Function() action,
@@ -2821,7 +2859,11 @@ class GenkitXiaoqiAgentRuntime
           'type': result['ok'] == false ? 'tool_failed' : 'tool_succeeded',
           'tool': name,
         });
-        return ToolResult.response(jsonEncode(result));
+        return ToolResult.response(
+          jsonEncode(
+            result.containsKey('ok') ? result : {'ok': true, 'data': result},
+          ),
+        );
       } on ExecutionBudgetExceeded {
         rethrow;
       } on Object catch (error) {
@@ -2829,15 +2871,18 @@ class GenkitXiaoqiAgentRuntime
         execution.check('read');
         onProcessEvent({'type': 'tool_failed', 'tool': name});
         return ToolResult.response(
-          jsonEncode({
-            'ok': false,
-            'status': 'failed',
-            'error': error is FormatException
-                ? error.message
-                : error is StateError
-                ? error.message
-                : '任务资源操作失败，请检查文件、版本和组件状态',
-          }),
+          jsonEncode(
+            agentToolFailure(
+              'tool_operation_failed',
+              error is FormatException
+                  ? error.message
+                  : error is StateError
+                  ? error.message
+                  : '任务资源操作失败，请检查文件、版本和组件状态',
+              retryable: false,
+              instruction: '检查参数、文件版本或组件状态后，再判断是否重试。',
+            ),
+          ),
         );
       }
     }
@@ -2959,7 +3004,8 @@ class GenkitXiaoqiAgentRuntime
     );
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'list_task_files',
-      description: '分页列出当前任务文件的逻辑路径和版本，不读取服务器目录。',
+      description:
+          '发现当前任务已保存的文件名、路径和版本时使用；只列目录，不读正文。用 prefix 限定目录，offset 是命中数量游标。',
       inputSchema: _objectToolSchema(const {
         'prefix': {'type': 'string'},
         'offset': {'type': 'integer', 'minimum': 0},
@@ -2973,9 +3019,148 @@ class GenkitXiaoqiAgentRuntime
       ),
     );
     ai.defineTool<Map<String, dynamic>, String>(
+      name: 'search_task_text',
+      description:
+          '只有需要在当前任务生成的文本正文中找词句时使用。找路径用 list_task_files；按问题读附件用 read_task_material；已知路径读全文用 read_task_text_file。query 是关键词或短语，prefix 可限制目录，offset 用上次 next_offset 续查。只做字面匹配，返回最多 20 个片段、artifact_id 和 Unicode 字符偏移；truncated=true 表示扫描预算到顶，不能据此断言无匹配。',
+      inputSchema: _objectToolSchema(
+        const {
+          'query': {
+            'type': 'string',
+            'minLength': 1,
+            'maxLength': 500,
+            'description': '要查找的文字',
+          },
+          'prefix': {'type': 'string', 'description': '可选目录前缀'},
+          'offset': {
+            'type': 'integer',
+            'minimum': 0,
+            'default': 0,
+            'description': '从第几个命中继续，使用上次 next_offset',
+          },
+          'case_sensitive': {'type': 'boolean', 'default': false},
+        },
+        required: const ['query'],
+      ),
+      fn: (input, context) => agentToolResult(
+        'search_task_text',
+        () => TaskTextFiles(execution).search(
+          input['query'].toString(),
+          prefix: input['prefix']?.toString() ?? '',
+          offset: (input['offset'] as num? ?? 0).toInt(),
+          caseSensitive: input['case_sensitive'] == true,
+        ),
+      ),
+    );
+    ai.defineTool<Map<String, dynamic>, String>(
+      name: 'ask_user',
+      description:
+          '只有缺少会实质改变结果的用户决定时才调用。一次问 1–3 个简短问题，可给单选项；等待回答或取消后再继续。不要用它请求账号密码、密钥或敏感操作授权。',
+      inputSchema: _objectToolSchema(
+        const {
+          'questions': {
+            'type': 'array',
+            'minItems': 1,
+            'maxItems': 3,
+            'items': {
+              'type': 'object',
+              'properties': {
+                'id': {'type': 'string', 'minLength': 1, 'maxLength': 40},
+                'question': {
+                  'type': 'string',
+                  'minLength': 1,
+                  'maxLength': 300,
+                },
+                'options': {
+                  'type': 'array',
+                  'items': {'type': 'string', 'maxLength': 100},
+                  'maxItems': 6,
+                },
+              },
+              'required': ['id', 'question'],
+              'additionalProperties': false,
+            },
+          },
+        },
+        required: const ['questions'],
+      ),
+      fn: (input, context) async {
+        final questions = (input['questions'] as List).map((item) {
+          final q = Map<String, dynamic>.from(item as Map);
+          final id = q['id'].toString();
+          final options = (q['options'] as List? ?? const [])
+              .map((v) => v.toString())
+              .toList();
+          if (options.length > 6 || options.toSet().length != options.length) {
+            throw const FormatException('每题最多 6 个互不重复的选项');
+          }
+          return {
+            'id': id,
+            'question': q['question'].toString(),
+            'options': options,
+          };
+        }).toList();
+        if (questions.map((q) => q['id']).toSet().length != questions.length) {
+          throw const FormatException('每道问题的 id 必须唯一');
+        }
+        return ToolResult.interrupt({
+          'type': 'user_questions',
+          'questions': questions,
+        });
+      },
+    );
+    ai.defineTool<Map<String, dynamic>, String>(
+      name: 'get_task_status',
+      description: '用户询问当前任务或后台工作进度时查询真实状态。任务由系统自动确定；只读，不会启动、重试或取消任务。',
+      inputSchema: _objectToolSchema(const {}, required: const []),
+      fn: (input, context) => agentToolResult('get_task_status', () async {
+        final task =
+            execution.store.get(execution.key)?.value ??
+            const <String, dynamic>{};
+        final dependencies = task['task_dependency_preparation'] as Map?;
+        final dependencyEnvironment = codeExecutor.taskDependencyInfo(
+          tenantId,
+          taskId,
+        );
+        final backgroundWork = taskBackgroundHookStatus(
+          execution.store,
+          tenantId,
+          taskId,
+        );
+        final status = task['status']?.toString() ?? 'unknown';
+        return {
+          'ok': true,
+          'data': {
+            'status': status,
+            if (task['updated_at'] != null) 'updated_at': task['updated_at'],
+            if (dependencies != null)
+              'dependency_preparation': {
+                'status': dependencies['status'],
+                if (dependencies['requested'] != null)
+                  'packages': dependencies['requested'],
+                if (dependencies['updated_at'] != null)
+                  'updated_at': dependencies['updated_at'],
+                if (dependencies['error'] != null)
+                  'error': dependencies['error'],
+              },
+            if (dependencyEnvironment.isNotEmpty)
+              'dependency_environment': dependencyEnvironment,
+            'background_work': backgroundWork,
+            'artifacts': (task['artifacts'] as List? ?? const [])
+                .map(
+                  (a) => {
+                    if (a is Map && a['id'] != null) 'artifact_id': a['id'],
+                    if (a is Map && a['name'] != null) 'name': a['name'],
+                  },
+                )
+                .toList(),
+          },
+        };
+      }),
+    );
+    ai.defineTool<Map<String, dynamic>, String>(
       name: 'read_task_text_file',
       description:
-          '分页读取当前任务 UTF-8 文件，可指定 artifact_id 保持同一版本；offset 按 Unicode 字符计数。',
+          '已知当前任务文件路径时读取 UTF-8 正文；路径和可选 artifact_id 从 list_task_files 或 search_task_text 取得。不要用它在未知目录里找文件（先 list），也不要用它搜索附件（用 read_task_material）。按 Unicode 字符 offset/max_chars 分页；超长时用 next_offset 继续，同一版本传回 artifact_id。结果含文本、版本和下一页位置。',
       inputSchema: _objectToolSchema(
         const {
           'path': {'type': 'string'},
@@ -2997,7 +3182,8 @@ class GenkitXiaoqiAgentRuntime
     );
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'write_task_text_file',
-      description: '创建当前任务 UTF-8 文件；修改已有路径必须提供最新 base_artifact_id，保留旧版本。',
+      description:
+          '创建当前任务 UTF-8 文本交付物；只在需要新建或完整重写文件时用。少量修改用 edit_task_text_file。path 是任务内相对路径；覆盖已有路径前，base_artifact_id 必须来自 list_task_files/read_task_text_file 的最新版本。成功返回新 artifact_id、路径和版本。',
       inputSchema: _objectToolSchema(
         const {
           'path': {'type': 'string'},
@@ -3017,7 +3203,8 @@ class GenkitXiaoqiAgentRuntime
     );
     ai.defineTool<Map<String, dynamic>, String>(
       name: 'edit_task_text_file',
-      description: '按确定 artifact_id 对最新文本文件作字面替换，保留旧版本；多处匹配时须明确 replace_all。',
+      description:
+          '对已知的当前任务文本文件做精确字面替换；不用于查找文件或改二进制内容。artifact_id 和 old_text 必须来自最近读取的版本；多处匹配默认报错，只有确实要全部替换才传 replace_all=true。成功返回新版本 artifact_id，旧版本保留。',
       inputSchema: _objectToolSchema(
         const {
           'artifact_id': {'type': 'string'},
@@ -4421,11 +4608,12 @@ class GenkitXiaoqiAgentRuntime
         description:
             '在服务器隔离的 Docker 沙箱执行 $language 代码。Shell 使用 Bash，arguments 作为独立 argv 值传给脚本。仅用于用户明确要求执行代码、'
             '处理文件或对资料做程序化操作时。默认断网。'
+            '缺少 Python/npm 包时在 dependencies 声明包名（可选固定版本），purpose 写清用途；服务端会展示清单并请求本任务一次性下载确认。成功后当前任务后续调用自动复用。此工具不安装系统软件；安装脚本、源码包、任意 URL 和私有源不支持。'
             '联网时提供 domains 精确域名及 purpose，确认仅绑定本次代码、参数和文件；网页工具可用不授予脚本或外部写入权限。'
             '仅当前已读取技能可用 skill_id 申请临时联网。资料和产物会在当前任务的隔离工作区中按需提供；'
             '先读 /workspace/input_manifest.json 获取当前输入的真实路径；不要复用旧沙箱绝对路径。'
             '可写工作目录为 /workspace/work，交付文件写入 /workspace/output，创建子目录时先创建父目录。'
-            '不要向用户展示隔离工作区的路径或内部参数。',
+            '成功时返回 stdout、产物和依赖锁定摘要；据此继续处理文件或汇报结果。失败时先看 stderr/error，只有修正参数或代码后再重试。不要向用户展示隔离工作区路径或内部参数。',
         inputSchema: _executePythonSchema,
         fn: (input, context) async {
           final callExecution = execution;
@@ -4436,23 +4624,33 @@ class GenkitXiaoqiAgentRuntime
             request['network_mode'],
           );
           final requestedDomains = _normalizeDomains(input['domains']);
+          final dependencies = input['dependencies'] is Map
+              ? Map<String, dynamic>.from(input['dependencies'] as Map)
+              : const <String, dynamic>{};
           if (requestedDomains.isNotEmpty &&
               execution.hasUncertainNetworkExecution) {
             return ToolResult.response(
-              jsonEncode({
-                'status': 'external_result_unknown',
-                'retryable': false,
-                'message': '前一次联网代码的外部结果未知，请先核实结果并由用户明确下一步。离线文件处理仍可继续。',
-              }),
+              jsonEncode(
+                agentToolFailure(
+                  'external_result_unknown',
+                  '前一次联网代码的外部结果未知。',
+                  retryable: false,
+                  instruction: '先核实外部结果并取得用户下一步指示；离线文件处理仍可继续。',
+                ),
+              ),
             );
           }
           final skillReference = optionalExecutionCapability(input);
           if (skillReference != null && !capabilityLoaded(skillReference)) {
             return ToolResult.response(
-              jsonEncode({
-                'ok': false,
-                'error': '请先 use_skill 读取该技能全文，再使用其执行权限',
-              }),
+              jsonEncode(
+                agentToolFailure(
+                  'skill_not_loaded',
+                  '请先 use_skill 读取该技能全文，再使用其执行权限。',
+                  retryable: false,
+                  instruction: '读取本轮需要使用的技能全文后再执行。',
+                ),
+              ),
             );
           }
           final temporaryNetwork =
@@ -4468,13 +4666,29 @@ class GenkitXiaoqiAgentRuntime
               'message': '脚本默认隔离公网；只有技能确需联网时才能临时授权精确域名。',
             });
             return ToolResult.response(
-              jsonEncode({
-                'status': 'blocked',
-                'message': '普通代码执行不能联网。请开启联网开关，或由当前技能说明其联网用途。',
-              }),
+              jsonEncode(
+                agentToolFailure(
+                  'network_blocked',
+                  '普通代码执行不能联网。请开启联网开关，或由当前技能说明其联网用途。',
+                  retryable: false,
+                  instruction: '继续使用离线代码；只有当前技能确实需要联网时才申请域名授权。',
+                ),
+              ),
             );
           }
           final purpose = input['purpose']?.toString().trim() ?? '';
+          if (dependencies.isNotEmpty && purpose.isEmpty) {
+            return ToolResult.response(
+              jsonEncode(
+                agentToolFailure(
+                  'dependency_purpose_required',
+                  '准备依赖前需要说明它解决当前任务的什么需求。',
+                  retryable: false,
+                  instruction: '在 purpose 中简述要完成的操作后再声明依赖。',
+                ),
+              ),
+            );
+          }
           if (temporaryNetwork && purpose.isEmpty) {
             onProcessEvent({
               'type': 'tool_failed',
@@ -4482,7 +4696,14 @@ class GenkitXiaoqiAgentRuntime
               'message': '技能申请临时联网时必须说明用途。',
             });
             return ToolResult.response(
-              jsonEncode({'status': 'blocked', 'message': '缺少技能联网用途。'}),
+              jsonEncode(
+                agentToolFailure(
+                  'missing_network_purpose',
+                  '缺少技能联网用途。',
+                  retryable: false,
+                  instruction: '补充明确用途后再申请技能临时联网。',
+                ),
+              ),
             );
           }
           final skillName = temporaryNetwork
@@ -4491,6 +4712,172 @@ class GenkitXiaoqiAgentRuntime
           final skillFiles = skillReference == null
               ? <String, List<int>>{}
               : executionFiles(skillReference);
+          late final bool dependenciesAlreadyReady;
+          try {
+            dependenciesAlreadyReady =
+                dependencies.isNotEmpty &&
+                codeExecutor.taskDependenciesCover(
+                  tenantId,
+                  taskId,
+                  dependencies,
+                );
+          } on Object catch (error) {
+            return ToolResult.response(
+              jsonEncode(
+                agentToolFailure(
+                  'invalid_dependency_request',
+                  DockerCodeExecutionService.failureDetails(error),
+                  retryable: false,
+                  instruction: '修正包名或固定版本格式；本版只支持官方 PyPI/npm 包。',
+                ),
+              ),
+            );
+          }
+          final dependencyInfoBefore = dependencies.isEmpty
+              ? const <String, dynamic>{}
+              : codeExecutor.taskDependencyInfo(tenantId, taskId);
+          if (dependencies.isNotEmpty && !dependenciesAlreadyReady) {
+            final dependencyDomains = <String>[
+              if ((dependencies['python'] as List? ?? const []).isNotEmpty) ...[
+                'pypi.org',
+                'files.pythonhosted.org',
+              ],
+              if ((dependencies['npm'] as List? ?? const []).isNotEmpty)
+                'registry.npmjs.org',
+            ];
+            final dependencyGrant = NetworkCallAuthorization(
+              execution: callExecution,
+              domains: dependencyDomains,
+              tool: 'prepare_task_dependencies',
+              arguments: {'dependencies': dependencies},
+              authority: {'task_id': taskId, 'purpose': purpose},
+            );
+            final dependencyDecision = dependencyGrant.decide(
+              resumed: context.resumed,
+            );
+            if (dependencyDecision == ToolAccessDecision.deny) {
+              return ToolResult.response(
+                jsonEncode(
+                  agentToolFailure(
+                    'dependency_install_denied',
+                    '用户拒绝了本次依赖下载。',
+                    retryable: false,
+                    instruction: '继续尝试离线方案；仍无法完成时说明阻塞，不要重复申请。',
+                    context: dependencyInfoBefore,
+                  ),
+                ),
+              );
+            }
+            if (dependencyDecision != ToolAccessDecision.allow) {
+              return ToolResult.interrupt({
+                'type': 'dependency_install_permission',
+                'tool': toolName,
+                'domains': dependencyDomains,
+                'purpose': purpose.isEmpty
+                    ? '为当前任务准备所需的 Python/npm 包'
+                    : purpose,
+                'dependencies': dependencies,
+                'approval_hash': dependencyGrant.approvalHash,
+                'scope_hash': dependencyGrant.scopeHash,
+              });
+            }
+            try {
+              await dependencyGrant.execute(() async {
+                onProcessEvent({
+                  'type': 'tool_started',
+                  'tool': 'prepare_task_dependencies',
+                });
+                await codeExecutor.prepareTaskDependencies(
+                  tenantId: tenantId,
+                  taskId: taskId,
+                  dependencies: dependencies,
+                  cancellation: cancellation,
+                );
+                onProcessEvent({
+                  'type': 'tool_succeeded',
+                  'tool': 'prepare_task_dependencies',
+                });
+                return 'prepared';
+              });
+            } on Object catch (error) {
+              if (cancellation.isCancelled) rethrow;
+              final message = DockerCodeExecutionService.failureDetails(error);
+              onProcessEvent({
+                'type': 'tool_failed',
+                'tool': 'prepare_task_dependencies',
+                'message': message,
+              });
+              return ToolResult.response(
+                jsonEncode(
+                  agentToolFailure(
+                    'dependency_install_failed',
+                    message,
+                    retryable: false,
+                    instruction: '不要更换来源、放开安装脚本或改装系统软件；修正受支持的包声明，或说明当前环境无法安装。',
+                    context: dependencyInfoBefore,
+                  ),
+                ),
+              );
+            }
+          }
+          final taskDependencyFiles = codeExecutor.taskDependencies(
+            tenantId,
+            taskId,
+          );
+          for (final entry in taskDependencyFiles.entries) {
+            final prior = skillFiles[entry.key];
+            if (entry.key == '.xiaoqi/dependency-lock.json' && prior != null) {
+              final priorLock = jsonDecode(utf8.decode(prior));
+              final taskLock = jsonDecode(utf8.decode(entry.value));
+              if (priorLock is! Map || taskLock is! Map) {
+                return ToolResult.response(
+                  jsonEncode(
+                    agentToolFailure(
+                      'dependency_lock_invalid',
+                      '技能或任务依赖锁文件格式无效。',
+                      retryable: false,
+                      instruction: '保留当前任务环境，检查技能依赖并重新准备任务依赖。',
+                    ),
+                  ),
+                );
+              }
+              final executables = <String>{
+                ...(priorLock['executables'] as List? ?? const [])
+                    .whereType<String>(),
+                ...(taskLock['executables'] as List? ?? const [])
+                    .whereType<String>(),
+              }.toList()..sort();
+              skillFiles[entry.key] = utf8.encode(
+                jsonEncode({
+                  ...Map<String, dynamic>.from(priorLock),
+                  'executables': executables,
+                }),
+              );
+              continue;
+            }
+            if (prior != null &&
+                (prior.length != entry.value.length ||
+                    prior.indexed.any(
+                      (item) => item.$2 != entry.value[item.$1],
+                    ))) {
+              onProcessEvent({
+                'type': 'tool_failed',
+                'tool': toolName,
+                'message': '任务依赖与已加载技能文件冲突',
+              });
+              return ToolResult.response(
+                jsonEncode(
+                  agentToolFailure(
+                    'dependency_path_conflict',
+                    '任务依赖与已加载技能文件路径冲突，未覆盖技能内容。',
+                    retryable: false,
+                    instruction: '保留技能原有内容；选择兼容的依赖版本，或改用不冲突的处理方式。',
+                  ),
+                ),
+              );
+            }
+            skillFiles[entry.key] = entry.value;
+          }
           onProcessEvent({
             'type': 'tool_started',
             'tool': toolName,
@@ -4587,7 +4974,28 @@ class GenkitXiaoqiAgentRuntime
               if (temporaryNetwork) 'temporary_network': true,
               if (skillName != null) 'capability_name': skillName,
             });
-            return ToolResult.response(result);
+            final dependencyInfo = codeExecutor.taskDependencyInfo(
+              tenantId,
+              taskId,
+            );
+            final previousPackages = dependencyInfoBefore['packages'];
+            final currentPackages = dependencyInfo['packages'];
+            return ToolResult.response(
+              jsonEncode({
+                'ok': true,
+                'data': {
+                  'output': result,
+                  if (dependencyInfo.isNotEmpty)
+                    'dependency_environment': {
+                      ...dependencyInfo,
+                      'reused':
+                          previousPackages != null &&
+                          jsonEncode(previousPackages) ==
+                              jsonEncode(currentPackages),
+                    },
+                },
+              }),
+            );
           } on Object catch (error) {
             if (requestedDomains.isNotEmpty && error is SandboxExecutionError) {
               callExecution.markUncertainNetworkExecution(
@@ -4614,13 +5022,15 @@ class GenkitXiaoqiAgentRuntime
             });
             return ToolResult.response(
               jsonEncode({
-                'status': 'script_error',
-                'code': 'script_error',
-                'retryable': retryable,
-                'message': message,
-                'instruction': retryable
-                    ? '根据完整异常修正离线代码和当前输入路径后重试；不要重复相同失败代码。仍受任务资源预算和取消约束。'
-                    : '不可自动重放外部操作或已耗尽预算的执行。保留已完成文件，如实说明阻塞并先核实外部结果。',
+                ...agentToolFailure(
+                  'script_error',
+                  message,
+                  retryable: retryable,
+                  instruction: retryable
+                      ? '依据错误修正代码或参数后重试；任务依赖环境已保留，不要重复声明同一组依赖。'
+                      : '不可自动重放外部操作或已耗尽预算的执行。保留已完成文件，如实说明阻塞并先核实外部结果。',
+                  context: codeExecutor.taskDependencyInfo(tenantId, taskId),
+                ),
               }),
             );
           }
@@ -5200,12 +5610,15 @@ class GenkitXiaoqiAgentRuntime
                 'search_plugin_agents',
                 'run_plugin_agent',
                 'read_plugin_agent_resource',
-                'list_task_files',
-                'read_task_text_file',
-                if (turnContract.permitsWorkspace) ...[
-                  'write_task_text_file',
-                  'edit_task_text_file',
-                ],
+              ],
+              'list_task_files',
+              'read_task_text_file',
+              'search_task_text',
+              'ask_user',
+              'get_task_status',
+              if (turnContract.permitsWorkspace) ...[
+                'write_task_text_file',
+                'edit_task_text_file',
               ],
               if (pluginAgents.entries.values.any(
                     (e) => e['has_scripts'] == true,

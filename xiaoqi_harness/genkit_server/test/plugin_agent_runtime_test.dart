@@ -133,6 +133,28 @@ void main() {
               (fork &&
                   tools.isNotEmpty &&
                   !tools.contains('set_task_deliverables'));
+          if (scenario == 'write' && !child) {
+            expect(
+              tools,
+              containsAll({
+                'list_task_files',
+                'read_task_text_file',
+                'write_task_text_file',
+                'edit_task_text_file',
+                'search_task_text',
+                'ask_user',
+                'get_task_status',
+              }),
+            );
+            final searchDescription = (body['tools'] as List)
+                .whereType<Map>()
+                .map((tool) => tool['function'] as Map)
+                .firstWhere(
+                  (function) => function['name'] == 'search_task_text',
+                )['description'];
+            expect(searchDescription, contains('找路径用 list_task_files'));
+            expect(searchDescription, contains('truncated=true'));
+          }
           bool called(String name) => messages.any(
             (m) =>
                 m['role'] == 'assistant' &&
