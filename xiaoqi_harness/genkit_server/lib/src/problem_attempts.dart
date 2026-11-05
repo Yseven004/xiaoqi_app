@@ -7,6 +7,23 @@ import 'package:genkit/genkit.dart';
 import 'execution_limits.dart';
 import 'store.dart';
 
+const Object _activeProblemAttemptZoneKey = Object();
+
+final Map<String, _ProblemAttemptGate> _problemAttemptGates = {};
+
+final class _ProblemAttemptGate {
+  int inFlight = 0;
+  int waiters = 0;
+  final Set<String> taskKeys = {};
+  Completer<void>? changed;
+
+  void notifyChanged() {
+    final signal = changed;
+    changed = null;
+    if (signal != null && !signal.isCompleted) signal.complete();
+  }
+}
+
 /// Enforces the user's five-failure ceiling at Genkit's shared tool boundary.
 ///
 /// Successful calls and intentional interrupts do not consume attempts. A
@@ -36,6 +53,69 @@ class ProblemAttemptBudget {
   GenerateMiddleware middleware() => _ProblemAttemptMiddleware(this);
 
   String get _taskKey => 'task/$tenantId/$taskId';
+
+  String _attemptGateKey(String problemId) {
+    final workflowHash = sha256.convert(utf8.encode(workflowId)).toString();
+    final recordKey = 'problem-attempt/$tenantId/$workflowHash/$problemId';
+    return '${identityHashCode(store)}/$recordKey/$stageId';
+  }
+
+  Future<bool> _reserveAttempt(
+    String gateKey,
+    String problemId, {
+    required bool nested,
+    required CancellationToken? cancellation,
+  }) async {
+    while (true) {
+      cancellation?.throwIfCancelled();
+      if (taskStopped || attemptsFor(problemId) >= limit) return false;
+      final gate = _problemAttemptGates.putIfAbsent(
+        gateKey,
+        _ProblemAttemptGate.new,
+      )..taskKeys.add(_taskKey);
+      final attempts = attemptsFor(problemId);
+      if (attempts + gate.inFlight < limit) {
+        gate.inFlight++;
+        return true;
+      }
+      // A parent Agent may be waiting for this nested call. Waiting for its
+      // own permit would deadlock; return a non-failure, retryable state instead.
+      if (nested) return false;
+      gate.waiters++;
+      final signal = gate.changed ??= Completer<void>();
+      try {
+        if (cancellation == null) {
+          await signal.future;
+        } else {
+          await Future.any([signal.future, cancellation.whenCancelled]);
+          cancellation.throwIfCancelled();
+        }
+      } finally {
+        gate.waiters--;
+        if (gate.inFlight == 0 &&
+            gate.waiters == 0 &&
+            identical(_problemAttemptGates[gateKey], gate)) {
+          _problemAttemptGates.remove(gateKey);
+        }
+      }
+    }
+  }
+
+  void _releaseAttempt(String gateKey) {
+    final gate = _problemAttemptGates[gateKey];
+    if (gate == null) return;
+    if (gate.inFlight > 0) gate.inFlight--;
+    gate.notifyChanged();
+    if (gate.inFlight == 0 && gate.waiters == 0) {
+      _problemAttemptGates.remove(gateKey);
+    }
+  }
+
+  void _notifyTaskAttemptWaiters() {
+    for (final entry in _problemAttemptGates.entries.toList()) {
+      if (entry.value.taskKeys.contains(_taskKey)) entry.value.notifyChanged();
+    }
+  }
 
   String _problemId(Object? rawInput) {
     final targets = <String, Object?>{};
@@ -182,7 +262,9 @@ class ProblemAttemptBudget {
       final stage = Map<String, dynamic>.from(
         allStages[stageId] as Map? ?? const {},
       );
-      final attempts = (stage['attempts'] as num? ?? 0).toInt() + 1;
+      final priorAttempts = (stage['attempts'] as num? ?? 0).toInt();
+      if (priorAttempts >= limit) return priorAttempts;
+      final attempts = priorAttempts + 1;
       final history = [
         ...(stage['history'] as List? ?? const []),
         {
@@ -256,6 +338,7 @@ class ProblemAttemptBudget {
           'limit': limit,
           'summary': summary,
         });
+        _notifyTaskAttemptWaiters();
         return;
       } on RevisionConflict {
         continue;
@@ -313,95 +396,138 @@ final class _ProblemAttemptMiddleware extends GenerateMiddleware {
       });
     }
     final problemId = budget._problemId(request.toolRequest.input);
-    // Do not hold a per-problem lock across tool execution: a delegated Agent
-    // can call another tool for the same issue while its parent tool is still
-    // waiting for the delegated run, which would deadlock nested execution.
+    final gateKey = budget._attemptGateKey(problemId);
+    final activeProblems =
+        Zone.current[_activeProblemAttemptZoneKey] as Set<String>? ?? const {};
+    final nested = activeProblems.contains(gateKey);
     final Future<ToolResult> Function() run = () async {
-      if (budget.taskStopped) {
-        return ToolResult.response({
-          'ok': false,
-          'status': 'stopped',
-          'message': '本任务因同一问题达到尝试上限而停止；请等待用户指示。',
-        });
-      }
-      ctx.cancel?.throwIfCancelled();
-      final priorAttempts = budget.attemptsFor(problemId);
-      if (priorAttempts >= budget.limit) {
-        await budget._stopTask(problemId, priorAttempts, '该问题在当前尝试阶段已达到上限');
-        return ToolResult.response({
-          'ok': false,
-          'status': 'stopped',
-          'error':
-              '同一问题当前阶段已尝试 ${budget.limit} 次，不能自动开始第 ${budget.limit + 1} 次。',
-          'problem_attempt': priorAttempts,
-          'problem_attempt_limit': budget.limit,
-          'recovery_instruction': '保留现有记录，简短说明原因并等待用户明确指示继续排查或提供新条件。',
-        });
-      }
-      late final ToolResult result;
-      try {
-        result = await next(request, ctx);
-      } on Object catch (error) {
-        if (ctx.cancel?.isCancelled == true ||
-            error is ExecutionBudgetExceeded) {
-          rethrow;
+      final reserved = await budget._reserveAttempt(
+        gateKey,
+        problemId,
+        nested: nested,
+        cancellation: ctx.cancel,
+      );
+      if (!reserved) {
+        final priorAttempts = budget.attemptsFor(problemId);
+        if (budget.taskStopped || priorAttempts >= budget.limit) {
+          if (priorAttempts >= budget.limit) {
+            await budget._stopTask(problemId, priorAttempts, '该问题在当前尝试阶段已达到上限');
+          }
+          return ToolResult.response({
+            'ok': false,
+            'status': 'stopped',
+            'message': '本任务因同一问题已达到尝试上限而停止；请等待用户指示。',
+          });
         }
-        final summary = ProblemAttemptBudget._safeSummary(error);
-        final attempts = await budget._recordFailure(problemId, name, summary);
-        final stopped = attempts >= budget.limit;
-        budget.onEvent({
-          'type': 'tool_failed',
-          'tool': name,
-          'problem_id': problemId,
-          'problem_attempt': attempts,
-          'problem_attempt_limit': budget.limit,
-          'message': summary,
-          if (stopped) 'stopped': true,
-        });
-        if (stopped) await budget._stopTask(problemId, attempts, summary);
         return ToolResult.response({
           'ok': false,
-          'status': stopped ? 'stopped' : 'failed',
-          'error': summary,
-          'problem_attempt': attempts,
-          'problem_attempt_limit': budget.limit,
-          'recovery_instruction': stopped
-              ? '自动执行已停止。简要说明问题和原因，然后等待用户指示。'
-              : '先核对错误与已有证据，再选择不同且有依据的修复方法。',
+          'status': 'in_progress',
+          'retryable': true,
+          'message': '同一问题已有并行操作占用剩余尝试名额；此嵌套操作未启动，请先等待当前操作结果。',
         });
       }
-      if (result case ToolResponseResult(
-        :final output,
-        :final parts,
-        :final metadata,
-      )) {
-        final summary = ProblemAttemptBudget._failureSummary(output);
-        if (summary == null) return result;
-        final attempts = await budget._recordFailure(problemId, name, summary);
-        final stopped = attempts >= budget.limit;
-        budget.onEvent({
-          'type': 'tool_failed',
-          'tool': name,
-          'problem_id': problemId,
-          'problem_attempt': attempts,
-          'problem_attempt_limit': budget.limit,
-          'message': summary,
-          if (stopped) 'stopped': true,
-        });
-        if (stopped) await budget._stopTask(problemId, attempts, summary);
-        final note = stopped
-            ? '同一问题已失败 $attempts 次（上限 ${budget.limit} 次）。本任务后续工具调用已关闭；请立即用简短中文向用户说明卡点、已知原因和需要的指示。'
-            : '同一问题第 $attempts/${budget.limit} 次失败。先检查失败证据，再换一种有依据的方法；禁止无变化地重试。';
-        return ToolResult.response(
-          output,
-          parts: [
-            ...?parts,
-            TextPart(text: note),
-          ],
-          metadata: metadata,
-        );
+      try {
+        if (budget.taskStopped) {
+          return ToolResult.response({
+            'ok': false,
+            'status': 'stopped',
+            'message': '本任务因同一问题达到尝试上限而停止；请等待用户指示。',
+          });
+        }
+        ctx.cancel?.throwIfCancelled();
+        final priorAttempts = budget.attemptsFor(problemId);
+        if (priorAttempts >= budget.limit) {
+          await budget._stopTask(problemId, priorAttempts, '该问题在当前尝试阶段已达到上限');
+          return ToolResult.response({
+            'ok': false,
+            'status': 'stopped',
+            'error':
+                '同一问题当前阶段已尝试 ${budget.limit} 次，不能自动开始第 ${budget.limit + 1} 次。',
+            'problem_attempt': priorAttempts,
+            'problem_attempt_limit': budget.limit,
+            'recovery_instruction': '保留现有记录，简短说明原因并等待用户明确指示继续排查或提供新条件。',
+          });
+        }
+        late final ToolResult result;
+        try {
+          result = await runZoned<Future<ToolResult>>(
+            () => next(request, ctx),
+            zoneValues: {
+              _activeProblemAttemptZoneKey: {...activeProblems, gateKey},
+            },
+          );
+        } on Object catch (error) {
+          if (ctx.cancel?.isCancelled == true ||
+              error is ExecutionBudgetExceeded) {
+            rethrow;
+          }
+          final summary = ProblemAttemptBudget._safeSummary(error);
+          final attempts = await budget._recordFailure(
+            problemId,
+            name,
+            summary,
+          );
+          final stopped = attempts >= budget.limit;
+          budget.onEvent({
+            'type': 'tool_failed',
+            'tool': name,
+            'problem_id': problemId,
+            'problem_attempt': attempts,
+            'problem_attempt_limit': budget.limit,
+            'message': summary,
+            if (stopped) 'stopped': true,
+          });
+          if (stopped) await budget._stopTask(problemId, attempts, summary);
+          return ToolResult.response({
+            'ok': false,
+            'status': stopped ? 'stopped' : 'failed',
+            'error': summary,
+            'problem_attempt': attempts,
+            'problem_attempt_limit': budget.limit,
+            'recovery_instruction': stopped
+                ? '自动执行已停止。简要说明问题和原因，然后等待用户指示。'
+                : '先核对错误与已有证据，再选择不同且有依据的修复方法。',
+          });
+        }
+        if (result case ToolResponseResult(
+          :final output,
+          :final parts,
+          :final metadata,
+        )) {
+          final summary = ProblemAttemptBudget._failureSummary(output);
+          if (summary == null) return result;
+          final attempts = await budget._recordFailure(
+            problemId,
+            name,
+            summary,
+          );
+          final stopped = attempts >= budget.limit;
+          budget.onEvent({
+            'type': 'tool_failed',
+            'tool': name,
+            'problem_id': problemId,
+            'problem_attempt': attempts,
+            'problem_attempt_limit': budget.limit,
+            'message': summary,
+            if (stopped) 'stopped': true,
+          });
+          if (stopped) await budget._stopTask(problemId, attempts, summary);
+          final note = stopped
+              ? '同一问题已失败 $attempts 次（上限 ${budget.limit} 次）。本任务后续工具调用已关闭；请立即用简短中文向用户说明卡点、已知原因和需要的指示。'
+              : '同一问题第 $attempts/${budget.limit} 次失败。先检查失败证据，再换一种有依据的方法；禁止无变化地重试。';
+          return ToolResult.response(
+            output,
+            parts: [
+              ...?parts,
+              TextPart(text: note),
+            ],
+            metadata: metadata,
+          );
+        }
+        return result;
+      } finally {
+        budget._releaseAttempt(gateKey);
       }
-      return result;
     };
     return run();
   }

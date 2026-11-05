@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:genkit/genkit.dart';
@@ -46,10 +47,11 @@ void main() {
   Future<ToolResult> invoke(
     ProblemAttemptBudget guard,
     ToolRequestPart call,
-    Future<ToolResult> Function() native,
-  ) => guard.middleware().tool(
+    Future<ToolResult> Function() native, {
+    CancellationToken? cancellation,
+  }) => guard.middleware().tool(
     call,
-    ActionFnArg<void, dynamic, void>(),
+    ActionFnArg<void, dynamic, void>(cancel: cancellation),
     (_, _) => native(),
   );
 
@@ -176,4 +178,55 @@ void main() {
       expect((stages['stage-2'] as Map)['attempts'], 1);
     },
   );
+
+  test(
+    'parallel successful calls beyond the failure ceiling still run',
+    () async {
+      final guard = budget(taskId: 'task-5', stageId: 'stage-5');
+      var nativeCalls = 0;
+      await Future.wait([
+        for (var index = 0; index < 6; index++)
+          invoke(
+            guard,
+            request(tool: 'read_document', ref: 'parallel-success-$index'),
+            () async {
+              nativeCalls++;
+              await Future<void>.delayed(const Duration(milliseconds: 2));
+              return ToolResult.response({'ok': true});
+            },
+          ),
+      ]);
+      expect(nativeCalls, 6);
+      expect(store.list('problem-attempt/alice/'), isEmpty);
+    },
+  );
+
+  test('a queued call observes Stop before its attempt slot opens', () async {
+    final guard = budget(taskId: 'task-6', stageId: 'stage-6');
+    final heldResult = Completer<ToolResult>();
+    var nativeCalls = 0;
+    final activeCalls = [
+      for (var index = 0; index < 5; index++)
+        invoke(guard, request(tool: 'read_document', ref: 'held-$index'), () {
+          nativeCalls++;
+          return heldResult.future;
+        }),
+    ];
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(nativeCalls, 5);
+
+    final cancellation = CancellationController();
+    final queuedCall = invoke(
+      guard,
+      request(tool: 'read_document', ref: 'queued'),
+      () async => fail('a cancelled queued call must not execute'),
+      cancellation: cancellation.token,
+    );
+    await Future<void>.delayed(Duration.zero);
+    cancellation.cancel('user pressed Stop');
+    await expectLater(queuedCall, throwsA(isA<CancelledException>()));
+
+    heldResult.complete(ToolResult.response({'ok': true}));
+    await Future.wait(activeCalls);
+  });
 }
