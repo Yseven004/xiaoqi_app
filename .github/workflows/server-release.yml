@@ -137,7 +137,7 @@ jobs:
                   for image_name, component in names.items():
                       if component not in matches: continue
                       prior=images[image_name]; expected=old[component]
-                      inspected=json.loads(subprocess.check_output(['docker','image','inspect',prior['tag'],text=True]))[0]
+                      inspected=json.loads(subprocess.check_output(['docker','image','inspect',prior['tag']],text=True))[0]
                       labels=inspected.get('Config',{}).get('Labels') or {}
                       if inspected['Id']!=expected['image_id'] or labels.get('org.xiaoqi.component')!=component or labels.get('org.xiaoqi.input-fingerprint')!=expected['fingerprint'] or labels.get('org.xiaoqi.component-source-commit')!=expected['source_commit']:
                           continue
