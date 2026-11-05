@@ -308,6 +308,69 @@ void main() {
     expect(persisted, hasLength(1000));
   });
 
+  test('bounded inference retains completed actions from omitted turns', () {
+    final messages = <Message>[
+      Message(
+        role: Role.user,
+        content: [TextPart(text: 'write and verify the selected file')],
+      ),
+      Message(
+        role: Role.model,
+        content: [
+          ToolRequestPart(
+            toolRequest: ToolRequest(
+              ref: 'write-ref',
+              name: 'write_task_text_file',
+              input: {'path': 'agent-helper.txt', 'text': 'verified'},
+            ),
+          ),
+        ],
+      ),
+      Message(
+        role: Role.tool,
+        content: [
+          ToolResponsePart(
+            toolResponse: ToolResponse(
+              ref: 'write-ref',
+              name: 'write_task_text_file',
+              output: {'ok': true, 'status': 'success'},
+            ),
+          ),
+        ],
+      ),
+      for (var turn = 1; turn < 7; turn++) ...[
+        Message(
+          role: Role.user,
+          content: [TextPart(text: 'later turn $turn')],
+        ),
+        Message(
+          role: Role.model,
+          content: [TextPart(text: List.filled(80, 'later response ').join())],
+        ),
+      ],
+    ];
+
+    final inference = boundedInferenceHistory(
+      messages,
+      maxCharacters: 4000,
+      recentTurns: 2,
+    );
+    final ledger = inference.singleWhere(
+      (message) => message.metadata?['xiaoqi_action_ledger'] == true,
+    );
+    const marker = 'XIAOQI_ACTION_LEDGER_V1\n';
+    final payload =
+        jsonDecode(ledger.content.single.text!.substring(marker.length)) as Map;
+    final actions = (payload['actions'] as List).whereType<Map>().toList();
+
+    expect(payload['notice'], contains('成功的副作用不要重复执行'));
+    expect(actions, hasLength(1));
+    expect(actions.single['name'], 'write_task_text_file');
+    expect(actions.single['input']['path'], 'agent-helper.txt');
+    expect(actions.single['result']['status'], 'success');
+    expect(messages, hasLength(15));
+  });
+
   test(
     'oversized structured tool output is omitted only in the inference copy',
     () {
