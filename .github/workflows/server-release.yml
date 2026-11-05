@@ -42,10 +42,15 @@ jobs:
           import os, subprocess, sys
           event=os.environ['EVENT_NAME']
           commit=os.environ['SOURCE_COMMIT']
+          # scope-baseline-v2: older successful runs did not prove cumulative checks.
           try:
               before=subprocess.check_output(['gh','run','list','--workflow','server-release.yml','--status','success','--branch','main','--limit','1','--json','headSha','--jq','.[0].headSha // empty'],text=True).strip()
               if before and subprocess.run(['git','merge-base','--is-ancestor',before,commit]).returncode:
                   before=''
+              if before:
+                  baseline_workflow=subprocess.check_output(['git','show',before+':.github/workflows/server-release.yml'],text=True)
+                  if '# scope-baseline-v2:' not in baseline_workflow:
+                      before=''
           except subprocess.CalledProcessError:
               before=''
           if before:
