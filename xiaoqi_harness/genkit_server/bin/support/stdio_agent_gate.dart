@@ -26,6 +26,41 @@ Future<void> verifyStdioAgent(
     try {
       final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
       final serialized = jsonEncode(body['messages']);
+      if (serialized.contains('XIAOQI_CONTEXT_SUMMARY_V1')) {
+        // The OpenAI adapter omits tool_choice when no tools are declared.
+        if ((body['tool_choice'] != null && body['tool_choice'] != 'none') ||
+            (body['tools'] as List? ?? const []).isNotEmpty) {
+          throw StateError('Context summarizer exposed executable tools');
+        }
+        // The local model also serves the official compressor's summary call.
+        // Retain its rendered action facts, without invoking the task planner.
+        final text = (body['messages'] as List)
+            .whereType<Map>()
+            .map((message) => message['content'].toString())
+            .join('\n');
+        final summary = text
+            .split('\n')
+            .where((line) => line.contains('[Tool call:'))
+            .join('\n');
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(
+          jsonEncode({
+            'id': 'local-summary',
+            'choices': [
+              {
+                'index': 0,
+                'message': {
+                  'role': 'assistant',
+                  'content': 'Executed action history:\n$summary',
+                },
+                'finish_reason': 'stop',
+              },
+            ],
+          }),
+        );
+        await request.response.close();
+        return;
+      }
       if (serialized.contains('XIAOQI_TURN_INTENT_V1')) {
         request.response.headers.contentType = ContentType.json;
         request.response.write(
@@ -122,7 +157,13 @@ Future<void> verifyStdioAgent(
         ).firstMatch(serialized)?.group(0);
         if (skill == null)
           throw StateError('Selected skill was not exposed alongside MCP');
-        bool called(String tool) => serialized.contains('"name":"$tool"');
+        final summaryText = (body['messages'] as List)
+            .whereType<Map>()
+            .map((message) => message['content'].toString())
+            .join('\n');
+        bool called(String tool) =>
+            serialized.contains('"name":"$tool"') ||
+            summaryText.contains('[Tool call: $tool(');
         bool calledWith(String tool, String key, String value) =>
             (body['messages'] as List).whereType<Map>().any(
               (message) =>
@@ -133,7 +174,13 @@ Future<void> verifyStdioAgent(
                                 as Map)[key] ==
                             value,
                   ),
-            );
+            ) ||
+            RegExp(
+              r'\[Tool call: ' + RegExp.escape(tool) + r'\(([^\n]*)\)\]',
+            ).allMatches(summaryText).any((match) {
+              final arguments = jsonDecode(match.group(1)!) as Map;
+              return arguments[key] == value;
+            });
         if (readOnlyDelegate &&
             serialized.contains('ASYNC_STOP_REVIEW_REQUIRED') &&
             !called('write_task_text_file')) {

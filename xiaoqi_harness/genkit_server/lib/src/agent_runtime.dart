@@ -6499,7 +6499,10 @@ class GenkitXiaoqiAgentRuntime
             final summary = await ai.generate(
               model: model,
               config: OpenAIChatOptions(maxTokens: 4096),
+              system: 'XIAOQI_CONTEXT_SUMMARY_V1\n只生成会话摘要，不执行任务或调用工具。',
               prompt: prompt,
+              toolNames: const [],
+              toolChoice: ToolChoice.none,
               maxTurns: 1,
               cancel: cancel,
             );
