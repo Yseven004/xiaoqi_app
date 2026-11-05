@@ -14,6 +14,13 @@
 
 ## Remote service deployment
 
+### Validated scope and reuse defaults
+
+- Follow `docs/architecture/release-flow-validation-2026-11-05.md` and `xiaoqi_harness/deploy/README.docker.md`. The full baseline, Linux isolated recovery, production activation and a four-component reuse run were verified on 2026-11-05. Use the existing workflow and deployment entry point for future releases.
+- Select checks against the latest successful main whose workflow supports cumulative checking, not merely the previous commit. Failed or cancelled runs do not erase unverified changes. Bootstrap a new checking policy with a complete baseline.
+- Reuse only verified images whose component input and base-image fingerprints match. Preserve actual component source commits and image IDs; build only changed or missing components. A release artifact still belongs to the exact current main, and image export/import verification remains mandatory. Scope business probes to affected behavior while keeping backup, health, contract, data verification and rollback for every actual activation.
+- Official capability sources and releases live in `Yseven004/xiaoqi-capabilities`; package-only updates do not rebuild or deploy the host. Package installation/update is manual. Preserve installed history and versions bound to active work; the product's single-version cleanup policy must not delete capability versions referenced by work. A package version switch never rewinds user data or grants permissions.
+
 - During solo development, deployment is the agent's automatic responsibility, not a manual user step. After changing production server code under `xiaoqi_harness/genkit_server/`, runtime deployment files under `xiaoqi_harness/deploy/`, or a Flutter/server API contract, the agent must run the relevant checks and then run `xiaoqi_harness/deploy/deploy_current.ps1` before claiming the task is complete. Do not ask the user to run the deployment command.
 - Do not deploy for Flutter-only UI changes, documentation-only changes, test-only changes, or comments/formatting that cannot affect the running service. When uncertain, inspect the actual diff and deploy only if the ECS runtime or its API behavior can change.
 - If required checks fail, do not deploy broken code. Fix the failure first; if it cannot be fixed within the task, leave the current healthy server untouched and report the blocker. If deployment starts and fails, rely on the scripted automatic rollback and verify that the restored service is healthy.
