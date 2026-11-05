@@ -243,9 +243,27 @@ class SkillMarket {
       'description': record['description'],
       'author': value['author'],
       if (value['curated_by'] != null) 'curated_by': value['curated_by'],
+      if (value['owner_tenant'] == '_official-curated' &&
+          value['capability_id'] is String)
+        'curated_capability_id': value['capability_id'],
       if (value['provenance'] != null) 'provenance': value['provenance'],
       'is_owner': value['owner_tenant'] == tenant,
       'publication_revision': doc.revision,
+      if (detail) 'current_version_id': record['current_version_id'],
+      if (detail)
+        'versions': [
+          for (final raw in record['versions'] as List? ?? const [])
+            if (raw is Map)
+              {
+                'id': raw['id'],
+                'number': raw['number'],
+                if (raw['version_label'] != null)
+                  'version_label': raw['version_label'],
+                'created_at': raw['created_at'],
+              },
+        ],
+      if (detail && value['capability_release'] is Map)
+        'capability_release': value['capability_release'],
       'presentation': presentation,
       'published_at': value['published_at'],
       'capability_id': value['owner_tenant'] == tenant
@@ -283,20 +301,51 @@ class SkillMarket {
     }
     final record = Map<String, dynamic>.from(value['record'] as Map)
       ..remove('owner_tenant');
+    // Updates retain versions referenced by unfinished work and user settings.
+    final versions = <String, Map>{};
+    for (final raw in [
+      ...?old?.value['versions'] as List?,
+      ...?record['versions'] as List?,
+    ]) {
+      if (raw is! Map || raw['id'] is! String) {
+        throw const FormatException('扩展版本记录无效，原安装保留');
+      }
+      final previous = versions[raw['id']];
+      if (previous != null && previous['artifact_key'] != raw['artifact_key']) {
+        throw const FormatException('已发布版本的内容发生变化，原安装保留');
+      }
+      if (previous != null &&
+          previous['capability_release'] is Map &&
+          raw['capability_release'] is Map &&
+          jsonEncode(previous['capability_release']) !=
+              jsonEncode(raw['capability_release'])) {
+        throw const FormatException('已发布版本的权限声明发生变化，原安装保留');
+      }
+      versions[raw['id'] as String] = raw;
+    }
     return store.put(key, {
       ...record,
+      'versions': versions.values.toList(),
       'id': 'market-$id',
       'origin': 'market',
+      if (value['owner_tenant'] == '_official-curated' &&
+          value['capability_id'] is String)
+        'curated_capability_id': value['capability_id'],
       'deleted_at': null,
       'source': {
         'publication_id': id,
+        if (value['owner_tenant'] == '_official-curated' &&
+            value['capability_id'] is String)
+          'curated_capability_id': value['capability_id'],
         'author': value['author'],
         if (value['curated_by'] != null) 'curated_by': value['curated_by'],
         if (value['provenance'] != null) 'provenance': value['provenance'],
+        if (value['capability_release'] is Map)
+          'capability_release': value['capability_release'],
         'publication_revision': revision,
       },
-      'enabled': true,
-      'show_in_menu': true,
+      'enabled': old?.value['enabled'] ?? true,
+      'show_in_menu': old?.value['show_in_menu'] ?? true,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     }, old?.revision);
   }

@@ -12,7 +12,7 @@
 
 ## 外部参考与复用
 
-固定提交、版本和许可证分别记录在 `genkit_server/official_catalog/*/PROVENANCE.json`。上游原文为 `UPSTREAM-SKILL.md`；新的 `SKILL.md` 仅声明宿主工具映射和边界。精选发布由部署拥有的包生成，没有客户端可调用的官方发布接口；普通发布不信任客户端自称官方的资料。
+固定提交、版本、许可证和宿主需求记录在独立的 `Yseven004/xiaoqi-capabilities` 仓库及每个包的清单中。上游原文为 `UPSTREAM-SKILL.md`；新的 `SKILL.md` 仅声明宿主工具映射和边界。官方包通过 GitHub Releases 独立发布；小七仅从固定仓库索引导入并校验，普通发布不信任客户端自称官方的资料。更新需用户手动安装，既有工作继续绑定旧版本。
 
 - Book to Skill：MIT，virgiliojr94，1.4.0，2026-10-12 提交。直接复用模块和提取入口；不引入 Calibre、Docling 或运行时 pip 安装。
 - Study Notes Studio：MIT，Gerson369 引入仓库，原始版权署名 yxxx6666（README 的原仓库地址与 LICENSE 均指向此作者），1.4.1，2026-07-04 提交。直接复用完整 handbook，仍须调用图片模型，不能偷换成代码排版。

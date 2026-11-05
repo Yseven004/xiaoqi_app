@@ -5,8 +5,7 @@ param(
     [string]$Profile = 'xiaoqi-remote-deploy',
     [string]$Endpoint = '',
     [string]$PublicHealthUrl = 'https://47-76-60-77.sslip.io/health',
-    [ValidateSet('full', 'non-image')][string]$VerificationProfile = 'full',
-    [switch]$SkipNativeLearningProbe
+    [ValidateSet('auto', 'full', 'non-image', 'component', 'deploy-only')][string]$VerificationProfile = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -314,7 +313,7 @@ try {
     Test-EcsConnection
     $remotePrepared = $true
     Invoke-RemoteCommand -Script "set -eu; install -d -m 700 '$RemoteRoot/incoming' '$incomingDir' '$RemoteRoot/logs'" -TimeoutSeconds 60 | Out-Null
-    foreach ($name in @('release_manager.sh', 'release_artifact.py', 'run_release_job.sh')) {
+    foreach ($name in @('release_manager.sh', 'release_artifact.py', 'run_release_job.sh', 'verify_store.py')) {
         $source = (Get-Content -Raw -LiteralPath (Join-Path $DeployDir $name)) -replace "`r`n", "`n"
         Send-RemoteFile -TargetDir $incomingDir -Name $name -Bytes ([Text.Encoding]::UTF8.GetBytes($source)) -Mode '0700'
     }
@@ -331,9 +330,7 @@ try {
     $downloadConfig = 'url = "' + $build.DownloadUrl + '"' + "`n"
     Send-RemoteFile -TargetDir $incomingDir -Name 'download.conf' -Bytes ([Text.Encoding]::UTF8.GetBytes($downloadConfig))
     Write-Host "Live verification profile: $VerificationProfile. Deferred checks are not marked verified."
-    $skipLearning = if ($SkipNativeLearningProbe) { '1' } else { '0' }
-    if ($SkipNativeLearningProbe) { Write-Warning 'Native learning probe explicitly waived for this deployment; it is not verified.' }
-    $launch = "set -eu; test ! -e '$incomingDir/started'; touch '$incomingDir/started'; XIAOQI_SKIP_NATIVE_LEARNING_PROBE='$skipLearning' XIAOQI_RELEASE_VERIFICATION_PROFILE='$VerificationProfile' nohup bash '$incomingDir/run_release_job.sh' '$releaseId' '$($build.Commit)' '$productRelease' '$contractVersion' </dev/null >/dev/null 2>&1 & echo JOB_STARTED"
+    $launch = "set -eu; test ! -e '$incomingDir/started'; touch '$incomingDir/started'; XIAOQI_RELEASE_VERIFICATION_PROFILE='$VerificationProfile' nohup bash '$incomingDir/run_release_job.sh' '$releaseId' '$($build.Commit)' '$productRelease' '$contractVersion' </dev/null >/dev/null 2>&1 & echo JOB_STARTED"
     # Mark ambiguous dispatches as started so finally never removes active inputs.
     $jobStarted = $true
     Invoke-RemoteCommand -Script $launch -TimeoutSeconds 60 | Write-Host

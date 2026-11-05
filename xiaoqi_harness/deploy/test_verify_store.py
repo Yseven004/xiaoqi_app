@@ -2,12 +2,50 @@ import hashlib
 import sqlite3
 import tempfile
 import unittest
+import tarfile
 from pathlib import Path
 
-from verify_store import manifest, with_catalog_changes
+from verify_store import manifest, with_catalog_changes, recover_manifest_metadata, exclude_expired_attachments
 
 
 class StoreVerificationTests(unittest.TestCase):
+    def test_legacy_expiration_requires_matching_original_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = sqlite3.connect(root / 'xiaoqi.sqlite3')
+            database.executescript('CREATE TABLE documents(key TEXT PRIMARY KEY, document TEXT, revision INTEGER); CREATE TABLE objects(key TEXT PRIMARY KEY);')
+            database.execute('INSERT INTO documents VALUES(?,?,?)', ('attachment/old', '{"expires_at":10}', 1))
+            database.commit()
+            database.close()
+            original = manifest(root)
+            legacy = {k: v for k, v in original.items() if k != 'document_expirations'}
+            archive = root / 'data.tgz'
+            with tarfile.open(archive, 'w:gz') as output:
+                output.add(root / 'xiaoqi.sqlite3', arcname='./xiaoqi.sqlite3')
+            recovered = recover_manifest_metadata(legacy, archive)
+            self.assertEqual(recovered, original)
+            self.assertNotIn('document_expirations', legacy)
+            self.assertEqual(exclude_expired_attachments(recovered, 10)['documents'], [])
+            forged = dict(legacy, document_hashes={'attachment/old': '0' * 64})
+            with self.assertRaisesRegex(ValueError, 'does not match'):
+                recover_manifest_metadata(forged, archive)
+
+    def test_legacy_manifest_cannot_use_live_data_as_recovery_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = sqlite3.connect(root / 'xiaoqi.sqlite3')
+            database.executescript('CREATE TABLE documents(key TEXT PRIMARY KEY, document TEXT, revision INTEGER); CREATE TABLE objects(key TEXT PRIMARY KEY);')
+            database.execute("INSERT INTO documents VALUES('private/note','original',1)")
+            database.commit()
+            database.close()
+            legacy = {'documents': [['private/note', 1]],
+                      'document_hashes': {'private/note': hashlib.sha256(b'original').hexdigest()},
+                      'object_keys': [], 'object_file_hashes': {},
+                      'counts': {'documents': 1, 'objects': 0, 'object_files': 0}}
+            forged = dict(legacy, document_hashes={'private/note': '0' * 64})
+            with self.assertRaises(FileNotFoundError):
+                recover_manifest_metadata(forged, root / 'missing-backup.tgz')
+
     def test_live_manifest_reads_committed_wal(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

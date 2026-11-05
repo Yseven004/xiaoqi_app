@@ -33,7 +33,11 @@ void main() {
   setUp(() {
     directory = Directory.systemTemp.createTempSync('xiaoqi-skill-market-');
     store = CloudStore(root: directory.path);
-    api = XiaoqiApi(store, _NoModel());
+    api = XiaoqiApi(
+      store,
+      _NoModel(),
+      officialCatalogRefresher: (_) async => {'updated_count': 0},
+    );
     for (final tenant in ['alice', 'bob']) {
       store.put('device/${sha256.convert(utf8.encode(tenant))}', {
         'tenant_id': tenant,
@@ -392,6 +396,100 @@ void main() {
     expect(saved.$1, 400);
     expect(store.get('cap/alice/plugin-a'), isNull);
   });
+
+  test(
+    'official package version switch changes only the installed default',
+    () async {
+      store.putImmutable('test/official-v1.zip', {
+        'SKILL.md': utf8.encode('version one'),
+      });
+      store.putImmutable('test/official-v2.zip', {
+        'SKILL.md': utf8.encode('version two'),
+      });
+      store.put('skill-market/official-publication', {
+        'id': 'official-publication',
+        'owner_tenant': '_official-curated',
+        'capability_id': 'study-notes-studio',
+      }, null);
+      store.put('cap/alice/market-official-publication', {
+        'id': 'market-official-publication',
+        'kind': 'skill',
+        'name': 'study-notes-studio',
+        'description': 'Official package',
+        'origin': 'market',
+        'enabled': false,
+        'show_in_menu': false,
+        'curated_capability_id': 'study-notes-studio',
+        'source': {
+          'publication_id': 'official-publication',
+          'curated_capability_id': 'study-notes-studio',
+        },
+        'current_version_id': 'version-two',
+        'versions': [
+          {
+            'id': 'version-one',
+            'number': 1,
+            'artifact_key': 'test/official-v1.zip',
+            'content_hash': 'a' * 64,
+          },
+          {
+            'id': 'version-two',
+            'number': 2,
+            'artifact_key': 'test/official-v2.zip',
+            'content_hash': 'b' * 64,
+            'capability_release': {
+              'id': 'study-notes-studio',
+              'capabilities': ['learning_notes.append'],
+            },
+          },
+        ],
+        'capability_release': {
+          'id': 'study-notes-studio',
+          'capabilities': ['learning_notes.append'],
+        },
+      }, null);
+
+      final (status, value) = await call(
+        'POST',
+        '/v1/capabilities/market-official-publication/version',
+        body: {'expected_revision': 1, 'version_id': 'version-one'},
+      );
+      expect(status, 200, reason: '$value');
+      final saved = value['record'] as Map;
+      expect(saved['current_version_id'], 'version-one');
+      expect(saved['enabled'], isFalse);
+      expect(saved['show_in_menu'], isFalse);
+      expect(saved['cloud_revision'], 2);
+      expect(
+        (saved['source'] as Map).containsKey('capability_release'),
+        isFalse,
+      );
+      expect(saved['capability_release'], isNull);
+      expect(
+        (saved['versions'] as List).map((version) => version['id']),
+        containsAll(['version-one', 'version-two']),
+      );
+      final (restoreStatus, restored) = await call(
+        'POST',
+        '/v1/capabilities/market-official-publication/version',
+        body: {'expected_revision': 2, 'version_id': 'version-two'},
+      );
+      expect(restoreStatus, 200, reason: '$restored');
+      expect(
+        ((restored['record'] as Map)['source']
+            as Map)['capability_release']['capabilities'],
+        ['learning_notes.append'],
+      );
+      expect(
+        (await call(
+          'POST',
+          '/v1/capabilities/market-official-publication/version',
+          body: {'expected_revision': 1, 'version_id': 'version-two'},
+        )).$1,
+        409,
+      );
+    },
+  );
 
   test(
     'author publishes a snapshot; private edits stay private; installations are immutable',

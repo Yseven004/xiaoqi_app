@@ -15,7 +15,7 @@ import '../lib/src/release_verification.dart';
 /// at most. Emits counters and integrity checks, never credentials or user data.
 Future<void> main(List<String> arguments) async {
   final profile = ReleaseVerificationProfile.fromArguments(arguments);
-  stdout.writeln(jsonEncode(profile.report(curated: false)));
+  stdout.writeln(jsonEncode(profile.report()));
   final directory = await Directory.systemTemp.createTemp('capability-live-');
   final store = CloudStore(root: directory.path);
   const tenant = 'capability-release-probe';

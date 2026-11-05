@@ -110,7 +110,7 @@
 
 用户提供的 `book-to-skill` 生成规范使用 `chapters/chNN-*.md`。因此，**按该规范生成并导入的技能，即使正文写有章节链接，该读取工具也无法打开这些链接。**这不是第一张截图的已证实根因，却是明确的后续闭环缺口。
 
-此外，单个技能资源超过 64 KiB 就报错，没有分段续读；脚本运行环境每次重建，官方 book-to-skill 适配文档已花费多条规则教模型重新发现上次输出路径。[64 KiB 限制](C:/Users/20833/Desktop/xiaoqi_app/xiaoqi_harness/genkit_server/lib/src/agent_runtime.dart:5551)、[宿主适配规则](C:/Users/20833/Desktop/xiaoqi_app/xiaoqi_harness/genkit_server/official_catalog/book-to-skill/SKILL.md:10)
+此外，单个技能资源超过 64 KiB 就报错，没有分段续读；脚本运行环境每次重建，官方 book-to-skill 适配文档已花费多条规则教模型重新发现上次输出路径。[64 KiB 限制](C:/Users/20833/Desktop/xiaoqi_app/xiaoqi_harness/genkit_server/lib/src/agent_runtime.dart:5551)、[宿主适配规则](C:/Users/20833/Desktop/xiaoqi-capabilities/book-to-skill/SKILL.md:10)
 
 **建议：**按已经验证、绑定版本的包清单开放可读文本资源，而不是靠固定目录名称证明安全；保留租户边界、路径规范化、遍历拒绝、文件类型与体积限制。资源读取增加游标/分段；跨调用文件使用稳定 `artifact_id` 及当前调用的路径映射。容器可以继续临时化，不必为了让模型记住路径而长期开着容器。
 

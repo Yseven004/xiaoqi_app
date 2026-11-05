@@ -1,1 +1,0 @@
-{"author":"第七世界","copyright":"2026 第七世界","license":"MIT","version":"1.0.0","adaptation_version":1,"original":true,"repository":"https://github.com/Yseven004/xiaoqi_app","adaptation":"小七官方原创。基于 Tesseract 字级定位，在原图上叠加常规红笔圈线、手写简评与浅黄重点；不重绘原文。","limitations":"需清晰正向单页图片；定位不可靠时跳过或请求重拍。无损 PNG 超限时需裁切单页。"}

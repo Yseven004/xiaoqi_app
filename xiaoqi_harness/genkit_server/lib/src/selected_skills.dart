@@ -16,6 +16,7 @@ class SelectedSkills {
     bool discover = false,
     bool allowUnavailable = false,
     Iterable<String> excludedIds = const [],
+    List workBindings = const [],
   }) {
     selections ??= const [];
     if (selections is! List || selections.length > 16) {
@@ -53,7 +54,15 @@ class SelectedSkills {
           continue;
         try {
           final candidate = SelectedSkills(store, tenant, [
-            {'id': id, 'version_id': record['current_version_id']},
+            {
+              'id': id,
+              'version_id':
+                  workBindings
+                      .whereType<Map>()
+                      .where((binding) => binding['id'] == id)
+                      .firstOrNull?['version_id'] ??
+                  record['current_version_id'],
+            },
           ]);
           for (final entry in candidate.entries.values) {
             if (entries.length >= 128) break;
@@ -138,18 +147,40 @@ class SelectedSkills {
   final unavailableSelections = <Map<String, String>>[];
   final _packages = <String, Map<String, List<int>>>{};
 
-  bool isOfficialActive(
-    String name,
+  bool hasCapabilityClaim(
+    String capability,
     Iterable<String> aliases, {
     bool explicitOnly = false,
-  }) => aliases.any(
-    (alias) =>
-        (!explicitOnly || explicitIds.contains(alias)) &&
-        entries[alias]?['artifact_key']?.startsWith(
-              'official-catalog/$name/',
-            ) ==
-            true,
-  );
+  }) {
+    for (final alias in aliases) {
+      if (explicitOnly && !explicitIds.contains(alias)) continue;
+      final entry = entries[alias];
+      final parentId = entry?['parent_id'];
+      if (parentId == null) continue;
+      final record = store.get('cap/$tenant/$parentId')?.value;
+      final curatedId = record?['curated_capability_id']?.toString();
+      final source = record?['source'] as Map?;
+      if (record == null ||
+          record['enabled'] == false ||
+          record['deleted_at'] != null ||
+          record['origin'] != 'market' ||
+          curatedId == null ||
+          curatedId.isEmpty ||
+          source?['curated_capability_id'] != curatedId) {
+        continue;
+      }
+      final version = (record['versions'] as List? ?? const [])
+          .whereType<Map>()
+          .where((item) => item['id'] == entry?['version_id'])
+          .firstOrNull;
+      final release = version?['capability_release'];
+      final claims = release is Map && release['id'] == curatedId
+          ? release['capabilities'] as List? ?? const []
+          : const [];
+      if (claims.contains(capability)) return true;
+    }
+    return false;
+  }
 
   void _unavailable(String id, {String? componentId, String? versionId}) {
     final record = store.get('cap/$tenant/$id')?.value;
@@ -204,14 +235,14 @@ class SelectedSkills {
     return _record(entry['parent_id']!)['name'].toString();
   }
 
-  /// This artifact namespace is assigned only by the deployment-owned catalog.
+  /// Curated identity is assigned by the trusted market installer.
   bool permitsGeneratedCode(Iterable<String> activeAliases) =>
       activeAliases.any(
         (alias) =>
-            entries[alias]?['artifact_key']?.startsWith(
-              'official-catalog/book-to-skill/',
-            ) ==
-            true,
+            store
+                .get('cap/$tenant/${entries[alias]?['parent_id']}')
+                ?.value['curated_capability_id'] ==
+            'book-to-skill',
       );
 
   Map<String, dynamic> reference(String alias) {

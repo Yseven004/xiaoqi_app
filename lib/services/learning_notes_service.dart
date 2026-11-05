@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:crypto/crypto.dart';
 import 'package:flutter/widgets.dart';
 import '../features/ai_study_annotation/data/ai_conversation_history.dart';
@@ -55,15 +56,24 @@ class LearningNotesService with WidgetsBindingObserver {
       final id = item['id']?.toString();
       if (id != null) {
         final record = await CapabilityStore.instance.find(id);
-        if (record?.name == 'learning-notes-manager' &&
+        final selectedVersionId =
+            item['version_id']?.toString() ?? record?.currentVersionId;
+        final version = record?.versions
+            .where((candidate) => candidate.id == selectedVersionId)
+            .firstOrNull;
+        final release =
+            version?.capabilityRelease ??
+            (selectedVersionId == record?.currentVersionId
+                ? record?.source['capability_release']
+                : null);
+        final claims = release is Map
+            ? release['capabilities'] as List? ?? const []
+            : const [];
+        if (claims.contains('learning_notes.append') &&
             record!.enabled &&
             record.origin == 'market' &&
-            record.source['publication_id'] ==
-                sha256
-                    .convert(
-                      utf8.encode('_official-curated/learning-notes-manager'),
-                    )
-                    .toString() &&
+            record.source['curated_capability_id'] ==
+                (release is Map ? release['id'] : null) &&
             record.deletedAt == null) {
           return true;
         }

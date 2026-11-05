@@ -7,13 +7,13 @@ if ($errors.Count) { throw ($errors | Out-String) }
 $endpointParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Endpoint' }
 if ($endpointParameter.DefaultValue.Value -ne '') { throw 'The default endpoint must follow Region.' }
 $verificationParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'VerificationProfile' }
-if ($verificationParameter.DefaultValue.Value -ne 'full') { throw 'Full verification must remain the default.' }
+if ($verificationParameter.DefaultValue.Value -ne 'auto') { throw 'Verification must follow the artifact scope by default.' }
 $validation = $verificationParameter.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' }
-if (($validation.PositionalArguments.Value -join ',') -ne 'full,non-image') { throw 'Unexpected verification profile choices.' }
+if (($validation.PositionalArguments.Value -join ',') -ne 'auto,full,non-image,component,deploy-only') { throw 'Unexpected verification profile choices.' }
 $launchAssignment = $ast.Find({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$launch'}, $true)
 if ($launchAssignment.Right.Extent.Text -notmatch 'XIAOQI_RELEASE_VERIFICATION_PROFILE=') { throw 'The selected verification profile is not forwarded to the remote job.' }
-if ($launchAssignment.Right.Extent.Text -notmatch 'XIAOQI_SKIP_NATIVE_LEARNING_PROBE=') { throw 'The explicit single-deployment waiver is not forwarded.' }
-if (-not ($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'SkipNativeLearningProbe' -and $null -eq $_.DefaultValue })) { throw 'Native learning checks must remain enabled by default.' }
+if ($launchAssignment.Right.Extent.Text -match 'XIAOQI_SKIP_NATIVE_LEARNING_PROBE=') { throw 'Package-specific runtime probes must not be part of a server deployment.' }
+if ($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'SkipNativeLearningProbe' }) { throw 'The obsolete learning-probe waiver must be removed.' }
 foreach ($name in @('Get-OptionalField', 'Wait-RemoteCommand', 'Get-EcsLocalProxy', 'Invoke-AliyunJson')) {
     $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
     . ([ScriptBlock]::Create($definition.Extent.Text))

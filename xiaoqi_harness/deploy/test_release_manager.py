@@ -34,13 +34,6 @@ elif a[0] == 'run':
     elif 'du' in a: print('10 /data')
     elif '/app/bin/verify_capability_chain' in a:
         if os.environ.get('FAIL_PROBE') == '1': sys.exit(8)
-    elif '/app/bin/verify_official_catalog' in a:
-        if os.environ.get('FAIL_CURATED_PROBE') == '1': sys.exit(8)
-    elif '/app/bin/verify_learning_plugins' in a:
-        if os.environ.get('FAIL_LEARNING_PROBE') == '1': sys.exit(8)
-    elif '--seed-official-catalog' in a:
-        if os.environ.get('FAIL_CATALOG_SEED') == '1': sys.exit(8)
-        print('{}')
     else:
         mounts = [a[i+1] for i,x in enumerate(a) if x == '-v']
         for mount in mounts:
@@ -72,6 +65,7 @@ class ManagerTests(unittest.TestCase):
         (self.root / 'current/genkit_server/pubspec.yaml').write_text('name: old\n')
         (self.root / 'current/deploy/compose.yaml').write_text('services: {}\n')
         (self.root / 'current/deploy/Caddyfile.docker').write_text('example.com { respond 200 }\n')
+        (self.root / 'current/deploy/verify_store.py').write_text('# fixture verifier\n')
         (self.root / 'current/.xiaoqi-release').write_text('old-release\n')
         self.bundle = make_bundle(self.root)
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'], XIAOQI_DEPLOY_TEST='1', XIAOQI_DEPLOY_ROOT=str(self.root))
@@ -89,13 +83,10 @@ class ManagerTests(unittest.TestCase):
         calls = (self.root/'docker.calls').read_text().splitlines()
         self.assertFalse(any(' build ' in ' '+c+' ' for c in calls))
         self.assertTrue(all('--no-build' in c and '--pull never' in c for c in calls if ' up ' in c))
-        curated = next(c for c in calls if '/app/bin/verify_official_catalog' in c)
-        self.assertNotIn('--non-image', curated)
+        self.assertFalse(any('/app/bin/verify_official_catalog' in c for c in calls))
+        self.assertFalse(any('/app/bin/verify_learning_plugins' in c for c in calls))
         self.assertNotIn('--non-image', next(c for c in calls if '/app/bin/verify_capability_chain' in c))
-        self.assertIn('--network xiaoqi-single-server_default', curated)
-        self.assertIn('--network xiaoqi-single-server_sandbox-control', curated)
-        self.assertIn('--env SANDBOX_RUNNER_URL=http://xiaoqi-probe-runner-new-release:8090', curated)
-        self.assertIn('xiaoqi-genkit-server:build-'+COMMIT, curated)
+        self.assertTrue(any('/app/bin/verify_web_tools' in c for c in calls))
         runner = next(c for c in calls if 'run --detach' in c)
         self.assertNotIn('--env-file', runner)
         self.assertIn('--env SANDBOX_RUNNER_TOKEN', runner)
@@ -107,11 +98,10 @@ class ManagerTests(unittest.TestCase):
         self.assertNotIn('--detach --rm', runner)
         self.assertNotIn('test-runner-token', '\n'.join(calls))
         retag = next(i for i,c in enumerate(calls) if c.startswith('tag xiaoqi-genkit-server:build-'))
-        probe = next(i for i,c in enumerate(calls) if '/app/bin/verify_official_catalog' in c)
+        probe = next(i for i,c in enumerate(calls) if '/app/bin/verify_capability_chain' in c)
         self.assertLess(probe, retag)
-        seed = next(i for i, c in enumerate(calls) if '--seed-official-catalog' in c)
-        compare = next(i for i, c in enumerate(calls) if '--catalog-changes /backup/catalog-changes.json' in c)
-        self.assertLess(seed, compare)
+        self.assertFalse(any('--seed-official-catalog' in c for c in calls))
+        self.assertFalse(any('--catalog-changes' in c for c in calls))
         verifiers = [c for c in calls if 'verify_store.py --root /data' in c]
         self.assertEqual(len(verifiers), 2)
         self.assertTrue(all(':/data:ro' not in c for c in verifiers))
@@ -131,13 +121,15 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('VERIFICATION_PROFILE=non-image', result.stdout)
         calls = (self.root/'docker.calls').read_text().splitlines()
-        probes = [c for c in calls if '/app/bin/verify_capability_chain' in c or '/app/bin/verify_official_catalog' in c]
+        probes = [c for c in calls if '/app/bin/verify_capability_chain' in c or '/app/bin/verify_web_tools' in c]
         self.assertEqual(len(probes), 2)
-        self.assertTrue(all(c.endswith(' --non-image') for c in probes))
+        self.assertTrue(next(c for c in probes if '/app/bin/verify_capability_chain' in c).endswith(' --non-image'))
+        self.assertFalse(any('/app/bin/verify_official_catalog' in c for c in calls))
+        self.assertFalse(any('/app/bin/verify_learning_plugins' in c for c in calls))
         self.assertIn('PUBLIC_RELEASE_VERIFIED', result.stdout)
 
     def test_non_image_failure_still_blocks_activation(self):
-        result = self.deploy(XIAOQI_RELEASE_VERIFICATION_PROFILE='non-image', FAIL_CURATED_PROBE='1')
+        result = self.deploy(XIAOQI_RELEASE_VERIFICATION_PROFILE='non-image', FAIL_PROBE='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
         calls = (self.root/'docker.calls').read_text()
@@ -150,35 +142,14 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse((self.root/'docker.calls').exists())
         self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
 
-    def test_failed_curated_probe_preserves_running_release(self):
-        result = self.deploy(FAIL_CURATED_PROBE='1')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
-        self.assertFalse((self.root/'restore/next').exists())
-        self.assertNotIn(' stop app', (self.root/'docker.calls').read_text())
-
-    def test_failed_learning_probe_never_stops_running_service(self):
-        result = self.deploy(FAIL_LEARNING_PROBE='1')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
-        self.assertNotIn(' stop app', (self.root/'docker.calls').read_text())
-
-    def test_explicit_learning_waiver_preserves_other_release_gates(self):
-        result = self.deploy(XIAOQI_SKIP_NATIVE_LEARNING_PROBE='1', FAIL_LEARNING_PROBE='1')
+    def test_deployment_does_not_fetch_or_mutate_independent_capability_packages(self):
+        result = self.deploy()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('"status":"deferred_by_user","verified":false', result.stdout)
-        calls = (self.root/'docker.calls').read_text()
-        self.assertNotIn('/app/bin/verify_learning_plugins', calls)
-        self.assertIn('/app/bin/verify_web_tools', calls)
-        self.assertIn('--compare /backup/store.json', calls)
-
-    def test_failed_catalog_seed_restores_source_version_and_data(self):
-        result = self.deploy(FAIL_CATALOG_SEED='1')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.root/'current/.xiaoqi-release').read_text().strip(), 'old-release')
         calls = (self.root/'docker.calls').read_text().splitlines()
-        last_compare = [c for c in calls if '--compare /backup/store.json' in c][-1]
-        self.assertNotIn('--catalog-changes', last_compare)
+        self.assertFalse(any('--seed-official-catalog' in c for c in calls))
+        self.assertFalse(any('--catalog-changes' in c for c in calls))
+        self.assertFalse(any('/app/bin/verify_official_catalog' in c for c in calls))
+        self.assertFalse(any('/app/bin/verify_learning_plugins' in c for c in calls))
 
     def test_failed_activation_restores_source_version_and_data(self):
         result = self.deploy(FAIL_ACTIVATE='1')
@@ -229,6 +200,41 @@ class ManagerTests(unittest.TestCase):
         result = self.deploy()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('RECOVER_INTERRUPTED_DEPLOYMENT', result.stdout)
+
+    def test_recovery_does_not_reapply_data_after_restore_marker(self):
+        next_dir = self.root/'restore/next'
+        next_dir.mkdir()
+        with tarfile.open(next_dir/'source.tgz', 'w:gz') as tar:
+            for path in (self.root/'current').iterdir():
+                tar.add(path, arcname=path.name)
+        for marker in ('rollback-ready', 'activation-started', 'data-saved', 'data-restored'):
+            (next_dir/marker).touch()
+        (next_dir/'data.tgz').write_bytes(b'old snapshot')
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('RECOVER_INTERRUPTED_DEPLOYMENT', result.stdout)
+        calls = (self.root/'docker.calls').read_text().splitlines()
+        self.assertFalse(any('tar -xzf /backup/data.tgz' in call for call in calls))
+        self.assertFalse((self.root/'restore/next').exists())
+
+    def test_manual_code_rollback_preserves_current_data(self):
+        latest = self.root/'restore/latest-good'
+        latest.mkdir()
+        with tarfile.open(latest/'source.tgz', 'w:gz') as tar:
+            for path in (self.root/'current').iterdir():
+                tar.add(path, arcname=path.name)
+        result = subprocess.run(
+            ['bash', str(HERE/'release_manager.sh'), 'rollback'],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('data=preserved', result.stdout)
+        calls = (self.root/'docker.calls').read_text().splitlines()
+        self.assertTrue(any('tar -czf /backup/data.tgz' in call for call in calls))
+        self.assertFalse(any('tar -xzf /backup/data.tgz' in call for call in calls))
 
 
 if __name__ == '__main__':

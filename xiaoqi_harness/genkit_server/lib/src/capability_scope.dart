@@ -67,6 +67,31 @@ Map<String, dynamic> resolveCapabilityScope(
     result['capability'] = previous['capability'];
   }
   if (operation == 'clear') result.remove('capability');
+  // Binding facts survive turns independently from selection preferences.
+  final bindings = <String, Map>{};
+  for (final raw in [
+    ...?previous?['work_bound_capabilities'] as List?,
+    ...?previous?['task_active_capabilities'] as List?,
+    ...?current['work_bound_capabilities'] as List?,
+    ...?current['task_active_capabilities'] as List?,
+    ...?current['selected_capabilities'] as List?,
+  ]) {
+    if (raw is Map && raw['version_id'] is String) {
+      final id = raw['parent_id'] ?? raw['id'];
+      if (id is String && id.isNotEmpty) {
+        bindings[id] = {'id': id, 'version_id': raw['version_id']};
+      }
+    }
+  }
+  if (operation != 'inherit') {
+    final selected = (current['selected_capabilities'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) => (item['id'] ?? '').toString())
+        .toSet();
+    excluded.addAll(bindings.keys.where((id) => !selected.contains(id)));
+    excluded.removeAll(selected);
+  }
+  result['work_bound_capabilities'] = bindings.values.toList();
   // Runtime activation is not a preference and must not leak into a new turn.
   result.remove('task_active_capabilities');
   result.remove('task_active_mcp_connections');

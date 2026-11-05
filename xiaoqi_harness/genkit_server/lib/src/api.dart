@@ -59,6 +59,7 @@ import 'mcp_connection_service.dart';
 import 'mcp_app_surface.dart';
 import 'tool_execution.dart';
 import 'store.dart';
+import 'official_catalog.dart';
 
 const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
 final _deepSeekApiKey = Platform.environment['DEEPSEEK_API_KEY'] ?? '';
@@ -316,8 +317,11 @@ class XiaoqiApi {
     ChatCompletionService? chatCompletions,
     WebService? webFetch,
     AttachmentService? attachments,
+    Future<Map<String, dynamic>> Function(CloudStore)? officialCatalogRefresher,
   }) : chatCompletions = chatCompletions ?? ChatCompletionService(),
        _attachments = attachments,
+       _officialCatalogRefresher =
+           officialCatalogRefresher ?? refreshOfficialCatalog,
        webFetch =
            webFetch ??
            WebService(
@@ -358,6 +362,8 @@ class XiaoqiApi {
   final ChatCompletionService chatCompletions;
   final WebService webFetch;
   AttachmentService? _attachments;
+  final Future<Map<String, dynamic>> Function(CloudStore)
+  _officialCatalogRefresher;
   AttachmentService get attachments =>
       _attachments ??= AttachmentService(store);
   late final CapabilityImportService imports;
@@ -674,6 +680,13 @@ class XiaoqiApi {
           (device) => _setVisibility(request, device, id),
         ),
       )
+      ..post(
+        '/v1/capabilities/<id>/version',
+        (request, id) => _authenticated(
+          request,
+          (device) => _setCapabilityVersion(request, device, id),
+        ),
+      )
       ..delete(
         '/v1/capabilities/<id>',
         (request, id) => _authenticated(
@@ -710,6 +723,14 @@ class XiaoqiApi {
         (request, id) => _authenticated(
           request,
           (device) => _skillMarket(request, device, id: id, action: 'install'),
+        ),
+      )
+      ..post(
+        '/v1/skill-market/<id>/check-update',
+        (request, id) => _authenticated(
+          request,
+          (device) =>
+              _skillMarket(request, device, id: id, action: 'check-update'),
         ),
       )
       ..put(
@@ -1987,6 +2008,86 @@ class XiaoqiApi {
     }
   }
 
+  Future<Response> _setCapabilityVersion(
+    Request request,
+    _Device device,
+    String id,
+  ) async {
+    try {
+      final safeId = _safeId(id, '能力 ID');
+      final body = await _body(request, 8192);
+      final versionId = _safeId(body['version_id'], '能力版本 ID');
+      final key = 'cap/${device.tenant}/$safeId';
+      final current = store.get(key);
+      if (current == null || current.value['deleted_at'] != null) {
+        return _error('能力不存在', 404);
+      }
+      final curatedId = current.value['curated_capability_id']?.toString();
+      final source = current.value['source'] as Map?;
+      final publicationId = source?['publication_id']?.toString();
+      final publication = publicationId == null
+          ? null
+          : store.get('skill-market/$publicationId');
+      if (current.value['origin'] != 'market' ||
+          curatedId == null ||
+          source?['curated_capability_id'] != curatedId ||
+          publication?.value['owner_tenant'] != '_official-curated' ||
+          publication?.value['capability_id'] != curatedId) {
+        return _error('当前仅支持切换官方能力包版本', 403);
+      }
+      if (_asInt(body['expected_revision']) != current.revision) {
+        return _json({
+          'error': {
+            'message': '云端版本已变化，请刷新后再切换',
+            'current': _publicCapability(current.value, current.revision, true),
+            'cloud_revision': current.revision,
+          },
+        }, 409);
+      }
+      final versions = (current.value['versions'] as List? ?? const [])
+          .whereType<Map>()
+          .where((version) => version['id'] == versionId)
+          .toList();
+      if (versions.length != 1) {
+        return _error('所选版本不在已安装历史中', 404);
+      }
+      final artifact = versions.single['artifact_key']?.toString() ?? '';
+      if (artifact.isEmpty || store.getObject(artifact).isEmpty) {
+        return _error('所选版本文件不完整，当前版本保持不变', 409);
+      }
+      if (current.value['current_version_id'] == versionId) {
+        return _json({
+          'record': _publicCapability(current.value, current.revision, false),
+          'cloud_revision': current.revision,
+        });
+      }
+      final updatedSource = Map<String, dynamic>.from(
+        current.value['source'] as Map? ?? const {},
+      )..remove('capability_release');
+      final release = versions.single['capability_release'];
+      if (release is Map) {
+        updatedSource['capability_release'] = Map<String, dynamic>.from(release);
+      }
+      final saved = store.put(key, {
+        ...current.value,
+        'current_version_id': versionId,
+        'source': updatedSource,
+        'capability_release': release is Map ? release : null,
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      }, current.revision);
+      return _json({
+        'record': _publicCapability(saved.value, saved.revision, false),
+        'cloud_revision': saved.revision,
+      });
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on RevisionConflict {
+      return _error('云端版本已变化，请刷新后再切换', 409);
+    } on Object {
+      return _error('切换版本失败，当前版本保持不变', 503);
+    }
+  }
+
   Future<Response> _setVisibility(
     Request request,
     _Device device,
@@ -2099,6 +2200,11 @@ class XiaoqiApi {
     try {
       final market = SkillMarket(store);
       if (id == null) {
+        try {
+          await _officialCatalogRefresher(store);
+        } on Object catch (error) {
+          stderr.writeln('OFFICIAL_CAPABILITY_INDEX_STALE error=$error');
+        }
         final query = (request.url.queryParameters['q'] ?? '')
             .toLowerCase()
             .trim();
@@ -2130,6 +2236,21 @@ class XiaoqiApi {
         return _json({
           'publication': market.listing(saved, device.tenant, detail: true),
           'record': _publicCapability(current.value, current.revision, true),
+        });
+      }
+      if (action == 'check-update') {
+        final refreshed = await refreshOfficialCapability(store, safeId);
+        final updatedPublication = store.get('skill-market/$safeId');
+        if (updatedPublication == null) {
+          return _error('官方能力包暂不可用，现有安装保持不变', 503);
+        }
+        return _json({
+          ...refreshed,
+          'publication': market.listing(
+            updatedPublication,
+            device.tenant,
+            detail: true,
+          ),
         });
       }
       if (action == 'install') {

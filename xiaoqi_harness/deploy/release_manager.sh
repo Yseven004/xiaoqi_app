@@ -8,6 +8,7 @@ if [[ "${XIAOQI_DEPLOY_TEST:-}" == 1 ]]; then
   ROOT="$XIAOQI_DEPLOY_ROOT"
 fi
 CURRENT="$ROOT/current"
+VERIFIER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$ROOT/config/single-server.env"
 RESTORE_ROOT="$ROOT/restore"
 LATEST="$RESTORE_ROOT/latest-good"
@@ -30,6 +31,7 @@ die() {
 require_layout() {
   [[ "$ROOT" == "/opt/xiaoqi-single-server" || "${XIAOQI_DEPLOY_TEST:-}" == 1 ]] || die "unsafe deployment root"
   [[ -d "$CURRENT/deploy" ]] || die "current deployment not found"
+  [[ -f "$VERIFIER_DIR/verify_store.py" ]] || die "the active store verifier is missing"
   mkdir -p "$ROOT/config" "$RESTORE_ROOT"
   if [[ ! -f "$CONFIG" ]]; then
     [[ -f "$CURRENT/deploy/single-server.env" ]] || die "server environment file not found"
@@ -128,16 +130,13 @@ write_store_manifest() {
 
 compare_store_manifest() {
   local expected_dir="$1"
-  local catalog_options=()
-  [[ "${2:-}" != with-catalog ]] || catalog_options=(--catalog-changes /backup/catalog-changes.json)
   local verifier=/deploy/verify_store.py
-  [[ ! -f "$expected_dir/verify_store.py" ]] || verifier=/backup/verify_store.py
   docker run --rm \
     -v "$VOLUME:/data" \
-    -v "$CURRENT/deploy:/deploy:ro" \
+    -v "$VERIFIER_DIR:/deploy:ro" \
     -v "$expected_dir:/backup:ro" \
     python:3.12-slim \
-    python "$verifier" --root /data --compare /backup/store.json "${catalog_options[@]}" >/dev/null
+    python "$verifier" --root /data --compare /backup/store.json --baseline-archive /backup/data.tgz >/dev/null
 }
 
 backup_data() {
@@ -210,6 +209,8 @@ rollback_from() {
   local restore_dir="$1"
   local image_suffix="$2"
   local restore_data_flag="$3"
+  local retain_restored_data="${4:-no}"
+  local defer_resume="${5:-no}"
   set +e
   compose --profile https stop app sandbox-runner >/dev/null 2>&1
   set -e
@@ -224,14 +225,19 @@ PY
   fi
   restore_source "$restore_dir" || return 1
   if [[ "$restore_data_flag" == "yes" ]]; then
-    restore_data "$restore_dir" || return 1
+    if [[ "$retain_restored_data" != yes || ! -f "$restore_dir/data-restored" ]]; then
+      restore_data "$restore_dir" || return 1
+      touch "$restore_dir/data-restored" || return 1
+    fi
   fi
   compose --profile https up -d --no-build --pull never --remove-orphans app sandbox-runner caddy || return 1
   wait_healthy || die "automatic rollback ran, but restored service is not healthy"
   if [[ "$restore_data_flag" == "yes" ]]; then
     compare_store_manifest "$restore_dir" || return 1
   fi
-  leave_maintenance || return 1
+  if [[ "$defer_resume" != yes ]]; then
+    leave_maintenance || return 1
+  fi
   phase ROLLBACK_VERIFIED
 }
 
@@ -420,7 +426,7 @@ recover_pending() {
     local data_saved=no
     [[ ! -f "$NEXT/data-saved" ]] || data_saved=yes
     enter_maintenance
-    rollback_from "$NEXT" rollback-next "$data_saved"
+    rollback_from "$NEXT" rollback-next "$data_saved" yes
   else
     retag_to_local rollback-next
     wait_healthy || die "interrupted deployment recovery is not healthy"
@@ -434,11 +440,11 @@ deploy_release() {
   local release_id="$2"
   local expected_sha="$3"
   local commit="$4" product="$5" contract="$6"
-  local verification_profile="${XIAOQI_RELEASE_VERIFICATION_PROFILE:-full}"
+  local requested_profile="${XIAOQI_RELEASE_VERIFICATION_PROFILE:-auto}"
+  local verification_profile="full"
   local -a probe_options=()
-  case "$verification_profile" in
-    full) ;;
-    non-image) probe_options=(--non-image) ;;
+  case "$requested_profile" in
+    auto|full|non-image|component|deploy-only) ;;
     *) die "invalid live verification profile" ;;
   esac
   local stage="$ROOT/staging/$release_id"
@@ -465,6 +471,21 @@ deploy_release() {
 
   phase VERIFY_ARTIFACT
   python3 "$(dirname "$0")/release_artifact.py" unpack --archive "$archive" --output "$stage" --commit "$commit" --product "$product" --contract "$contract"
+  if [[ "$requested_profile" == auto ]]; then
+    verification_profile="$(python3 - "$stage/manifest.json" <<'PY'
+import json, sys
+manifest=json.load(open(sys.argv[1]))
+print(manifest.get('verification_profile', 'full') if manifest.get('schema') == 2 else 'full')
+PY
+)"
+  else
+    verification_profile="$requested_profile"
+  fi
+  case "$verification_profile" in
+    full|component|deploy-only) ;;
+    non-image) probe_options=(--non-image) ;;
+    *) die "release artifact contains an invalid verification profile" ;;
+  esac
   tar --exclude='./deploy/single-server.env' -czf "$NEXT/source.tgz" -C "$CURRENT" .
   tag_images rollback-next
   python3 - "$NEXT/images.json" "${LOCAL_IMAGES[@]}" <<'PY'
@@ -491,25 +512,17 @@ PY
   # service or its persistent volume. A failure uses the existing rollback trap.
   phase RUNTIME_PROBE
   printf 'VERIFICATION_PROFILE=%s\n' "$verification_profile"
-  start_candidate_runner "$commit"
-  timeout --kill-after=30s 600 docker run --rm --name xiaoqi-release-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
-    --entrypoint /app/bin/verify_capability_chain "xiaoqi-genkit-server:build-$commit" "${probe_options[@]}"
-  timeout --kill-after=30s 900 docker run --rm --name xiaoqi-curated-release-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
-    --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
-    --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
-    --entrypoint /app/bin/verify_official_catalog "xiaoqi-genkit-server:build-$commit" "${probe_options[@]}"
-  if [[ "${XIAOQI_SKIP_NATIVE_LEARNING_PROBE:-0}" == "1" ]]; then
-    printf '%s\n' '{"check":"native-learning-plugins","status":"deferred_by_user","verified":false,"reason":"explicit_deployment_waiver"}'
-  else
-    timeout --kill-after=30s 900 docker run --rm --name xiaoqi-native-learning-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
-      --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
-      --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
-      --entrypoint /app/bin/verify_learning_plugins "xiaoqi-genkit-server:build-$commit"
+  if [[ "$verification_profile" != deploy-only ]]; then
+    start_candidate_runner "$commit"
+    timeout --kill-after=30s 600 docker run --rm --name xiaoqi-release-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
+      --entrypoint /app/bin/verify_capability_chain "xiaoqi-genkit-server:build-$commit" "${probe_options[@]}"
+    if [[ "$verification_profile" == full || "$verification_profile" == non-image ]]; then
+      timeout --kill-after=30s 900 docker run --rm --name xiaoqi-web-tools-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
+        --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
+        --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
+        --entrypoint /app/bin/verify_web_tools "xiaoqi-genkit-server:build-$commit"
+    fi
   fi
-  timeout --kill-after=30s 900 docker run --rm --name xiaoqi-web-tools-probe --memory=768m --cpus=1 --env-file "$CONFIG" \
-    --network xiaoqi-single-server_default --network xiaoqi-single-server_sandbox-control \
-    --env "SANDBOX_RUNNER_URL=http://$DEPLOY_CANDIDATE_RUNNER:8090" \
-    --entrypoint /app/bin/verify_web_tools "xiaoqi-genkit-server:build-$commit"
   cleanup_candidate_runner
 
   phase HOLD_WRITES
@@ -524,11 +537,6 @@ PY
   DEPLOY_DATA_SAVED="yes"
   touch "$NEXT/data-saved"
 
-  phase SEED_OFFICIAL_CATALOG
-  docker run --rm --network none -v "$VOLUME:/var/lib/xiaoqi" \
-    --entrypoint /app/bin/server "xiaoqi-genkit-server:build-$commit" \
-    --seed-official-catalog >"$NEXT/catalog-changes.json"
-
   phase ACTIVATE
   for image in "${LOCAL_IMAGES[@]}"; do
     docker tag "${image%:local}:build-$commit" "$image"
@@ -539,7 +547,7 @@ PY
   compose --profile https up -d --no-build --pull never --remove-orphans app sandbox-runner caddy
   phase VERIFY_HEALTH_AND_DATA
   wait_healthy
-  compare_store_manifest "$NEXT" with-catalog
+  compare_store_manifest "$NEXT"
   verify_public_release "$product" "$contract"
 
   remove_tree "$LATEST"
@@ -563,9 +571,21 @@ PY
 manual_rollback() {
   require_layout
   [[ -d "$LATEST" ]] || die "no latest-good restore point"
+  local snapshot="$ROOT/staging/manual-rollback-$$"
+  mkdir -p "$snapshot"
   enter_maintenance
-  rollback_from "$LATEST" restore yes
-  printf 'ROLLBACK_OK source=latest-good\n'
+  compose stop app sandbox-runner
+  if ! backup_data "$snapshot" || ! write_store_manifest "$snapshot" "$CURRENT/deploy"; then
+    compose --profile https up -d --no-build --pull never app sandbox-runner caddy || true
+    wait_healthy && leave_maintenance || true
+    die "could not verify a current data snapshot; current release was not replaced"
+  fi
+  # A manual code rollback keeps live chat, notes, attachments, and runner data.
+  rollback_from "$LATEST" restore no no yes
+  compare_store_manifest "$snapshot"
+  leave_maintenance
+  remove_tree "$snapshot"
+  printf 'ROLLBACK_OK source=latest-good data=preserved\n'
 }
 
 show_status() {

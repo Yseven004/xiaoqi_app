@@ -1007,6 +1007,15 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
   Future<void> _manage(_MarketEntry entry) async {
     final record = entry.record!;
+    final publicationId =
+        record.publicationId ?? record.source['publication_id']?.toString();
+    final isCurated =
+        record.source['curated_capability_id'] is String ||
+        _publishedSkills.any(
+          (publication) =>
+              publication['id'] == publicationId &&
+              publication['curated_capability_id'] is String,
+        );
     await showDialog<void>(
       context: context,
       barrierColor: marketBarrier,
@@ -1028,9 +1037,19 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             marketDialogButton('检查更新', () {
               Navigator.pop(ctx);
               unawaited(
-                _import(update: record, upload: record.origin == 'upload'),
+                isCurated
+                    ? _checkOfficialPackageUpdate(entry)
+                    : _import(
+                        update: record,
+                        upload: record.origin == 'upload',
+                      ),
               );
             }, icon: 'link'),
+          if (isCurated)
+            marketDialogButton('管理版本', () {
+              Navigator.pop(ctx);
+              unawaited(_chooseOfficialPackageVersion(record));
+            }, icon: 'history'),
         ],
         actions: [
           marketDialogButton(
@@ -1054,6 +1073,105 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         ],
       ),
     );
+  }
+
+  Future<void> _checkOfficialPackageUpdate(_MarketEntry entry) async {
+    final record = entry.record!;
+    if (_busyIds.contains(entry.id)) return;
+    setState(() => _busyIds.add(entry.id));
+    try {
+      final publicationId =
+          record.publicationId ?? record.source['publication_id']?.toString();
+      if (publicationId == null || publicationId.isEmpty) {
+        throw StateError('官方能力包缺少发布记录，未修改当前安装');
+      }
+      final publication = await _cloud.checkOfficialMarketUpdate(publicationId);
+      final latestVersion = publication['current_version_id']?.toString() ?? '';
+      if (latestVersion.isEmpty || latestVersion == record.currentVersionId) {
+        if (mounted) AppToast.show(context, '当前已是官方最新版本');
+        return;
+      }
+      final versions = (publication['versions'] as List? ?? const [])
+          .whereType<Map>()
+          .toList();
+      final version = versions
+          .where((item) => item['id'] == latestVersion)
+          .firstOrNull;
+      final label =
+          version?['version_label']?.toString() ??
+          '版本 ${version?['number'] ?? ''}';
+      if (!mounted ||
+          !await _confirm(
+            '更新 ${entry.name}',
+            '已找到官方 $label。安装后只影响新工作；正在进行的工作继续使用原版本，旧版本也会保留，可随时切回。',
+            '安装更新',
+          )) {
+        return;
+      }
+      await _cloud.installMarketSkill(
+        publicationId,
+        (publication['publication_revision'] as num).toInt(),
+      );
+      await _reload();
+      if (mounted) AppToast.show(context, '$label 已安装');
+    } catch (error) {
+      if (mounted) AppToast.show(context, '检查更新失败：$error');
+    } finally {
+      if (mounted) setState(() => _busyIds.remove(entry.id));
+    }
+  }
+
+  Future<void> _chooseOfficialPackageVersion(CapabilityRecord record) async {
+    final selected = await showDialog<String>(
+      context: context,
+      barrierColor: marketBarrier,
+      builder: (ctx) => MarketDialog(
+        title: '管理 ${record.displayName} 的版本',
+        children: [
+          const Text(
+            '切换后只改变新工作默认使用的版本；正在进行的工作继续使用已绑定版本。',
+            style: TextStyle(height: 1.6),
+          ),
+          const SizedBox(height: 12),
+          for (final version in record.versions.reversed)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(version.versionLabel ?? '版本 ${version.number}'),
+              subtitle: Text(
+                version.id == record.currentVersionId ? '当前默认版本' : '已安装，可切换',
+              ),
+              trailing: TextButton(
+                onPressed: version.id == record.currentVersionId
+                    ? null
+                    : () => Navigator.pop(ctx, version.id),
+                child: Text(
+                  version.id == record.currentVersionId ? '当前' : '切换',
+                ),
+              ),
+            ),
+        ],
+        actions: [marketDialogButton('完成', () => Navigator.pop(ctx))],
+      ),
+    );
+    if (selected == null || !mounted) return;
+    final version = record.versions
+        .where((item) => item.id == selected)
+        .firstOrNull;
+    final label = version?.versionLabel ?? '版本 ${version?.number ?? ''}';
+    if (!await _confirm(
+      '切换到 $label？',
+      '只有新工作会默认使用该版本。历史记录、用户数据和正在进行的工作不会改动。',
+      '切换版本',
+    )) {
+      return;
+    }
+    try {
+      await _cloud.setInstalledCapabilityVersion(record, selected);
+      await _reload();
+      if (mounted) AppToast.show(context, '新工作将使用 $label');
+    } catch (error) {
+      if (mounted) AppToast.show(context, '切换版本失败：$error');
+    }
   }
 
   Future<void> _connectPluginDependency(Map component) async {
@@ -1171,7 +1289,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               padding: const EdgeInsets.symmetric(vertical: 16),
               child: Row(
                 children: [
-                  SkillPresentationIcon(entry.presentation, size: 40, defaultAsset: entry.defaultIcon),
+                  SkillPresentationIcon(
+                    entry.presentation,
+                    size: 40,
+                    defaultAsset: entry.defaultIcon,
+                  ),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
@@ -1343,9 +1465,15 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       for (final draft in _matchingDrafts)
         ListTile(
           contentPadding: EdgeInsets.zero,
-          leading: SkillPresentationIcon(draft.presentation, size: 44,
-            defaultAsset: draft.creationMode == 'mcp' ? 'mcp'
-                : draft.kind == CapabilityKind.plugin ? 'extension' : 'file-text'),
+          leading: SkillPresentationIcon(
+            draft.presentation,
+            size: 44,
+            defaultAsset: draft.creationMode == 'mcp'
+                ? 'mcp'
+                : draft.kind == CapabilityKind.plugin
+                ? 'extension'
+                : 'file-text',
+          ),
           title: Text(
             (draft.presentation['title']?.toString().trim().isNotEmpty == true
                     ? draft.presentation['title']
@@ -1821,10 +1949,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                                 child: Padding(
                                   padding: const EdgeInsets.all(4),
                                   child: SkillPresentationIcon(
-                                          e.presentation,
-                                          size: 40,
-                                          defaultAsset: e.defaultIcon,
-                                        ),
+                                    e.presentation,
+                                    size: 40,
+                                    defaultAsset: e.defaultIcon,
+                                  ),
                                 ),
                               ),
                             ),

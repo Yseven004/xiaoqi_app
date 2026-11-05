@@ -2,38 +2,184 @@ name: Server release artifact
 on:
   push:
     branches: [main]
+    paths:
+      - '.github/workflows/server-release.yml'
+      - 'lib/config/release.dart'
+      - 'xiaoqi_harness/genkit_server/**'
+      - 'xiaoqi_harness/deploy/**'
   workflow_dispatch:
 permissions:
+  actions: read
   contents: read
 concurrency:
   group: server-release-artifact
   cancel-in-progress: false
 jobs:
-  build:
+  plan:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    outputs:
+      app_tests: ${{ steps.scope.outputs.app_tests }}
+      runner_tests: ${{ steps.scope.outputs.runner_tests }}
+      proxy_tests: ${{ steps.scope.outputs.proxy_tests }}
+      deploy_tests: ${{ steps.scope.outputs.deploy_tests }}
+      stdio_test: ${{ steps.scope.outputs.stdio_test }}
+      verification_profile: ${{ steps.scope.outputs.verification_profile }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: scope
+        name: Select checks from changed paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, subprocess, sys
+          event=os.environ['EVENT_NAME']
+          before=os.environ.get('EVENT_BEFORE','')
+          commit=os.environ['SOURCE_COMMIT']
+          if event == 'workflow_dispatch' or not before or set(before)=={'0'}:
+              try: before=subprocess.check_output(['git','rev-parse',commit+'^'],text=True).strip()
+              except subprocess.CalledProcessError: before=''
+          if before:
+              paths=subprocess.check_output(['git','diff','--name-only',before,commit],text=True).splitlines()
+          else:
+              paths=subprocess.check_output(['git','ls-tree','-r','--name-only',commit],text=True).splitlines()
+          def under(prefix): return any(p.startswith(prefix) for p in paths)
+          server='xiaoqi_harness/genkit_server/'
+          app_tests=any(p.startswith((server+'lib/',server+'bin/',server+'test/',server+'pubspec')) or p == server+'Dockerfile' for p in paths)
+          runner_tests=under(server+'sandbox_runner/')
+          proxy_tests=under(server+'sandbox_proxy/')
+          deploy_tests=under('xiaoqi_harness/deploy/') or '.github/workflows/server-release.yml' in paths
+          stdio_test=any(p.startswith(server+'lib/src/') for p in paths)
+          behavior=any(p.startswith((server+'lib/',server+'bin/',server+'pubspec')) for p in paths) or 'lib/config/release.dart' in paths
+          component=any(under(server+part) for part in ('sandbox_runner/','sandbox_image/','sandbox_proxy/')) or under(server+'Dockerfile')
+          profile='full' if behavior else ('component' if component else 'deploy-only')
+          for key,value in {
+              'app_tests':app_tests, 'runner_tests':runner_tests,
+              'proxy_tests':proxy_tests,
+              'deploy_tests':deploy_tests, 'stdio_test':stdio_test,
+              'verification_profile':profile,
+          }.items(): print(f'{key}={str(value).lower() if isinstance(value,bool) else value}')
+          print('CHANGE_SCOPE profile='+profile+' changed_paths='+str(len(paths)),file=sys.stderr)
+          PY
+
+  build:
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
+      GH_TOKEN: ${{ github.token }}
       BUILDX_NO_DEFAULT_ATTESTATIONS: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Match production OCI image storage
         run: |
-          # Keep image identities stable across docker save/load. Production
-          # uses containerd, whose image ID is the OCI manifest digest.
           sudo mkdir -p /etc/docker
           sudo python3 - <<'PY'
           import json, pathlib
-          path = pathlib.Path('/etc/docker/daemon.json')
-          config = json.loads(path.read_text()) if path.exists() else {}
-          config.setdefault('features', {})['containerd-snapshotter'] = True
+          path=pathlib.Path('/etc/docker/daemon.json')
+          config=json.loads(path.read_text()) if path.exists() else {}
+          config.setdefault('features',{})['containerd-snapshotter']=True
           path.write_text(json.dumps(config))
           PY
           sudo systemctl restart docker
           docker info --format '{{json .DriverStatus}}'
-      - name: Validate deployment scripts and recovery tests
+      - name: Create BuildKit builder
+        run: |
+          docker buildx create --name "xiaoqi-${GITHUB_RUN_ID}" --driver docker-container --use
+          docker buildx inspect --bootstrap
+      - name: Fetch pinned base images
+        working-directory: xiaoqi_harness
+        run: |
+          mapfile -t base_images < <(python3 deploy/component_fingerprints.py --root . --list-base-images)
+          for base_image in "${base_images[@]}"; do
+            for attempt in 1 2 3; do
+              if docker pull --platform linux/amd64 "$base_image"; then break; fi
+              if [[ "$attempt" == 3 ]]; then exit 1; fi
+              sleep 3
+            done
+          done
+      - name: Fingerprint component inputs and base image IDs
+        working-directory: xiaoqi_harness
+        run: python3 deploy/component_fingerprints.py --root . --output "$RUNNER_TEMP/component-fingerprints.json"
+      - name: Reuse unchanged images from the latest verified artifact
+        working-directory: xiaoqi_harness
+        run: |
+          mkdir -p "$RUNNER_TEMP/previous/download" "$RUNNER_TEMP/previous/unpacked"
+          run_id="$(gh run list --workflow server-release.yml --status success --branch main --limit 5 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
+          if [[ -n "$run_id" ]] && gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name server-release --dir "$RUNNER_TEMP/previous/download" >/dev/null 2>&1; then
+            python3 - "$RUNNER_TEMP/previous/download/release.tgz" "$RUNNER_TEMP/previous/download/release.sha256" <<'PY'
+          import hashlib, pathlib, sys
+          archive=pathlib.Path(sys.argv[1]); expected=pathlib.Path(sys.argv[2]).read_text().strip()
+          if hashlib.sha256(archive.read_bytes()).hexdigest()!=expected: raise SystemExit('Prior artifact checksum mismatch')
+          PY
+            python3 deploy/release_artifact.py inspect --archive "$RUNNER_TEMP/previous/download/release.tgz" --output "$RUNNER_TEMP/previous/unpacked"
+            python3 - "$RUNNER_TEMP/previous/unpacked/manifest.json" "$RUNNER_TEMP/component-fingerprints.json" "$RUNNER_TEMP/reuse-status.json" <<'PY'
+          import json, pathlib, subprocess, sys
+          previous=json.load(open(sys.argv[1])); current=json.load(open(sys.argv[2]))['components']
+          names={'xiaoqi-genkit-server':'app','xiaoqi-sandbox-runner':'runner','xiaoqi-code-sandbox':'sandbox','xiaoqi-sandbox-proxy':'proxy'}
+          status={name:{'fingerprint':row['fingerprint'],'reused':False} for name,row in current.items()}
+          if previous.get('schema')==2:
+              old={row['name']:row for row in previous.get('components',[])}
+              matches=[name for name,row in current.items() if name in old and old[name].get('fingerprint')==row['fingerprint']]
+              if matches:
+                  subprocess.run(['docker','load','--input',str(pathlib.Path(sys.argv[1]).parent/'images.tar.gz')],check=True)
+                  images={row['name']:row for row in previous['images']}
+                  for image_name, component in names.items():
+                      if component not in matches: continue
+                      prior=images[image_name]; expected=old[component]
+                      inspected=json.loads(subprocess.check_output(['docker','image','inspect',prior['tag'],text=True]))[0]
+                      labels=inspected.get('Config',{}).get('Labels') or {}
+                      if inspected['Id']!=expected['image_id'] or labels.get('org.xiaoqi.component')!=component or labels.get('org.xiaoqi.input-fingerprint')!=expected['fingerprint'] or labels.get('org.xiaoqi.component-source-commit')!=expected['source_commit']:
+                          continue
+                      subprocess.run(['docker','tag',prior['tag'],image_name+':local'],check=True)
+                      status[component]['reused']=True
+                      print(f"COMPONENT_REUSED name={component} source={expected['source_commit']} fingerprint={expected['fingerprint']}")
+          pathlib.Path(sys.argv[3]).write_text(json.dumps({'schema':1,'components':status},indent=2)+'\n')
+          PY
+          else
+            echo 'No retained verified component artifact; all missing images will be built.'
+            python3 - "$RUNNER_TEMP/component-fingerprints.json" "$RUNNER_TEMP/reuse-status.json" <<'PY'
+          import json, pathlib, sys
+          rows=json.load(open(sys.argv[1]))['components']
+          pathlib.Path(sys.argv[2]).write_text(json.dumps({'schema':1,'components':{k:{'fingerprint':v['fingerprint'],'reused':False} for k,v in rows.items()}},indent=2)+'\n')
+          PY
+          fi
+      - name: Run affected server tests
+        if: needs.plan.outputs.app_tests == 'true'
+        working-directory: xiaoqi_harness
+        run: |
+          docker buildx build --platform linux/amd64 --target tests --progress=plain \
+            --cache-from type=gha,scope=app \
+            --cache-to type=gha,mode=max,scope=app \
+            -f genkit_server/Dockerfile .
+      - name: Run affected sandbox runner tests
+        if: needs.plan.outputs.runner_tests == 'true'
+        working-directory: xiaoqi_harness
+        run: |
+          docker buildx build --platform linux/amd64 --target tests --progress=plain \
+            --cache-from type=gha,scope=runner \
+            --cache-to type=gha,mode=max,scope=runner \
+            -f genkit_server/sandbox_runner/Dockerfile genkit_server/sandbox_runner
+      - name: Run affected proxy tests
+        if: needs.plan.outputs.proxy_tests == 'true'
+        working-directory: xiaoqi_harness
+        run: |
+          docker buildx build --platform linux/amd64 --target tests --progress=plain \
+            --cache-from type=gha,scope=proxy \
+            --cache-to type=gha,mode=max,scope=proxy \
+            -f genkit_server/sandbox_proxy/Dockerfile genkit_server/sandbox_proxy
+      - name: Validate deployment and recovery scripts
+        if: needs.plan.outputs.deploy_tests == 'true'
         run: |
           bash -n xiaoqi_harness/deploy/release_manager.sh
           bash -n xiaoqi_harness/deploy/run_release_job.sh
@@ -42,49 +188,59 @@ jobs:
           pwsh -NoProfile -File xiaoqi_harness/deploy/test_public_health.ps1
           pwsh -NoProfile -File xiaoqi_harness/deploy/test_deploy_controller.ps1
           pwsh -NoProfile -File xiaoqi_harness/deploy/test_github_build.ps1
-      - name: Build and test images off the production host
+      - name: Build only changed or unavailable components
         working-directory: xiaoqi_harness
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/build-logs"
-          # Fetch public bases before expensive compilation; only downloads retry.
-          base_images=$(awk '$1 == "FROM" {print $2}' genkit_server/Dockerfile genkit_server/sandbox_runner/Dockerfile genkit_server/sandbox_image/Dockerfile genkit_server/sandbox_proxy/Dockerfile | sort -u)
-          for base_image in $base_images; do
-            for attempt in 1 2 3; do
-              if docker pull --platform linux/amd64 "$base_image" 2>&1 | tee -a "$RUNNER_TEMP/build-logs/base-images.log"; then
-                break
-              fi
-              if [[ "$attempt" == 3 ]]; then exit 1; fi
-              sleep 3
-            done
-          done
-          for spec in 'app genkit_server/Dockerfile .' 'runner genkit_server/sandbox_runner/Dockerfile genkit_server/sandbox_runner' 'sandbox genkit_server/sandbox_image/Dockerfile genkit_server/sandbox_image' 'proxy genkit_server/sandbox_proxy/Dockerfile genkit_server/sandbox_proxy'; do
-            read -r name dockerfile context <<< "$spec"
-            case "$name" in
-              app) image=xiaoqi-genkit-server;;
-              runner) image=xiaoqi-sandbox-runner;;
-              sandbox) image=xiaoqi-code-sandbox;;
-              proxy) image=xiaoqi-sandbox-proxy;;
-            esac
-            docker build --platform linux/amd64 --provenance=false -f "$dockerfile" -t "$image:local" "$context" 2>&1 | tee "$RUNNER_TEMP/build-logs/$name.log"
-          done
-      - name: Verify native annotations with real Chinese OCR
-        run: |
-          docker run --rm --network none --memory 384m --cpus 0.5 -v "$GITHUB_WORKSPACE:/source:ro" xiaoqi-code-sandbox:local python3 /source/xiaoqi_harness/genkit_server/test/annotation_engine_test.py
-      - name: Verify isolated stdio MCP without paid services
+          read_fingerprint() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["components"][sys.argv[2]]["fingerprint"])' "$RUNNER_TEMP/component-fingerprints.json" "$1"; }
+          is_reused() { python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["components"][sys.argv[2]]["reused"]).lower())' "$RUNNER_TEMP/reuse-status.json" "$1"; }
+          build_component() {
+            local name="$1" image="$2" dockerfile="$3" context="$4" fingerprint reused
+            fingerprint="$(read_fingerprint "$name")"
+            reused="$(is_reused "$name")"
+            if [[ "$reused" == true ]]; then return 0; fi
+            docker buildx build --platform linux/amd64 --load --provenance=false \
+              --label "org.xiaoqi.component=$name" \
+              --label "org.xiaoqi.input-fingerprint=$fingerprint" \
+              --label "org.xiaoqi.component-source-commit=$SOURCE_COMMIT" \
+              --tag "$image:local" \
+              --cache-from "type=gha,scope=$name" \
+              --cache-to "type=gha,mode=max,scope=$name" \
+              --file "$dockerfile" "$context"
+          }
+          build_component app xiaoqi-genkit-server genkit_server/Dockerfile .
+          build_component runner xiaoqi-sandbox-runner genkit_server/sandbox_runner/Dockerfile genkit_server/sandbox_runner
+          build_component sandbox xiaoqi-code-sandbox genkit_server/sandbox_image/Dockerfile genkit_server/sandbox_image
+          build_component proxy xiaoqi-sandbox-proxy genkit_server/sandbox_proxy/Dockerfile genkit_server/sandbox_proxy
+      - name: Verify isolated stdio MCP when Agent or MCP code changed
+        if: needs.plan.outputs.stdio_test == 'true'
         run: bash xiaoqi_harness/deploy/run_stdio_gate.sh
-      - name: Export verified release
+      - name: Export verified release with component provenance
+        working-directory: xiaoqi_harness
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          VERIFICATION_PROFILE: ${{ needs.plan.outputs.verification_profile }}
         run: |
-          python3 xiaoqi_harness/deploy/release_artifact.py pack --root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/release" --commit "$GITHUB_SHA"
-          # Exercise the actual export/import boundary on the matching engine.
+          python3 - "$RUNNER_TEMP/reuse-status.json" "$RUNNER_TEMP/component-status.json" "$VERIFICATION_PROFILE" <<'PY'
+          import json, pathlib, sys
+          value=json.load(open(sys.argv[1])); value['verification_profile']=sys.argv[3]
+          pathlib.Path(sys.argv[2]).write_text(json.dumps(value,indent=2)+'\n')
+          PY
+          mkdir -p "$RUNNER_TEMP/release"
+          python3 deploy/release_artifact.py pack --root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/release" --commit "$SOURCE_COMMIT" --components-file "$RUNNER_TEMP/component-status.json"
           docker image ls --format '{{.Repository}}:{{.Tag}}' | grep '^xiaoqi-' | xargs -r docker image rm
           docker load --input "$RUNNER_TEMP/release/images.tar.gz"
           python3 - "$RUNNER_TEMP/release/manifest.json" <<'PY'
           import json, subprocess, sys
           for expected in json.load(open(sys.argv[1]))['images']:
-              actual = json.loads(subprocess.check_output(['docker', 'inspect', expected['tag']]))[0]
-              assert (actual['Id'], actual['Os'], actual['Architecture']) == (expected['id'], expected['os'], expected['architecture']), 'Image roundtrip changed its identity'
-          print('IMAGE_ROUNDTRIP_VERIFIED')
+              actual=json.loads(subprocess.check_output(['docker','inspect',expected['tag']]))[0]
+              assert (actual['Id'],actual['Os'],actual['Architecture'])==(expected['id'],expected['os'],expected['architecture']), 'Image roundtrip changed its identity'
+              labels=actual.get('Config',{}).get('Labels') or {}
+              assert labels.get('org.xiaoqi.component')==expected['component']
+              assert labels.get('org.xiaoqi.input-fingerprint')==expected['input_fingerprint']
+          print('IMAGE_ROUNDTRIP_AND_COMPONENTS_VERIFIED')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -93,12 +249,12 @@ jobs:
             ${{ runner.temp }}/release/release.tgz
             ${{ runner.temp }}/release/release.sha256
           compression-level: 0
-          retention-days: 3
+          retention-days: 90
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: build-logs
           path: ${{ runner.temp }}/build-logs
-          retention-days: 7
+          retention-days: 14
           if-no-files-found: ignore

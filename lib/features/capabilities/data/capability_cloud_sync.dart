@@ -1641,7 +1641,10 @@ class CapabilityCloudSync {
       );
     } else if (result['record'] is Map) {
       await CapabilityStore.instance.applyRemote(
-        CapabilityRecord.fromJson(result['record']),
+        _preserveLocalVersionFiles(
+          CapabilityRecord.fromJson(result['record']),
+          record,
+        ),
       );
     }
   }
@@ -1652,7 +1655,7 @@ class CapabilityCloudSync {
       final value = _checked(
         await _client
             .get(Uri.parse('$_baseUrl/skill-market'), headers: _headers(token))
-            .timeout(const Duration(seconds: 30)),
+            .timeout(const Duration(seconds: 180)),
       );
       return (value['items'] as List? ?? [])
           .whereType<Map>()
@@ -1692,11 +1695,48 @@ class CapabilityCloudSync {
           )
           .timeout(const Duration(seconds: 45)),
     );
-    final saved = CapabilityRecord.fromJson(value['record']);
+    final saved = _preserveLocalVersionFiles(
+      CapabilityRecord.fromJson(value['record']),
+      record,
+    );
     await CapabilityStore.instance.applyRemote(saved);
     invalidateMarketCache('publications');
     invalidateMarketCache('capabilities');
     return saved;
+  }
+
+  CapabilityRecord _preserveLocalVersionFiles(
+    CapabilityRecord remote,
+    CapabilityRecord local,
+  ) {
+    final localVersions = {
+      for (final version in local.versions) version.id: version,
+    };
+    final versions = remote.versions
+        .map((version) {
+          final previous = localVersions[version.id];
+          if (previous == null) return version;
+          return CapabilityVersion(
+            id: version.id,
+            number: version.number,
+            content: previous.content.isNotEmpty
+                ? previous.content
+                : version.content,
+            contentHash: version.contentHash,
+            createdAt: version.createdAt,
+            parentVersionId:
+                version.parentVersionId ?? previous.parentVersionId,
+            versionLabel: version.versionLabel ?? previous.versionLabel,
+            capabilityRelease:
+                version.capabilityRelease ?? previous.capabilityRelease,
+            files: previous.files.isNotEmpty ? previous.files : version.files,
+            components: version.components.isNotEmpty
+                ? version.components
+                : previous.components,
+          );
+        })
+        .toList(growable: false);
+    return remote.copyWith(versions: versions);
   }
 
   Future<CapabilityRecord> syncAuthoredSkill(CapabilityRecord record) async {
@@ -1714,7 +1754,10 @@ class CapabilityCloudSync {
           )
           .timeout(const Duration(seconds: 45)),
     );
-    final saved = CapabilityRecord.fromJson(value['record']);
+    final saved = _preserveLocalVersionFiles(
+      CapabilityRecord.fromJson(value['record']),
+      record,
+    );
     await CapabilityStore.instance.applyRemote(saved);
     invalidateMarketCache('capabilities');
     return saved;
@@ -1735,6 +1778,52 @@ class CapabilityCloudSync {
           .timeout(const Duration(seconds: 45)),
     );
     final saved = CapabilityRecord.fromJson(value['record']);
+    await CapabilityStore.instance.applyRemote(saved);
+    invalidateMarketCache('capabilities');
+    return saved;
+  }
+
+  Future<Map<String, dynamic>> checkOfficialMarketUpdate(String id) async {
+    invalidateMarketCache('publications');
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/skill-market/${Uri.encodeComponent(id)}/check-update',
+            ),
+            headers: _headers(token),
+          )
+          .timeout(const Duration(seconds: 60)),
+    );
+    invalidateMarketCache('publications');
+    return Map<String, dynamic>.from(value['publication'] as Map);
+  }
+
+  Future<CapabilityRecord> setInstalledCapabilityVersion(
+    CapabilityRecord record,
+    String versionId,
+  ) async {
+    invalidateMarketCache('capabilities');
+    final token = await _requireToken();
+    final value = _checked(
+      await _client
+          .post(
+            Uri.parse(
+              '$_baseUrl/capabilities/${Uri.encodeComponent(record.id)}/version',
+            ),
+            headers: _headers(token),
+            body: jsonEncode({
+              'expected_revision': record.cloudRevision,
+              'version_id': versionId,
+            }),
+          )
+          .timeout(const Duration(seconds: 30)),
+    );
+    final saved = _preserveLocalVersionFiles(
+      CapabilityRecord.fromJson(value['record']),
+      record,
+    );
     await CapabilityStore.instance.applyRemote(saved);
     invalidateMarketCache('capabilities');
     return saved;

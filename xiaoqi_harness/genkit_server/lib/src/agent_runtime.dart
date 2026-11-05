@@ -1794,6 +1794,7 @@ class GenkitXiaoqiAgentRuntime
       ],
       discover: true,
       allowUnavailable: true,
+      workBindings: request['work_bound_capabilities'] as List? ?? const [],
       excludedIds: (request['excluded_capability_ids'] as List? ?? const [])
           .map((id) => id.toString()),
     );
@@ -2224,8 +2225,8 @@ class GenkitXiaoqiAgentRuntime
         images.isConfigured &&
         !skillsAvailable &&
         selectedMcpConnections.isEmpty;
-    final nativeAnnotation = selectedSkills.isOfficialActive(
-      'original-reading-annotations',
+    final nativeAnnotation = selectedSkills.hasCapabilityClaim(
+      'image.annotate_original',
       turnContract.skillIds,
     );
     if (nativeAnnotation) {
@@ -5647,8 +5648,8 @@ class GenkitXiaoqiAgentRuntime
           .length,
     });
     final nativeNotesEnabled =
-        selectedSkills.isOfficialActive(
-          'learning-notes-manager',
+        selectedSkills.hasCapabilityClaim(
+          'learning_notes.append',
           selectedSkills.explicitIds,
           explicitOnly: true,
         ) &&

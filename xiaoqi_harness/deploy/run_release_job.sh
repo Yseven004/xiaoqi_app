@@ -48,3 +48,4 @@ timeout --signal=TERM --kill-after=300s 1800 \
 install -m 700 "$incoming/release_manager.sh" "$root/release_manager.next"
 mv "$root/release_manager.next" "$root/release_manager.sh"
 install -m 600 "$incoming/release_artifact.py" "$root/release_artifact.py"
+install -m 600 "$incoming/verify_store.py" "$root/verify_store.py"

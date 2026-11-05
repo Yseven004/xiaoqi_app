@@ -9,8 +9,7 @@ void main() {
       expect(profile, ReleaseVerificationProfile.full);
       expect(profile.requiresImageProvider, true);
       expect(profile.capabilityScenarios, hasLength(5));
-      expect(profile.curatedPackages, ['study-notes-studio', 'book-to-skill']);
-      expect(profile.report(curated: false)['deferred_checks'], isEmpty);
+      expect(profile.report()['deferred_checks'], isEmpty);
     },
   );
 
@@ -24,15 +23,10 @@ void main() {
         'ordinary-answer',
         'text-only-skill',
       ]);
-      expect(profile.curatedPackages, ['book-to-skill']);
-      final deferred = [
-        ...(profile.report(curated: false)['deferred_checks'] as List),
-        ...(profile.report(curated: true)['deferred_checks'] as List),
-      ].cast<Map>();
+      final deferred = (profile.report()['deferred_checks'] as List).cast<Map>();
       expect(deferred.map((check) => check['check']), [
         'implicit-skill',
         'explicit-plugin',
-        'study-notes-studio',
       ]);
       expect(
         deferred.every(

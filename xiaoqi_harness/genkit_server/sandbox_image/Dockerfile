@@ -15,9 +15,6 @@ RUN apt-get update \
  && mkdir -p /workspace \
  && chmod 0755 /workspace
 
-COPY fonts/ /usr/local/share/fonts/
-RUN fc-cache -f && test -f /usr/local/share/fonts/LongCang-Regular.ttf
-
 WORKDIR /workspace
 ENV HOME=/tmp/home \
     TMPDIR=/tmp \

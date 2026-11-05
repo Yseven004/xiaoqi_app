@@ -135,6 +135,8 @@ class CapabilityVersion {
     required this.contentHash,
     required this.createdAt,
     this.parentVersionId,
+    this.versionLabel,
+    this.capabilityRelease,
     this.files = const {},
     this.components = const [],
   });
@@ -145,6 +147,8 @@ class CapabilityVersion {
   final String contentHash;
   final DateTime createdAt;
   final String? parentVersionId;
+  final String? versionLabel;
+  final Map<String, dynamic>? capabilityRelease;
   final Map<String, String> files;
   final List<Map<String, dynamic>> components;
 
@@ -155,6 +159,8 @@ class CapabilityVersion {
     'content_hash': contentHash,
     'created_at': createdAt.toIso8601String(),
     'parent_version_id': parentVersionId,
+    if (versionLabel != null) 'version_label': versionLabel,
+    if (capabilityRelease != null) 'capability_release': capabilityRelease,
     'files': files,
     if (components.isNotEmpty) 'components': components,
   };
@@ -170,6 +176,10 @@ class CapabilityVersion {
           DateTime.tryParse(raw['created_at']?.toString() ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
       parentVersionId: raw['parent_version_id']?.toString(),
+      versionLabel: raw['version_label']?.toString(),
+      capabilityRelease: raw['capability_release'] is Map
+          ? Map<String, dynamic>.from(raw['capability_release'] as Map)
+          : null,
       files: raw['files'] is Map
           ? (raw['files'] as Map).map(
               (key, value) => MapEntry(key.toString(), value.toString()),

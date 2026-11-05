@@ -10,6 +10,8 @@ import re
 import sqlite3
 import sys
 import time
+import tarfile
+import tempfile
 from pathlib import Path
 
 
@@ -113,6 +115,39 @@ def exclude_expired_attachments(value: dict, now_ms: int) -> dict:
     return result
 
 
+def recover_manifest_metadata(expected: dict, archive: Path) -> dict:
+    """Enrich a legacy baseline only from its verified original backup.
+
+    Never use the live database to manufacture missing baseline evidence.
+    Extract regular files ourselves so archive links cannot escape the scratch dir.
+    """
+    with tempfile.TemporaryDirectory(prefix="xiaoqi-baseline-") as scratch:
+        root = Path(scratch)
+        with tarfile.open(archive, "r:*") as source:
+            for member in source.getmembers():
+                relative = Path(member.name)
+                if relative.is_absolute() or ".." in relative.parts or "\\" in member.name or ":" in member.name or member.issym() or member.islnk():
+                    raise ValueError("Unsafe recovery archive entry")
+                target = root / relative
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif member.isfile():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    stream = source.extractfile(member)
+                    if stream is None:
+                        raise ValueError("Unreadable recovery archive entry")
+                    with stream, target.open("xb") as output:
+                        while chunk := stream.read(1024 * 1024):
+                            output.write(chunk)
+                else:
+                    raise ValueError("Unsupported recovery archive entry")
+        original = manifest(root)
+        legacy = {key: value for key, value in original.items() if key != "document_expirations"}
+        if legacy != expected:
+            raise ValueError("Recovery backup does not match the original manifest")
+        return original
+
+
 def with_catalog_changes(expected: dict, changes: dict) -> dict:
     """Apply only the exact deployment-owned catalog delta to the baseline."""
     names = ("study-notes-studio", "book-to-skill", "original-reading-annotations", "learning-notes-manager")
@@ -163,6 +198,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--compare", type=Path)
     parser.add_argument("--catalog-changes", type=Path)
+    parser.add_argument("--baseline-archive", type=Path)
     args = parser.parse_args()
 
     current = manifest(args.root)
@@ -174,6 +210,10 @@ def main() -> int:
 
     if args.compare:
         expected = json.loads(args.compare.read_text(encoding="utf-8"))
+        if "document_expirations" not in expected:
+            if args.baseline_archive is None:
+                raise ValueError("Legacy manifest requires its original backup archive")
+            expected = recover_manifest_metadata(expected, args.baseline_archive)
         now_ms = int(time.time() * 1000)
         current = exclude_expired_attachments(current, now_ms)
         expected = exclude_expired_attachments(expected, now_ms)

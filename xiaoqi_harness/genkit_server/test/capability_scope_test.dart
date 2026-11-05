@@ -55,6 +55,38 @@ void main() {
     expect(resolved['capability'], {'type': 'skill', 'id': 'bound-skill'});
   });
 
+  test('automatically activated versions bind for the current work only', () {
+    final first = resolveCapabilityScope({
+      'workflow_id': 'conversation-1',
+      'work_id': 'work-pinned',
+      'capability_scope_operation': 'inherit',
+      'task_active_capabilities': [
+        {'id': 'skill-alias', 'parent_id': 'skill-id', 'version_id': 'v1'},
+      ],
+    }, const []);
+    expect(first['work_bound_capabilities'], [
+      {'id': 'skill-id', 'version_id': 'v1'},
+    ]);
+    final next = resolveCapabilityScope(
+      {
+        'workflow_id': 'conversation-1',
+        'work_id': 'work-pinned',
+        'capability_scope_operation': 'inherit',
+      },
+      [first],
+    );
+    expect(next['work_bound_capabilities'], first['work_bound_capabilities']);
+    final other = resolveCapabilityScope(
+      {
+        'workflow_id': 'conversation-1',
+        'work_id': 'new-work',
+        'capability_scope_operation': 'inherit',
+      },
+      [first],
+    );
+    expect(other['work_bound_capabilities'], isEmpty);
+  });
+
   test(
     'same-work inheritance skips another branch and keeps the nearest match',
     () {

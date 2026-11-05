@@ -20,19 +20,14 @@ enum ReleaseVerificationProfile {
     'text-only-skill',
   ];
 
-  List<String> get curatedPackages => [
-    if (this == full) 'study-notes-studio',
-    'book-to-skill',
-  ];
-
-  Map<String, Object> report({required bool curated}) {
-    final all = curated ? full.curatedPackages : full.capabilityScenarios;
-    final selected = curated ? curatedPackages : capabilityScenarios;
+  Map<String, Object> report() {
     return {
       'verification_profile': label,
-      'suite': curated ? 'official_catalog' : 'capability_chain',
+      'suite': 'capability_chain',
       'deferred_checks': [
-        for (final check in all.where((check) => !selected.contains(check)))
+        for (final check in full.capabilityScenarios.where(
+          (check) => !capabilityScenarios.contains(check),
+        ))
           {
             'check': check,
             'status': 'deferred_by_user',

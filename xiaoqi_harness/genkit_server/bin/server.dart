@@ -8,18 +8,21 @@ import '../lib/src/api.dart';
 import '../lib/src/attachment_service.dart';
 import '../lib/src/image_service.dart';
 import '../lib/src/mcp_server.dart';
-import '../lib/src/official_catalog.dart';
 import '../lib/src/store.dart';
+import '../lib/src/official_catalog.dart';
 
 Future<void> main(List<String> args) async {
   if (args.isNotEmpty &&
-      (args.length != 1 || args.single != '--seed-official-catalog')) {
+      (args.length != 1 || args.single != '--refresh-official-catalog')) {
     throw ArgumentError('Unsupported server arguments');
   }
   final store = CloudStore();
   if (args.isNotEmpty) {
     try {
-      final changes = seedOfficialCatalog(store);
+      final changes = await refreshOfficialCatalog(store);
+      if ((changes['failed_packages'] as List).isNotEmpty) {
+        throw StateError('One or more official capability packages failed to refresh');
+      }
       if (!store.checkpointWal()) throw StateError('Catalog checkpoint failed');
       stdout.writeln(jsonEncode(changes));
     } finally {
@@ -27,7 +30,6 @@ Future<void> main(List<String> args) async {
     }
     return;
   }
-  seedOfficialCatalog(store);
   store.removeOrphanedTempFiles();
   final imageService = ImageService(store);
   final attachments = AttachmentService(store);

@@ -446,6 +446,24 @@ class CapabilityImportService {
     return _preserveSourceExecutables(files, executableFiles);
   }
 
+  static Map<String, List<int>> decodeCapabilityRelease(
+    String packageId,
+    List<int> bytes,
+  ) {
+    if (!RegExp(r'^[a-z0-9][a-z0-9-]{1,63}$').hasMatch(packageId)) {
+      throw const FormatException('能力包标识无效');
+    }
+    final archived = _decodeZip(bytes, stripRepositoryRoot: false);
+    final prefix = '$packageId/';
+    if (archived.isEmpty || archived.keys.any((path) => !path.startsWith(prefix))) {
+      throw const FormatException('发布包路径必须位于能力包目录内');
+    }
+    return {
+      for (final entry in archived.entries)
+        entry.key.substring(prefix.length): entry.value,
+    };
+  }
+
   static Map<String, List<int>> _decodeZip(
     List<int> bytes, {
     required bool stripRepositoryRoot,
