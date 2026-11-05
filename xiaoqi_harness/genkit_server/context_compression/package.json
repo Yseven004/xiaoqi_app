@@ -1,0 +1,9 @@
+{
+  "name": "xiaoqi-context-compression",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@genkit-ai/middleware": "0.12.0",
+    "genkit": "1.44.0"
+  }
+}

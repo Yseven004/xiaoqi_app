@@ -1,5 +1,13 @@
+FROM node:24-bookworm-slim AS compression-deps
+WORKDIR /compression
+COPY genkit_server/context_compression/package.json genkit_server/context_compression/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+COPY genkit_server/context_compression/compress.mjs ./
+
 FROM dart:3.13.5 AS build
 WORKDIR /app
+COPY --from=compression-deps /usr/local/bin/node /usr/local/bin/node
+COPY --from=compression-deps /compression /app/context_compression
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
  && rm -rf /var/lib/apt/lists/*
 COPY genkit_server/pubspec.yaml genkit_server/pubspec.lock ./
@@ -13,6 +21,8 @@ RUN dart analyze && dart test --concurrency=1 && dart build cli --target bin/ser
  && dart build cli --target bin/verify_stdio_runtime.dart --output /stdio-probe
 
 FROM debian:bookworm-slim
+COPY --from=compression-deps /usr/local/bin/node /usr/local/bin/node
+COPY --from=compression-deps /compression /app/context_compression
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates libsqlite3-0 curl python3 poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim && rm -rf /var/lib/apt/lists/* \

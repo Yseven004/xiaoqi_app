@@ -34,6 +34,7 @@ import 'turn_contract.dart';
 import 'intent_router.dart';
 import 'model_limits.dart';
 import 'history_context.dart';
+import 'official_context_compression.dart';
 import 'tool_execution.dart';
 import 'user_action_authorization.dart';
 import 'plugin_commands.dart';
@@ -199,8 +200,9 @@ class _TaskScopeAdvanced implements Exception {
 }
 
 class _HistoryScopeMiddleware extends GenerateMiddleware {
-  _HistoryScopeMiddleware(this.refs);
+  _HistoryScopeMiddleware(this.refs, this.compression);
   final Set<String> refs;
+  final OfficialContextCompression compression;
 
   @override
   Future<ModelResponse> model(
@@ -211,11 +213,17 @@ class _HistoryScopeMiddleware extends GenerateMiddleware {
       ActionFnArg<ModelResponseChunk, ModelRequest, void>,
     )
     next,
-  ) {
-    // Copy the request: sanitizing the inference view must not rewrite chat
-    // history or remove the original tool evidence from the persisted session.
-    final inferenceMessages = boundedInferenceHistory(
-      withoutHistoricalSkillBodies(request.messages, refs),
+  ) async {
+    final compressed = await compression.compress(
+      request.messages,
+      cancel: context.cancel,
+    );
+    // The official package returns original contents plus compression metadata.
+    // Persist those receipts; only its resolved inference view goes to the model.
+    request.messages = compressed.history;
+    final inferenceMessages = withoutHistoricalSkillBodies(
+      compressed.messages,
+      refs,
     );
     final inference = ModelRequest.fromJson({
       ...request.toJson(),
@@ -6484,7 +6492,24 @@ class GenkitXiaoqiAgentRuntime
     );
     final historyScope = ai.defineGenerateMiddleware<void>(
       name: 'xiaoqi_history_scope_$taskId',
-      create: (_, _) => _HistoryScopeMiddleware(historicalSkillRefs),
+      create: (_, _) => _HistoryScopeMiddleware(
+        historicalSkillRefs,
+        OfficialContextCompression(
+          summarize: (prompt, cancel) async {
+            final summary = await ai.generate(
+              model: model,
+              config: OpenAIChatOptions(maxTokens: 4096),
+              prompt: prompt,
+              maxTurns: 1,
+              cancel: cancel,
+            );
+            if (summary.finishReason != FinishReason.stop) {
+              throw StateError('上下文摘要未正常完成');
+            }
+            return summary.text;
+          },
+        ),
+      ),
     );
     delegateAgent = (id, delegatedTask, context) async {
       final owner = execution;
@@ -6662,7 +6687,7 @@ class GenkitXiaoqiAgentRuntime
             '${policy.notes.isEmpty ? '' : '\n插件宿主兼容说明：\n${policy.notes.join('\n')}'}'
             '${preload.instructions}'
             '${preload.entries.expand((entry) => PluginHookCatalog.skillIssues(selectedSkills.metadata(entry))).map((issue) => '\n技能宿主兼容说明：$issue').join()}',
-        use: [problemAttemptGuard(), guard(), hooks()],
+        use: [problemAttemptGuard(), guard(), hooks(), historyScope()],
       );
       if (sourceAgent != null) {
         owner.recordPluginAgent(sourceAgent, sourceAgentFingerprint!);

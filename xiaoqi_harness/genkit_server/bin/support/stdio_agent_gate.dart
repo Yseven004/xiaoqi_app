@@ -62,35 +62,9 @@ Future<void> verifyStdioAgent(
                 ),
               )['function']['name']
               as String;
-      final actionHistory = <Map>[];
-      for (final message in (body['messages'] as List).whereType<Map>()) {
-        if (message['role'] != 'system' || message['content'] is! String) {
-          continue;
-        }
-        final content = message['content'] as String;
-        const marker = 'XIAOQI_ACTION_LEDGER_V1\n';
-        final markerIndex = content.indexOf(marker);
-        if (markerIndex < 0) continue;
-        try {
-          final payload =
-              jsonDecode(content.substring(markerIndex + marker.length)) as Map;
-          actionHistory.addAll(
-            (payload['actions'] as List? ?? const []).whereType<Map>(),
-          );
-        } on Object {
-          throw StateError('Malformed server action history ledger');
-        }
-      }
       final preparing = body['tool_choice'] != 'none';
       String? name;
       Map<String, dynamic>? input;
-      bool completed(Map action) {
-        if (action['outcome'] != null) return action['outcome'] == 'succeeded';
-        final result = action['result'];
-        if (result is! Map) return false;
-        return result['ok'] == true || result['status'] == 'success';
-      }
-
       final child =
           readOnlyDelegate &&
           (body['messages'] as List).whereType<Map>().any(
@@ -148,11 +122,7 @@ Future<void> verifyStdioAgent(
         ).firstMatch(serialized)?.group(0);
         if (skill == null)
           throw StateError('Selected skill was not exposed alongside MCP');
-        bool called(String tool) =>
-            serialized.contains('"name":"$tool"') ||
-            actionHistory.any(
-              (action) => completed(action) && action['name'] == tool,
-            );
+        bool called(String tool) => serialized.contains('"name":"$tool"');
         bool calledWith(String tool, String key, String value) =>
             (body['messages'] as List).whereType<Map>().any(
               (message) =>
@@ -163,12 +133,6 @@ Future<void> verifyStdioAgent(
                                 as Map)[key] ==
                             value,
                   ),
-            ) ||
-            actionHistory.any(
-              (action) =>
-                  completed(action) &&
-                  action['name'] == tool &&
-                  (action['input'] as Map? ?? const {})[key] == value,
             );
         if (readOnlyDelegate &&
             serialized.contains('ASYNC_STOP_REVIEW_REQUIRED') &&
@@ -268,25 +232,6 @@ Future<void> verifyStdioAgent(
           };
         }
       }
-      // CI-only trace: retain action decisions and receipt outcomes without
-      // dumping prompts, file contents or tool arguments.
-      stderr.writeln(
-        jsonEncode({
-          'event': 'stdio_gate_model_decision',
-          'child': child,
-          'preparing': preparing,
-          'messages': (body['messages'] as List).length,
-          'history': actionHistory
-              .map(
-                (action) => {
-                  'name': action['name'],
-                  'outcome': action['outcome'],
-                },
-              )
-              .toList(),
-          'next_tool': name,
-        }),
-      );
       final delta = name == null
           ? {'content': preparing ? '【准备完成】' : '文件已写入、核对并完成命令接力。'}
           : {
