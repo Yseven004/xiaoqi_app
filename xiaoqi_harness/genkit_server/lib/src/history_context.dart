@@ -68,7 +68,9 @@ List<Message> boundedInferenceHistory(
       .toList(growable: false);
   final turns = <List<Message>>[];
   var currentTurn = <Message>[];
-  for (final message in compactedTools.where(
+  // Build the action ledger from original receipts, before output clipping.
+  // A clipped JSON string cannot reliably prove success/failure anymore.
+  for (final message in messages.where(
     (message) => message.role != Role.system,
   )) {
     if (message.role == Role.user && currentTurn.isNotEmpty) {
@@ -84,7 +86,15 @@ List<Message> boundedInferenceHistory(
   final firstTurn = turns.first;
   final firstUser = firstTurn.where((message) => message.role == Role.user);
   final goal = firstUser.isEmpty ? null : _shortGoal(firstUser.first);
-  final trailingTurns = turns.skip(turns.length - keepCount).toList();
+  final trailingTurns = turns
+      .skip(turns.length - keepCount)
+      .map(
+        (turn) => _boundToolResponses(
+          turn,
+          maxCharacters: historicalToolResponseCharacters,
+        ),
+      )
+      .toList();
   var omittedTurnCount = turns.length - trailingTurns.length;
   var actionLedger = _historicalActionLedger(turns.take(omittedTurnCount));
   var retainedTurns = trailingTurns;
@@ -150,6 +160,7 @@ List<Map<String, Object?>> _historicalActionLedger(
             if (request['ref'] != null) 'ref': request['ref'],
             'input': _safeActionValue(request['input']),
             'result': 'unknown',
+            'outcome': 'unknown',
           };
           actions.add(action);
           final ref = request['ref'];
@@ -158,13 +169,34 @@ List<Map<String, Object?>> _historicalActionLedger(
           final ref = response['ref'];
           final action = ref is String ? byRef[ref] : null;
           if (action != null) {
-            action['result'] = _safeActionValue(response['output']);
+            final output = _decodedToolOutput(response['output']);
+            action['outcome'] = _toolOutcome(output);
+            action['result'] = _safeActionValue(output);
           }
         }
       }
     }
   }
   return actions.length <= 64 ? actions : actions.sublist(actions.length - 64);
+}
+
+Object? _decodedToolOutput(Object? output) {
+  if (output is! String) return output;
+  try {
+    return jsonDecode(output);
+  } on FormatException {
+    return output;
+  }
+}
+
+String _toolOutcome(Object? output) {
+  if (output is! Map) return 'unknown';
+  // Preserve explicit failure/unknown evidence; never infer success from
+  // arbitrary text, a file name, or absence of an error message.
+  if (output['ok'] == false || output['isError'] == true) return 'failed';
+  if (const {'unknown', 'pending'}.contains(output['status'])) return 'unknown';
+  if (output['ok'] == true || output['status'] == 'success') return 'succeeded';
+  return 'unknown';
 }
 
 Message _actionLedgerMessage(List<Map<String, Object?>> actions) => Message(

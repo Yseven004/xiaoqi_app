@@ -85,6 +85,7 @@ Future<void> verifyStdioAgent(
       String? name;
       Map<String, dynamic>? input;
       bool completed(Map action) {
+        if (action['outcome'] != null) return action['outcome'] == 'succeeded';
         final result = action['result'];
         if (result is! Map) return false;
         return result['ok'] == true || result['status'] == 'success';
@@ -267,6 +268,25 @@ Future<void> verifyStdioAgent(
           };
         }
       }
+      // CI-only trace: retain action decisions and receipt outcomes without
+      // dumping prompts, file contents or tool arguments.
+      stderr.writeln(
+        jsonEncode({
+          'event': 'stdio_gate_model_decision',
+          'child': child,
+          'preparing': preparing,
+          'messages': (body['messages'] as List).length,
+          'history': actionHistory
+              .map(
+                (action) => {
+                  'name': action['name'],
+                  'outcome': action['outcome'],
+                },
+              )
+              .toList(),
+          'next_tool': name,
+        }),
+      );
       final delta = name == null
           ? {'content': preparing ? '【准备完成】' : '文件已写入、核对并完成命令接力。'}
           : {

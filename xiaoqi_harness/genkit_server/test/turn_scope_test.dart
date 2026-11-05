@@ -333,7 +333,13 @@ void main() {
             toolResponse: ToolResponse(
               ref: 'write-ref',
               name: 'write_task_text_file',
-              output: {'ok': true, 'status': 'success'},
+              // Production tools return JSON strings, often larger than the
+              // inference output cap. The ledger must read the original.
+              output: jsonEncode({
+                'ok': true,
+                'status': 'success',
+                'data': {'output': List.filled(5000, 'x').join()},
+              }),
             ),
           ),
         ],
@@ -367,9 +373,86 @@ void main() {
     expect(actions, hasLength(1));
     expect(actions.single['name'], 'write_task_text_file');
     expect(actions.single['input']['path'], 'agent-helper.txt');
+    expect(actions.single['outcome'], 'succeeded');
     expect(actions.single['result']['status'], 'success');
     expect(messages, hasLength(15));
   });
+
+  test(
+    'action ledger preserves failed and unknown receipts without secrets',
+    () {
+      for (final sample in [
+        ({'ok': false, 'status': 'success'}, 'failed'),
+        ({'ok': true, 'status': 'unknown'}, 'unknown'),
+        ({'message': 'success'}, 'unknown'),
+        ({'ok': true}, 'succeeded'),
+      ]) {
+        final receipt = jsonEncode({
+          ...sample.$1,
+          'token': 'private-value',
+          'data': List.filled(5000, 'x').join(),
+        });
+        final messages = [
+          Message(
+            role: Role.user,
+            content: [TextPart(text: 'initial')],
+          ),
+          Message(
+            role: Role.model,
+            content: [
+              ToolRequestPart(
+                toolRequest: ToolRequest(
+                  name: 'execute_shell',
+                  ref: 'op',
+                  input: {'code': 'verify'},
+                ),
+              ),
+            ],
+          ),
+          Message(
+            role: Role.tool,
+            content: [
+              ToolResponsePart(
+                toolResponse: ToolResponse(
+                  name: 'execute_shell',
+                  ref: 'op',
+                  output: receipt,
+                ),
+              ),
+            ],
+          ),
+          for (var index = 0; index < 3; index++) ...[
+            Message(
+              role: Role.user,
+              content: [TextPart(text: 'continue')],
+            ),
+            Message(
+              role: Role.model,
+              content: [TextPart(text: 'x' * 2000)],
+            ),
+          ],
+        ];
+        final bounded = boundedInferenceHistory(
+          messages,
+          maxCharacters: 4000,
+          recentTurns: 1,
+        );
+        final ledger = bounded.singleWhere(
+          (message) => message.metadata?['xiaoqi_action_ledger'] == true,
+        );
+        final text = ledger.content.single.text!;
+        final payload =
+            jsonDecode(text.substring('XIAOQI_ACTION_LEDGER_V1\n'.length))
+                as Map;
+        expect((payload['actions'] as List).single['outcome'], sample.$2);
+        expect(text, isNot(contains('private-value')));
+        expect(
+          messages[2].content.single.toJson()['toolResponse']['output'],
+          receipt,
+        );
+      }
+    },
+  );
 
   test(
     'oversized structured tool output is omitted only in the inference copy',
