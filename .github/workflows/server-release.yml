@@ -33,6 +33,7 @@ jobs:
       - id: scope
         name: Select checks from changed paths
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_BEFORE: ${{ github.event.before }}
           SOURCE_COMMIT: ${{ github.sha }}
@@ -40,11 +41,13 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import os, subprocess, sys
           event=os.environ['EVENT_NAME']
-          before=os.environ.get('EVENT_BEFORE','')
           commit=os.environ['SOURCE_COMMIT']
-          if event == 'workflow_dispatch' or not before or set(before)=={'0'}:
-              try: before=subprocess.check_output(['git','rev-parse',commit+'^'],text=True).strip()
-              except subprocess.CalledProcessError: before=''
+          try:
+              before=subprocess.check_output(['gh','run','list','--workflow','server-release.yml','--status','success','--branch','main','--limit','1','--json','headSha','--jq','.[0].headSha // empty'],text=True).strip()
+              if before and subprocess.run(['git','merge-base','--is-ancestor',before,commit]).returncode:
+                  before=''
+          except subprocess.CalledProcessError:
+              before=''
           if before:
               paths=subprocess.check_output(['git','diff','--name-only',before,commit],text=True).splitlines()
           else:
