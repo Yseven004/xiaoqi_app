@@ -9,6 +9,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 
@@ -36,6 +37,17 @@ def manifest(root: Path) -> dict[str, object]:
             str(row[0]): hashlib.sha256(str(row[1]).encode("utf-8")).hexdigest()
             for row in connection.execute("SELECT key, document FROM documents ORDER BY key")
         }
+        document_expirations: dict[str, int] = {}
+        for row in connection.execute(
+            "SELECT key, document FROM documents WHERE key LIKE 'attachment/%'"
+        ):
+            try:
+                record = json.loads(str(row[1]))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            expires_at = record.get("expires_at") if isinstance(record, dict) else None
+            if type(expires_at) in (int, float):
+                document_expirations[str(row[0])] = int(expires_at)
         object_rows = [
             str(row[0])
             for row in connection.execute("SELECT key FROM objects ORDER BY key")
@@ -58,6 +70,7 @@ def manifest(root: Path) -> dict[str, object]:
     return {
         "documents": documents,
         "document_hashes": document_hashes,
+        "document_expirations": document_expirations,
         "object_keys": object_rows,
         "object_file_hashes": hashes,
         "counts": {
@@ -66,6 +79,38 @@ def manifest(root: Path) -> dict[str, object]:
             "object_files": len(hashes),
         },
     }
+
+
+def exclude_expired_attachments(value: dict, now_ms: int) -> dict:
+    """Ignore attachment records the service is designed to prune on startup."""
+    expirations = value.get("document_expirations", {})
+    expired = {
+        key
+        for key, expires_at in expirations.items()
+        if key.startswith("attachment/")
+        and type(expires_at) is int
+        and expires_at <= now_ms
+    }
+    if not expired:
+        return value
+
+    result = dict(value)
+    result["documents"] = [row for row in value["documents"] if row[0] not in expired]
+    result["document_hashes"] = {
+        key: digest
+        for key, digest in value["document_hashes"].items()
+        if key not in expired
+    }
+    result["document_expirations"] = {
+        key: expires_at
+        for key, expires_at in expirations.items()
+        if key not in expired
+    }
+    result["counts"] = {
+        **value["counts"],
+        "documents": len(result["documents"]),
+    }
+    return result
 
 
 def with_catalog_changes(expected: dict, changes: dict) -> dict:
@@ -105,6 +150,7 @@ def with_catalog_changes(expected: dict, changes: dict) -> dict:
     return {
         "documents": sorted([key, value] for key, value in merged_documents.items()),
         "document_hashes": dict(expected["document_hashes"], **hashes),
+        "document_expirations": dict(expected.get("document_expirations", {})),
         "object_keys": merged_objects,
         "object_file_hashes": merged_files,
         "counts": {"documents": len(merged_documents), "objects": len(merged_objects), "object_files": len(merged_files)},
@@ -128,6 +174,9 @@ def main() -> int:
 
     if args.compare:
         expected = json.loads(args.compare.read_text(encoding="utf-8"))
+        now_ms = int(time.time() * 1000)
+        current = exclude_expired_attachments(current, now_ms)
+        expected = exclude_expired_attachments(expected, now_ms)
         if args.catalog_changes:
             expected = with_catalog_changes(expected, json.loads(args.catalog_changes.read_text(encoding="utf-8")))
         if current != expected:
