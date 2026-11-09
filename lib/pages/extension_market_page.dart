@@ -1704,6 +1704,29 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
   static const _tabLabels = ['市场', '已安装', '我的'];
 
+  // Only one category exists today; the row stays here so more can join it.
+  Widget _categoryStrip() => Align(
+    alignment: Alignment.centerLeft,
+    child: Container(
+      height: 32,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: marketInk,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: const Text(
+        '全部',
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w500,
+          color: Colors.white,
+          height: 1,
+        ),
+      ),
+    ),
+  );
+
   Widget _scopeTabs() => Container(
     decoration: const BoxDecoration(
       border: Border(bottom: BorderSide(color: marketLine)),
@@ -1728,13 +1751,14 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     return Semantics(
       selected: selected,
       button: true,
-      child: InkWell(
+      // No ink: switching scope is a tab move, not a button press.
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
         onTap: () {
           if (_tab == index) return;
           FocusManager.instance.primaryFocus?.unfocus();
           setState(() => _tab = index);
         },
-        borderRadius: BorderRadius.circular(8),
         child: Padding(
           padding: const EdgeInsets.only(right: 26, top: 10),
           child: Stack(
@@ -1911,6 +1935,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             marketHeading(_label, subtitle: _tabSubtitle),
           if (_listTitle == null) ...[_scopeTabs(), const SizedBox(height: 18)],
           _searchField(),
+          if (_listTitle == null && _tab == 0) ...[
+            const SizedBox(height: 14),
+            _categoryStrip(),
+          ],
           if (_error != null) marketError(_error!, _reload),
           if (_kind == ExtensionKind.plugin && _mcpError != null)
             marketError(_mcpError!, _reloadMcp),
