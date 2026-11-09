@@ -1708,20 +1708,22 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   Widget _categoryStrip() => Align(
     alignment: Alignment.centerLeft,
     child: Container(
-      height: 32,
-      alignment: Alignment.center,
-      padding: const EdgeInsets.symmetric(horizontal: 14),
+      height: 31,
+      padding: const EdgeInsets.symmetric(horizontal: 13),
       decoration: BoxDecoration(
         color: marketInk,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(15.5),
       ),
-      child: const Text(
-        '全部',
-        style: TextStyle(
-          fontSize: 13,
-          fontWeight: FontWeight.w500,
-          color: Colors.white,
-          height: 1,
+      child: const Center(
+        widthFactor: 1,
+        child: Text(
+          '全部',
+          style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w500,
+            color: Colors.white,
+            height: 1,
+          ),
         ),
       ),
     ),
@@ -1936,7 +1938,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           if (_listTitle == null) ...[_scopeTabs(), const SizedBox(height: 18)],
           _searchField(),
           if (_listTitle == null && _tab == 0) ...[
-            const SizedBox(height: 14),
+            const SizedBox(height: 12),
             _categoryStrip(),
           ],
           if (_error != null) marketError(_error!, _reload),
@@ -1952,7 +1954,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             else
               _list(_mcpEntries),
           ] else ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             _tabContent(),
           ],
         ],
