@@ -335,7 +335,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('返回技能'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('个人'));
+    await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('管理 他人技能'));
     await tester.pumpAndSettle();

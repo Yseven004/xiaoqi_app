@@ -481,6 +481,26 @@ class MarketGrid extends StatelessWidget {
   );
 }
 
+class MarketList extends StatelessWidget {
+  const MarketList({required this.children, super.key});
+  final List<Widget> children;
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      for (var index = 0; index < children.length; index++) ...[
+        if (index > 0)
+          const Divider(
+            height: 1,
+            thickness: 1,
+            indent: 54,
+            color: Color(0xFFF0F0F0),
+          ),
+        children[index],
+      ],
+    ],
+  );
+}
+
 Widget marketEmpty(
   String title,
   String message, {
@@ -507,6 +527,37 @@ Widget marketEmpty(
         const SizedBox(height: 20),
         marketButton(action, onAction),
       ],
+    ],
+  ),
+);
+
+Widget marketEmptyState({
+  required String title,
+  required String message,
+  Widget? leading,
+}) => Padding(
+  padding: const EdgeInsets.only(top: 84, bottom: 24),
+  child: Column(
+    children: [
+      if (leading != null) ...[leading, const SizedBox(height: 18)],
+      Text(
+        title,
+        textAlign: TextAlign.center,
+        style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 8),
+      ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 300),
+        child: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 14,
+            color: marketMuted,
+            height: 1.65,
+          ),
+        ),
+      ),
     ],
   ),
 );

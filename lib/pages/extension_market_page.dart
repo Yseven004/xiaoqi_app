@@ -454,9 +454,8 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   String _searchQuery = '';
   final Set<String> _busyIds = {};
   late ExtensionKind _kind;
-  bool _personal = false, _loading = true, _loadingMcp = true;
-  static const _categories = ['推荐'];
-  String _category = '推荐';
+  int _tab = 0;
+  bool _loading = true, _loadingMcp = true;
   String? _error, _mcpError, _listTitle;
   int _recordsRequest = 0,
       _mcpRequest = 0,
@@ -1372,27 +1371,90 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       ],
     ),
   );
-  Widget _grid(List<_MarketEntry> entries) => _searchPending
-      ? marketSkeleton()
-      : entries.isEmpty
-      ? marketEmpty(
-          '没有找到相关内容',
-          '试试更短的名称或用途关键词。',
-          action: _searchQuery.isNotEmpty ? '清除搜索' : null,
-          onAction: _clearSearch,
-        )
-      : MarketGrid(children: entries.map(_row).toList());
+  Widget _list(List<_MarketEntry> entries) =>
+      MarketList(children: entries.map(_row).toList());
+
+  Widget _emptyTile() => SkillPresentationIcon(
+    const {},
+    size: 52,
+    defaultAsset: _kind == ExtensionKind.plugin ? 'extension' : 'file-text',
+  );
+
+  Widget _noMatch() => marketEmpty(
+    '没有找到相关内容',
+    '试试更短的名称或用途关键词。',
+    action: _searchQuery.isNotEmpty ? '清除搜索' : null,
+    onAction: _clearSearch,
+  );
 
   void _clearSearch() {
     _searchFocus.unfocus(disposition: UnfocusDisposition.scope);
     _search.clear();
   }
 
+  List<_MarketEntry> get _mcpEntries =>
+      _matching(_entries.where((e) => e.kind == ExtensionKind.mcp));
+
+  String get _tabSubtitle => switch (_tab) {
+    1 => '管理从市场安装的$_label',
+    2 => '你自己导入或创建的$_label',
+    _ =>
+      _kind == ExtensionKind.plugin ? '连接你的工具，让小七与你协同工作' : '用于扩展小七能力的说明与工作方法',
+  };
+
+  Widget _tabContent() {
+    if (_searchPending) return marketSkeleton();
+    return switch (_tab) {
+      1 => _installedContent(),
+      2 => _personalContent(),
+      _ => _publicContent(),
+    };
+  }
+
+  Widget _installedContent() {
+    if (_loading || _kind == ExtensionKind.plugin && _loadingMcp) {
+      return marketSkeleton();
+    }
+    final entries = _matching(_installed);
+    if (entries.isEmpty) {
+      if (_searchQuery.isNotEmpty) return _noMatch();
+      return marketEmptyState(
+        leading: _emptyTile(),
+        title: '还没有安装$_label',
+        message: '从市场安装的$_label会出现在这里。',
+      );
+    }
+    return _list(entries);
+  }
+
+  Widget _personalContent() {
+    if (_loading || _kind == ExtensionKind.plugin && _loadingMcp) {
+      return marketSkeleton();
+    }
+    final entries = _matching(_personalEntries);
+    final drafts = _matchingDrafts;
+    if (entries.isEmpty && drafts.isEmpty) {
+      if (_searchQuery.isNotEmpty) return _noMatch();
+      return marketEmptyState(
+        leading: _emptyTile(),
+        title: '还没有个人$_label',
+        message: '导入已有$_label，或从空白新建一个。个人$_label只在你自己的账号下生效。',
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (entries.isNotEmpty) _list(entries),
+        if (drafts.isNotEmpty) _draftList(),
+      ],
+    );
+  }
+
   Widget _publicContent() {
     if (_loadingSkills) return marketSkeleton();
     if (_skillsError != null && _publishedSkills.isEmpty)
       return marketError(_skillsError!, _reloadSkills);
-    if (_kind == ExtensionKind.plugin && _loadingCatalog || _searchPending) {
+    if (_kind == ExtensionKind.plugin && _loadingCatalog) {
       return marketSkeleton();
     }
     if (_kind == ExtensionKind.plugin &&
@@ -1402,19 +1464,22 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       return marketError(_catalogError!, _reloadCatalog);
     }
     final entries = _matching(_publicEntries);
-    if (_searchQuery.isNotEmpty) return _grid(entries);
+    if (_searchQuery.isNotEmpty) {
+      return entries.isEmpty ? _noMatch() : _list(entries);
+    }
     if (entries.isNotEmpty)
       return Column(
         children: [
           if (_skillsError != null) marketError(_skillsError!, _reloadSkills),
           if (_kind == ExtensionKind.plugin && _catalogError != null)
             marketError(_catalogError!, _reloadCatalog),
-          _grid(entries),
+          _list(entries),
         ],
       );
-    return Padding(
-      padding: const EdgeInsets.only(top: 100),
-      child: marketEmpty('暂无推荐$_label', '推荐内容将在这里展示。'),
+    return marketEmptyState(
+      leading: _emptyTile(),
+      title: '市场里还没有$_label',
+      message: '有新的公开作品时会出现在这里。',
     );
   }
 
@@ -1501,27 +1566,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     ],
   );
 
-  Widget _searchResults() {
-    if (_searchPending) return marketSkeleton();
-    if (!_personal) return _publicContent();
-    if (_loading || _kind == ExtensionKind.plugin && _loadingMcp) {
-      return marketSkeleton();
-    }
-    final entries = _matching(_personalEntries);
-    if (entries.isEmpty &&
-        (_error != null ||
-            _kind == ExtensionKind.plugin && _mcpError != null)) {
-      // The existing error banners above include the matching retry action.
-      return const SizedBox.shrink();
-    }
-    if (_matchingDrafts.isNotEmpty) {
-      return Column(
-        children: [if (entries.isNotEmpty) _grid(entries), _draftList()],
-      );
-    }
-    return _grid(entries);
-  }
-
   Widget _searchField() => TextField(
     controller: _search,
     focusNode: _searchFocus,
@@ -1529,13 +1573,15 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     onTapOutside: (_) =>
         _searchFocus.unfocus(disposition: UnfocusDisposition.scope),
     decoration: InputDecoration(
-      hintText: _listTitle == null
-          ? _personal
-                ? '搜索我的$_label'
-                : '搜索名称或用途'
-          : '搜索$_label',
+      hintText: _listTitle != null
+          ? '搜索$_label'
+          : switch (_tab) {
+              1 => '搜索已安装$_label',
+              2 => '搜索我的$_label',
+              _ => '搜索名称或用途',
+            },
       prefixIcon: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(10),
         child: marketIcon('search-light'),
       ),
       suffixIcon: _search.text.isEmpty
@@ -1545,14 +1591,14 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               onPressed: _clearSearch,
               icon: marketIcon('close', size: 17),
             ),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(99)),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(99),
-        borderSide: const BorderSide(color: Color(0xFFD9D9D9)),
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
       ),
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(99),
+        borderRadius: BorderRadius.circular(12),
         borderSide: const BorderSide(color: Color(0xFF888888), width: 2),
       ),
     ),
@@ -1647,8 +1693,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       FocusManager.instance.primaryFocus?.unfocus();
       setState(() {
         _kind = kind;
-        _personal = false;
-        _category = '推荐';
         _search.clear();
       });
       if (kind == ExtensionKind.plugin) {
@@ -1658,100 +1702,103 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     },
   );
 
-  Widget _visibilitySwitch() => Wrap(
-    spacing: 8,
-    crossAxisAlignment: WrapCrossAlignment.center,
-    children: [
-      _segmentedSwitch(
-        labels: const ['公开', '个人'],
-        selectedIndex: _personal ? 1 : 0,
-        width: 208,
-        onSelected: (index) => setState(() => _personal = index == 1),
+  static const _tabLabels = ['市场', '已安装', '我的'];
+
+  Widget _scopeTabs() => Container(
+    decoration: const BoxDecoration(
+      border: Border(bottom: BorderSide(color: marketLine)),
+    ),
+    child: SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      clipBehavior: Clip.none,
+      child: Row(
+        children: [
+          for (var index = 0; index < _tabLabels.length; index++)
+            _scopeTab(index, _tabLabels[index]),
+        ],
       ),
-      if (_kind == ExtensionKind.plugin &&
-          MediaQuery.sizeOf(context).width <= 500)
-        _settingsButton(),
-    ],
+    ),
   );
 
-  Widget _categoryPill(String label) {
-    final selected = _category == label;
+  Widget _scopeTab(int index, String label) {
+    final selected = _tab == index;
+    final count = index == 1 && _installed.isNotEmpty
+        ? _installed.length
+        : null;
     return Semantics(
       selected: selected,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          // Both assets stay mounted so selection updates immediately.
-          Positioned.fill(
-            top: 4,
-            bottom: 4,
-            child: SvgPicture.asset(
-              'assets/icons/extensions/market_category.svg',
-              fit: BoxFit.fill,
-              excludeFromSemantics: true,
-            ),
-          ),
-          Positioned.fill(
-            top: 4,
-            bottom: 4,
-            child: Opacity(
-              opacity: selected ? 1 : 0,
-              child: SvgPicture.asset(
-                'assets/icons/extensions/market_category_selected.svg',
-                fit: BoxFit.fill,
-                excludeFromSemantics: true,
+      button: true,
+      child: InkWell(
+        onTap: () {
+          if (_tab == index) return;
+          FocusManager.instance.primaryFocus?.unfocus();
+          setState(() => _tab = index);
+        },
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.only(right: 26, top: 10),
+          child: Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.bottomCenter,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: selected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                        color: selected ? marketInk : marketMuted,
+                      ),
+                    ),
+                    if (count != null) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 5,
+                          vertical: 1,
+                        ),
+                        decoration: BoxDecoration(
+                          color: selected ? marketInk : marketSoft,
+                          borderRadius: BorderRadius.circular(5),
+                        ),
+                        child: Text(
+                          '$count',
+                          style: TextStyle(
+                            fontSize: 11,
+                            height: 1.3,
+                            fontWeight: FontWeight.w600,
+                            color: selected ? Colors.white : marketMuted,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
-            ),
-          ),
-          TextButton(
-            onPressed: () => setState(() => _category = label),
-            style:
-                TextButton.styleFrom(
-                  minimumSize: const Size(0, 48),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 14,
-                  ),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  foregroundColor: selected
-                      ? const Color(0xFF0069D9)
-                      : marketInk,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(11),
-                  ),
-                  textStyle: TextStyle(
-                    fontSize: 14,
-                    fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
-                  ),
-                  animationDuration: Duration.zero,
-                  splashFactory: NoSplash.splashFactory,
-                ).copyWith(
-                  overlayColor: WidgetStateProperty.resolveWith(
-                    (states) => states.contains(WidgetState.pressed)
-                        ? Colors.transparent
-                        : null,
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: -1,
+                child: Container(
+                  height: 2,
+                  decoration: BoxDecoration(
+                    color: selected ? marketInk : Colors.transparent,
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-            child: Text(label),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
-
-  Widget _categoryStrip() => SingleChildScrollView(
-    key: ValueKey(_kind),
-    scrollDirection: Axis.horizontal,
-    child: Row(
-      children: [
-        for (final category in _categories)
-          Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: _categoryPill(category),
-          ),
-      ],
-    ),
-  );
 
   Widget _settingsButton() => IconButton(
     tooltip: '管理连接',
@@ -1768,8 +1815,9 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   );
 
   Widget _topBar() {
-    final compact = MediaQuery.sizeOf(context).width <= 500;
-    final showGear = _kind == ExtensionKind.plugin && !compact;
+    // The gear used to live in the visibility row; the scope tabs replaced that
+    // row, so connection management stays reachable from the top bar.
+    final showGear = _kind == ExtensionKind.plugin;
     final addWidth = MediaQuery.textScalerOf(context).scale(15) * 2 + 34;
     final actions = Row(
       mainAxisSize: MainAxisSize.min,
@@ -1845,25 +1893,8 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                 Align(alignment: Alignment.centerRight, child: _addMenu()),
               ],
             )
-          else if (_listTitle == null)
-            _topBar()
           else
-            Row(
-              children: [
-                marketButton(
-                  _label,
-                  () => setState(() {
-                    _listTitle = null;
-                    _search.clear();
-                  }),
-                  outlined: false,
-                  fontSize: 17,
-                ),
-                marketIcon('caret-right', size: 16, color: marketMuted),
-                Expanded(child: Text(_listTitle!)),
-                _addMenu(),
-              ],
-            ),
+            _topBar(),
           if (_listTitle == '连接管理')
             const Padding(
               padding: EdgeInsets.only(top: 30, bottom: 24),
@@ -1877,103 +1908,24 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
               ),
             )
           else
-            marketHeading(
-              _listTitle ?? _label,
-              subtitle: _listTitle == '已安装'
-                  ? '管理从市场安装的$_label'
-                  : _listTitle == '推荐'
-                  ? '精选实用且值得关注的$_label。'
-                  : _kind == ExtensionKind.plugin
-                  ? '连接你的工具，让小七与你协同工作'
-                  : '用于扩展小七能力的说明与工作方法',
-            ),
-          if (_listTitle == null) ...[
-            _visibilitySwitch(),
-            const SizedBox(height: 18),
-          ],
+            marketHeading(_label, subtitle: _tabSubtitle),
+          if (_listTitle == null) ...[_scopeTabs(), const SizedBox(height: 18)],
           _searchField(),
-          if (_listTitle == null &&
-              !_personal &&
-              _search.text.trim().isEmpty) ...[
-            const SizedBox(height: 14),
-            _categoryStrip(),
-          ],
           if (_error != null) marketError(_error!, _reload),
           if (_kind == ExtensionKind.plugin && _mcpError != null)
             marketError(_mcpError!, _reloadMcp),
           if (_listTitle != null) ...[
             const SizedBox(height: 24),
-            if (_listTitle == '连接管理') ...[
-              marketButton('添加连接', () => _edit(), icon: 'plus'),
-              if (_loadingMcp)
-                marketSkeleton()
-              else
-                _grid(
-                  _matching(_entries.where((e) => e.kind == ExtensionKind.mcp)),
-                ),
-            ] else if (_listTitle == '推荐')
-              _publicContent()
-            else if (_loading || _kind == ExtensionKind.plugin && _loadingMcp)
+            marketButton('添加连接', () => _edit(), icon: 'plus'),
+            if (_loadingMcp)
               marketSkeleton()
-            else if (_installed.isEmpty)
-              marketEmpty(
-                '还没有安装$_label',
-                '从市场安装的$_label将在这里展示。',
-                action: '查看推荐',
-                onAction: () => _showList('推荐'),
-              )
+            else if (_mcpEntries.isEmpty)
+              marketEmptyState(title: '还没有连接', message: '添加 MCP 服务器后会显示在这里。')
             else
-              _grid(_matching(_installed)),
-          ] else if (_search.text.trim().isNotEmpty) ...[
-            marketSection('搜索结果'),
-            _searchResults(),
+              _list(_mcpEntries),
           ] else ...[
-            if (_installed.isNotEmpty) ...[
-              marketSection('已安装', onTap: () => _showList('已安装')),
-              if (_loading || _kind == ExtensionKind.plugin && _loadingMcp)
-                marketSkeleton()
-              else if (_kind == ExtensionKind.skill)
-                _grid(_installed)
-              else
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: _installed
-                        .map(
-                          (e) => Padding(
-                            padding: const EdgeInsets.only(right: 10),
-                            child: Tooltip(
-                              message: e.name,
-                              child: InkWell(
-                                onTap: () => _open(e),
-                                child: Padding(
-                                  padding: const EdgeInsets.all(4),
-                                  child: SkillPresentationIcon(
-                                    e.presentation,
-                                    size: 40,
-                                    defaultAsset: e.defaultIcon,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        )
-                        .toList(),
-                  ),
-                ),
-            ],
-            if (_personal) ...[
-              marketSection('个人$_label'),
-              if (_loading || _kind == ExtensionKind.plugin && _loadingMcp)
-                marketSkeleton()
-              else if (_personalEntries.isEmpty)
-                marketEmpty('暂无个人$_label', '你导入或创建的$_label将在这里展示。')
-              else
-                _grid(_personalEntries),
-              _draftList(),
-            ] else ...[
-              _publicContent(),
-            ],
+            const SizedBox(height: 8),
+            _tabContent(),
           ],
         ],
       ),

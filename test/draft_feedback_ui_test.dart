@@ -242,7 +242,7 @@ void main() {
         () => entered.future.timeout(const Duration(seconds: 2)),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('个人'));
+      await tester.tap(find.text('我的'));
       await tester.pumpAndSettle();
       expect(find.text('本机已保存 · 同步待处理'), findsOneWidget);
       expect(find.bySemanticsLabel('正在加载扩展'), findsNothing);

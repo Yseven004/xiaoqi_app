@@ -75,7 +75,7 @@ void main() {
       expect(find.text('Scientific Agent Skills'), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsNothing);
       await tester.tap(find.text('技能'));
-      await tester.tap(find.text('个人'));
+      await tester.tap(find.text('我的'));
       await tester.pump();
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 50)),
