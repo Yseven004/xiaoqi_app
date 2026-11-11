@@ -63,6 +63,29 @@ void main() {
       expect(result.clarification, '请选择需要解释的文件');
     },
   );
+  test(
+    'recent assistant questions are included for short follow-up answers',
+    () async {
+      String? prompt;
+      await routeTurnIntent(
+        text: '是的',
+        skills: [],
+        connections: [],
+        artifacts: [],
+        recentUserMessages: [],
+        recentConversation: const [
+          {'role': 'assistant', 'text': '要用这张图片做原文批注吗？'},
+          {'role': 'user', 'text': '是的'},
+        ],
+        generate: (_, value) async {
+          prompt = value;
+          return proposal('continue');
+        },
+      );
+      expect(prompt, contains('要用这张图片做原文批注吗？'));
+      expect(prompt, contains('"recent_conversation"'));
+    },
+  );
   test('persistent format failure stops after two pure attempts', () async {
     var calls = 0;
     final failures = <int>[];

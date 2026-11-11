@@ -3302,15 +3302,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     String? workId,
     String? referenceMessageId,
   }) async {
-    final contextHistory = workId == null
-        ? history
-        : history
-              .where(
-                (message) =>
-                    message.workId == workId ||
-                    message.id == referenceMessageId,
-              )
-              .toList(growable: false);
+    // [history] is already the selected root-to-leaf branch. Keep its public
+    // dialogue available even when a completed work starts a new task; work
+    // scope still controls capabilities and materials below.
+    final contextHistory = history;
     final aiMessages = <Map<String, Object?>>[];
     final systemInstructions = <String>[];
     if (referenceMessageId != null) {
@@ -3460,8 +3455,9 @@ $materialIndex
     r'(这个|上述|刚才|上一份|上一个|之前的|已有的|结果|成果|它|继续|修改|改成|优化|完善)',
   ).hasMatch(text);
 
-  bool _asksHowToUseCapability(String text) =>
-      RegExp(r'(怎么用|如何使用|如何用|使用方法|用法|能做什么|需要什么材料|要提供什么|输入什么)').hasMatch(text);
+  bool _asksHowToUseCapability(String text) => RegExp(
+    r'(怎么\s*(?:用|使用)|如何\s*(?:用|使用)|使用方法|用法|能做什么|需要什么材料|要提供什么|输入什么)',
+  ).hasMatch(text);
 
   bool _startsSeparateWork(String text) =>
       RegExp(r'(新任务|新工作|另一个任务|另一个工作|另外一件事|换个任务|换个工作)').hasMatch(text);
@@ -3473,11 +3469,24 @@ $materialIndex
   Future<List<Map<String, Object?>>> _agentTaskMaterials(
     List<AiConversationMessage> messages, {
     String? workId,
+    String? referenceQuestionId,
   }) async {
+    final allowedMessageIds = <String>{
+      for (final message in messages)
+        if (message.workId == workId) message.id,
+      if (referenceQuestionId != null) referenceQuestionId,
+    };
+    final pendingReply = messages.reversed
+        .where((message) => !message.isUser && !message.isDeletedMarker)
+        .firstOrNull;
+    if (pendingReply?.agentProcessStatus == 'waiting_for_user' &&
+        pendingReply?.parentMessageId != null) {
+      allowedMessageIds.add(pendingReply!.parentMessageId!);
+    }
     final materialsById = <String, Map<String, Object?>>{};
     for (final message in messages) {
       if (message.isDeletedMarker) continue;
-      if (workId != null && message.workId != workId) continue;
+      if (!allowedMessageIds.contains(message.id)) continue;
       for (final attachment in message.attachments) {
         final ready = await _prepareAttachment(attachment);
         materialsById[attachment.id] = {
@@ -3546,7 +3555,11 @@ $materialIndex
     String? resumeTaskId,
   }) async {
     final workId = question.workId;
-    final materials = await _agentTaskMaterials(history, workId: workId);
+    final materials = await _agentTaskMaterials(
+      history,
+      workId: workId,
+      referenceQuestionId: question.workReferenceQuestionId,
+    );
     final taskMessages = _agentTaskMessages(aiMessages, materials);
     final capability = await _agentTaskCapability(question);
     final isImageGeneration =

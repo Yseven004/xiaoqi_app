@@ -985,8 +985,10 @@ class XiaoqiApi {
           ?.map((value) => value.toString())
           .where((value) => value.isNotEmpty)
           .toSet();
+      var executionMessages = messages;
       if (workContextIds != null && workContextIds.isNotEmpty) {
         final scopedMessages = <Message>[];
+        final publicDialogueMessages = <Message>[];
         String? currentContextMessageId;
         for (final message in messages) {
           if (message.role == Role.user) {
@@ -1015,8 +1017,23 @@ class XiaoqiApi {
                   workContextIds.contains(currentContextMessageId))) {
             scopedMessages.add(message);
           }
+          if (_isPublicDialogueMessage(message)) {
+            publicDialogueMessages.add(message);
+          }
         }
-        messages = scopedMessages;
+        executionMessages = scopedMessages;
+        // Conversation history is readable context; it is not execution scope.
+        // Keep public user/assistant text from the selected session branch while
+        // leaving tools, artifacts, system prompts and permissions scoped.
+        final publicIds = publicDialogueMessages
+            .map((message) => identityHashCode(message))
+            .toSet();
+        messages = [
+          for (final message in messages)
+            if (scopedMessages.contains(message) ||
+                publicIds.contains(identityHashCode(message)))
+              message,
+        ];
       }
       currentUserIndex = messages.lastIndexWhere(
         (message) => message.role == Role.user,
@@ -1032,8 +1049,12 @@ class XiaoqiApi {
         ..['_visible_artifacts'] = visibleTaskArtifacts(
           store,
           tenantId,
-          messages
-              .take(currentUserIndex)
+          executionMessages
+              .take(
+                executionMessages.lastIndexWhere(
+                  (message) => message.role == Role.user,
+                ),
+              )
               .where((m) => m.role == Role.user)
               .map((m) => m.metadata?[_remoteAgentTurnMetadataKey])
               .whereType<Map>()
@@ -1056,7 +1077,13 @@ class XiaoqiApi {
       }
       final executionKey = 'task/$tenantId/$taskId';
       final settled = store.get(executionKey)!.value;
-      if (input.message == null && settled['status'] == 'completed') {
+      final replayableStatuses = const {
+        'completed',
+        'waiting_for_user',
+        'partially_completed',
+      };
+      if (input.message == null &&
+          replayableStatuses.contains(settled['status'])) {
         session.setMessages([
           ...messages,
           Message(
@@ -1065,6 +1092,10 @@ class XiaoqiApi {
           ),
         ]);
         session.addArtifacts(_remoteAgentArtifacts(tenantId, taskId));
+        if (settled['status'] == 'waiting_for_user') {
+          final statusArtifact = _remoteAgentStatusArtifact(taskId, settled);
+          session.addArtifacts([statusArtifact]);
+        }
         return TurnResult(finishReason: AgentFinishReason.stop);
       }
       if (_controllers.containsKey(executionKey)) {
@@ -1079,6 +1110,7 @@ class XiaoqiApi {
       try {
         final checkpoint = SessionSnapshot(
           snapshotId: _uuid.v4(),
+          parentId: turnContext.parentSnapshotId,
           status: SnapshotStatus.completed,
           createdAt: DateTime.now().toUtc().toIso8601String(),
           state: session.getState(),
@@ -1391,6 +1423,10 @@ class XiaoqiApi {
         }
         final taskValue =
             store.get('task/$tenantId/$taskId')?.value ?? const {};
+        final interruptData = _interruptData(result.messages);
+        final interruptType = interruptData?['type']?.toString();
+        final pendingQuestion =
+            result.pendingQuestion ?? _interruptQuestion(interruptData);
         final resolvedScope = taskValue['turn_scope'];
         final requestedImage = resolvedScope is Map
             ? (resolvedScope['image_limit'] as num? ?? 0) > 0
@@ -1412,7 +1448,11 @@ class XiaoqiApi {
                   ? 'paused'
                   : 'failed'
             : result.finishReason == AgentFinishReason.interrupted
-            ? 'awaiting_network_permission'
+            ? interruptType == 'user_questions'
+                  ? 'waiting_for_user'
+                  : 'awaiting_network_permission'
+            : result.waitingForUser
+            ? 'waiting_for_user'
             : problemLimitReached || request['keep_work_open'] == true
             ? 'waiting_for_user'
             : partialImage || result.extensionEvidenceMissing
@@ -1423,6 +1463,12 @@ class XiaoqiApi {
           taskId,
           finalTaskStatus,
           result: resultText,
+          pendingQuestion: finalTaskStatus == 'waiting_for_user'
+              ? pendingQuestion
+              : null,
+          interruptType: finalTaskStatus == 'waiting_for_user'
+              ? interruptType
+              : null,
           partialReason: partialImage
               ? ((taskValue['image_failure'] as Map?)?['category']
                         ?.toString() ??
@@ -1432,14 +1478,11 @@ class XiaoqiApi {
               : null,
         );
         if (finalTaskStatus == 'waiting_for_user') {
-          final statusArtifact = Artifact(
-            name: 'xiaoqi-task-status-$taskId',
-            parts: const [],
-            metadata: {
-              'task_id': taskId,
-              'task_status': finalTaskStatus,
-              'problem_attempt_limit': taskValue['problem_attempt_limit'],
-            },
+          final statusArtifact = _remoteAgentStatusArtifact(
+            taskId,
+            taskValue,
+            pendingQuestion: pendingQuestion,
+            interruptType: interruptType,
           );
           session.addArtifacts([statusArtifact]);
           options.sendChunk(AgentStreamChunk(artifact: statusArtifact));
@@ -1554,20 +1597,33 @@ class XiaoqiApi {
     String taskId,
     String status, {
     String? result,
+    String? pendingQuestion,
+    String? interruptType,
     String? partialReason,
   }) {
     final key = 'task/$tenantId/$taskId';
     final previous = store.get(key)?.value['status'];
-    _mutateTask(
-      key,
-      (value) => {
+    _mutateTask(key, (value) {
+      final updated = <String, dynamic>{
         ...value,
         'status': status,
         if (result != null) 'result': result,
         if (partialReason != null) 'partial_reason': partialReason,
         'updated_at': _now(),
-      },
-    );
+      };
+      if (status == 'waiting_for_user') {
+        if (pendingQuestion != null) {
+          updated['pending_question'] = pendingQuestion;
+        }
+        if (interruptType != null) {
+          updated['interrupt_type'] = interruptType;
+        }
+      } else {
+        updated.remove('pending_question');
+        updated.remove('interrupt_type');
+      }
+      return updated;
+    });
     if (previous != status) {
       _appendEvent(key, {'type': 'status', 'status': status});
     }
@@ -1590,6 +1646,30 @@ class XiaoqiApi {
     ];
   }
 
+  Artifact _remoteAgentStatusArtifact(
+    String taskId,
+    Map<String, dynamic> taskValue, {
+    String? pendingQuestion,
+    String? interruptType,
+  }) {
+    final resolvedQuestion =
+        pendingQuestion ?? taskValue['pending_question']?.toString();
+    final resolvedInterruptType =
+        interruptType ?? taskValue['interrupt_type']?.toString();
+    return Artifact(
+      name: 'xiaoqi-task-status-$taskId',
+      parts: const [],
+      metadata: {
+        'task_id': taskId,
+        'task_status': taskValue['status'],
+        if (resolvedQuestion != null) 'pending_question': resolvedQuestion,
+        if (resolvedInterruptType != null)
+          'interrupt_type': resolvedInterruptType,
+        'problem_attempt_limit': taskValue['problem_attempt_limit'],
+      },
+    );
+  }
+
   static Map<String, Object?> _legacyMessageFor(Message message) => {
     'role': switch (message.role) {
       Role.system => 'system',
@@ -1608,6 +1688,43 @@ class XiaoqiApi {
           },
     ],
   };
+
+  static bool _isPublicDialogueMessage(Message message) {
+    if (message.role != Role.user && message.role != Role.model) return false;
+    final texts = message.content
+        .map((part) => part.toJson()['text'])
+        .whereType<String>()
+        .map((text) => text.trim())
+        .where((text) => text.isNotEmpty)
+        .toList(growable: false);
+    if (texts.isEmpty) return false;
+    return message.content.every((part) {
+      final json = part.toJson();
+      return json['text'] is String &&
+          (json['text'] as String).trim().isNotEmpty;
+    });
+  }
+
+  static Map<String, dynamic>? _interruptData(List<Message> messages) {
+    final last = messages.lastOrNull;
+    if (last == null) return null;
+    for (final part in last.content.reversed) {
+      final value = part.metadata?['interrupt'];
+      if (value is Map) return Map<String, dynamic>.from(value);
+    }
+    return null;
+  }
+
+  static String? _interruptQuestion(Map<String, dynamic>? data) {
+    final questions = data?['questions'];
+    if (questions is! List) return null;
+    final values = questions
+        .whereType<Map>()
+        .map((question) => question['question']?.toString().trim() ?? '')
+        .where((question) => question.isNotEmpty)
+        .toList(growable: false);
+    return values.isEmpty ? null : values.join('\n');
+  }
 
   static Message _withoutTurnMetadata(Message message) {
     final metadata = Map<String, dynamic>.from(message.metadata ?? const {})
@@ -2066,7 +2183,9 @@ class XiaoqiApi {
       )..remove('capability_release');
       final release = versions.single['capability_release'];
       if (release is Map) {
-        updatedSource['capability_release'] = Map<String, dynamic>.from(release);
+        updatedSource['capability_release'] = Map<String, dynamic>.from(
+          release,
+        );
       }
       final saved = store.put(key, {
         ...current.value,

@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental.dart'
-    show AgentFinishReason, AgentStreamChunk;
+    show AgentFinishReason, AgentStreamChunk, Artifact;
 import 'package:genkit/experimental_client.dart' show AgentApi, remoteAgent;
 import 'package:genkit/genkit.dart'
     show
@@ -46,6 +46,7 @@ class _StreamingRuntime
   final preparationEvents = <Map<String, Object?>>[];
   bool failAfterPreparation = false;
   bool waitForCancellation = false;
+  bool waitForUser = false;
   CloudStore? effectStore;
   int imageSubmissions = 0;
 
@@ -157,6 +158,30 @@ class _StreamingRuntime
     );
     onProcessEvent({'type': 'tool_succeeded', 'tool': 'execute_python'});
     onProcessEvent({'type': 'answer_started'});
+    if (waitForUser) {
+      const question = '请确认是否继续处理这份材料。';
+      onChunk(
+        AgentStreamChunk(
+          modelChunk: ModelResponseChunk(
+            role: Role.model,
+            content: [TextPart(text: question)],
+          ),
+        ),
+      );
+      turnStarted?.complete();
+      return XiaoqiAgentTurnResult(
+        text: question,
+        messages: [
+          ...messages,
+          Message(
+            role: Role.model,
+            content: [TextPart(text: question)],
+          ),
+        ],
+        waitingForUser: true,
+        pendingQuestion: question,
+      );
+    }
     onChunk(
       AgentStreamChunk(
         modelChunk: ModelResponseChunk(
@@ -361,6 +386,51 @@ void main() {
     expect(runtime.turnCount, 2);
     expect(runtime.imageSubmissions, 1);
   });
+
+  test(
+    'replays a waiting question and its status artifact after reconnect',
+    () async {
+      runtime.waitForUser = true;
+      const taskId = 'waiting-replay-task';
+      final first = ownerAgent.chat().sendStream(
+        message: userMessage('继续处理', taskId),
+      );
+      final firstArtifacts = <Artifact>[];
+      await for (final chunk in first.stream) {
+        if (chunk.artifact != null) firstArtifacts.add(chunk.artifact!);
+      }
+      final firstResponse = await first.response;
+      expect(firstResponse.text, '请确认是否继续处理这份材料。');
+      expect(
+        store.get('task/personal/$taskId')!.value['status'],
+        'waiting_for_user',
+      );
+      expect(
+        firstArtifacts.any(
+          (artifact) =>
+              artifact.metadata?['pending_question'] == '请确认是否继续处理这份材料。',
+        ),
+        isTrue,
+      );
+
+      final replay = ownerAgent
+          .chat(snapshotId: firstResponse.snapshotId)
+          .sendStream();
+      final replayArtifacts = <Artifact>[];
+      await for (final chunk in replay.stream) {
+        if (chunk.artifact != null) replayArtifacts.add(chunk.artifact!);
+      }
+      final replayResponse = await replay.response;
+      expect(replayResponse.text, '请确认是否继续处理这份材料。');
+      expect(
+        replayArtifacts.any(
+          (artifact) =>
+              artifact.metadata?['pending_question'] == '请确认是否继续处理这份材料。',
+        ),
+        isTrue,
+      );
+    },
+  );
 
   test(
     'ordinary followups preserve capabilities while removal and branches isolate scope',

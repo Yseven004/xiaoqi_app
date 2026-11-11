@@ -214,17 +214,21 @@ class _HistoryScopeMiddleware extends GenerateMiddleware {
     )
     next,
   ) async {
-    final compressed = await compression.compress(
+    // Remove stale skill directives before the official compressor sees the
+    // history. Otherwise the summary can preserve an instruction that the
+    // current scope intentionally removed.
+    final compressionInput = withoutHistoricalSkillBodies(
       request.messages,
+      refs,
+    );
+    final compressed = await compression.compress(
+      compressionInput,
       cancel: context.cancel,
     );
     // The official package returns original contents plus compression metadata.
     // Persist those receipts; only its resolved inference view goes to the model.
     request.messages = compressed.history;
-    final inferenceMessages = withoutHistoricalSkillBodies(
-      compressed.messages,
-      refs,
-    );
+    final inferenceMessages = compressed.messages;
     final inference = ModelRequest.fromJson({
       ...request.toJson(),
       'messages': inferenceMessages.map((message) => message.toJson()).toList(),
@@ -914,6 +918,8 @@ class XiaoqiAgentTurnResult {
     required this.text,
     required this.messages,
     this.finishReason,
+    this.waitingForUser = false,
+    this.pendingQuestion,
     this.extensionEvidenceMissing = false,
     this.activeCapabilities,
     this.activeMcpConnections,
@@ -922,6 +928,8 @@ class XiaoqiAgentTurnResult {
   final String text;
   final List<Message> messages;
   final AgentFinishReason? finishReason;
+  final bool waitingForUser;
+  final String? pendingQuestion;
   final bool extensionEvidenceMissing;
   final List<Map<String, dynamic>>? activeCapabilities;
   final List<String>? activeMcpConnections;
@@ -1104,13 +1112,11 @@ class GenkitXiaoqiAgentRuntime
             .toList(),
         recentUserMessages: [
           ...recentSteeringRequests,
-          ...messages.reversed
-              .where((m) => m.role == Role.user)
-              .skip(1)
-              .take(6)
-              .map((m) => m.content.map((p) => p.text ?? '').join())
-              .toList(),
-        ].take(6).toList(),
+          ..._routingConversation(messages)
+              .where((entry) => entry['role'] == 'user')
+              .map((entry) => entry['text']!),
+        ],
+        recentConversation: _routingConversation(messages),
         generate: (system, prompt) async {
           final result = await ai.generate(
             model: openAI.model(
@@ -1733,11 +1739,16 @@ class GenkitXiaoqiAgentRuntime
     // Step 1: Get current turn text (prioritize current_turn_text from request)
     final hasCurrentTurnText = request.containsKey('current_turn_text');
     final currentTurnText = request['current_turn_text']?.toString() ?? '';
-    var latestUserText = hasCurrentTurnText
-        ? currentTurnText.trim()
-        : _latestUserText(legacyMessages);
-
     final intentMode = request['intent_mode']?.toString();
+    var latestUserText = hasCurrentTurnText && currentTurnText.trim().isNotEmpty
+        ? currentTurnText.trim()
+        : intentMode == 'attachment_only'
+        ? ''
+        : _latestUserText(legacyMessages);
+    final effectiveAttachmentText =
+        latestUserText.isEmpty && intentMode == 'attachment_only'
+        ? '请概括附件内容与重点，并询问我接下来想了解什么。'
+        : latestUserText;
     if (latestUserText.isEmpty && intentMode == 'capability_only') {
       final capabilityInfo = _publicCapabilityInfo(request, rawCapability);
       final answer = _singleCapabilityAnswer(capabilityInfo);
@@ -2167,6 +2178,8 @@ class GenkitXiaoqiAgentRuntime
             content: [TextPart(text: answer)],
           ),
         ],
+        waitingForUser: turnContract.mode == 'clarify',
+        pendingQuestion: turnContract.mode == 'clarify' ? answer : null,
       );
     }
     final skillSelected = selectedSkills.explicitIds.isNotEmpty;
@@ -2240,7 +2253,7 @@ class GenkitXiaoqiAgentRuntime
     final imageToolAvailable =
         images.isConfigured && turnContract.permitsImages && !nativeAnnotation;
 
-    final attachmentMode = agentAttachmentReadMode(latestUserText);
+    final attachmentMode = agentAttachmentReadMode(effectiveAttachmentText);
     final preparedMaterials = <Map<String, dynamic>>[];
     if (taskMaterials.isNotEmpty) {
       onProcessEvent({'type': 'reading_material'});
@@ -2252,7 +2265,7 @@ class GenkitXiaoqiAgentRuntime
           materials: taskMaterials,
           materialId: material['id']?.toString() ?? '',
           mode: attachmentMode == 'query' ? 'query' : 'overview',
-          query: latestUserText,
+          query: effectiveAttachmentText,
           maxChars: (48000 ~/ taskMaterials.length).clamp(2000, 16000).toInt(),
         );
         cancellation.throwIfCancelled();
@@ -2532,7 +2545,7 @@ class GenkitXiaoqiAgentRuntime
         materials: taskMaterials,
         preparedMaterials: preparedMaterials,
         mode: attachmentMode,
-        latestUserText: latestUserText,
+        latestUserText: effectiveAttachmentText,
         onChunk: onChunk,
         onProcessEvent: onProcessEvent,
         onLegacyDelta: onLegacyDelta,
@@ -7724,6 +7737,29 @@ class GenkitXiaoqiAgentRuntime
     }
     if (content is Map) return content['text']?.toString() ?? '';
     return '';
+  }
+
+  static List<Map<String, String>> _routingConversation(
+    List<Message> messages,
+  ) {
+    const characterBudget = 12000;
+    var remaining = characterBudget;
+    final reverse = <Map<String, String>>[];
+    for (final message in messages.reversed.skip(1)) {
+      if (message.role != Role.user && message.role != Role.model) continue;
+      final text = message.content.map((part) => part.text ?? '').join().trim();
+      if (text.isEmpty) continue;
+      if (remaining <= 0) break;
+      final clipped = text.length <= remaining
+          ? text
+          : text.substring(0, remaining);
+      reverse.add({
+        'role': message.role == Role.user ? 'user' : 'assistant',
+        'text': clipped,
+      });
+      remaining -= clipped.length;
+    }
+    return reverse.reversed.toList(growable: false);
   }
 
   static String _latestUserText(Object? rawMessages) {
