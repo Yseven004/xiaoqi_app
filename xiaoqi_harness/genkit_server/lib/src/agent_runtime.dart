@@ -1740,7 +1740,7 @@ class GenkitXiaoqiAgentRuntime
     final hasCurrentTurnText = request.containsKey('current_turn_text');
     final currentTurnText = request['current_turn_text']?.toString() ?? '';
     final intentMode = request['intent_mode']?.toString();
-    var latestUserText = hasCurrentTurnText && currentTurnText.trim().isNotEmpty
+    var latestUserText = hasCurrentTurnText
         ? currentTurnText.trim()
         : intentMode == 'attachment_only'
         ? ''
