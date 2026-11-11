@@ -12,10 +12,11 @@ COPY genkit_server/pubspec.yaml genkit_server/pubspec.lock ./
 RUN dart pub get --no-precompile
 
 FROM dart-deps AS tests
+ARG DART_TEST_ARGS="--concurrency=1"
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
  && rm -rf /var/lib/apt/lists/*
 COPY genkit_server/ ./
-RUN dart analyze && dart test --concurrency=1
+RUN dart analyze && dart test ${DART_TEST_ARGS}
 
 FROM dart-deps AS build
 COPY genkit_server/lib/ ./lib/

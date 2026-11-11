@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       app_tests: ${{ steps.scope.outputs.app_tests }}
+      app_test_args: ${{ steps.scope.outputs.app_test_args }}
       runner_tests: ${{ steps.scope.outputs.runner_tests }}
       proxy_tests: ${{ steps.scope.outputs.proxy_tests }}
       deploy_tests: ${{ steps.scope.outputs.deploy_tests }}
@@ -59,18 +60,54 @@ jobs:
               paths=subprocess.check_output(['git','ls-tree','-r','--name-only',commit],text=True).splitlines()
           def under(prefix): return any(p.startswith(prefix) for p in paths)
           server='xiaoqi_harness/genkit_server/'
-          app_tests=any(p.startswith((server+'lib/',server+'bin/',server+'test/',server+'pubspec')) or p == server+'Dockerfile' for p in paths)
+          app_tests=any(p.startswith((server+'lib/',server+'bin/',server+'test/',server+'pubspec')) for p in paths)
           runner_tests=under(server+'sandbox_runner/')
           proxy_tests=under(server+'sandbox_proxy/')
           deploy_tests=under('xiaoqi_harness/deploy/') or '.github/workflows/server-release.yml' in paths
           stdio_test=any(p.startswith(server+'lib/src/') for p in paths)
           behavior=any(p.startswith((server+'lib/',server+'bin/',server+'pubspec')) for p in paths) or 'lib/config/release.dart' in paths
           component=any(under(server+part) for part in ('sandbox_runner/','sandbox_image/','sandbox_proxy/')) or under(server+'Dockerfile')
-          profile='full' if behavior else ('component' if component else 'deploy-only')
+          focused_sources=(
+              server+'lib/src/agent_runtime.dart',
+              server+'lib/src/api.dart',
+              server+'lib/src/intent_router.dart',
+              server+'lib/src/attachment_service.dart',
+              server+'lib/src/history_context.dart',
+              server+'lib/src/official_context_compression.dart',
+              server+'lib/src/turn_contract.dart',
+          )
+          focused_tests=(
+              'test/agent_runtime_test.dart',
+              'test/remote_agent_api_test.dart',
+              'test/intent_router_recovery_test.dart',
+              'test/turn_scope_test.dart',
+              'test/attachment_agent_runtime_test.dart',
+              'test/attachment_service_test.dart',
+          )
+          focused=app_tests and any(p in focused_sources for p in paths)
+          if focused:
+              selected=set(focused_tests)
+              selected.update(
+                  p.removeprefix(server)
+                  for p in paths
+                  if p.startswith(server+'test/') and p.endswith('_test.dart')
+              )
+              app_test_args='--concurrency=1 '+' '.join(sorted(selected))
+          elif app_tests:
+              app_test_args='--concurrency=1'
+          else:
+              app_test_args=''
+          image_behavior=any(p in {
+              server+'lib/src/image_service.dart',
+              server+'bin/verify_capability_chain.dart',
+              server+'test/image_service_test.dart',
+          } for p in paths)
+          profile='full' if image_behavior else ('non-image' if behavior else ('component' if component else 'deploy-only'))
           for key,value in {
               'app_tests':app_tests, 'runner_tests':runner_tests,
               'proxy_tests':proxy_tests,
               'deploy_tests':deploy_tests, 'stdio_test':stdio_test,
+              'app_test_args':app_test_args,
               'verification_profile':profile,
           }.items(): print(f'{key}={str(value).lower() if isinstance(value,bool) else value}')
           print('CHANGE_SCOPE profile='+profile+' changed_paths='+str(len(paths)),file=sys.stderr)
@@ -165,8 +202,11 @@ jobs:
       - name: Run affected server tests
         if: needs.plan.outputs.app_tests == 'true'
         working-directory: xiaoqi_harness
+        env:
+          DART_TEST_ARGS: ${{ needs.plan.outputs.app_test_args }}
         run: |
           docker buildx build --platform linux/amd64 --target tests --progress=plain \
+            --build-arg "DART_TEST_ARGS=$DART_TEST_ARGS" \
             --cache-from type=gha,scope=app \
             --cache-to type=gha,mode=max,scope=app \
             -f genkit_server/Dockerfile .
