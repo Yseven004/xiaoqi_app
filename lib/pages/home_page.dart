@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/gestures.dart'
     show LongPressGestureRecognizer, PointerDownEvent;
 import 'package:flutter/material.dart';
+import '../widgets/chat_message_scroll_view.dart';
 import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:a2ui_core/a2ui_core.dart' as a2ui_core;
@@ -464,7 +465,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _composerController = CapabilityTagTextController();
   final _composerKey = GlobalKey<_HomeComposerState>();
   final _composerFocusNode = FocusNode();
-  final _messagesScrollController = ScrollController();
+  late final _messagesScrollController = ScrollController(
+    keepScrollOffset: false,
+    onDetach: (_) {
+      _latestScrollEpoch++;
+      _latestScrollAnimating = false;
+      _scrollToBottomAnimating = false;
+      _showScrollToBottom = false;
+      _replyBodyOverflowsMessageCanvas = false;
+      _userScrollingMessages = false;
+    },
+  );
   final _streamingReply = ValueNotifier<String>('');
   final _agentStreamPresentation = ValueNotifier<_AgentStreamPresentation>(
     const _AgentStreamPresentation(),
@@ -502,7 +513,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _showScrollToBottom = false;
   bool _scrollToBottomAnimating = false;
   bool _latestScrollAnimating = false;
-  bool _latestScrollFollowUp = false;
   int _latestScrollEpoch = 0;
   bool _replyBodyOverflowsMessageCanvas = false;
   bool _composerExpanded = false;
@@ -1930,7 +1940,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!_messagesScrollController.hasClients) return;
     if (_latestScrollAnimating || _scrollToBottomAnimating) return;
     final position = _messagesScrollController.position;
-    final atBottom = position.maxScrollExtent - position.pixels <= 72;
+    final atBottom = position.extentBefore <= 72;
     _followLatestMessage = atBottom;
   }
 
@@ -1948,7 +1958,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         notification.dragDetails != null) {
       _latestScrollEpoch++;
       _latestScrollAnimating = false;
-      _latestScrollFollowUp = false;
+      _scrollToBottomAnimating = false;
       _userScrollingMessages = true;
       _followLatestMessage = false;
     } else if (notification is ScrollEndNotification &&
@@ -1965,7 +1975,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _followLatestMessage &&
         !_userScrollingMessages &&
         !_scrollToBottomAnimating &&
-        metrics.extentAfter > 1) {
+        metrics.extentBefore > 1) {
       _scrollToLatest(requireFollow: true);
     }
   }
@@ -1975,6 +1985,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _latestScrollRequiresFollow = _latestScrollRequiresFollow || requireFollow;
     if (_latestScrollScheduled) return;
     _latestScrollScheduled = true;
+    final conversationId = _conversation?.id;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final jump = _latestScrollImmediate;
@@ -1982,21 +1993,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _latestScrollScheduled = false;
       _latestScrollImmediate = false;
       _latestScrollRequiresFollow = false;
+      if (_conversation?.id != conversationId) {
+        if (_conversationFocusMessageId == null) {
+          _scrollToLatest(immediate: true, requireFollow: true);
+        }
+        return;
+      }
       if (!_messagesScrollController.hasClients) return;
       if (followOnly && (!_followLatestMessage || _userScrollingMessages)) {
         return;
       }
       if (followOnly && _latestScrollAnimating && !jump) {
-        _latestScrollFollowUp = true;
         return;
       }
       final position = _messagesScrollController.position;
-      final target = position.maxScrollExtent;
+      final target = position.minScrollExtent;
       if ((target - position.pixels).abs() < 1) return;
       final epoch = ++_latestScrollEpoch;
       if (jump || MediaQuery.of(context).disableAnimations) {
         _latestScrollAnimating = false;
-        _latestScrollFollowUp = false;
         _messagesScrollController.jumpTo(target);
       } else {
         _latestScrollAnimating = true;
@@ -2008,13 +2023,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 curve: Curves.easeOutCubic,
               )
               .whenComplete(() {
-                if (!mounted || epoch != _latestScrollEpoch) return;
+                if (!mounted ||
+                    epoch != _latestScrollEpoch ||
+                    _conversation?.id != conversationId) {
+                  return;
+                }
                 _latestScrollAnimating = false;
-                final followUp = _latestScrollFollowUp;
-                _latestScrollFollowUp = false;
-                if (_followLatestMessage &&
-                    !_userScrollingMessages &&
-                    (followUp || _isGenerating)) {
+                if (_isGenerating &&
+                    _followLatestMessage &&
+                    !_userScrollingMessages) {
                   _scrollToLatest(requireFollow: true);
                 } else {
                   _onMessagesScrolled();
@@ -2027,12 +2044,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _jumpToLatestMessage() {
     if (!_messagesScrollController.hasClients) return;
-    _latestScrollEpoch++;
+    final conversationId = _conversation?.id;
+    final epoch = ++_latestScrollEpoch;
     _latestScrollAnimating = false;
-    _latestScrollFollowUp = false;
     _followLatestMessage = true;
     _userScrollingMessages = false;
-    final target = _messagesScrollController.position.maxScrollExtent;
+    final target = _messagesScrollController.position.minScrollExtent;
     _scrollToBottomAnimating = true;
     if (_showScrollToBottom) {
       setState(() => _showScrollToBottom = false);
@@ -2050,8 +2067,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             curve: Curves.easeOutCubic,
           )
           .whenComplete(() {
+            if (!mounted ||
+                epoch != _latestScrollEpoch ||
+                _conversation?.id != conversationId) {
+              return;
+            }
             _scrollToBottomAnimating = false;
             if (mounted) {
+              // Follow only content that is still arriving.
               if (_isGenerating &&
                   _followLatestMessage &&
                   !_userScrollingMessages) {
@@ -7298,6 +7321,9 @@ $text''';
     AiConversationRecord record, {
     String? messageId,
   }) {
+    if (_messagesScrollController.hasClients) {
+      _messagesScrollController.jumpTo(_messagesScrollController.offset);
+    }
     _activeSkillWorkflow = null;
     _pendingSkillDraftReview = null;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
@@ -7307,6 +7333,11 @@ $text''';
     _clearEmptyStoppedReply();
     setState(() {
       _space = _HomeSpace.reading;
+      _latestScrollEpoch++;
+      _latestScrollAnimating = false;
+      _scrollToBottomAnimating = false;
+      _showScrollToBottom = false;
+      _replyBodyOverflowsMessageCanvas = false;
       _conversation = record;
       _conversationFocusMessageId = messageId;
       _conversationPresentationRevision++;
@@ -7524,6 +7555,7 @@ $text''';
                                         fit: StackFit.expand,
                                         children: [
                                           _ConversationMessages(
+                                            key: ValueKey(_conversation?.id),
                                             onSendMcpAppMessage:
                                                 _sendMcpAppMessage,
                                             annotations: _annotations,
@@ -7538,7 +7570,7 @@ $text''';
                                             onAnnotationNavigation: () {
                                               _latestScrollEpoch++;
                                               _latestScrollAnimating = false;
-                                              _latestScrollFollowUp = false;
+                                              _scrollToBottomAnimating = false;
                                               _followLatestMessage = false;
                                             },
                                             onPreviewImages: _openImageGallery,
@@ -9904,6 +9936,7 @@ class _ScrollToBottomRingPainter extends CustomPainter {
 
 class _ConversationMessages extends StatefulWidget {
   const _ConversationMessages({
+    super.key,
     required this.onSendMcpAppMessage,
     required this.attachmentPreparationStates,
     required this.onRetryAttachment,
@@ -10059,7 +10092,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     }
     final revealed = await revealChatMessage(
       messageId: source.id,
-      messageIds: _messageRows.map((r) => r.message.id).toList(),
+      messageIds: _messageRows.reversed.map((r) => r.message.id).toList(),
       anchors: _messageAnchorKeys,
       heights: _messageRowHeights,
       controller: widget.scrollController,
@@ -10087,7 +10120,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     final top =
         root.localToGlobal(boxes.first.topLeft).dy -
         viewport.localToGlobal(Offset.zero).dy;
-    final offset = (position.pixels + top - viewport.size.height * .25)
+    final offset = (position.pixels - top + viewport.size.height * .25)
         .clamp(position.minScrollExtent, position.maxScrollExtent)
         .toDouble();
     if (MediaQuery.disableAnimationsOf(context)) {
@@ -10133,7 +10166,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   int _versionAnchorEpoch = 0;
   _PendingVersionAnchor? _pendingVersionAnchor;
   bool _replyBodyMeasurementScheduled = false;
-  double? _latestReplyBottomInScrollExtent;
+
   bool _lastReportedReplyOverflow = false;
 
   @override
@@ -10156,7 +10189,6 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.record.id != widget.record.id) {
       _artifactPreviewFutures.clear();
-      _latestReplyBottomInScrollExtent = null;
       _lastReportedReplyOverflow = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) widget.onReplyBodyOverflowChanged(false);
@@ -10231,10 +10263,26 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   void _scheduleMessageFocus() {
     final targetId = widget.targetMessageId;
     if (targetId == null || targetId.isEmpty) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || widget.targetMessageId != targetId) return;
+    final epoch = ++_annotationNavigationEpoch;
+    bool cancelled() =>
+        !mounted ||
+        widget.targetMessageId != targetId ||
+        epoch != _annotationNavigationEpoch;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (cancelled()) return;
+      widget.onAnnotationNavigation();
+      final revealed = await revealChatMessage(
+        messageId: targetId,
+        messageIds: _messageRows.reversed.map((row) => row.message.id).toList(),
+        anchors: _messageAnchorKeys,
+        heights: _messageRowHeights,
+        controller: widget.scrollController,
+        cancelled: cancelled,
+      );
+      if (cancelled() || !revealed) return;
+      if (!mounted) return;
       final targetContext = _messageAnchorKeys[targetId]?.currentContext;
-      if (targetContext == null) return;
+      if (targetContext == null || !targetContext.mounted) return;
       unawaited(
         Scrollable.ensureVisible(
           targetContext,
@@ -10251,18 +10299,6 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
         messageId,
         () => GlobalKey(debugLabel: 'message:$messageId'),
       );
-
-  bool _hasLatestReplyBody() {
-    final streamingText = widget.streamingReply.value.trim();
-    if (widget.isGenerating && widget.continuingReplyId == null) {
-      return streamingText.isNotEmpty;
-    }
-    if (widget.isGenerating && streamingText.isNotEmpty) return true;
-    for (final row in _messageRows.reversed) {
-      if (row.text != null && row.text!.trim().isNotEmpty) return true;
-    }
-    return false;
-  }
 
   bool _isLatestAssistantRow(_ConversationMessageRow row) {
     for (final candidate in _messageRows.reversed) {
@@ -10289,47 +10325,13 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   }
 
   void _measureReplyBodyOverflow() {
-    if (!_hasLatestReplyBody()) {
-      _latestReplyBottomInScrollExtent = null;
-      _reportReplyBodyOverflow(false);
-      return;
-    }
-    final viewportObject = _messageViewportKey.currentContext
-        ?.findRenderObject();
-    final bodyObject = _latestReplyBodyKey.currentContext?.findRenderObject();
-    final viewport = viewportObject is RenderBox && viewportObject.attached
-        ? viewportObject
-        : null;
-    final body = bodyObject is RenderBox && bodyObject.attached
-        ? bodyObject
-        : null;
     final position = widget.scrollController.hasClients
         ? widget.scrollController.position
         : null;
-    if (viewport != null && body != null && body.hasSize) {
-      final viewportTop = viewport.localToGlobal(Offset.zero).dy;
-      final bodyTop = body.localToGlobal(Offset.zero).dy;
-      final bodyBottomInViewport = bodyTop + body.size.height - viewportTop;
-      if (position != null && position.hasContentDimensions) {
-        _latestReplyBottomInScrollExtent =
-            position.pixels + bodyBottomInViewport;
-      }
-      _reportReplyBodyOverflow(bodyBottomInViewport > viewport.size.height + 1);
-      return;
-    }
-    if (viewport == null ||
-        position == null ||
-        !position.hasContentDimensions) {
-      _reportReplyBodyOverflow(false);
-      return;
-    }
-    final cachedBottom = _latestReplyBottomInScrollExtent;
-    if (cachedBottom == null) {
-      _reportReplyBodyOverflow(false);
-      return;
-    }
     _reportReplyBodyOverflow(
-      cachedBottom > position.pixels + viewport.size.height + 1,
+      position != null &&
+          position.hasContentDimensions &&
+          position.extentBefore > 72,
     );
   }
 
@@ -10448,7 +10450,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       _pendingVersionAnchor = null;
       return;
     }
-    final desired = position.pixels + nextTop - pending.top;
+    final desired = position.pixels - nextTop + pending.top;
     final target = desired
         .clamp(position.minScrollExtent, position.maxScrollExtent)
         .toDouble();
@@ -10858,291 +10860,341 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
               }
               final childIndexByKey = <Key, int>{
                 for (var index = 0; index < itemKeys.length; index++)
-                  itemKeys[index]: index,
+                  itemKeys[index]: itemKeys.length - 1 - index,
               };
               return GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onTap: _clearActiveSelection,
                 excludeFromSemantics: true,
-                child: ListView.builder(
+                // Latest content stays at offset zero; older rows remain lazy.
+                child: ChatMessageScrollView(
                   key: _messageViewportKey,
                   controller: widget.scrollController,
-                  padding: EdgeInsets.only(
-                    top: 24,
-                    bottom: 20 + widget.annotationBottomPadding,
-                  ),
-                  itemCount: itemKeys.length,
-                  findChildIndexCallback: (key) => childIndexByKey[key],
-                  itemBuilder: (context, index) {
-                    if (index == 0) {
-                      return const KeyedSubtree(
-                        key: ValueKey<String>('ai-disclaimer'),
-                        child: Padding(
-                          padding: EdgeInsets.only(bottom: 24),
-                          child: Center(
-                            child: Text(
-                              '内容由AI生成仅供参考',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Color(0xFFB0B2B5),
-                                fontSize: 12,
-                                height: 1.2,
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    }
-                    final rowIndex = index - 1;
-                    if (showSeparateStream && rowIndex >= _messageRows.length) {
-                      final child = ValueListenableBuilder<_AgentStreamPresentation>(
-                        valueListenable: widget.agentStreamPresentation,
-                        builder: (context, process, _) =>
-                            ValueListenableBuilder<String>(
-                              valueListenable: widget.streamingReply,
-                              builder: (context, reply, _) =>
-                                  ValueListenableBuilder<_AgentClarification?>(
-                                    valueListenable: widget.agentClarification,
-                                    builder: (context, rawClarification, _) =>
-                                        ValueListenableBuilder<bool>(
-                                          valueListenable:
-                                              widget.imageGenerationInProgress,
-                                          builder: (context, imageInProgress, _) {
-                                            _scheduleReplyBodyMeasurement();
-                                            final clarification =
-                                                _currentClarification(
-                                                  rawClarification,
-                                                );
-                                            final hasProcess =
-                                                process
-                                                    .currentStep
-                                                    .isNotEmpty ||
-                                                process.reasoning.isNotEmpty ||
-                                                process.events.isNotEmpty ||
-                                                process.details.isNotEmpty;
-                                            if (reply.isNotEmpty ||
-                                                imageInProgress ||
-                                                hasProcess ||
-                                                clarification != null) {
-                                              return Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  if (hasProcess)
-                                                    _AgentProcessPanel(
-                                                      presentation: process,
-                                                      onToggle: widget
-                                                          .onToggleAgentProcess,
-                                                    ),
-                                                  if (reply.isNotEmpty)
-                                                    _measureLatestReplyBody(
-                                                      _assistantStreamingText(
-                                                        context,
-                                                        reply,
-                                                      ),
-                                                    ),
-                                                  if (clarification != null)
-                                                    _AgentClarificationCard(
-                                                      clarification:
-                                                          clarification,
-                                                    ),
-                                                  if (imageInProgress)
-                                                    const Padding(
-                                                      padding: EdgeInsets.only(
-                                                        top: 12,
-                                                      ),
-                                                      child:
-                                                          _ImageGenerationProgress(),
-                                                    ),
-                                                ],
-                                              );
-                                            }
-                                            if (widget.isContinuingReply) {
-                                              return const SizedBox.shrink();
-                                            }
-                                            return const _AgentStatusHeader(
-                                              text: '正在思考',
-                                              animated: true,
-                                            );
-                                          },
-                                        ),
+                  slivers: [
+                    SliverPadding(
+                      padding: EdgeInsets.only(
+                        top: 24,
+                        bottom: 20 + widget.annotationBottomPadding,
+                      ),
+                      sliver: SliverList(
+                        delegate: SliverChildBuilderDelegate(
+                          (context, reverseIndex) {
+                            final index = itemKeys.length - 1 - reverseIndex;
+                            if (index == 0) {
+                              return const KeyedSubtree(
+                                key: ValueKey<String>('ai-disclaimer'),
+                                child: Padding(
+                                  padding: EdgeInsets.only(bottom: 24),
+                                  child: Center(
+                                    child: Text(
+                                      '内容由AI生成仅供参考',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        color: Color(0xFFB0B2B5),
+                                        fontSize: 12,
+                                        height: 1.2,
+                                      ),
+                                    ),
                                   ),
-                            ),
-                      );
-                      return KeyedSubtree(
-                        key: itemKeys[index],
-                        child: Padding(
-                          padding: const EdgeInsets.only(top: 20),
-                          child: child,
-                        ),
-                      );
-                    }
-                    if (!widget.isGenerating &&
-                        widget.stoppedEmptyReplyParentId != null &&
-                        rowIndex == _messageRows.length) {
-                      return KeyedSubtree(
-                        key: itemKeys[index],
-                        child: _emptyStoppedReply(
-                          widget.stoppedEmptyReplyParentId!,
-                        ),
-                      );
-                    }
-                    final row = _messageRows[rowIndex];
-                    if (row.text == null) {
-                      return KeyedSubtree(
-                        key: itemKeys[index],
-                        child: KeyedSubtree(
-                          key: _messageAnchorKey(row.message.id),
-                          child: _userMessage(context, row.message),
-                        ),
-                      );
-                    }
-                    final segments = row.segments!;
-                    final isContinuing =
-                        widget.isGenerating &&
-                        widget.continuingReplyId == row.message.id;
-                    final isStopped = row.message.isIncomplete && !isContinuing;
-                    final isLatestAssistant =
-                        !showSeparateStream && _isLatestAssistantRow(row);
-                    final replyBody = isContinuing
-                        ? ValueListenableBuilder<String>(
-                            valueListenable: widget.streamingReply,
-                            builder: (context, addition, _) {
-                              _scheduleReplyBodyMeasurement();
-                              return _assistantStreamingText(
-                                context,
-                                '${row.message.text}$addition',
-                                question: _annotationQuestion(row.message),
+                                ),
                               );
-                            },
-                          )
-                        : Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              for (
-                                var segmentIndex = 0;
-                                segmentIndex < segments.length;
-                                segmentIndex++
-                              )
-                                Padding(
-                                  padding: EdgeInsets.only(
-                                    bottom: segmentIndex == segments.length - 1
-                                        ? 0
-                                        : _homeAssistantMarkdownSegmentSpacing,
-                                  ),
-                                  child: _assistantText(
-                                    context,
-                                    segments[segmentIndex],
-                                    sources: row.message.agentWebSources,
-                                    question: _annotationQuestion(row.message),
-                                  ),
+                            }
+                            final rowIndex = index - 1;
+                            if (showSeparateStream &&
+                                rowIndex >= _messageRows.length) {
+                              final child = ValueListenableBuilder<_AgentStreamPresentation>(
+                                valueListenable: widget.agentStreamPresentation,
+                                builder: (context, process, _) => ValueListenableBuilder<String>(
+                                  valueListenable: widget.streamingReply,
+                                  builder: (context, reply, _) =>
+                                      ValueListenableBuilder<
+                                        _AgentClarification?
+                                      >(
+                                        valueListenable:
+                                            widget.agentClarification,
+                                        builder:
+                                            (
+                                              context,
+                                              rawClarification,
+                                              _,
+                                            ) => ValueListenableBuilder<bool>(
+                                              valueListenable: widget
+                                                  .imageGenerationInProgress,
+                                              builder: (context, imageInProgress, _) {
+                                                _scheduleReplyBodyMeasurement();
+                                                final clarification =
+                                                    _currentClarification(
+                                                      rawClarification,
+                                                    );
+                                                final hasProcess =
+                                                    process
+                                                        .currentStep
+                                                        .isNotEmpty ||
+                                                    process
+                                                        .reasoning
+                                                        .isNotEmpty ||
+                                                    process.events.isNotEmpty ||
+                                                    process.details.isNotEmpty;
+                                                if (reply.isNotEmpty ||
+                                                    imageInProgress ||
+                                                    hasProcess ||
+                                                    clarification != null) {
+                                                  return Column(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .start,
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      if (hasProcess)
+                                                        _AgentProcessPanel(
+                                                          presentation: process,
+                                                          onToggle: widget
+                                                              .onToggleAgentProcess,
+                                                        ),
+                                                      if (reply.isNotEmpty)
+                                                        _measureLatestReplyBody(
+                                                          _assistantStreamingText(
+                                                            context,
+                                                            reply,
+                                                          ),
+                                                        ),
+                                                      if (clarification != null)
+                                                        _AgentClarificationCard(
+                                                          clarification:
+                                                              clarification,
+                                                        ),
+                                                      if (imageInProgress)
+                                                        const Padding(
+                                                          padding:
+                                                              EdgeInsets.only(
+                                                                top: 12,
+                                                              ),
+                                                          child:
+                                                              _ImageGenerationProgress(),
+                                                        ),
+                                                    ],
+                                                  );
+                                                }
+                                                if (widget.isContinuingReply) {
+                                                  return const SizedBox.shrink();
+                                                }
+                                                return const _AgentStatusHeader(
+                                                  text: '正在思考',
+                                                  animated: true,
+                                                );
+                                              },
+                                            ),
+                                      ),
                                 ),
-                            ],
-                          );
-                    return KeyedSubtree(
-                      key: itemKeys[index],
-                      child: KeyedSubtree(
-                        key: _messageAnchorKey(row.message.id),
-                        child: Padding(
-                          padding: const EdgeInsets.only(bottom: 20),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (isContinuing)
-                                ValueListenableBuilder<
-                                  _AgentStreamPresentation
-                                >(
-                                  valueListenable:
-                                      widget.agentStreamPresentation,
-                                  builder: (context, process, _) =>
-                                      process.currentStep.isEmpty &&
-                                          process.reasoning.isEmpty &&
-                                          process.events.isEmpty
-                                      ? const SizedBox.shrink()
-                                      : _AgentProcessPanel(
-                                          presentation: process,
-                                          onToggle: widget.onToggleAgentProcess,
+                              );
+                              return KeyedSubtree(
+                                key: itemKeys[index],
+                                child: Padding(
+                                  padding: const EdgeInsets.only(top: 20),
+                                  child: child,
+                                ),
+                              );
+                            }
+                            if (!widget.isGenerating &&
+                                widget.stoppedEmptyReplyParentId != null &&
+                                rowIndex == _messageRows.length) {
+                              return KeyedSubtree(
+                                key: itemKeys[index],
+                                child: _emptyStoppedReply(
+                                  widget.stoppedEmptyReplyParentId!,
+                                ),
+                              );
+                            }
+                            final row = _messageRows[rowIndex];
+                            if (row.text == null) {
+                              return KeyedSubtree(
+                                key: itemKeys[index],
+                                child: KeyedSubtree(
+                                  key: _messageAnchorKey(row.message.id),
+                                  child: _userMessage(context, row.message),
+                                ),
+                              );
+                            }
+                            final segments = row.segments!;
+                            final isContinuing =
+                                widget.isGenerating &&
+                                widget.continuingReplyId == row.message.id;
+                            final isStopped =
+                                row.message.isIncomplete && !isContinuing;
+                            final isLatestAssistant =
+                                !showSeparateStream &&
+                                _isLatestAssistantRow(row);
+                            final replyBody = isContinuing
+                                ? ValueListenableBuilder<String>(
+                                    valueListenable: widget.streamingReply,
+                                    builder: (context, addition, _) {
+                                      _scheduleReplyBodyMeasurement();
+                                      return _assistantStreamingText(
+                                        context,
+                                        '${row.message.text}$addition',
+                                        question: _annotationQuestion(
+                                          row.message,
                                         ),
-                                )
-                              else if (row.message.hasAgentProcess)
-                                _SavedAgentProcessSummary(
-                                  key: ValueKey('process:${row.message.id}'),
-                                  summary:
-                                      row.message.agentProcessSummary ?? '思考过程',
-                                  details: row.message.agentProcessDetails,
-                                  durationMs:
-                                      row.message.agentProcessDurationMs,
-                                  status: savedChatProcessStatus(
-                                    row.message.agentProcessStatus,
-                                    isIncomplete: isStopped,
+                                      );
+                                    },
+                                  )
+                                : Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      for (
+                                        var segmentIndex = 0;
+                                        segmentIndex < segments.length;
+                                        segmentIndex++
+                                      )
+                                        Padding(
+                                          padding: EdgeInsets.only(
+                                            bottom:
+                                                segmentIndex ==
+                                                    segments.length - 1
+                                                ? 0
+                                                : _homeAssistantMarkdownSegmentSpacing,
+                                          ),
+                                          child: _assistantText(
+                                            context,
+                                            segments[segmentIndex],
+                                            sources:
+                                                row.message.agentWebSources,
+                                            question: _annotationQuestion(
+                                              row.message,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  );
+                            return KeyedSubtree(
+                              key: itemKeys[index],
+                              child: KeyedSubtree(
+                                key: _messageAnchorKey(row.message.id),
+                                child: Padding(
+                                  padding: const EdgeInsets.only(bottom: 20),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (isContinuing)
+                                        ValueListenableBuilder<
+                                          _AgentStreamPresentation
+                                        >(
+                                          valueListenable:
+                                              widget.agentStreamPresentation,
+                                          builder: (context, process, _) =>
+                                              process.currentStep.isEmpty &&
+                                                  process.reasoning.isEmpty &&
+                                                  process.events.isEmpty
+                                              ? const SizedBox.shrink()
+                                              : _AgentProcessPanel(
+                                                  presentation: process,
+                                                  onToggle: widget
+                                                      .onToggleAgentProcess,
+                                                ),
+                                        )
+                                      else if (row.message.hasAgentProcess)
+                                        _SavedAgentProcessSummary(
+                                          key: ValueKey(
+                                            'process:${row.message.id}',
+                                          ),
+                                          summary:
+                                              row.message.agentProcessSummary ??
+                                              '思考过程',
+                                          details:
+                                              row.message.agentProcessDetails,
+                                          durationMs: row
+                                              .message
+                                              .agentProcessDurationMs,
+                                          status: savedChatProcessStatus(
+                                            row.message.agentProcessStatus,
+                                            isIncomplete: isStopped,
+                                          ),
+                                          initialExpanded:
+                                              row.message.agentProcessExpanded,
+                                        )
+                                      else if (isStopped)
+                                        const _AgentStatusHeader(text: '已停止'),
+                                      _messageSelection(
+                                        row.message,
+                                        'assistant:${row.message.id}:${row.message.text.hashCode}',
+                                        isLatestAssistant
+                                            ? _measureLatestReplyBody(replyBody)
+                                            : replyBody,
+                                      ),
+                                      if (row
+                                          .message
+                                          .agentWebSources
+                                          .isNotEmpty)
+                                        _AgentSourcesCapsule(
+                                          sources: row.message.agentWebSources,
+                                          onTap: _showAgentSourcesSheet,
+                                        ),
+                                      if (row.message.capabilityMetadata !=
+                                          null)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            top: 7,
+                                            left: 2,
+                                          ),
+                                          child: CapabilityInlineTag(
+                                            data:
+                                                row.message.capabilityMetadata!,
+                                            textStyle: const TextStyle(
+                                              color: Color(0xFF24272C),
+                                              fontSize: 16,
+                                            ),
+                                            onTap:
+                                                row
+                                                        .message
+                                                        .capabilityMetadata?['type'] ==
+                                                    'draft'
+                                                ? () {
+                                                    final id = row
+                                                        .message
+                                                        .capabilityMetadata?['draft_id']
+                                                        ?.toString();
+                                                    if (id != null &&
+                                                        id.isNotEmpty) {
+                                                      widget.onOpenDraftReview(
+                                                        id,
+                                                      );
+                                                    }
+                                                  }
+                                                : null,
+                                          ),
+                                        ),
+                                      if (row
+                                          .message
+                                          .outputArtifacts
+                                          .isNotEmpty)
+                                        _assistantArtifactCards(row.message),
+                                      if (isStopped)
+                                        _continueReplyButton(
+                                          () => unawaited(
+                                            widget.onContinueIncompleteReply(
+                                              row.message.id,
+                                            ),
+                                          ),
+                                        ),
+                                      if (!widget.isGenerating)
+                                        _replyActionBar(row.message),
+                                    ],
                                   ),
-                                  initialExpanded:
-                                      row.message.agentProcessExpanded,
-                                )
-                              else if (isStopped)
-                                const _AgentStatusHeader(text: '已停止'),
-                              _messageSelection(
-                                row.message,
-                                'assistant:${row.message.id}:${row.message.text.hashCode}',
-                                isLatestAssistant
-                                    ? _measureLatestReplyBody(replyBody)
-                                    : replyBody,
+                                ),
                               ),
-                              if (row.message.agentWebSources.isNotEmpty)
-                                _AgentSourcesCapsule(
-                                  sources: row.message.agentWebSources,
-                                  onTap: _showAgentSourcesSheet,
-                                ),
-                              if (row.message.capabilityMetadata != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(
-                                    top: 7,
-                                    left: 2,
-                                  ),
-                                  child: CapabilityInlineTag(
-                                    data: row.message.capabilityMetadata!,
-                                    textStyle: const TextStyle(
-                                      color: Color(0xFF24272C),
-                                      fontSize: 16,
-                                    ),
-                                    onTap:
-                                        row
-                                                .message
-                                                .capabilityMetadata?['type'] ==
-                                            'draft'
-                                        ? () {
-                                            final id = row
-                                                .message
-                                                .capabilityMetadata?['draft_id']
-                                                ?.toString();
-                                            if (id != null && id.isNotEmpty) {
-                                              widget.onOpenDraftReview(id);
-                                            }
-                                          }
-                                        : null,
-                                  ),
-                                ),
-                              if (row.message.outputArtifacts.isNotEmpty)
-                                _assistantArtifactCards(row.message),
-                              if (isStopped)
-                                _continueReplyButton(
-                                  () => unawaited(
-                                    widget.onContinueIncompleteReply(
-                                      row.message.id,
-                                    ),
-                                  ),
-                                ),
-                              if (!widget.isGenerating)
-                                _replyActionBar(row.message),
-                            ],
-                          ),
+                            );
+                          },
+                          childCount: itemKeys.length,
+                          findChildIndexCallback: (key) => childIndexByKey[key],
                         ),
                       ),
-                    );
-                  },
+                    ),
+                  ],
                 ),
               );
             },
@@ -12054,34 +12106,36 @@ class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
   }
 
   @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !_hasSelection,
-    onPopInvokedWithResult: (didPop, result) {
-      if (!didPop && _hasSelection) _clearSelection();
-    },
-    child: ChatTextAnnotationLayer(
-      annotations: widget.annotations,
-      highlight: widget.highlight,
-      annotationNumbers: widget.annotationNumbers,
-      onTapAnnotation: (annotation, anchor) =>
-          unawaited(widget.onAnnotate(annotation, anchor)),
-      child: SelectionArea(
-        key: _selectionAreaKey,
-        contextMenuBuilder: _buildContextMenu,
-        onSelectionChanged: (content) {
-          _selectedText = content?.plainText ?? '';
-          final hasSelection = _selectedText.isNotEmpty;
-          if (_hasSelection == hasSelection) return;
-          setState(() => _hasSelection = hasSelection);
-          widget.onSelectionAreaChanged(this, hasSelection);
-        },
-        child: SelectionListener(
-          selectionNotifier: _selectionListener,
-          child: widget.child,
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !_hasSelection,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _hasSelection) _clearSelection();
+      },
+      child: ChatTextAnnotationLayer(
+        annotations: widget.annotations,
+        highlight: widget.highlight,
+        annotationNumbers: widget.annotationNumbers,
+        onTapAnnotation: (annotation, anchor) =>
+            unawaited(widget.onAnnotate(annotation, anchor)),
+        child: SelectionArea(
+          key: _selectionAreaKey,
+          contextMenuBuilder: _buildContextMenu,
+          onSelectionChanged: (content) {
+            _selectedText = content?.plainText ?? '';
+            final hasSelection = _selectedText.isNotEmpty;
+            if (_hasSelection == hasSelection) return;
+            setState(() => _hasSelection = hasSelection);
+            widget.onSelectionAreaChanged(this, hasSelection);
+          },
+          child: SelectionListener(
+            selectionNotifier: _selectionListener,
+            child: widget.child,
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _MessageSelectionActionCard extends StatelessWidget {
