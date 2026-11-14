@@ -400,6 +400,19 @@ class XiaoqiApi {
           'api_contract_version': apiContractVersion,
         }),
       )
+      ..get('/s/<id>', _publicChatShare)
+      ..post(
+        '/v1/chat-shares',
+        (request) => _authenticated(
+          request,
+          (device) => _createChatShare(request, device),
+        ),
+      )
+      ..delete(
+        '/v1/chat-shares/<id>',
+        (request, id) =>
+            _authenticated(request, (device) => _revokeChatShare(device, id)),
+      )
       ..post(
         '/v1/attachments',
         (Request request) => _authenticated(
@@ -3372,6 +3385,118 @@ class XiaoqiApi {
     if (record == null || record.value['revoked_at'] != null)
       return _error('登录状态已失效，请重新登录', 401);
     return action(_Device(key, record.value));
+  }
+
+  Future<Response> _createChatShare(Request request, _Device device) async {
+    try {
+      final body = await _body(request, 96 * 1024);
+      final question = body['question']?.toString().trim() ?? '';
+      final answer = body['answer']?.toString().trim() ?? '';
+      if (question.isEmpty || answer.isEmpty) {
+        return _error('请选择一组完整问答', 400);
+      }
+      if (question.length > 12000 || answer.length > 60000) {
+        return _error('分享内容过长，请减少选中的内容', 400);
+      }
+      final rawSources = body['sources'];
+      if (rawSources != null && rawSources is! List) {
+        return _error('来源格式无效', 400);
+      }
+      final sources = <Map<String, String>>[];
+      for (final raw in (rawSources as List? ?? const []).take(50)) {
+        if (raw is! Map) continue;
+        final url = Uri.tryParse(raw['url']?.toString().trim() ?? '');
+        if (url == null ||
+            !const {'http', 'https'}.contains(url.scheme.toLowerCase()) ||
+            url.host.isEmpty) {
+          continue;
+        }
+        sources.add({
+          'title': (raw['title']?.toString().trim() ?? url.host).substring(
+            0,
+            min(300, (raw['title']?.toString().trim() ?? url.host).length),
+          ),
+          'url': url.toString(),
+        });
+      }
+      final id = _token().substring(0, 22);
+      final now = _now();
+      store.put('chat-share/$id', {
+        'id': id,
+        'tenant_id': device.tenant,
+        'question': question,
+        'answer': answer,
+        'sources': sources,
+        'created_at': now,
+        'revoked_at': null,
+      }, null);
+      final configuredBase =
+          Platform.environment['XIAOQI_PUBLIC_BASE_URL']?.trim() ?? '';
+      final publicUrl = configuredBase.isNotEmpty
+          ? '${configuredBase.replaceFirst(RegExp(r'/$'), '')}/s/$id'
+          : request.requestedUri.resolve('/s/$id').toString();
+      return _json({'id': id, 'url': publicUrl, 'created_at': now}, 201);
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('创建分享链接失败', 503);
+    }
+  }
+
+  Future<Response> _revokeChatShare(_Device device, String rawId) async {
+    try {
+      final id = _safeId(rawId, '分享 ID');
+      final key = 'chat-share/$id';
+      final record = store.get(key);
+      if (record == null || record.value['tenant_id'] != device.tenant) {
+        return _error('分享链接不存在', 404);
+      }
+      if (record.value['revoked_at'] == null) {
+        store.put(key, {
+          ...record.value,
+          'revoked_at': _now(),
+        }, record.revision);
+      }
+      return _json({'ok': true});
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on RevisionConflict {
+      return _error('分享状态已变化，请重试', 409);
+    }
+  }
+
+  Future<Response> _publicChatShare(Request request, String rawId) async {
+    String escape(Object? value) => const HtmlEscape().convert('$value');
+    try {
+      final id = _safeId(rawId, '分享 ID');
+      final record = store.get('chat-share/$id');
+      if (record == null || record.value['revoked_at'] != null) {
+        return Response.notFound('分享链接不存在或已撤销');
+      }
+      final value = record.value;
+      final sources = (value['sources'] as List? ?? const []).whereType<Map>().map((
+        source,
+      ) {
+        final url = escape(source['url']);
+        final title = escape(source['title']);
+        return '<li><a href="$url" rel="nofollow noopener noreferrer">$title</a></li>';
+      }).join();
+      final html =
+          '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>小栖分享</title><style>body{margin:0;background:#f5f6f8;color:#24272c;font:16px/1.7 system-ui,sans-serif}.page{max-width:760px;margin:auto;padding:32px 20px 64px}.brand{font-weight:700;margin-bottom:24px}.card{background:#fff;border:1px solid #e6e8ec;border-radius:20px;padding:22px;white-space:pre-wrap;overflow-wrap:anywhere}.q{background:#f0f2ff;margin-bottom:16px}.label{font-size:13px;color:#747982;margin-bottom:6px}a{color:#3158d8}.sources{margin-top:18px}</style></head><body><main class="page"><div class="brand">小栖</div><section class="card q"><div class="label">提问</div>${escape(value['question'])}</section><section class="card"><div class="label">回答</div>${escape(value['answer'])}${sources.isEmpty ? '' : '<div class="sources"><div class="label">网页来源</div><ol>$sources</ol></div>'}</section></main></body></html>''';
+      return Response.ok(
+        html,
+        headers: const {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'public, max-age=60',
+          'x-content-type-options': 'nosniff',
+          'content-security-policy':
+              "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; base-uri 'none'; form-action 'none'",
+          'referrer-policy': 'no-referrer',
+        },
+      );
+    } on FormatException {
+      return Response.notFound('分享链接不存在或已撤销');
+    }
   }
 
   Map<String, dynamic> _normalizeAuthoredPlugin(String tenant, Map raw) {

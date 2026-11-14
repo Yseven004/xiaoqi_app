@@ -264,6 +264,60 @@ void main() {
     directory.deleteSync(recursive: true);
   });
 
+  test('share snapshot is public until its owner revokes it', () async {
+    final http = HttpClient();
+    try {
+      final create = await http.postUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/v1/chat-shares'),
+      );
+      create.headers
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken')
+        ..set('x-xiaoqi-contract', apiContractVersion)
+        ..contentType = ContentType.json;
+      create.write(
+        jsonEncode({
+          'question': '公开问题',
+          'answer': '公开回答',
+          'hidden_branch': '不能公开',
+          'sources': [
+            {'title': '来源', 'url': 'https://example.com/article'},
+          ],
+        }),
+      );
+      final createdResponse = await create.close();
+      final created =
+          jsonDecode(await createdResponse.transform(utf8.decoder).join())
+              as Map<String, dynamic>;
+      expect(createdResponse.statusCode, 201);
+
+      final publicResponse = await (await http.getUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/s/${created['id']}'),
+      )).close();
+      final html = await publicResponse.transform(utf8.decoder).join();
+      expect(publicResponse.statusCode, 200);
+      expect(html, contains('公开问题'));
+      expect(html, contains('公开回答'));
+      expect(html, isNot(contains('不能公开')));
+
+      final revoke = await http.deleteUrl(
+        Uri.parse(
+          'http://127.0.0.1:${server.port}/v1/chat-shares/${created['id']}',
+        ),
+      );
+      revoke.headers
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken')
+        ..set('x-xiaoqi-contract', apiContractVersion);
+      expect((await revoke.close()).statusCode, 200);
+
+      final revokedResponse = await (await http.getUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/s/${created['id']}'),
+      )).close();
+      expect(revokedResponse.statusCode, 404);
+    } finally {
+      http.close(force: true);
+    }
+  });
+
   test(
     'recovers interrupted tasks on read without mutating startup data',
     () async {

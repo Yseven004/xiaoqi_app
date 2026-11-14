@@ -2,15 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' show cos, min, pi, sin;
-import 'dart:ui' show ImageFilter;
+import 'dart:ui' show ImageByteFormat, ImageFilter;
 
 import 'package:flutter/foundation.dart'
     show TargetPlatform, ValueListenable, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/gestures.dart'
     show LongPressGestureRecognizer, PointerDownEvent;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import '../widgets/chat_message_scroll_view.dart';
-import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:a2ui_core/a2ui_core.dart' as a2ui_core;
 import 'package:crypto/crypto.dart';
@@ -6110,18 +6110,202 @@ $text''';
   }
 
   Future<void> _shareReply(AiConversationMessage message) async {
-    try {
+    final record = _conversation;
+    if (record == null) return;
+    final question = record.nodeById(message.parentMessageId ?? '');
+    if (question == null || !question.isUser) return;
+    final questionText = presentChatMessage(record, question).text.trim();
+    final answerText = chatReplyPlainText(record, message).trim();
+    if (questionText.isEmpty || answerText.isEmpty) return;
+    final previewKey = GlobalKey();
+    final preferences = await SharedPreferences.getInstance();
+    final storageKey = 'chat-share.${record.id}.${message.id}';
+    var shareId = preferences.getString('$storageKey.id');
+    var shareUrl = preferences.getString('$storageKey.url');
+    var busy = false;
+    if (!mounted) return;
+
+    Future<void> shareImage() async {
+      final boundary = previewKey.currentContext?.findRenderObject();
+      if (boundary is! RenderRepaintBoundary) return;
+      final image = await boundary.toImage(
+        pixelRatio: MediaQuery.devicePixelRatioOf(context).clamp(1.5, 3),
+      );
+      final data = await image.toByteData(format: ImageByteFormat.png);
+      image.dispose();
+      if (data == null) throw StateError('长图生成失败');
+      final directory = await getTemporaryDirectory();
+      final file = File(
+        '${directory.path}${Platform.pathSeparator}xiaoqi-share-${message.id}.png',
+      );
+      await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
       await SharePlus.instance.share(
         ShareParams(
-          text: chatReplyPlainText(
-            _conversation ?? AiConversationRecord.empty(),
-            message,
-          ),
+          files: [XFile(file.path, mimeType: 'image/png')],
+          text: '来自小栖的问答',
         ),
       );
-    } catch (_) {
-      _showReplyError('分享失败');
     }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          Future<void> run(Future<void> Function() action) async {
+            if (busy) return;
+            setSheetState(() => busy = true);
+            try {
+              await action();
+            } catch (error) {
+              if (mounted) AppToast.show(this.context, '分享失败，请重试');
+            } finally {
+              if (sheetContext.mounted) setSheetState(() => busy = false);
+            }
+          }
+
+          return SafeArea(
+            child: Material(
+              color: Colors.white,
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(24),
+              ),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  20,
+                  14,
+                  20,
+                  20 + MediaQuery.viewInsetsOf(context).bottom,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 36,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFD4D7DC),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        '分享问答',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      RepaintBoundary(
+                        key: previewKey,
+                        child: _ChatSharePreview(
+                          question: questionText,
+                          answer: answerText,
+                          sources: message.agentWebSources,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _ChatShareAction(
+                            icon: Icons.image_outlined,
+                            label: '生成长图',
+                            enabled: !busy,
+                            onTap: () => run(shareImage),
+                          ),
+                          _ChatShareAction(
+                            icon: Icons.link,
+                            label: shareUrl == null ? '复制公开链接' : '复制链接',
+                            enabled: !busy,
+                            onTap: () => run(() async {
+                              if (shareUrl == null) {
+                                final result = await CapabilityCloudSync
+                                    .instance
+                                    .createChatShare(
+                                      question: questionText,
+                                      answer: answerText,
+                                      sources: [
+                                        for (final source
+                                            in message.agentWebSources)
+                                          {
+                                            'title': source.title,
+                                            'url': source.url,
+                                          },
+                                      ],
+                                    );
+                                shareId = result['id']?.toString();
+                                shareUrl = result['url']?.toString();
+                                if (shareId == null || shareUrl == null) {
+                                  throw StateError('分享链接无效');
+                                }
+                                await preferences.setString(
+                                  '$storageKey.id',
+                                  shareId!,
+                                );
+                                await preferences.setString(
+                                  '$storageKey.url',
+                                  shareUrl!,
+                                );
+                              }
+                              await Clipboard.setData(
+                                ClipboardData(text: shareUrl!),
+                              );
+                              if (mounted) AppToast.show(this.context, '链接已复制');
+                            }),
+                          ),
+                          _ChatShareAction(
+                            icon: Icons.ios_share_outlined,
+                            label: '系统分享',
+                            enabled: !busy,
+                            onTap: () => run(() async {
+                              await SharePlus.instance.share(
+                                ShareParams(
+                                  text:
+                                      shareUrl ??
+                                      '提问：$questionText\n\n回答：$answerText',
+                                ),
+                              );
+                            }),
+                          ),
+                          if (shareId != null)
+                            _ChatShareAction(
+                              icon: Icons.link_off,
+                              label: '撤销链接',
+                              enabled: !busy,
+                              destructive: true,
+                              onTap: () => run(() async {
+                                await CapabilityCloudSync.instance
+                                    .revokeChatShare(shareId!);
+                                await preferences.remove('$storageKey.id');
+                                await preferences.remove('$storageKey.url');
+                                if (!sheetContext.mounted) return;
+                                setSheetState(() {
+                                  shareId = null;
+                                  shareUrl = null;
+                                });
+                                if (mounted)
+                                  AppToast.show(this.context, '公开链接已撤销');
+                              }),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Future<T?> _showKeyboardStableDialog<T>(
@@ -11612,10 +11796,11 @@ class _AgentSourcesCapsule extends StatelessWidget {
         borderRadius: BorderRadius.circular(18),
         onTap: () => onTap(sources),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.fromLTRB(4, 4, 10, 4),
           decoration: BoxDecoration(
-            color: const Color(0xFFF5F6F8),
-            borderRadius: BorderRadius.circular(18),
+            color: Colors.white,
+            border: Border.all(color: const Color(0xFFE1E3E7)),
+            borderRadius: BorderRadius.circular(100),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -11628,9 +11813,9 @@ class _AgentSourcesCapsule extends StatelessWidget {
               Text(
                 '${sources.length} 个网页',
                 style: const TextStyle(
-                  color: Color(0xFF50545A),
+                  color: Color(0xFF30343A),
                   fontSize: 13,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
               const SizedBox(width: 3),
@@ -11645,6 +11830,124 @@ class _AgentSourcesCapsule extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ChatSharePreview extends StatelessWidget {
+  const _ChatSharePreview({
+    required this.question,
+    required this.answer,
+    required this.sources,
+  });
+
+  final String question;
+  final String answer;
+  final List<AiChatWebSource> sources;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    color: const Color(0xFFF5F6F8),
+    padding: const EdgeInsets.all(18),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text(
+          '小栖',
+          style: TextStyle(
+            color: Color(0xFF24272C),
+            fontSize: 17,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 14),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 320),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0F2FF),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Text(
+              question,
+              style: const TextStyle(fontSize: 15, height: 1.45),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border.all(color: const Color(0xFFE6E8EC)),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                answer,
+                style: const TextStyle(
+                  color: Color(0xFF303134),
+                  fontSize: 15,
+                  height: 1.55,
+                ),
+              ),
+              if (sources.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                const Divider(height: 1),
+                const SizedBox(height: 10),
+                Text(
+                  '${sources.length} 个网页来源',
+                  style: const TextStyle(
+                    color: Color(0xFF686D75),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _ChatShareAction extends StatelessWidget {
+  const _ChatShareAction({
+    required this.icon,
+    required this.label,
+    required this.enabled,
+    required this.onTap,
+    this.destructive = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool enabled;
+  final VoidCallback onTap;
+  final bool destructive;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 112,
+    height: 48,
+    child: OutlinedButton.icon(
+      onPressed: enabled ? onTap : null,
+      icon: Icon(icon, size: 19),
+      label: Text(label),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: destructive
+            ? const Color(0xFFB33A4A)
+            : const Color(0xFF30343A),
+        side: const BorderSide(color: Color(0xFFDDE0E5)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+      ),
+    ),
+  );
 }
 
 class _AgentSourceListTile extends StatelessWidget {

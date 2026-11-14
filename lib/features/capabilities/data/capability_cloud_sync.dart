@@ -1294,6 +1294,37 @@ class CapabilityCloudSync {
     _checked(response);
   }
 
+  Future<Map<String, dynamic>> createChatShare({
+    required String question,
+    required String answer,
+    List<Map<String, String>> sources = const [],
+  }) async {
+    final token = await _requireToken();
+    final response = await _client
+        .post(
+          Uri.parse('$_baseUrl/chat-shares'),
+          headers: _headers(token),
+          body: jsonEncode({
+            'question': question,
+            'answer': answer,
+            'sources': sources,
+          }),
+        )
+        .timeout(const Duration(seconds: 20));
+    return _checked(response);
+  }
+
+  Future<void> revokeChatShare(String id) async {
+    final token = await _requireToken();
+    final response = await _client
+        .delete(
+          Uri.parse('$_baseUrl/chat-shares/${Uri.encodeComponent(id)}'),
+          headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 20));
+    _checked(response);
+  }
+
   Future<String> _requireToken({bool verifyContract = true}) async {
     final token = await _secureStorage.read(key: _tokenKey);
     if (token == null || token.isEmpty) throw StateError('请先登录个人账号');
