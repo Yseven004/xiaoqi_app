@@ -3897,16 +3897,25 @@ $materialIndex
           final responseSources = response.state?['web_sources'];
           if (!_isCurrentRequest(generation, conversationId)) {
             final backgroundText = response.text.trimRight();
-            if (backgroundText.isNotEmpty && response.interrupts.isEmpty) {
+            final backgroundTask = await CapabilityCloudSync.instance
+                .getTask(taskId)
+                .catchError((Object _) => <String, dynamic>{});
+            if (backgroundText.isNotEmpty &&
+                response.interrupts.isEmpty &&
+                const {
+                  'succeeded',
+                  'completed',
+                  'partially_completed',
+                }.contains(backgroundTask['status'])) {
               final stored = await _historyService.get(conversationId);
-              if (stored != null &&
-                  !stored.nodes.any(
-                    (node) =>
-                        !node.isUser &&
-                        node.parentMessageId == question.id &&
-                        !node.isIncomplete &&
-                        node.text.trim() == backgroundText,
-                  )) {
+              if (stored != null) {
+                final answerAlreadySaved = stored.nodes.any(
+                  (node) =>
+                      !node.isUser &&
+                      node.parentMessageId == question.id &&
+                      !node.isIncomplete &&
+                      node.text.trim() == backgroundText,
+                );
                 final finalBackgroundSources = responseSources is List
                     ? responseSources
                           .map(AiChatWebSource.fromJson)
@@ -3931,10 +3940,23 @@ $materialIndex
                   agentProcessStatus: 'completed',
                   agentWebSources: finalBackgroundSources,
                 );
+                final completed = answerAlreadySaved
+                    ? stored
+                    : stored.appendAnswerVersion(question.id, answer);
                 await _historyService.saveTransactional(
-                  stored
-                      .appendAnswerVersion(question.id, answer)
-                      .copyWith(updatedAt: DateTime.now()),
+                  completed.copyWith(
+                    nodes: [
+                      for (final node in completed.nodes)
+                        if (node.id == question.id)
+                          node.copyWith(
+                            clearAgentTaskId: true,
+                            agentTaskPending: false,
+                          )
+                        else
+                          node,
+                    ],
+                    updatedAt: DateTime.now(),
+                  ),
                 );
               }
             }
@@ -5315,6 +5337,14 @@ $text''';
       }
       return;
     }
+    if (task['remote_agent_turn'] == true &&
+        const {
+          'waiting_for_user',
+          'awaiting_network_permission',
+        }.contains(task['status'])) {
+      unawaited(_continueStoppedReply(parentMessageId: message.id));
+      return;
+    }
 
     final generation = ++_requestGeneration;
     _pendingReplyParentId = message.id;
@@ -6227,11 +6257,14 @@ $text''';
     final revokedShareIds = <String>{};
     final existingSharesFuture = CapabilityCloudSync.instance.listChatShares();
     if (shareId != null) {
-      unawaited(
-        CapabilityCloudSync.instance
-            .associateChatShare(shareId, conversationId: record.id)
-            .catchError((Object _) {}),
-      );
+      try {
+        await CapabilityCloudSync.instance.associateChatShare(
+          shareId,
+          conversationId: record.id,
+        );
+      } on Object {
+        // Deletion retries association before revoking this conversation's shares.
+      }
     }
     if (!mounted) return;
 
@@ -6922,6 +6955,7 @@ $text''';
       if (updated == null) return;
       try {
         if (updated.nodes.isEmpty) {
+          await _associateStoredConversationShares(current);
           await CapabilityCloudSync.instance.revokeConversationShares(
             current.id,
           );
@@ -7891,6 +7925,7 @@ $text''';
   Future<void> _cancelReplyBeforeConversationDelete(
     AiConversationRecord record,
   ) async {
+    await _associateStoredConversationShares(record);
     await CapabilityCloudSync.instance.revokeConversationShares(record.id);
     final pendingTaskIds = record.nodes
         .where((message) => message.isUser && message.agentTaskId != null)
@@ -7933,6 +7968,22 @@ $text''';
       setState(() {
         _isGenerating = false;
       });
+    }
+  }
+
+  Future<void> _associateStoredConversationShares(
+    AiConversationRecord record,
+  ) async {
+    final preferences = await SharedPreferences.getInstance();
+    for (final answer in record.nodes.where((node) => !node.isUser)) {
+      final key = 'chat-share.${record.id}.${answer.id}';
+      final shareId = preferences.getString('$key.id');
+      if (shareId != null) {
+        await CapabilityCloudSync.instance.associateChatShare(
+          shareId,
+          conversationId: record.id,
+        );
+      }
     }
   }
 

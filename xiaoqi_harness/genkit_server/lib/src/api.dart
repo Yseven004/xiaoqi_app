@@ -3092,6 +3092,7 @@ class XiaoqiApi {
       return _json({
         'task_id': taskId,
         'status': _publicTaskStatus(value['status']),
+        'remote_agent_turn': value['remote_agent_turn'] == true,
         'attempt': value['attempt'] ?? 1,
         'agent_snapshot_id': value['agent_snapshot_id'],
         'error': value['error'],
@@ -3514,6 +3515,9 @@ class XiaoqiApi {
               },
             ]
           : const [];
+      if (inputRounds.length > 50) {
+        return _error('一次最多分享 50 组问答', 400);
+      }
       for (final raw in inputRounds.take(50)) {
         if (raw is! Map) continue;
         final question = raw['question']?.toString().trim() ?? '';

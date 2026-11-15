@@ -267,6 +267,28 @@ void main() {
   test('share snapshot is public until its owner revokes it', () async {
     final http = HttpClient();
     try {
+      final tooMany = await http.postUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/v1/chat-shares'),
+      );
+      tooMany.headers
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken')
+        ..set('x-xiaoqi-contract', apiContractVersion)
+        ..contentType = ContentType.json;
+      tooMany.write(
+        jsonEncode({
+          'rounds': [
+            for (var index = 0; index < 51; index++)
+              {'question': '问题 $index', 'answer': '回答 $index'},
+          ],
+        }),
+      );
+      final tooManyResponse = await tooMany.close();
+      expect(tooManyResponse.statusCode, 400);
+      expect(
+        await tooManyResponse.transform(utf8.decoder).join(),
+        contains('50 组问答'),
+      );
+
       final create = await http.postUrl(
         Uri.parse('http://127.0.0.1:${server.port}/v1/chat-shares'),
       );
@@ -416,6 +438,7 @@ void main() {
 
         expect(response.statusCode, 200);
         expect(payload['status'], 'paused');
+        expect(payload['remote_agent_turn'], isTrue);
         expect(payload['error_code'], isNull);
         expect(payload['agent_snapshot_id'], 'snapshot-before-restart');
         expect(store.get(key)!.value['status'], 'paused');
