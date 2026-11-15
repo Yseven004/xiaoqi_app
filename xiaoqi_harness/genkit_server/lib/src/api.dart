@@ -3531,7 +3531,7 @@ class XiaoqiApi {
       if (rounds.isEmpty) {
         return _error('请选择一组完整问答', 400);
       }
-      final id = _token().substring(0, 22);
+      final id = 's-${_token().substring(0, 22)}';
       final now = _now();
       store.put('chat-share/$id', {
         'id': id,

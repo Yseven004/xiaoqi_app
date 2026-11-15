@@ -319,6 +319,10 @@ void main() {
                 await (await oldCreate.close()).transform(utf8.decoder).join(),
               )
               as Map<String, dynamic>;
+      expect(
+        oldCreated['id'],
+        matches(RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')),
+      );
       final associate = await http.postUrl(
         Uri.parse(
           'http://127.0.0.1:${server.port}/v1/chat-shares/${oldCreated['id']}/associate',
