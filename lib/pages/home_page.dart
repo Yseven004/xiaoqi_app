@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' show cos, min, pi, sin;
+import 'dart:math' show cos, max, min, pi, sin;
 import 'dart:ui' show ImageByteFormat, ImageFilter;
 
 import 'package:flutter/foundation.dart'
@@ -572,6 +572,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, Object?>? _activeSkillWorkflow;
   CapabilityDraft? _pendingSkillDraftReview;
   String? _activeCapabilityTaskId;
+  final Set<String> _leasedCapabilityTaskIds = <String>{};
+  Timer? _capabilityHeartbeatTimer;
   String? _activeRemoteAgentTaskId;
   String? _activeRemoteAgentConversationId;
   String? _lastAgentSteeringTaskId;
@@ -700,6 +702,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _agentReasoningTimer?.cancel();
     _agentReasoningPublishTimer?.cancel();
     _agentReasoningStopwatch?.stop();
+    _capabilityHeartbeatTimer?.cancel();
     _abortActiveAgentTurn?.call();
     _abortActiveAgentTurn = null;
     _streamingReply.dispose();
@@ -723,6 +726,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ..removeListener(_onMessagesScrolled)
       ..dispose();
     super.dispose();
+  }
+
+  void _leaseCapabilityTask(String taskId) {
+    _leasedCapabilityTaskIds.add(taskId);
+    _capabilityHeartbeatTimer ??= Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => unawaited(_heartbeatCapabilityTasks()),
+    );
+    unawaited(_heartbeatCapabilityTasks());
+  }
+
+  void _releaseCapabilityTaskLease(String taskId) {
+    _leasedCapabilityTaskIds.remove(taskId);
+    if (_leasedCapabilityTaskIds.isEmpty) {
+      _capabilityHeartbeatTimer?.cancel();
+      _capabilityHeartbeatTimer = null;
+    }
+  }
+
+  Future<void> _heartbeatCapabilityTasks() async {
+    for (final taskId in _leasedCapabilityTaskIds.toList(growable: false)) {
+      try {
+        final status = await CapabilityCloudSync.instance.heartbeatTask(taskId);
+        if (!const {'queued', 'running', 'pausing'}.contains(status)) {
+          _releaseCapabilityTaskLease(taskId);
+        }
+      } catch (_) {
+        // The server lease pauses the task after 60 seconds without a heartbeat.
+      }
+    }
   }
 
   @override
@@ -3604,6 +3637,7 @@ $materialIndex
     if (!_isCurrentRequest(generation, conversationId)) return null;
     _activeRemoteAgentTaskId = taskId;
     _activeRemoteAgentConversationId = conversationId;
+    _leaseCapabilityTask(taskId);
     if (mounted) setState(() {});
     _agentReasoningTimer?.cancel();
     _agentReasoningStopwatch?.stop();
@@ -3768,19 +3802,39 @@ $materialIndex
     var turn = resumeTaskId == null
         ? chat.sendStream(message: userMessage)
         : chat.sendStream();
+    final backgroundProcessDetails = <Map<String, Object?>>[];
+    var backgroundSources = <AiChatWebSource>[];
+    final backgroundStartedAt = DateTime.now();
     try {
       late genkit_client.AgentResponse<Map<String, dynamic>> response;
       while (true) {
-        if (!_isCurrentRequest(generation, conversationId)) {
-          turn.abort();
-          return null;
+        if (_isCurrentRequest(generation, conversationId)) {
+          _abortActiveAgentTurn = turn.abort;
         }
-        _abortActiveAgentTurn = turn.abort;
         try {
           await for (final chunk in turn.stream) {
             if (!_isCurrentRequest(generation, conversationId)) {
-              turn.abort();
-              return null;
+              final custom = chunk.custom ?? chunk.raw.modelChunk?.custom;
+              final events = custom?['agent_process'];
+              if (events is List) {
+                final merged = mergeChatProcessDetails([
+                  ...backgroundProcessDetails,
+                  ...events.whereType<Map>().map(
+                    (event) => Map<String, Object?>.from(event),
+                  ),
+                ]);
+                backgroundProcessDetails
+                  ..clear()
+                  ..addAll(merged);
+              }
+              final rawSources = custom?['web_sources'];
+              if (rawSources is List) {
+                backgroundSources = rawSources
+                    .map(AiChatWebSource.fromJson)
+                    .where((source) => source.url.startsWith('http'))
+                    .toList(growable: false);
+              }
+              continue;
             }
             _handleAgentChunk(
               chunk,
@@ -3840,8 +3894,53 @@ $materialIndex
             }
           }
           response = await turn.response;
-          if (!_isCurrentRequest(generation, conversationId)) return null;
           final responseSources = response.state?['web_sources'];
+          if (!_isCurrentRequest(generation, conversationId)) {
+            final backgroundText = response.text.trimRight();
+            if (backgroundText.isNotEmpty && response.interrupts.isEmpty) {
+              final stored = await _historyService.get(conversationId);
+              if (stored != null &&
+                  !stored.nodes.any(
+                    (node) =>
+                        !node.isUser &&
+                        node.parentMessageId == question.id &&
+                        !node.isIncomplete &&
+                        node.text.trim() == backgroundText,
+                  )) {
+                final finalBackgroundSources = responseSources is List
+                    ? responseSources
+                          .map(AiChatWebSource.fromJson)
+                          .where((source) => source.url.startsWith('http'))
+                          .toList(growable: false)
+                    : backgroundSources;
+                final answer = AiConversationMessage(
+                  text: backgroundText,
+                  isUser: false,
+                  createdAt: DateTime.now(),
+                  parentMessageId: question.id,
+                  agentSessionId: response.sessionId ?? chat.sessionId,
+                  agentSnapshotId: response.snapshotId ?? chat.snapshotId,
+                  agentProcessSummary: '已完成',
+                  agentProcessDetails: settleChatProcessDetails(
+                    backgroundProcessDetails,
+                    status: 'completed',
+                  ),
+                  agentProcessDurationMs: DateTime.now()
+                      .difference(backgroundStartedAt)
+                      .inMilliseconds,
+                  agentProcessStatus: 'completed',
+                  agentWebSources: finalBackgroundSources,
+                );
+                await _historyService.saveTransactional(
+                  stored
+                      .appendAnswerVersion(question.id, answer)
+                      .copyWith(updatedAt: DateTime.now()),
+                );
+              }
+            }
+            _releaseCapabilityTaskLease(taskId);
+            return null;
+          }
           if (responseSources is List) {
             _agentWebSources = responseSources
                 .map(AiChatWebSource.fromJson)
@@ -4063,6 +4162,7 @@ $materialIndex
         durationMs: durationMs,
       );
       _flushStreamingReply(generation, conversationId);
+      _releaseCapabilityTaskLease(taskId);
       return (
         taskId: taskId,
         reply: reply,
@@ -4225,6 +4325,7 @@ $materialIndex
     }
     if (!_isCurrentRequest(generation, conversationId)) return null;
     _activeCapabilityTaskId = taskId;
+    _leaseCapabilityTask(taskId);
 
     var terminalFailure = false;
     var cancelled = false;
@@ -4287,6 +4388,10 @@ $materialIndex
               terminalFailure = true;
             }
             break;
+          case 'connection':
+            _agentStreamPresentation.value = _agentStreamPresentation.value
+                .copyWith(currentStep: '连接中', processStatus: 'thinking');
+            break;
           case 'error':
             terminalFailure = true;
             final errorCode = event['error_code']?.toString();
@@ -4343,6 +4448,9 @@ $materialIndex
       );
     } finally {
       if (_activeCapabilityTaskId == taskId) _activeCapabilityTaskId = null;
+      if (terminalFailure || cancelled || completedText != null) {
+        _releaseCapabilityTaskLease(taskId);
+      }
     }
   }
 
@@ -5214,6 +5322,7 @@ $text''';
     _continuingReplyId = null;
     _isContinuingReply = false;
     _activeCapabilityTaskId = taskId;
+    _leaseCapabilityTask(taskId);
     _clearStreamingReply();
     setState(() => _isGenerating = true);
     unawaited(
@@ -5295,6 +5404,10 @@ $text''';
             cancelled = status == 'cancelled';
             paused = status == 'paused';
             break;
+          case 'connection':
+            _agentStreamPresentation.value = _agentStreamPresentation.value
+                .copyWith(currentStep: '连接中', processStatus: 'thinking');
+            break;
           case 'error':
             throw AiException(event['message']?.toString() ?? '技能任务失败');
         }
@@ -5358,6 +5471,9 @@ $text''';
         }
         _pendingReplyParentId = null;
         _clearStreamingReply();
+      }
+      if (paused || cancelled || completedText != null) {
+        _releaseCapabilityTaskLease(taskId);
       }
     }
   }
@@ -5855,6 +5971,9 @@ $text''';
     _abortActiveAgentTurn = null;
     _activeCapabilityTaskId = null;
     if (capabilityTaskId != null) {
+      _releaseCapabilityTaskLease(capabilityTaskId);
+    }
+    if (capabilityTaskId != null) {
       final taskIsBeingCreated = _pendingCapabilityTaskCreationIds.contains(
         capabilityTaskId,
       );
@@ -5899,52 +6018,21 @@ $text''';
     }
   }
 
-  void _detachReply() {
+  void _leaveReplyRunningInBackground() {
     _clearAgentClarification();
     if (!_isGenerating) {
       _clearStreamingReply();
       return;
     }
-    final pending = _conversation?.nodeById(_pendingReplyParentId ?? '');
-    for (final attachment
-        in pending?.attachments ?? const <HomeChatAttachment>[]) {
-      _cancelAttachmentPreparation(attachment);
-    }
-    final parentMessageId = _pendingReplyParentId;
-    final partialReply = _streamingReplyBuffer.toString().trimRight();
-    final processSummary = _agentProcessSummary();
-    _abortActiveAgentTurn?.call();
-    _abortActiveAgentTurn = null;
     _requestGeneration++;
-    _activeCapabilityTaskId = null;
     _pendingReplyParentId = null;
     _pendingContinuationMessageId = null;
     _continuingReplyId = null;
     _isContinuingReply = false;
-    if ((partialReply.trim().isNotEmpty || _agentProcessDetails.isNotEmpty) &&
-        parentMessageId != null) {
-      unawaited(
-        _appendAssistantReply(
-          partialReply,
-          parentMessageId: parentMessageId,
-          clearAgentTaskId: true,
-          isIncomplete: true,
-          agentProcessSummary: processSummary,
-          agentProcessStatus: 'stopped',
-          agentWebSources: _agentWebSources,
-        ),
-      );
-    } else {
-      _clearStreamingReply();
-    }
-    if (mounted) {
-      setState(() {
-        _isGenerating = false;
-        _messages
-          ..clear()
-          ..addAll(_conversation?.messages ?? const []);
-      });
-    }
+    _activeCapabilityTaskId = null;
+    _activeRemoteAgentTaskId = null;
+    _clearStreamingReply();
+    if (mounted) setState(() => _isGenerating = false);
   }
 
   Future<void> _finishStoppedReply(
@@ -6112,38 +6200,103 @@ $text''';
   Future<void> _shareReply(AiConversationMessage message) async {
     final record = _conversation;
     if (record == null) return;
-    final question = record.nodeById(message.parentMessageId ?? '');
-    if (question == null || !question.isUser) return;
-    final questionText = presentChatMessage(record, question).text.trim();
-    final answerText = chatReplyPlainText(record, message).trim();
-    if (questionText.isEmpty || answerText.isEmpty) return;
-    final previewKey = GlobalKey();
+    final rounds = <_ChatShareRound>[];
+    for (final answer in record.messages.where((item) => !item.isUser)) {
+      final question = record.nodeById(answer.parentMessageId ?? '');
+      if (question == null || !question.isUser || answer.isIncomplete) continue;
+      final questionText = presentChatMessage(record, question).text.trim();
+      final answerText = chatReplyPlainText(record, answer).trim();
+      if (questionText.isEmpty || answerText.isEmpty) continue;
+      rounds.add(
+        _ChatShareRound(
+          messageId: answer.id,
+          question: questionText,
+          answer: answerText,
+          sources: answer.agentWebSources,
+        ),
+      );
+    }
+    if (!rounds.any((round) => round.messageId == message.id)) return;
+    final selected = <String>{message.id};
+    final previewKeys = <int, GlobalKey>{};
     final preferences = await SharedPreferences.getInstance();
-    final storageKey = 'chat-share.${record.id}.${message.id}';
+    var storageKey = 'chat-share.${record.id}.${message.id}';
     var shareId = preferences.getString('$storageKey.id');
     var shareUrl = preferences.getString('$storageKey.url');
     var busy = false;
+    final revokedShareIds = <String>{};
+    final existingSharesFuture = CapabilityCloudSync.instance.listChatShares();
+    if (shareId != null) {
+      unawaited(
+        CapabilityCloudSync.instance
+            .associateChatShare(shareId, conversationId: record.id)
+            .catchError((Object _) {}),
+      );
+    }
     if (!mounted) return;
 
-    Future<void> shareImage() async {
-      final boundary = previewKey.currentContext?.findRenderObject();
-      if (boundary is! RenderRepaintBoundary) return;
-      final image = await boundary.toImage(
-        pixelRatio: MediaQuery.devicePixelRatioOf(context).clamp(1.5, 3),
-      );
-      final data = await image.toByteData(format: ImageByteFormat.png);
-      image.dispose();
-      if (data == null) throw StateError('长图生成失败');
+    List<_ChatShareRound> selectedRounds() => rounds
+        .where((round) => selected.contains(round.messageId))
+        .toList(growable: false);
+
+    List<_ChatShareRound> previewRounds() {
+      const maxAnswerCharacters = 4200;
+      final result = <_ChatShareRound>[];
+      for (final round in selectedRounds()) {
+        final parts = _splitShareAnswer(round.answer, maxAnswerCharacters);
+        for (var index = 0; index < parts.length; index++) {
+          result.add(
+            _ChatShareRound(
+              messageId: round.messageId,
+              question: index == 0 ? round.question : '${round.question}（续）',
+              answer: parts[index],
+              sources: index == parts.length - 1 ? round.sources : const [],
+            ),
+          );
+        }
+      }
+      return result;
+    }
+
+    List<List<_ChatShareRound>> previewPages() {
+      final pages = <List<_ChatShareRound>>[];
+      var current = <_ChatShareRound>[];
+      var characters = 0;
+      for (final round in previewRounds()) {
+        final length = round.question.length + round.answer.length;
+        if (current.isNotEmpty && characters + length > 4800) {
+          pages.add(current);
+          current = <_ChatShareRound>[];
+          characters = 0;
+        }
+        current.add(round);
+        characters += length;
+      }
+      if (current.isNotEmpty) pages.add(current);
+      return pages;
+    }
+
+    Future<void> shareImages() async {
       final directory = await getTemporaryDirectory();
-      final file = File(
-        '${directory.path}${Platform.pathSeparator}xiaoqi-share-${message.id}.png',
-      );
-      await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
+      final pixelRatio = MediaQuery.devicePixelRatioOf(context).clamp(1.5, 2.5);
+      final files = <XFile>[];
+      final pages = previewPages();
+      for (var index = 0; index < pages.length; index++) {
+        final boundary = previewKeys[index]?.currentContext?.findRenderObject();
+        if (boundary is! RenderRepaintBoundary) continue;
+        final image = await boundary.toImage(pixelRatio: pixelRatio);
+        final data = await image.toByteData(format: ImageByteFormat.png);
+        image.dispose();
+        if (data == null) continue;
+        final file = File(
+          '${directory.path}${Platform.pathSeparator}xiaoqi-share-${message.id}-${index + 1}.png',
+        );
+        await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
+        files.add(XFile(file.path, mimeType: 'image/png'));
+      }
+      if (files.isEmpty) throw StateError('长图生成失败');
       await SharePlus.instance.share(
-        ShareParams(
-          files: [XFile(file.path, mimeType: 'image/png')],
-          text: '来自小栖的问答',
-        ),
+        ShareParams(files: files, text: '来自小栖的问答'),
       );
     }
 
@@ -6195,21 +6348,208 @@ $text''';
                       ),
                       const SizedBox(height: 16),
                       const Text(
-                        '分享问答',
+                        '选择要分享的问答',
                         style: TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      RepaintBoundary(
-                        key: previewKey,
-                        child: _ChatSharePreview(
-                          question: questionText,
-                          answer: answerText,
-                          sources: message.agentWebSources,
+                      const SizedBox(height: 8),
+                      for (final round in rounds)
+                        CheckboxListTile(
+                          value: selected.contains(round.messageId),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          controlAffinity: ListTileControlAffinity.leading,
+                          title: Text(
+                            round.question,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onChanged: busy
+                              ? null
+                              : (checked) {
+                                  if (checked != true && selected.length == 1) {
+                                    return;
+                                  }
+                                  setSheetState(() {
+                                    checked == true
+                                        ? selected.add(round.messageId)
+                                        : selected.remove(round.messageId);
+                                    final ids = selected.toList()..sort();
+                                    storageKey =
+                                        'chat-share.${record.id}.${ids.join('-')}';
+                                    shareId = preferences.getString(
+                                      '$storageKey.id',
+                                    );
+                                    shareUrl = preferences.getString(
+                                      '$storageKey.url',
+                                    );
+                                  });
+                                },
                         ),
+                      if (shareUrl != null) ...[
+                        const SizedBox(height: 4),
+                        SelectableText(
+                          shareUrl!,
+                          style: const TextStyle(
+                            color: Color(0xFF3158D8),
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                      FutureBuilder<List<Map<String, dynamic>>>(
+                        future: existingSharesFuture,
+                        builder: (context, snapshot) {
+                          if (!snapshot.hasData) {
+                            if (snapshot.hasError) {
+                              return const Padding(
+                                padding: EdgeInsets.only(top: 8),
+                                child: Text(
+                                  '已有链接暂时无法读取',
+                                  style: TextStyle(
+                                    color: Color(0xFF858A92),
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              );
+                            }
+                            return const SizedBox.shrink();
+                          }
+                          final existing = snapshot.data!
+                              .where((item) {
+                                final linkedConversation =
+                                    item['conversation_id']?.toString().trim();
+                                return linkedConversation == record.id ||
+                                    linkedConversation == null ||
+                                    linkedConversation.isEmpty;
+                              })
+                              .where(
+                                (item) => !revokedShareIds.contains(
+                                  item['id']?.toString(),
+                                ),
+                              )
+                              .toList(growable: false);
+                          if (existing.isEmpty) return const SizedBox.shrink();
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 12),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  '已有公开链接',
+                                  style: TextStyle(
+                                    color: Color(0xFF62666D),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                for (final item in existing)
+                                  ListTile(
+                                    dense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                    title: SelectableText(
+                                      item['url']?.toString() ?? '',
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                    subtitle: Text(
+                                      item['conversation_id'] == record.id
+                                          ? '本会话'
+                                          : '旧链接，未关联会话',
+                                      style: const TextStyle(fontSize: 11),
+                                    ),
+                                    trailing: Wrap(
+                                      spacing: 0,
+                                      children: [
+                                        IconButton(
+                                          tooltip: '复制链接',
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: busy
+                                              ? null
+                                              : () => run(() async {
+                                                  await Clipboard.setData(
+                                                    ClipboardData(
+                                                      text:
+                                                          item['url']
+                                                              ?.toString() ??
+                                                          '',
+                                                    ),
+                                                  );
+                                                  if (mounted) {
+                                                    AppToast.show(
+                                                      this.context,
+                                                      '链接已复制',
+                                                    );
+                                                  }
+                                                }),
+                                          icon: const Icon(
+                                            Icons.copy_outlined,
+                                            size: 18,
+                                          ),
+                                        ),
+                                        IconButton(
+                                          tooltip: '撤销链接',
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: busy
+                                              ? null
+                                              : () => run(() async {
+                                                  final id = item['id']
+                                                      ?.toString();
+                                                  if (id == null) return;
+                                                  await CapabilityCloudSync
+                                                      .instance
+                                                      .revokeChatShare(id);
+                                                  revokedShareIds.add(id);
+                                                  if (shareId == id) {
+                                                    await preferences.remove(
+                                                      '$storageKey.id',
+                                                    );
+                                                    await preferences.remove(
+                                                      '$storageKey.url',
+                                                    );
+                                                    shareId = null;
+                                                    shareUrl = null;
+                                                  }
+                                                  if (mounted) {
+                                                    AppToast.show(
+                                                      this.context,
+                                                      '公开链接已撤销',
+                                                    );
+                                                  }
+                                                }),
+                                          icon: const Icon(
+                                            Icons.link_off_outlined,
+                                            size: 18,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          );
+                        },
                       ),
+                      const SizedBox(height: 8),
+                      for (final entry in previewPages().indexed)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: RepaintBoundary(
+                            key: previewKeys.putIfAbsent(
+                              entry.$1,
+                              () => GlobalKey(),
+                            ),
+                            child: _ChatSharePreview(rounds: entry.$2),
+                          ),
+                        ),
+                      if (previewPages().length > 1)
+                        Text(
+                          '内容较长，将生成 ${previewPages().length} 张清晰图片',
+                          style: const TextStyle(
+                            color: Color(0xFF70747C),
+                            fontSize: 12,
+                          ),
+                        ),
                       const SizedBox(height: 16),
                       Wrap(
                         spacing: 8,
@@ -6219,7 +6559,7 @@ $text''';
                             icon: Icons.image_outlined,
                             label: '生成长图',
                             enabled: !busy,
-                            onTap: () => run(shareImage),
+                            onTap: () => run(shareImages),
                           ),
                           _ChatShareAction(
                             icon: Icons.link,
@@ -6230,15 +6570,10 @@ $text''';
                                 final result = await CapabilityCloudSync
                                     .instance
                                     .createChatShare(
-                                      question: questionText,
-                                      answer: answerText,
-                                      sources: [
-                                        for (final source
-                                            in message.agentWebSources)
-                                          {
-                                            'title': source.title,
-                                            'url': source.url,
-                                          },
+                                      conversationId: record.id,
+                                      rounds: [
+                                        for (final round in selectedRounds())
+                                          round.toJson(),
                                       ],
                                     );
                                 shareId = result['id']?.toString();
@@ -6270,7 +6605,12 @@ $text''';
                                 ShareParams(
                                   text:
                                       shareUrl ??
-                                      '提问：$questionText\n\n回答：$answerText',
+                                      selectedRounds()
+                                          .map(
+                                            (round) =>
+                                                '提问：${round.question}\n\n回答：${round.answer}',
+                                          )
+                                          .join('\n\n——\n\n'),
                                 ),
                               );
                             }),
@@ -6582,6 +6922,9 @@ $text''';
       if (updated == null) return;
       try {
         if (updated.nodes.isEmpty) {
+          await CapabilityCloudSync.instance.revokeConversationShares(
+            current.id,
+          );
           await _historyService.delete([current.id]);
         } else {
           await _historyService.saveTransactional(updated);
@@ -7188,7 +7531,7 @@ $text''';
     if (_voicePanelVisible) await _cancelVoiceInput();
     if (!mounted || generation != _readingTaskGeneration) return;
     _dismissComposerFocus();
-    _detachReply();
+    _leaveReplyRunningInBackground();
     _clearEmptyStoppedReply();
     _setComposerExpanded(false);
     final conversation = AiConversationRecord.empty(
@@ -7277,7 +7620,7 @@ $text''';
 
     _dismissComposerFocus();
     _setComposerExpanded(false);
-    _detachReply();
+    _leaveReplyRunningInBackground();
     try {
       await _bookLibrary.setBookInReadingSpace(bookId, true);
       final currentConversation = _conversation;
@@ -7513,7 +7856,7 @@ $text''';
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _readingTaskGeneration++;
     _dismissComposerFocus();
-    _detachReply();
+    _leaveReplyRunningInBackground();
     _clearEmptyStoppedReply();
     setState(() {
       _space = _HomeSpace.reading;
@@ -7545,7 +7888,10 @@ $text''';
     }
   }
 
-  void _cancelReplyBeforeConversationDelete(AiConversationRecord record) {
+  Future<void> _cancelReplyBeforeConversationDelete(
+    AiConversationRecord record,
+  ) async {
+    await CapabilityCloudSync.instance.revokeConversationShares(record.id);
     final pendingTaskIds = record.nodes
         .where((message) => message.isUser && message.agentTaskId != null)
         .where(
@@ -9476,14 +9822,14 @@ class _AgentStatusHeader extends StatelessWidget {
   final bool animated;
 
   static const textStyle = TextStyle(
-    color: Color(0xFF777777),
-    fontSize: 16,
-    height: 1.3,
+    color: Color(0xFF70747C),
+    fontSize: 14,
+    height: 1.4,
   );
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    height: 48,
+    height: 34,
     child: Align(
       alignment: Alignment.centerLeft,
       child: Semantics(
@@ -9493,7 +9839,7 @@ class _AgentStatusHeader extends StatelessWidget {
         child: Material(
           type: MaterialType.transparency,
           child: InkWell(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(6),
             splashFactory: NoSplash.splashFactory,
             splashColor: Colors.transparent,
             highlightColor: Colors.transparent,
@@ -9502,10 +9848,22 @@ class _AgentStatusHeader extends StatelessWidget {
             overlayColor: const WidgetStatePropertyAll(Colors.transparent),
             onTap: onToggle,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: EdgeInsets.zero,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  SvgPicture.asset(
+                    'assets/images/deepseek_think_outline_16.svg',
+                    width: 16,
+                    height: 16,
+                    colorFilter: ColorFilter.mode(
+                      text == '已停止'
+                          ? const Color(0xFF9A9EA5)
+                          : const Color(0xFF4D6BFE),
+                      BlendMode.srcIn,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
                   Flexible(
                     child: animated
                         ? _ThinkingStatusText(text: text, style: textStyle)
@@ -9520,7 +9878,7 @@ class _AgentStatusHeader extends StatelessWidget {
                     const SizedBox(width: 6),
                     Icon(
                       expanded ? Icons.expand_more : Icons.chevron_right,
-                      size: 24,
+                      size: 16,
                       color: const Color(0xFF8A8D91),
                     ),
                   ],
@@ -9655,7 +10013,7 @@ class _AgentProcessPanelState extends State<_AgentProcessPanel> {
     final textColor = colors.onSurfaceVariant.withValues(alpha: 0.78);
     final content = Container(
       margin: const EdgeInsets.only(left: 3),
-      padding: const EdgeInsets.only(left: 12),
+      padding: const EdgeInsets.only(left: 22),
       decoration: BoxDecoration(
         border: Border(
           left: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.5)),
@@ -9694,8 +10052,8 @@ class _AgentProcessPanelState extends State<_AgentProcessPanel> {
                             detail['text']?.toString() ?? '',
                             style: TextStyle(
                               color: textColor,
-                              fontSize: 12,
-                              height: 1.5,
+                              fontSize: 14,
+                              height: 1.55,
                             ),
                           ),
                         ),
@@ -9711,8 +10069,8 @@ class _AgentProcessPanelState extends State<_AgentProcessPanel> {
                             _agentProcessEventLabel(detail),
                             style: TextStyle(
                               color: textColor,
-                              fontSize: 12,
-                              height: 1.5,
+                              fontSize: 13,
+                              height: 1.55,
                             ),
                           ),
                         ),
@@ -9725,7 +10083,7 @@ class _AgentProcessPanelState extends State<_AgentProcessPanel> {
 
     if (!_isStreaming) return content;
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 120),
+      constraints: const BoxConstraints(maxHeight: 180),
       child: ShaderMask(
         blendMode: BlendMode.dstIn,
         shaderCallback: (bounds) => const LinearGradient(
@@ -11396,7 +11754,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
         alignment: Alignment.centerRight,
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxWidth: MediaQuery.sizeOf(context).width * .82,
+            maxWidth: max(0, MediaQuery.sizeOf(context).width - 68),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
@@ -11441,12 +11799,12 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                 DecoratedBox(
                   decoration: BoxDecoration(
                     color: const Color(0xFFF0F2FF),
-                    borderRadius: BorderRadius.circular(18),
+                    borderRadius: BorderRadius.circular(22),
                   ),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 16,
-                      vertical: 11,
+                      vertical: 10,
                     ),
                     child: _messageSelection(
                       message,
@@ -11457,7 +11815,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                         textStyle: const TextStyle(
                           color: Color(0xFF24272C),
                           fontSize: 16,
-                          height: 1.45,
+                          height: 1.5,
                         ),
                       ),
                     ),
@@ -11832,16 +12190,32 @@ class _AgentSourcesCapsule extends StatelessWidget {
   }
 }
 
-class _ChatSharePreview extends StatelessWidget {
-  const _ChatSharePreview({
+class _ChatShareRound {
+  const _ChatShareRound({
+    required this.messageId,
     required this.question,
     required this.answer,
     required this.sources,
   });
 
+  final String messageId;
   final String question;
   final String answer;
   final List<AiChatWebSource> sources;
+
+  Map<String, Object?> toJson() => {
+    'question': question,
+    'answer': answer,
+    'sources': [
+      for (final source in sources) {'title': source.title, 'url': source.url},
+    ],
+  };
+}
+
+class _ChatSharePreview extends StatelessWidget {
+  const _ChatSharePreview({required this.rounds});
+
+  final List<_ChatShareRound> rounds;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -11859,60 +12233,112 @@ class _ChatSharePreview extends StatelessWidget {
             fontWeight: FontWeight.w700,
           ),
         ),
-        const SizedBox(height: 14),
-        Align(
-          alignment: Alignment.centerRight,
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 320),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF0F2FF),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Text(
-              question,
-              style: const TextStyle(fontSize: 15, height: 1.45),
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            border: Border.all(color: const Color(0xFFE6E8EC)),
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                answer,
-                style: const TextStyle(
-                  color: Color(0xFF303134),
-                  fontSize: 15,
-                  height: 1.55,
-                ),
+        for (final round in rounds) ...[
+          const SizedBox(height: 14),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 320),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF0F2FF),
+                borderRadius: BorderRadius.circular(22),
               ),
-              if (sources.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                const Divider(height: 1),
-                const SizedBox(height: 10),
-                Text(
-                  '${sources.length} 个网页来源',
-                  style: const TextStyle(
-                    color: Color(0xFF686D75),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ],
+              child: Text(
+                round.question,
+                style: const TextStyle(fontSize: 15, height: 1.5),
+              ),
+            ),
           ),
-        ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border.all(color: const Color(0xFFE6E8EC)),
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                GptMarkdown(
+                  round.answer,
+                  style: const TextStyle(
+                    color: Color(0xFF303134),
+                    fontSize: 15,
+                    height: 1.55,
+                  ),
+                  animation: GptMarkdownAnimation.none,
+                  blockAnimation: GptMarkdownBlockAnimation.none,
+                  useDollarSignsForLatex: false,
+                ),
+                if (round.sources.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  const Divider(height: 1),
+                  const SizedBox(height: 10),
+                  Text(
+                    '${round.sources.length} 个网页来源',
+                    style: const TextStyle(
+                      color: Color(0xFF686D75),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  for (var index = 0; index < round.sources.length; index++)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        '[${index + 1}] ${round.sources[index].title} · ${round.sources[index].siteName.isNotEmpty ? round.sources[index].siteName : round.sources[index].url}',
+                        style: const TextStyle(
+                          color: Color(0xFF3158D8),
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ],
       ],
     ),
   );
+}
+
+List<String> _splitShareAnswer(String answer, int maxCharacters) {
+  if (answer.length <= maxCharacters) return [answer];
+  final pages = <String>[];
+  final current = StringBuffer();
+  var currentLength = 0;
+  void flush() {
+    if (currentLength == 0) return;
+    pages.add(current.toString().trim());
+    current.clear();
+    currentLength = 0;
+  }
+
+  for (final paragraph in answer.split('\n')) {
+    final line = paragraph.isEmpty ? '\n' : '$paragraph\n';
+    final codePoints = line.runes.toList(growable: false);
+    if (codePoints.length > maxCharacters) {
+      flush();
+      for (var start = 0; start < codePoints.length; start += maxCharacters) {
+        pages.add(
+          String.fromCharCodes(
+            codePoints.skip(start).take(maxCharacters),
+          ).trim(),
+        );
+      }
+      continue;
+    }
+    if (currentLength + codePoints.length > maxCharacters) flush();
+    current.write(line);
+    currentLength += codePoints.length;
+  }
+  flush();
+  return pages.where((page) => page.isNotEmpty).toList(growable: false);
 }
 
 class _ChatShareAction extends StatelessWidget {

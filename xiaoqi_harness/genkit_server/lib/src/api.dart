@@ -355,6 +355,10 @@ class XiaoqiApi {
       path: '/v1/agent/chat',
       contextProvider: _agentRequestContext,
     );
+    _taskLeaseTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => _pauseExpiredTaskLeases(),
+    );
   }
 
   final CloudStore store;
@@ -371,6 +375,8 @@ class XiaoqiApi {
   late final GenkitRouter _agentRouter;
   late final Agent<Map<String, dynamic>> _remoteAgent;
   final _controllers = <String, CancellationController>{};
+  final _leasedTaskKeys = <String>{};
+  Timer? _taskLeaseTimer;
   final _appControllers =
       <String, ({String callId, CancellationController controller})>{};
   static const _uuid = Uuid();
@@ -408,10 +414,31 @@ class XiaoqiApi {
           (device) => _createChatShare(request, device),
         ),
       )
+      ..get(
+        '/v1/chat-shares',
+        (request) => _authenticated(
+          request,
+          (device) => _listChatShares(request, device),
+        ),
+      )
+      ..delete(
+        '/v1/chat-shares',
+        (request) => _authenticated(
+          request,
+          (device) => _revokeConversationShares(request, device),
+        ),
+      )
       ..delete(
         '/v1/chat-shares/<id>',
         (request, id) =>
             _authenticated(request, (device) => _revokeChatShare(device, id)),
+      )
+      ..post(
+        '/v1/chat-shares/<id>/associate',
+        (request, id) => _authenticated(
+          request,
+          (device) => _associateChatShare(request, device, id),
+        ),
       )
       ..post(
         '/v1/attachments',
@@ -820,6 +847,11 @@ class XiaoqiApi {
         (request, id) =>
             _authenticated(request, (device) => _resumeTask(device, id)),
       )
+      ..post(
+        '/v1/agent/tasks/<id>/heartbeat',
+        (request, id) =>
+            _authenticated(request, (device) => _heartbeatTask(device, id)),
+      )
       ..get(
         '/v1/agent/tasks/<task>/artifacts/<artifact>',
         (request, task, artifact) => _authenticated(
@@ -865,7 +897,49 @@ class XiaoqiApi {
       );
 
   Future<void> close() async {
+    _taskLeaseTimer?.cancel();
     await _attachments?.close();
+  }
+
+  void _pauseExpiredTaskLeases() {
+    final now = DateTime.now().toUtc();
+    for (final key in _leasedTaskKeys.toList(growable: false)) {
+      final document = store.get(key);
+      if (document == null) {
+        _leasedTaskKeys.remove(key);
+        continue;
+      }
+      final value = document.value;
+      if (value['remote_agent_turn'] != true ||
+          value['lease_required'] != true ||
+          !const {'queued', 'running'}.contains(value['status'])) {
+        _leasedTaskKeys.remove(key);
+        continue;
+      }
+      final heartbeat = DateTime.tryParse(
+        value['last_client_heartbeat_at']?.toString() ?? '',
+      );
+      if (heartbeat == null || now.difference(heartbeat).inSeconds < 60)
+        continue;
+      final updated = _mutateTask(
+        key,
+        (current) => {
+          ...current,
+          'status': 'pausing',
+          'cancel_requested': true,
+          'lease_expired_at': _now(),
+          'updated_at': _now(),
+        },
+      );
+      if (updated?.value['status'] != 'pausing') continue;
+      _leasedTaskKeys.remove(key);
+      _controllers[key]?.cancel('客户端连接已中断，任务已暂停');
+      _appendEvent(key, {
+        'type': 'status',
+        'status': 'pausing',
+        'reason': 'client_disconnected',
+      });
+    }
   }
 
   Map<String, dynamic> _agentRequestContext(RequestData request) {
@@ -3308,6 +3382,7 @@ class XiaoqiApi {
       if (task == null) return _error('任务不存在', 404);
       if (!const {
         'failed',
+        'paused',
         'awaiting_network_permission',
       }.contains(task.value['status']))
         return _error('任务当前无法恢复', 409);
@@ -3322,6 +3397,9 @@ class XiaoqiApi {
           ...value,
           'status': 'queued',
           'cancel_requested': false,
+          'lease_required': false,
+          'last_client_heartbeat_at': null,
+          'lease_expired_at': null,
           'attempt': (value['attempt'] as num? ?? 1).toInt() + 1,
           'updated_at': _now(),
         },
@@ -3330,6 +3408,36 @@ class XiaoqiApi {
       return _json({'ok': true, 'status': 'queued'});
     } on Object {
       return _error('恢复任务失败', 503);
+    }
+  }
+
+  Future<Response> _heartbeatTask(_Device device, String id) async {
+    try {
+      final key = 'task/${device.tenant}/${_safeId(id, '任务 ID')}';
+      final task = store.get(key);
+      if (task == null) return _error('任务不存在', 404);
+      final status = task.value['status']?.toString();
+      if (!const {'queued', 'running', 'pausing'}.contains(status)) {
+        _leasedTaskKeys.remove(key);
+        return _json({'ok': true, 'status': _publicTaskStatus(status)});
+      }
+      _leasedTaskKeys.add(key);
+      final updated = _mutateTask(
+        key,
+        (value) => {
+          ...value,
+          'lease_required': true,
+          'last_client_heartbeat_at': _now(),
+        },
+      );
+      return _json({
+        'ok': true,
+        'status': _publicTaskStatus(updated?.value['status']),
+      });
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on Object {
+      return _error('任务连接状态更新失败', 503);
     }
   }
 
@@ -3389,57 +3497,134 @@ class XiaoqiApi {
 
   Future<Response> _createChatShare(Request request, _Device device) async {
     try {
-      final body = await _body(request, 96 * 1024);
-      final question = body['question']?.toString().trim() ?? '';
-      final answer = body['answer']?.toString().trim() ?? '';
-      if (question.isEmpty || answer.isEmpty) {
-        return _error('请选择一组完整问答', 400);
-      }
-      if (question.length > 12000 || answer.length > 60000) {
-        return _error('分享内容过长，请减少选中的内容', 400);
-      }
-      final rawSources = body['sources'];
-      if (rawSources != null && rawSources is! List) {
-        return _error('来源格式无效', 400);
-      }
-      final sources = <Map<String, String>>[];
-      for (final raw in (rawSources as List? ?? const []).take(50)) {
+      final body = await _body(request, 512 * 1024);
+      final conversationId = body['conversation_id']?.toString().trim() ?? '';
+      final rawRounds = body['rounds'];
+      final legacyQuestion = body['question']?.toString().trim() ?? '';
+      final legacyAnswer = body['answer']?.toString().trim() ?? '';
+      final rounds = <Map<String, dynamic>>[];
+      final inputRounds = rawRounds is List
+          ? rawRounds
+          : legacyQuestion.isNotEmpty && legacyAnswer.isNotEmpty
+          ? [
+              {
+                'question': legacyQuestion,
+                'answer': legacyAnswer,
+                'sources': body['sources'],
+              },
+            ]
+          : const [];
+      for (final raw in inputRounds.take(50)) {
         if (raw is! Map) continue;
-        final url = Uri.tryParse(raw['url']?.toString().trim() ?? '');
-        if (url == null ||
-            !const {'http', 'https'}.contains(url.scheme.toLowerCase()) ||
-            url.host.isEmpty) {
-          continue;
+        final question = raw['question']?.toString().trim() ?? '';
+        final answer = raw['answer']?.toString().trim() ?? '';
+        if (question.isEmpty || answer.isEmpty) continue;
+        if (question.length > 12000 || answer.length > 60000) {
+          return _error('分享内容过长，请减少选中的内容', 400);
         }
-        sources.add({
-          'title': (raw['title']?.toString().trim() ?? url.host).substring(
-            0,
-            min(300, (raw['title']?.toString().trim() ?? url.host).length),
-          ),
-          'url': url.toString(),
+        rounds.add({
+          'question': question,
+          'answer': answer,
+          'sources': _chatShareSources(raw['sources']),
         });
+      }
+      if (rounds.isEmpty) {
+        return _error('请选择一组完整问答', 400);
       }
       final id = _token().substring(0, 22);
       final now = _now();
       store.put('chat-share/$id', {
         'id': id,
         'tenant_id': device.tenant,
-        'question': question,
-        'answer': answer,
-        'sources': sources,
+        if (conversationId.isNotEmpty) 'conversation_id': conversationId,
+        'rounds': rounds,
         'created_at': now,
         'revoked_at': null,
       }, null);
-      final configuredBase =
-          Platform.environment['XIAOQI_PUBLIC_BASE_URL']?.trim() ?? '';
-      final publicUrl = configuredBase.isNotEmpty
-          ? '${configuredBase.replaceFirst(RegExp(r'/$'), '')}/s/$id'
-          : request.requestedUri.resolve('/s/$id').toString();
+      final publicUrl = _publicChatShareUrl(request, id);
       return _json({'id': id, 'url': publicUrl, 'created_at': now}, 201);
     } on FormatException catch (error) {
       return _error(error.message, 400);
     } on Object {
       return _error('创建分享链接失败', 503);
+    }
+  }
+
+  List<Map<String, String>> _chatShareSources(Object? rawSources) {
+    final sources = <Map<String, String>>[];
+    for (final raw in (rawSources is List ? rawSources : const []).take(50)) {
+      if (raw is! Map) continue;
+      final url = Uri.tryParse(raw['url']?.toString().trim() ?? '');
+      if (url == null ||
+          !const {'http', 'https'}.contains(url.scheme.toLowerCase()) ||
+          url.host.isEmpty)
+        continue;
+      final rawTitle = raw['title']?.toString().trim() ?? url.host;
+      sources.add({
+        'title': rawTitle.substring(0, min(300, rawTitle.length)),
+        'url': url.toString(),
+      });
+    }
+    return sources;
+  }
+
+  String _publicChatShareUrl(Request request, String id) {
+    final configuredBase =
+        Platform.environment['XIAOQI_PUBLIC_BASE_URL']?.trim() ?? '';
+    if (configuredBase.isNotEmpty) {
+      return '${configuredBase.replaceFirst(RegExp(r'/$'), '')}/s/$id';
+    }
+    final publicHost = Platform.environment['XIAOQI_PUBLIC_HOST']?.trim() ?? '';
+    if (publicHost.isNotEmpty) return 'https://$publicHost/s/$id';
+    return request.requestedUri.resolve('/s/$id').toString();
+  }
+
+  Future<Response> _listChatShares(Request request, _Device device) async {
+    final items =
+        store
+            .list('chat-share/', limit: 1000)
+            .map((row) => row.$2.value)
+            .where(
+              (value) =>
+                  value['tenant_id'] == device.tenant &&
+                  value['revoked_at'] == null,
+            )
+            .map(
+              (value) => {
+                'id': value['id'],
+                'conversation_id': value['conversation_id'],
+                'created_at': value['created_at'],
+                'url': _publicChatShareUrl(request, value['id'].toString()),
+              },
+            )
+            .toList(growable: false)
+          ..sort(
+            (a, b) => '${b['created_at']}'.compareTo('${a['created_at']}'),
+          );
+    return _json({'items': items});
+  }
+
+  Future<Response> _revokeConversationShares(
+    Request request,
+    _Device device,
+  ) async {
+    try {
+      final conversationId =
+          request.url.queryParameters['conversation_id']?.trim() ?? '';
+      if (conversationId.isEmpty) return _error('需要会话 ID', 400);
+      var count = 0;
+      for (final (key, document) in store.list('chat-share/', limit: 1000)) {
+        final value = document.value;
+        if (value['tenant_id'] != device.tenant ||
+            value['conversation_id'] != conversationId ||
+            value['revoked_at'] != null)
+          continue;
+        store.put(key, {...value, 'revoked_at': _now()}, document.revision);
+        count++;
+      }
+      return _json({'ok': true, 'revoked': count});
+    } on RevisionConflict {
+      return _error('分享状态已变化，请重试', 409);
     }
   }
 
@@ -3465,6 +3650,39 @@ class XiaoqiApi {
     }
   }
 
+  Future<Response> _associateChatShare(
+    Request request,
+    _Device device,
+    String rawId,
+  ) async {
+    try {
+      final id = _safeId(rawId, '分享 ID');
+      final body = await _body(request, 2048);
+      final conversationId = body['conversation_id']?.toString().trim() ?? '';
+      if (conversationId.isEmpty) return _error('需要会话 ID', 400);
+      final key = 'chat-share/$id';
+      final record = store.get(key);
+      if (record == null || record.value['tenant_id'] != device.tenant) {
+        return _error('分享链接不存在', 404);
+      }
+      final existing = record.value['conversation_id']?.toString();
+      if (existing != null &&
+          existing.isNotEmpty &&
+          existing != conversationId) {
+        return _error('分享链接已关联其他会话', 409);
+      }
+      store.put(key, {
+        ...record.value,
+        'conversation_id': conversationId,
+      }, record.revision);
+      return _json({'ok': true});
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    } on RevisionConflict {
+      return _error('分享状态已变化，请重试', 409);
+    }
+  }
+
   Future<Response> _publicChatShare(Request request, String rawId) async {
     String escape(Object? value) => const HtmlEscape().convert('$value');
     try {
@@ -3474,20 +3692,35 @@ class XiaoqiApi {
         return Response.notFound('分享链接不存在或已撤销');
       }
       final value = record.value;
-      final sources = (value['sources'] as List? ?? const []).whereType<Map>().map((
-        source,
-      ) {
-        final url = escape(source['url']);
-        final title = escape(source['title']);
-        return '<li><a href="$url" rel="nofollow noopener noreferrer">$title</a></li>';
+      final rounds = value['rounds'] is List
+          ? (value['rounds'] as List).whereType<Map>().toList(growable: false)
+          : <Map>[
+              {
+                'question': value['question'],
+                'answer': value['answer'],
+                'sources': value['sources'],
+              },
+            ];
+      final content = rounds.map((round) {
+        final sources = (round['sources'] as List? ?? const [])
+            .whereType<Map>()
+            .map((source) {
+              final url = escape(source['url']);
+              final title = escape(source['title']);
+              return '<li><a href="$url" rel="nofollow noopener noreferrer">$title</a></li>';
+            })
+            .join();
+        return '<section class="card q"><div class="label">提问</div>${escape(round['question'])}</section>'
+            '<section class="card answer"><div class="label">回答</div>${escape(round['answer'])}'
+            '${sources.isEmpty ? '' : '<div class="sources"><div class="label">网页来源</div><ol>$sources</ol></div>'}</section>';
       }).join();
       final html =
-          '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>小栖分享</title><style>body{margin:0;background:#f5f6f8;color:#24272c;font:16px/1.7 system-ui,sans-serif}.page{max-width:760px;margin:auto;padding:32px 20px 64px}.brand{font-weight:700;margin-bottom:24px}.card{background:#fff;border:1px solid #e6e8ec;border-radius:20px;padding:22px;white-space:pre-wrap;overflow-wrap:anywhere}.q{background:#f0f2ff;margin-bottom:16px}.label{font-size:13px;color:#747982;margin-bottom:6px}a{color:#3158d8}.sources{margin-top:18px}</style></head><body><main class="page"><div class="brand">小栖</div><section class="card q"><div class="label">提问</div>${escape(value['question'])}</section><section class="card"><div class="label">回答</div>${escape(value['answer'])}${sources.isEmpty ? '' : '<div class="sources"><div class="label">网页来源</div><ol>$sources</ol></div>'}</section></main></body></html>''';
+          '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>小栖分享</title><style>body{margin:0;background:#f5f6f8;color:#24272c;font:16px/1.7 system-ui,sans-serif}.page{max-width:760px;margin:auto;padding:32px 20px 64px}.brand{font-weight:700;margin-bottom:24px}.card{background:#fff;border:1px solid #e6e8ec;border-radius:20px;padding:22px;white-space:pre-wrap;overflow-wrap:anywhere}.q{background:#f0f2ff;margin-top:22px;margin-bottom:12px}.answer{margin-bottom:22px}.label{font-size:13px;color:#747982;margin-bottom:6px}a{color:#3158d8}.sources{margin-top:18px}</style></head><body><main class="page"><div class="brand">小栖</div>$content</main></body></html>''';
       return Response.ok(
         html,
         headers: const {
           'content-type': 'text/html; charset=utf-8',
-          'cache-control': 'public, max-age=60',
+          'cache-control': 'no-store',
           'x-content-type-options': 'nosniff',
           'content-security-policy':
               "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; base-uri 'none'; form-action 'none'",

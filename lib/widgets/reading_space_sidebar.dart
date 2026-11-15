@@ -55,7 +55,8 @@ class ReadingSpaceSidebar extends StatefulWidget {
   final VoidCallback onOpenLibrary;
   final VoidCallback onOpenExtensionMarket;
   final ValueChanged<AiConversationRecord>? onConversationChanged;
-  final ValueChanged<AiConversationRecord>? onBeforeConversationDeleted;
+  final Future<void> Function(AiConversationRecord)?
+  onBeforeConversationDeleted;
   final ValueChanged<AiConversationRecord>? onConversationDeleted;
   final BookLibraryService? bookLibraryService;
   final AiConversationHistoryService? historyService;
@@ -786,10 +787,10 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
       ),
     );
     if (!mounted || confirmed != true) return;
-    for (final record in selected) {
-      widget.onBeforeConversationDeleted?.call(record);
-    }
     try {
+      for (final record in selected) {
+        await widget.onBeforeConversationDeleted?.call(record);
+      }
       await _history.delete(ids);
       if (!mounted) return;
       for (final record in selected) {

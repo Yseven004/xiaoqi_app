@@ -276,12 +276,18 @@ void main() {
         ..contentType = ContentType.json;
       create.write(
         jsonEncode({
-          'question': '公开问题',
-          'answer': '公开回答',
-          'hidden_branch': '不能公开',
-          'sources': [
-            {'title': '来源', 'url': 'https://example.com/article'},
+          'conversation_id': 'conversation-share-test',
+          'rounds': [
+            {
+              'question': '公开问题一',
+              'answer': '公开回答一',
+              'sources': [
+                {'title': '来源', 'url': 'https://example.com/article'},
+              ],
+            },
+            {'question': '公开问题二', 'answer': '公开回答二'},
           ],
+          'hidden_branch': '不能公开',
         }),
       );
       final createdResponse = await create.close();
@@ -295,19 +301,72 @@ void main() {
       )).close();
       final html = await publicResponse.transform(utf8.decoder).join();
       expect(publicResponse.statusCode, 200);
-      expect(html, contains('公开问题'));
-      expect(html, contains('公开回答'));
+      expect(publicResponse.headers.value('cache-control'), 'no-store');
+      expect(html, contains('公开问题一'));
+      expect(html, contains('公开回答二'));
       expect(html, isNot(contains('不能公开')));
+
+      final oldCreate = await http.postUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/v1/chat-shares'),
+      );
+      oldCreate.headers
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken')
+        ..set('x-xiaoqi-contract', apiContractVersion)
+        ..contentType = ContentType.json;
+      oldCreate.write(jsonEncode({'question': '旧问题', 'answer': '旧回答'}));
+      final oldCreated =
+          jsonDecode(
+                await (await oldCreate.close()).transform(utf8.decoder).join(),
+              )
+              as Map<String, dynamic>;
+      final associate = await http.postUrl(
+        Uri.parse(
+          'http://127.0.0.1:${server.port}/v1/chat-shares/${oldCreated['id']}/associate',
+        ),
+      );
+      associate.headers
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken')
+        ..set('x-xiaoqi-contract', apiContractVersion)
+        ..contentType = ContentType.json;
+      associate.write(
+        jsonEncode({'conversation_id': 'conversation-share-test'}),
+      );
+      expect((await associate.close()).statusCode, 200);
+
+      final list = await http.getUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/v1/chat-shares'),
+      );
+      list.headers
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken')
+        ..set('x-xiaoqi-contract', apiContractVersion);
+      final listedResponse = await list.close();
+      final listed =
+          jsonDecode(await listedResponse.transform(utf8.decoder).join())
+              as Map<String, dynamic>;
+      final listedItems = listed['items'] as List;
+      expect(listedItems, hasLength(2));
+      expect(
+        listedItems.every(
+          (item) => item['url'].toString().endsWith('/s/${item['id']}'),
+        ),
+        isTrue,
+      );
 
       final revoke = await http.deleteUrl(
         Uri.parse(
-          'http://127.0.0.1:${server.port}/v1/chat-shares/${created['id']}',
+          'http://127.0.0.1:${server.port}/v1/chat-shares?conversation_id=conversation-share-test',
         ),
       );
       revoke.headers
         ..set(HttpHeaders.authorizationHeader, 'Bearer $ownerToken')
         ..set('x-xiaoqi-contract', apiContractVersion);
-      expect((await revoke.close()).statusCode, 200);
+      final revoked = await revoke.close();
+      expect(revoked.statusCode, 200);
+      expect(
+        (jsonDecode(await revoked.transform(utf8.decoder).join())
+            as Map<String, dynamic>)['revoked'],
+        2,
+      );
 
       final revokedResponse = await (await http.getUrl(
         Uri.parse('http://127.0.0.1:${server.port}/s/${created['id']}'),

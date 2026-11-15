@@ -1,2 +1,2 @@
-const releaseId = '2026-11-14-deepseek-chat-parity';
-const apiContractVersion = '33';
+const releaseId = '2026-11-15-deepseek-chat-canvas';
+const apiContractVersion = '34';

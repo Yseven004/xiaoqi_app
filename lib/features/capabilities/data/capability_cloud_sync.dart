@@ -953,15 +953,25 @@ class CapabilityCloudSync {
     var completionReceived = false;
     var errorReceived = false;
     var consecutiveNetworkFailures = 0;
+    DateTime? disconnectedAt;
+    var connectingPublished = false;
     while (DateTime.now().difference(started) < const Duration(minutes: 20)) {
       late final Map<String, dynamic> response;
       try {
         response = await getTaskEvents(taskId, cursor);
         consecutiveNetworkFailures = 0;
+        disconnectedAt = null;
+        connectingPublished = false;
       } on TimeoutException {
         consecutiveNetworkFailures++;
-        if (consecutiveNetworkFailures >= 3) {
-          throw TimeoutException('连接云端任务超时，可重新打开会话恢复。');
+        disconnectedAt ??= DateTime.now();
+        if (!connectingPublished) {
+          connectingPublished = true;
+          yield const {'type': 'connection', 'status': 'connecting'};
+        }
+        if (DateTime.now().difference(disconnectedAt) >=
+            const Duration(seconds: 60)) {
+          throw TimeoutException('连接已中断，任务已暂停；请点击恢复继续。');
         }
         await Future<void>.delayed(
           Duration(seconds: consecutiveNetworkFailures),
@@ -969,8 +979,14 @@ class CapabilityCloudSync {
         continue;
       } on http.ClientException {
         consecutiveNetworkFailures++;
-        if (consecutiveNetworkFailures >= 3) {
-          throw http.ClientException('连接云端任务失败，可重新打开会话恢复。');
+        disconnectedAt ??= DateTime.now();
+        if (!connectingPublished) {
+          connectingPublished = true;
+          yield const {'type': 'connection', 'status': 'connecting'};
+        }
+        if (DateTime.now().difference(disconnectedAt) >=
+            const Duration(seconds: 60)) {
+          throw http.ClientException('连接已中断，任务已暂停；请点击恢复继续。');
         }
         await Future<void>.delayed(
           Duration(seconds: consecutiveNetworkFailures),
@@ -1294,10 +1310,22 @@ class CapabilityCloudSync {
     _checked(response);
   }
 
+  Future<String?> heartbeatTask(String taskId) async {
+    final token = await _requireToken();
+    final response = await _client
+        .post(
+          Uri.parse(
+            '$_baseUrl/agent/tasks/${Uri.encodeComponent(taskId)}/heartbeat',
+          ),
+          headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 15));
+    return _checked(response)['status']?.toString();
+  }
+
   Future<Map<String, dynamic>> createChatShare({
-    required String question,
-    required String answer,
-    List<Map<String, String>> sources = const [],
+    required String conversationId,
+    required List<Map<String, Object?>> rounds,
   }) async {
     final token = await _requireToken();
     final response = await _client
@@ -1305,13 +1333,35 @@ class CapabilityCloudSync {
           Uri.parse('$_baseUrl/chat-shares'),
           headers: _headers(token),
           body: jsonEncode({
-            'question': question,
-            'answer': answer,
-            'sources': sources,
+            'conversation_id': conversationId,
+            'rounds': rounds,
           }),
         )
         .timeout(const Duration(seconds: 20));
     return _checked(response);
+  }
+
+  Future<List<Map<String, dynamic>>> listChatShares() async {
+    final token = await _requireToken();
+    final response = await _client
+        .get(Uri.parse('$_baseUrl/chat-shares'), headers: _headers(token))
+        .timeout(const Duration(seconds: 20));
+    final body = _checked(response);
+    return (body['items'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) => item.cast<String, dynamic>())
+        .toList(growable: false);
+  }
+
+  Future<void> revokeConversationShares(String conversationId) async {
+    final token = await _requireToken();
+    final uri = Uri.parse(
+      '$_baseUrl/chat-shares',
+    ).replace(queryParameters: {'conversation_id': conversationId});
+    final response = await _client
+        .delete(uri, headers: _headers(token))
+        .timeout(const Duration(seconds: 20));
+    _checked(response);
   }
 
   Future<void> revokeChatShare(String id) async {
@@ -1320,6 +1370,23 @@ class CapabilityCloudSync {
         .delete(
           Uri.parse('$_baseUrl/chat-shares/${Uri.encodeComponent(id)}'),
           headers: _headers(token),
+        )
+        .timeout(const Duration(seconds: 20));
+    _checked(response);
+  }
+
+  Future<void> associateChatShare(
+    String id, {
+    required String conversationId,
+  }) async {
+    final token = await _requireToken();
+    final response = await _client
+        .post(
+          Uri.parse(
+            '$_baseUrl/chat-shares/${Uri.encodeComponent(id)}/associate',
+          ),
+          headers: _headers(token),
+          body: jsonEncode({'conversation_id': conversationId}),
         )
         .timeout(const Duration(seconds: 20));
     _checked(response);
