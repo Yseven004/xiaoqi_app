@@ -87,7 +87,7 @@ function Test-EcsConnection {
     try {
         $result = Invoke-AliyunJson -Arguments @(
             'ecs', 'DescribeInstances', '--profile', $Profile,
-            '--region', $Region, '--RegionId', $Region,
+            '--region', $Region,
             '--InstanceIds', ('["' + $InstanceId + '"]')
         )
         $instances = @(Get-OptionalField (Get-OptionalField $result 'Instances') 'Instance')
@@ -112,7 +112,6 @@ function Wait-RemoteCommand {
                 'ecs', 'DescribeInvocationResults',
                 '--profile', $Profile,
                 '--region', $Region,
-                '--RegionId', $Region,
                 '--InvokeId', $InvokeId,
                 '--InstanceId', $InstanceId
             )
@@ -160,7 +159,6 @@ function Invoke-RemoteCommand {
         'ecs', 'RunCommand',
         '--profile', $Profile,
         '--region', $Region,
-        '--RegionId', $Region,
         '--InstanceId.1', $InstanceId,
         '--CommandContent', $encoded,
         '--ContentEncoding', 'Base64',
@@ -209,7 +207,6 @@ function Send-RemoteFile {
         'ecs', 'SendFile',
         '--profile', $Profile,
         '--region', $Region,
-        '--RegionId', $Region,
         '--InstanceId.1', $InstanceId,
         '--TargetDir', $TargetDir,
         '--Name', $Name,
@@ -225,7 +222,6 @@ function Send-RemoteFile {
             'ecs', 'DescribeSendFileResults',
             '--profile', $Profile,
             '--region', $Region,
-            '--RegionId', $Region,
             '--InvokeId', [string]$started.InvokeId,
             '--InstanceId', $InstanceId
         )
