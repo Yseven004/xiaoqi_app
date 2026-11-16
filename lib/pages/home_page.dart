@@ -13,11 +13,12 @@ import 'package:flutter/rendering.dart';
 import '../widgets/chat_message_scroll_view.dart';
 import 'package:flutter/services.dart';
 import 'package:a2ui_core/a2ui_core.dart' as a2ui_core;
+import 'package:a2ui_flutter/a2ui_flutter.dart' as a2ui_flutter;
+import 'package:a2ui_flutter/v0_9/basic_catalog.dart' as a2ui_v09;
 import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental_client.dart' as genkit_client;
 import 'package:genkit/genkit.dart' as genkit;
-import 'package:genkit_a2ui/client.dart' as genkit_a2ui;
-import 'package:genui/genui.dart' as genui;
+import 'package:json_schema_builder/json_schema_builder.dart' as json_schema;
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:file_picker/file_picker.dart';
@@ -46,6 +47,7 @@ import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
 import '../services/book_library_service.dart';
 import '../services/ai_service.dart';
+import '../services/a2ui_genkit_bridge.dart';
 import '../services/learning_notes_service.dart';
 import '../widgets/learning_notes_status_bar.dart';
 import '../services/home_chat_attachment_preparer.dart';
@@ -77,12 +79,14 @@ class _AgentTaskFailure extends AiException {
     required this.isImageGeneration,
     this.errorCode,
     this.details,
+    this.restoreQuestionSubmission = false,
   });
 
   final String taskId;
   final bool isImageGeneration;
   final String? errorCode;
   final String? details;
+  final bool restoreQuestionSubmission;
 }
 
 class _AgentStreamPresentation {
@@ -141,42 +145,102 @@ class _AgentStreamPresentation {
 
 class _AgentClarification {
   const _AgentClarification({
-    required this.controller,
+    required this.processor,
     required this.surfaceIds,
     required this.conversationId,
     required this.messageId,
     required this.generation,
     this.status = '请补充信息',
     this.answerSummary,
+    this.taskId,
+    this.questions = const [],
+    this.draft = const {},
+    this.currentIndex = 0,
+    this.questionPanel = false,
+    this.paused = false,
   });
 
-  final genui.SurfaceController controller;
+  final a2ui_core.MessageProcessor<a2ui_flutter.ComponentImplementation>
+  processor;
   final List<String> surfaceIds;
   final String conversationId;
   final String messageId;
   final int generation;
   final String status;
   final String? answerSummary;
+  final String? taskId;
+  final List<Map<String, Object?>> questions;
+  final Map<String, Object?> draft;
+  final int currentIndex;
+  final bool questionPanel;
+  final bool paused;
+
+  _AgentClarification copyWith({
+    String? status,
+    String? answerSummary,
+    Map<String, Object?>? draft,
+    int? currentIndex,
+    bool? paused,
+  }) => _AgentClarification(
+    processor: processor,
+    surfaceIds: surfaceIds,
+    conversationId: conversationId,
+    messageId: messageId,
+    generation: generation,
+    status: status ?? this.status,
+    answerSummary: answerSummary ?? this.answerSummary,
+    taskId: taskId,
+    questions: questions,
+    draft: draft ?? this.draft,
+    currentIndex: currentIndex ?? this.currentIndex,
+    questionPanel: questionPanel,
+    paused: paused ?? this.paused,
+  );
 }
 
 const _agentClarificationCatalogId = 'com.xiaoqi.chat.clarification.v1';
 
-final _agentClarificationCatalog = genui.Catalog(
-  [
-    genui.BasicCatalogItems.text,
-    genui.BasicCatalogItems.row,
-    genui.BasicCatalogItems.column,
-    genui.BasicCatalogItems.card,
-    genui.BasicCatalogItems.divider,
-    genui.BasicCatalogItems.button,
-    genui.BasicCatalogItems.textField,
-    genui.BasicCatalogItems.checkBox,
-  ],
-  functions: genui.BasicFunctions.all,
-  catalogId: _agentClarificationCatalogId,
+final _agentClarificationBaseCatalog = a2ui_v09.basicCatalog();
+
+final _agentQuestionPanelComponent = a2ui_flutter.ComponentImplementation(
+  name: 'XiaoqiQuestionPanel',
+  schema: json_schema.Schema.object(
+    properties: {
+      'questions': json_schema.Schema.list(items: json_schema.Schema.any()),
+      'draft': json_schema.Schema.object(additionalProperties: true),
+      'currentIndex': json_schema.Schema.integer(),
+      'paused': json_schema.Schema.boolean(),
+    },
+    required: ['questions', 'draft', 'currentIndex', 'paused'],
+  ),
+  builder: (context, node, props, buildChild) => _AgentQuestionPanelSurface(
+    data: {
+      'questions': props.list('questions'),
+      'draft': props.value('draft'),
+      'currentIndex': props.value('currentIndex'),
+      'paused': props.value('paused'),
+    },
+    componentId: node.componentId,
+  ),
 );
 
-bool _a2uiEnvelopeNeedsInput(Map<String, dynamic> envelope) {
+final _agentClarificationCatalog = a2ui_flutter.CatalogImplementation(
+  id: _agentClarificationCatalogId,
+  components: [
+    ..._agentClarificationBaseCatalog.components.values,
+    _agentQuestionPanelComponent,
+  ],
+  functions: _agentClarificationBaseCatalog.functions.values.toList(),
+  themeSchema: _agentClarificationBaseCatalog.themeSchema,
+  schemaId: _agentClarificationBaseCatalog.schemaId,
+  title: _agentClarificationBaseCatalog.title,
+  description: _agentClarificationBaseCatalog.description,
+  protocolVersion: a2ui_core.A2uiProtocolVersion.v0_9,
+  instructions: _agentClarificationBaseCatalog.instructions,
+  definitions: _agentClarificationBaseCatalog.definitions,
+);
+
+bool _a2uiEnvelopeHasInteractiveComponent(Map<String, dynamic> envelope) {
   final update = envelope['updateComponents'];
   if (update is! Map || update['components'] is! List) return false;
   return (update['components'] as List).whereType<Map>().any(
@@ -186,6 +250,17 @@ bool _a2uiEnvelopeNeedsInput(Map<String, dynamic> envelope) {
       'CheckBox',
     }.contains(component['component']?.toString()),
   );
+}
+
+String _mergeAssistantContinuation(String savedText, String newText) {
+  if (newText.startsWith(savedText)) return newText;
+  final maxOverlap = min(savedText.length, newText.length);
+  for (var length = maxOverlap; length > 0; length--) {
+    if (savedText.endsWith(newText.substring(0, length))) {
+      return '$savedText${newText.substring(length)}';
+    }
+  }
+  return '$savedText$newText';
 }
 
 String _agentTaskFailureMessage(
@@ -520,11 +595,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _composerSizeTransitioning = false;
   bool _taskSearchKeepsComposerFixed = false;
   bool _keyboardOverlayLayoutLocked = false;
+  bool _agentQuestionOwnsLayoutLock = false;
+  bool _allowAgentQuestionPop = false;
+  bool _agentQuestionPauseInProgress = false;
+  Completer<Map<String, Object?>?>? _agentQuestionActionCompleter;
   bool _unlockKeyboardOverlayLayoutAfterImeHides = false;
   bool _releaseTaskSearchLayoutAfterKeyboardHides = false;
   Timer? _streamingReplyPublishTimer;
   Timer? _agentReasoningTimer;
   Timer? _agentReasoningPublishTimer;
+  Timer? _agentQuestionDraftPersistTimer;
+  Future<void> _agentQuestionDraftWrite = Future<void>.value();
+  a2ui_core.Subscription? _agentQuestionRestoreSubscription;
   Stopwatch? _agentReasoningStopwatch;
   final _agentProcessDetails = <Map<String, Object?>>[];
   var _agentWebSources = <AiChatWebSource>[];
@@ -749,6 +831,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (final taskId in _leasedCapabilityTaskIds.toList(growable: false)) {
       try {
         final status = await CapabilityCloudSync.instance.heartbeatTask(taskId);
+        if (status == 'paused' &&
+            _isGenerating &&
+            _activeRemoteAgentTaskId == taskId) {
+          // Resume sends the Genkit request immediately after registering the
+          // lease. The first heartbeat may race that request and see the old
+          // paused state; keep polling so the next beat reaches the running task.
+          continue;
+        }
         if (!const {'queued', 'running', 'pausing'}.contains(status)) {
           _releaseCapabilityTaskLease(taskId);
         }
@@ -837,6 +927,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     CapabilityStore.instance.clearSkillPreviews();
     _dismissAnnotationComment?.call();
     _clearAgentClarification();
+    final pausedQuestion = conversation.messages.reversed
+        .where(
+          (message) =>
+              message.isUser &&
+              message.agentClarification?['status'] == 'paused',
+        )
+        .firstOrNull;
+    if (pausedQuestion != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _conversation?.id == conversation.id) {
+          _showPausedAgentQuestion(conversation.id, pausedQuestion);
+        }
+      });
+    }
     for (final attachment in _attachments) {
       _cancelAttachmentPreparation(attachment);
     }
@@ -2587,7 +2691,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             parentMessageId: editedQuestion.id,
           );
           _clearStreamingReply();
-          _showAgentTaskError(error);
+          final restoredQuestion =
+              error is _AgentTaskFailure &&
+              error.restoreQuestionSubmission &&
+              await _restorePausedAgentQuestionAfterSubmissionFailure(
+                conversationId,
+                editedQuestion.id,
+              );
+          if (restoredQuestion) {
+            _showReplyError('补充信息暂未提交，已保留答案。点击“继续任务”重试');
+          } else {
+            _showAgentTaskError(error);
+          }
         }
       } catch (_) {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -2981,7 +3096,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           parentMessageId: userMessage.id,
         );
         _clearStreamingReply();
-        _showAgentTaskError(error);
+        final restoredQuestion =
+            error is _AgentTaskFailure &&
+            error.restoreQuestionSubmission &&
+            await _restorePausedAgentQuestionAfterSubmissionFailure(
+              conversationId,
+              userMessage.id,
+            );
+        if (restoredQuestion) {
+          _showReplyError('补充信息暂未提交，已保留答案。点击“继续任务”重试');
+        } else {
+          _showAgentTaskError(error);
+        }
         restoreAnnotationDraft();
       }
     } catch (_) {
@@ -3245,114 +3371,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         false;
   }
 
-  Future<Map<String, dynamic>?> _askAgentQuestions(List questions) async {
-    if (!mounted || questions.isEmpty || questions.length > 3) return null;
-    final controllers = <String, TextEditingController>{};
-    final answers = <String, String>{};
-    final formKey = GlobalKey<FormState>();
-    for (final raw in questions) {
-      final id = (raw as Map)['id'].toString();
-      controllers[id] = TextEditingController();
-    }
-    try {
-      return await showDialog<Map<String, dynamic>>(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) => StatefulBuilder(
-          builder: (context, setDialogState) => AlertDialog(
-            title: const Text('请补充信息'),
-            content: SingleChildScrollView(
-              child: Form(
-                key: formKey,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    for (final raw in questions) ...[
-                      Builder(
-                        builder: (context) {
-                          final q = Map<String, dynamic>.from(raw as Map);
-                          final id = q['id'].toString();
-                          final options = (q['options'] as List? ?? const [])
-                              .map((v) => v.toString())
-                              .toList();
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 16),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  q['question'].toString(),
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                if (options.isNotEmpty)
-                                  Wrap(
-                                    spacing: 8,
-                                    children: [
-                                      for (final option in options)
-                                        ChoiceChip(
-                                          label: Text(option),
-                                          selected: answers[id] == option,
-                                          onSelected: (_) => setDialogState(() {
-                                            answers[id] = option;
-                                            controllers[id]!.clear();
-                                          }),
-                                        ),
-                                    ],
-                                  ),
-                                TextFormField(
-                                  controller: controllers[id],
-                                  decoration: InputDecoration(
-                                    hintText: options.isEmpty
-                                        ? '请输入回答'
-                                        : '也可填写其他答案',
-                                  ),
-                                  onChanged: (value) => setDialogState(
-                                    () => answers[id] = value.trim(),
-                                  ),
-                                  validator: (value) =>
-                                      (answers[id]?.trim().isNotEmpty ?? false)
-                                      ? null
-                                      : '请回答此问题',
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.of(dialogContext).pop({'cancelled': true});
-                  _stopReply();
-                },
-                child: const Text('取消任务'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  if (formKey.currentState?.validate() != true) return;
-                  Navigator.of(dialogContext).pop({'answers': answers});
-                },
-                child: const Text('提交并继续'),
-              ),
-            ],
-          ),
-        ),
-      );
-    } finally {
-      for (final controller in controllers.values) {
-        controller.dispose();
-      }
-    }
-  }
-
   Future<List<Map<String, Object?>>> _buildAiMessages(
     List<AiConversationMessage> history, {
     String? workId,
@@ -3609,6 +3627,8 @@ $materialIndex
     required String modelId,
     required String reasoningLevel,
     String? resumeTaskId,
+    String? resumePrefixContent,
+    String? resumePrefixReasoning,
   }) async {
     final workId = question.workId;
     final materials = await _agentTaskMaterials(
@@ -3624,6 +3644,7 @@ $materialIndex
 
     final taskId = resumeTaskId ?? CapabilityCloudSync.newTaskId();
     Map<String, dynamic>? recovery;
+    var continueAbortedTurn = false;
     if (resumeTaskId != null) {
       recovery = await CapabilityCloudSync.instance.getTask(taskId);
       if (recovery['status'] == 'running' || recovery['status'] == 'pausing') {
@@ -3632,6 +3653,10 @@ $materialIndex
       if (recovery['agent_snapshot_id'] == null) {
         throw const AiException('原任务没有可用恢复快照，请重新发送消息');
       }
+      continueAbortedTurn = const {
+        'paused',
+        'failed',
+      }.contains(recovery['status']);
     }
     await _persistCapabilityTaskId(conversationId, question.id, taskId);
     if (!_isCurrentRequest(generation, conversationId)) return null;
@@ -3700,6 +3725,7 @@ $materialIndex
       if (nativeNotesEnabled)
         'learning_note_topics': await notesService.topics(),
       'task_id': taskId,
+      'attempt_id': taskId,
       'workflow_id': conversationId,
       if (workId != null) 'work_id': workId,
       'work_context_message_ids': {
@@ -3769,38 +3795,91 @@ $materialIndex
           ? startSessionId
           : null,
     );
-    final surfaceController = genui.SurfaceController(
-      catalogs: [_agentClarificationCatalog],
-    );
-    Completer<genkit_a2ui.A2uiClientAction>? clarificationAction;
-    final clarificationCancellation = Completer<void>();
-    var clarificationPending = false;
+    final surfaceProcessor =
+        a2ui_core.MessageProcessor<a2ui_flutter.ComponentImplementation>(
+          catalogs: [_agentClarificationCatalog],
+          defaultVersion: a2ui_core.A2uiProtocolVersion.v0_9,
+          validationConfig: a2ui_core.ValidationConfig.relaxed,
+        );
+    Completer<({genkit.Message message, Map<String, dynamic> action})?>?
+    clarificationAction;
+    var clarificationCancellation = Completer<void>();
+    ({genkit.Message message, Map<String, dynamic> action})? pendingA2uiAction;
+    var hasInteractiveA2ui = false;
     var keepSurface = false;
+    Map<String, Object?>? pendingQuestionSubmission;
+
+    Future<void> markQuestionSubmissionAccepted() async {
+      final submission = pendingQuestionSubmission;
+      if (submission == null) return;
+      pendingQuestionSubmission = null;
+      try {
+        await _persistAgentQuestionState(
+          conversationId: conversationId,
+          messageId: question.id,
+          taskId: taskId,
+          questions: (submission['questions'] as List)
+              .whereType<Map>()
+              .map((item) => Map<String, Object?>.from(item))
+              .toList(growable: false),
+          draft: Map<String, Object?>.from(submission['draft'] as Map),
+          currentIndex: submission['current_index'] as int,
+          status: 'submitted',
+        );
+      } on Object {
+        // Keep the durable `submitting` draft rather than failing an accepted
+        // model turn because summary persistence was temporarily unavailable.
+      }
+    }
+
     _clearAgentClarification();
-    final submitSubscription = surfaceController.onSubmit.listen((message) {
+    final actionSubscription = surfaceProcessor.model.onAction.subscribe((
+      event,
+    ) {
       if (!_isCurrentRequest(generation, conversationId)) return;
-      for (final part in message.parts.uiInteractionParts) {
-        try {
-          final envelope = jsonDecode(part.interaction);
-          final rawAction = envelope is Map ? envelope['action'] : null;
-          final pendingAction = clarificationAction;
-          if (rawAction is Map &&
-              pendingAction != null &&
-              !pendingAction.isCompleted) {
-            pendingAction.complete(
-              genkit_a2ui.A2uiClientAction.fromJson(
-                Map<String, dynamic>.from(rawAction),
-              ),
-            );
-            break;
-          }
-        } on Object {
-          // Malformed UI interactions are ignored; the card stays available.
+      final submission = a2uiActionToMessage(event);
+      final activeClarification = _agentClarification.value;
+      if (activeClarification?.questionPanel == true &&
+          identical(activeClarification!.processor, surfaceProcessor)) {
+        final actionCompleter = _agentQuestionActionCompleter;
+        if (actionCompleter != null && !actionCompleter.isCompleted) {
+          unawaited(
+            _handleAgentQuestionAction(
+              submission.action,
+              processor: surfaceProcessor,
+              taskId: activeClarification.taskId ?? taskId,
+              questions: activeClarification.questions,
+              completer: actionCompleter,
+            ),
+          );
         }
+        return;
+      }
+      final pendingAction = clarificationAction;
+      if (pendingAction != null && !pendingAction.isCompleted) {
+        pendingAction.complete(submission);
+      } else {
+        pendingA2uiAction = submission;
       }
     });
     var turn = resumeTaskId == null
         ? chat.sendStream(message: userMessage)
+        : continueAbortedTurn
+        ? chat.sendStream(
+            message: genkit.Message(
+              role: genkit.Role.user,
+              content: const [],
+              metadata: {
+                ...?userMessage.metadata,
+                'xiaoqi_agent_resume': {
+                  if ((resumePrefixContent ?? '').isNotEmpty)
+                    'prefix_content': resumePrefixContent,
+                  if ((resumePrefixReasoning ?? '').isNotEmpty)
+                    'prefix_reasoning': resumePrefixReasoning,
+                },
+              },
+            ),
+          )
         : chat.sendStream();
     final backgroundProcessDetails = <Map<String, Object?>>[];
     var backgroundSources = <AiChatWebSource>[];
@@ -3841,28 +3920,39 @@ $materialIndex
               generation: generation,
               conversationId: conversationId,
             );
+            // The remote Agent sends status artifacts before the resumed
+            // model call starts. They are not an acknowledgement that the
+            // user's interrupt response was consumed. Confirm on the first
+            // real model part (including a follow-up interrupt), or after the
+            // turn response resolves below.
+            if (pendingQuestionSubmission != null &&
+                chunk.raw.modelChunk?.content.isNotEmpty == true) {
+              await markQuestionSubmissionAccepted();
+            }
             final artifactMetadata = chunk.artifact?.metadata;
             if (artifactMetadata?['task_id'] == taskId) {
               _prefetchArtifactImages(
                 _taskArtifacts(artifactMetadata?['artifacts']),
               );
             }
-            final envelopes = genkit_a2ui.a2uiEnvelopesFromParts(
-              chunk.raw.modelChunk?.content,
-            );
-            for (final envelope in envelopes) {
-              surfaceController.handleMessage(
-                a2ui_core.A2uiMessage.fromJson(envelope),
-              );
-              if (_a2uiEnvelopeNeedsInput(envelope)) {
-                clarificationPending = true;
+            final messages = a2uiMessagesFrom(chunk.raw.modelChunk?.content);
+            for (final message in messages) {
+              try {
+                surfaceProcessor.processMessages([message]);
+              } on Object {
+                // An invalid surface must not discard streamed prose or stop
+                // later valid A2UI messages in the same turn.
+                continue;
               }
-              final surfaceIds = surfaceController.activeSurfaceIds.toList(
-                growable: false,
-              );
+              hasInteractiveA2ui =
+                  hasInteractiveA2ui ||
+                  _a2uiEnvelopeHasInteractiveComponent(message);
+              final surfaceIds = surfaceProcessor.model.allSurfaces
+                  .map((surface) => surface.id)
+                  .toList(growable: false);
               if (surfaceIds.isNotEmpty) {
                 _agentClarification.value = _AgentClarification(
-                  controller: surfaceController,
+                  processor: surfaceProcessor,
                   surfaceIds: surfaceIds,
                   conversationId: conversationId,
                   messageId: question.id,
@@ -3894,6 +3984,7 @@ $materialIndex
             }
           }
           response = await turn.response;
+          await markQuestionSubmissionAccepted();
           final responseSources = response.state?['web_sources'];
           if (!_isCurrentRequest(generation, conversationId)) {
             final backgroundText = response.text.trimRight();
@@ -3974,36 +4065,49 @@ $materialIndex
             _abortActiveAgentTurn = null;
           }
         }
-        if (clarificationPending && response.interrupts.isEmpty) {
+        if (response.interrupts.isEmpty && hasInteractiveA2ui) {
+          hasInteractiveA2ui = false;
+          final surfaceIds = surfaceProcessor.model.allSurfaces
+              .map((surface) => surface.id)
+              .toList(growable: false);
           _agentClarification.value = _AgentClarification(
-            controller: surfaceController,
+            processor: surfaceProcessor,
+            surfaceIds: surfaceIds,
             conversationId: conversationId,
             messageId: question.id,
             generation: generation,
-            surfaceIds: surfaceController.activeSurfaceIds.toList(
-              growable: false,
-            ),
-            status: '请补充信息后继续',
+            status: '请在卡片中完成操作',
           );
-          final actionCompleter = Completer<genkit_a2ui.A2uiClientAction>();
+          final actionCompleter =
+              Completer<
+                ({genkit.Message message, Map<String, dynamic> action})?
+              >();
           clarificationAction = actionCompleter;
+          clarificationCancellation = Completer<void>();
           _abortActiveAgentTurn = () {
             if (!clarificationCancellation.isCompleted) {
               clarificationCancellation.complete();
             }
           };
-          final actionResult = await Future.any<Object?>([
-            actionCompleter.future,
-            clarificationCancellation.future,
-          ]);
+          final actionResult =
+              pendingA2uiAction ??
+              await Future.any<Object?>([
+                    actionCompleter.future,
+                    clarificationCancellation.future,
+                  ])
+                  as ({genkit.Message message, Map<String, dynamic> action})?;
+          pendingA2uiAction = null;
           clarificationAction = null;
           if (actionResult == null ||
               !_isCurrentRequest(generation, conversationId)) {
             return null;
           }
-          final action = actionResult as genkit_a2ui.A2uiClientAction;
-          clarificationPending = false;
-          final summary = action.context.entries
+          final action = actionResult.action;
+          final rawContext = action['context'];
+          final actionContext = rawContext is Map
+              ? rawContext
+              : const <String, dynamic>{};
+          final summary = actionContext.entries
               .where(
                 (entry) =>
                     entry.value != null &&
@@ -4012,24 +4116,22 @@ $materialIndex
               .map((entry) => '${entry.key}：${entry.value}')
               .join('；');
           _agentClarification.value = _AgentClarification(
-            controller: surfaceController,
+            processor: surfaceProcessor,
+            surfaceIds: const [],
             conversationId: conversationId,
             messageId: question.id,
             generation: generation,
-            surfaceIds: const [],
             status: '已收到，正在继续',
-            answerSummary: summary.isEmpty ? action.name : summary,
+            answerSummary: summary.isEmpty
+                ? action['name']?.toString() ?? '已提交'
+                : summary,
           );
-          final actionMessage = genkit_a2ui.actionToMessage(action);
           turn = chat.sendStream(
             message: genkit.Message(
-              role: actionMessage.role,
-              content: actionMessage.content,
+              role: actionResult.message.role,
+              content: actionResult.message.content,
               metadata: {
-                'xiaoqi_agent_turn': {
-                  ...turnMetadata,
-                  'a2ui_action': action.toJson(),
-                },
+                'xiaoqi_agent_turn': {...turnMetadata, 'a2ui_action': action},
               },
             ),
           );
@@ -4045,13 +4147,102 @@ $materialIndex
         if (input['type'] == 'user_questions') {
           _agentStreamPresentation.value = _agentStreamPresentation.value
               .copyWith(currentStep: '等待你补充信息');
-          final answer = await _askAgentQuestions(
-            input['questions'] as List? ?? const [],
+          final questions = (input['questions'] as List? ?? const [])
+              .whereType<Map>()
+              .map((item) => Map<String, Object?>.from(item))
+              .where(
+                (item) =>
+                    item['id']?.toString().trim().isNotEmpty == true &&
+                    item['question']?.toString().trim().isNotEmpty == true,
+              )
+              .take(3)
+              .toList(growable: false);
+          if (questions.isEmpty) {
+            throw const AiException('服务端提问内容无效，请重试当前任务');
+          }
+          final saved = question.agentClarification;
+          final savedForTask = saved?['task_id'] == taskId;
+          final draft = savedForTask && saved?['draft'] is Map
+              ? Map<String, Object?>.from(saved!['draft'] as Map)
+              : <String, Object?>{};
+          final currentIndex = savedForTask
+              ? (saved?['current_index'] as num? ?? 0).toInt()
+              : 0;
+          final surfaceId = _createAgentQuestionSurface(
+            processor: surfaceProcessor,
+            taskId: taskId,
+            questions: questions,
+            draft: draft,
+            currentIndex: currentIndex,
+            paused: false,
+          );
+          _agentClarification.value = _AgentClarification(
+            processor: surfaceProcessor,
+            surfaceIds: [surfaceId],
+            conversationId: conversationId,
+            messageId: question.id,
+            generation: generation,
+            status: '请补充信息',
+            taskId: taskId,
+            questions: questions,
+            draft: draft,
+            currentIndex: currentIndex,
+            questionPanel: true,
+          );
+          _lockAgentQuestionLayout();
+          await _persistAgentQuestionState(
+            conversationId: conversationId,
+            messageId: question.id,
+            taskId: taskId,
+            questions: questions,
+            draft: draft,
+            currentIndex: currentIndex,
+            status: 'waiting_for_user',
           );
           if (!_isCurrentRequest(generation, conversationId)) return null;
+          final questionAction = Completer<Map<String, Object?>?>();
+          _agentQuestionActionCompleter = questionAction;
+          _abortActiveAgentTurn = () {
+            if (!questionAction.isCompleted) {
+              questionAction.complete(null);
+            }
+          };
+          final result = await questionAction.future;
+          if (identical(_agentQuestionActionCompleter, questionAction)) {
+            _agentQuestionActionCompleter = null;
+          }
+          if (!_isCurrentRequest(generation, conversationId) ||
+              result == null) {
+            return null;
+          }
+          final action = result['action']?.toString();
+          if (action == 'pause') {
+            keepSurface = true;
+            await _appendAssistantReply(
+              _streamingReplyBuffer.toString().trimRight(),
+              parentMessageId: question.id,
+              agentTaskId: taskId,
+              isIncomplete: true,
+              agentSessionId: response.sessionId ?? chat.sessionId,
+              agentSnapshotId: response.snapshotId ?? chat.snapshotId,
+              agentProcessSummary: '任务已暂停',
+              agentProcessStatus: 'stopped',
+              agentWebSources: _agentWebSources,
+            );
+            return null;
+          }
+          if (action != 'submit') return null;
+          final answers = result['answers'] is Map
+              ? Map<String, Object?>.from(result['answers'] as Map)
+              : <String, Object?>{};
+          pendingQuestionSubmission = {
+            'questions': questions,
+            'draft': answers,
+            'current_index': currentIndex,
+          };
           turn = chat.resumeStream(
             respond: [
-              interrupt.respond(answer ?? {'cancelled': true}),
+              interrupt.respond({'answers': answers}),
             ],
           );
           continue;
@@ -4135,10 +4326,10 @@ $materialIndex
           ..clear()
           ..write(finalText);
       }
-      if (!clarificationPending && _agentClarification.value != null) {
+      if (_agentClarification.value != null) {
         final clarification = _agentClarification.value!;
         _agentClarification.value = _AgentClarification(
-          controller: clarification.controller,
+          processor: clarification.processor,
           surfaceIds: clarification.surfaceIds,
           conversationId: conversationId,
           messageId: question.id,
@@ -4198,6 +4389,27 @@ $materialIndex
         webSources: List<AiChatWebSource>.unmodifiable(_agentWebSources),
       );
     } catch (error) {
+      final failedQuestionSubmission = pendingQuestionSubmission;
+      if (failedQuestionSubmission != null) {
+        try {
+          await _persistAgentQuestionState(
+            conversationId: conversationId,
+            messageId: question.id,
+            taskId: taskId,
+            questions: (failedQuestionSubmission['questions'] as List)
+                .whereType<Map>()
+                .map((item) => Map<String, Object?>.from(item))
+                .toList(growable: false),
+            draft: Map<String, Object?>.from(
+              failedQuestionSubmission['draft'] as Map,
+            ),
+            currentIndex: failedQuestionSubmission['current_index'] as int,
+            status: 'paused',
+          );
+        } on Object {
+          // The persisted `submitting` draft is still sufficient to restore it.
+        }
+      }
       if (_isCurrentRequest(generation, conversationId)) {
         _abortActiveAgentTurn = null;
       }
@@ -4206,6 +4418,7 @@ $materialIndex
         taskId: taskId,
         isImageGeneration: isImageGeneration,
         details: _safeAgentTaskDetails(error),
+        restoreQuestionSubmission: failedQuestionSubmission != null,
       );
     } finally {
       if (_isCurrentRequest(generation, conversationId)) {
@@ -4217,14 +4430,11 @@ $materialIndex
         _activeRemoteAgentConversationId = null;
         if (mounted) setState(() {});
       }
-      await submitSubscription.cancel();
+      actionSubscription.unsubscribe();
       if (!keepSurface) {
-        _disposeAgentSurface(surfaceController);
+        _disposeAgentSurface(surfaceProcessor);
         if (mounted &&
-            identical(
-              _agentClarification.value?.controller,
-              surfaceController,
-            )) {
+            identical(_agentClarification.value?.processor, surfaceProcessor)) {
           _agentClarification.value = null;
         }
       }
@@ -5184,16 +5394,518 @@ $text''';
     );
   }
 
-  void _disposeAgentSurface(genui.SurfaceController controller) {
-    if (_disposedAgentSurfaces[controller] == true) return;
-    _disposedAgentSurfaces[controller] = true;
-    controller.dispose();
+  void _disposeAgentSurface(
+    a2ui_core.MessageProcessor<a2ui_flutter.ComponentImplementation> processor,
+  ) {
+    if (_disposedAgentSurfaces[processor] == true) return;
+    _disposedAgentSurfaces[processor] = true;
+    processor.dispose();
+  }
+
+  void _lockAgentQuestionLayout() {
+    if (_keyboardOverlayLayoutLocked) return;
+    _agentQuestionOwnsLayoutLock = true;
+    if (mounted) setState(() => _keyboardOverlayLayoutLocked = true);
+  }
+
+  void _unlockAgentQuestionLayout() {
+    if (!_agentQuestionOwnsLayoutLock) return;
+    _agentQuestionOwnsLayoutLock = false;
+    if (mounted) setState(() => _keyboardOverlayLayoutLocked = false);
+  }
+
+  String _createAgentQuestionSurface({
+    required a2ui_core.MessageProcessor<a2ui_flutter.ComponentImplementation>
+    processor,
+    required String taskId,
+    required List<Map<String, Object?>> questions,
+    required Map<String, Object?> draft,
+    required int currentIndex,
+    required bool paused,
+  }) {
+    final surfaceId =
+        'xiaoqi-question-${taskId}-${DateTime.now().microsecondsSinceEpoch}';
+    processor.processMessages([
+      {
+        'version': a2ui_core.A2uiProtocolVersion.v0_9.jsonValue,
+        'createSurface': {
+          'surfaceId': surfaceId,
+          'catalogId': _agentClarificationCatalogId,
+        },
+      },
+      {
+        'version': a2ui_core.A2uiProtocolVersion.v0_9.jsonValue,
+        'updateComponents': {
+          'surfaceId': surfaceId,
+          'components': [
+            {
+              'id': 'root',
+              'component': 'XiaoqiQuestionPanel',
+              'questions': questions,
+              'draft': draft,
+              'currentIndex': currentIndex,
+              'paused': paused,
+            },
+          ],
+        },
+      },
+    ]);
+    return surfaceId;
+  }
+
+  Future<void> _persistAgentQuestionState({
+    required String conversationId,
+    required String messageId,
+    required String taskId,
+    required List<Map<String, Object?>> questions,
+    required Map<String, Object?> draft,
+    required int currentIndex,
+    required String status,
+  }) {
+    final previous = _agentQuestionDraftWrite;
+    final next = () async {
+      try {
+        await previous;
+      } on Object {
+        // A later draft write must still proceed after a prior local write fails.
+      }
+      final record = await _historyService.get(conversationId);
+      final question = record?.nodeById(messageId);
+      if (record == null || question == null || !question.isUser) return;
+      final clarification = <String, Object?>{
+        'task_id': taskId,
+        'questions': questions,
+        'draft': draft,
+        'current_index': currentIndex,
+        'status': status,
+      };
+      final updated = record.copyWith(
+        nodes: [
+          for (final node in record.nodes)
+            if (node.id == messageId)
+              node.copyWith(agentClarification: clarification)
+            else
+              node,
+        ],
+        updatedAt: DateTime.now(),
+      );
+      await _historyService.saveTransactional(updated);
+      if (mounted && _conversation?.id == conversationId) {
+        setState(() {
+          _conversation = updated;
+          _messages
+            ..clear()
+            ..addAll(updated.messages);
+          _conversationPresentationRevision++;
+        });
+      }
+    }();
+    _agentQuestionDraftWrite = next;
+    return next;
+  }
+
+  void _acceptAgentQuestionDraft(Map<String, dynamic> action) {
+    final clarification = _agentClarification.value;
+    if (clarification == null || !clarification.questionPanel) return;
+    final rawContext = action['context'];
+    if (rawContext is! Map) return;
+    final context = Map<String, dynamic>.from(rawContext);
+    final rawDraft = context['draft'];
+    if (rawDraft is! Map) return;
+    final draft = Map<String, Object?>.from(rawDraft);
+    final index = (context['current_index'] as num? ?? 0)
+        .toInt()
+        .clamp(0, max(0, clarification.questions.length - 1))
+        .toInt();
+    _agentClarification.value = clarification.copyWith(
+      draft: draft,
+      currentIndex: index,
+    );
+    _agentQuestionDraftPersistTimer?.cancel();
+    _agentQuestionDraftPersistTimer = Timer(
+      const Duration(milliseconds: 180),
+      () => unawaited(
+        _persistAgentQuestionState(
+          conversationId: clarification.conversationId,
+          messageId: clarification.messageId,
+          taskId: clarification.taskId ?? '',
+          questions: clarification.questions,
+          draft: draft,
+          currentIndex: index,
+          status: clarification.paused ? 'paused' : 'waiting_for_user',
+        ).catchError((Object _) {
+          if (mounted && _conversation?.id == clarification.conversationId) {
+            _showReplyError('回答草稿暂未保存，请保持卡片打开并重试');
+          }
+        }),
+      ),
+    );
+  }
+
+  Future<void> _handleAgentQuestionAction(
+    Map<String, dynamic> action, {
+    required a2ui_core.MessageProcessor<a2ui_flutter.ComponentImplementation>
+    processor,
+    required String taskId,
+    required List<Map<String, Object?>> questions,
+    required Completer<Map<String, Object?>?> completer,
+  }) async {
+    final name = action['name']?.toString();
+    if (name == 'question_draft') {
+      _acceptAgentQuestionDraft(action);
+      return;
+    }
+    final clarification = _agentClarification.value;
+    if (clarification == null ||
+        !clarification.questionPanel ||
+        !identical(clarification.processor, processor)) {
+      return;
+    }
+    final context = action['context'] is Map
+        ? Map<String, dynamic>.from(action['context'] as Map)
+        : <String, dynamic>{};
+    final draftValue = name == 'question_submit'
+        ? context['answers']
+        : context['draft'];
+    final draft = draftValue is Map
+        ? Map<String, Object?>.from(draftValue)
+        : clarification.draft;
+    final index =
+        (context['current_index'] as num? ?? clarification.currentIndex)
+            .toInt()
+            .clamp(0, max(0, questions.length - 1))
+            .toInt();
+    _agentQuestionDraftPersistTimer?.cancel();
+    if (name == 'question_submit') {
+      try {
+        await _persistAgentQuestionState(
+          conversationId: clarification.conversationId,
+          messageId: clarification.messageId,
+          taskId: taskId,
+          questions: questions,
+          draft: draft,
+          currentIndex: index,
+          status: 'submitting',
+        );
+      } on Object {
+        if (mounted) _showReplyError('回答暂未保存，卡片仍保留，请重试提交');
+        return;
+      }
+      if (!mounted || completer.isCompleted) return;
+      _agentClarification.value = null;
+      _unlockAgentQuestionLayout();
+      completer.complete({'action': 'submit', 'answers': draft});
+      return;
+    }
+    if (name != 'question_cancel') return;
+    try {
+      final status = await CapabilityCloudSync.instance.cancelTask(taskId);
+      if (status != 'cancelled') {
+        throw StateError('服务端未确认任务已取消');
+      }
+      await _persistAgentQuestionState(
+        conversationId: clarification.conversationId,
+        messageId: clarification.messageId,
+        taskId: taskId,
+        questions: questions,
+        draft: draft,
+        currentIndex: index,
+        status: 'cancelled',
+      );
+      await _clearCapabilityTaskId(
+        clarification.conversationId,
+        clarification.messageId,
+        taskId,
+      );
+      if (!mounted || completer.isCompleted) return;
+      _agentClarification.value = null;
+      _unlockAgentQuestionLayout();
+      completer.complete({'action': 'cancel'});
+    } on Object catch (error) {
+      if (mounted) _showReplyError('取消任务失败：$error');
+    }
+  }
+
+  Future<void> _pauseAgentQuestionAndPop() async {
+    final clarification = _agentClarification.value;
+    if (clarification == null ||
+        !clarification.questionPanel ||
+        clarification.paused ||
+        _agentQuestionPauseInProgress) {
+      return;
+    }
+    _agentQuestionPauseInProgress = true;
+    try {
+      _agentQuestionDraftPersistTimer?.cancel();
+      await _persistAgentQuestionState(
+        conversationId: clarification.conversationId,
+        messageId: clarification.messageId,
+        taskId: clarification.taskId ?? '',
+        questions: clarification.questions,
+        draft: clarification.draft,
+        currentIndex: clarification.currentIndex,
+        status: 'paused',
+      );
+      if (!mounted || _conversation?.id != clarification.conversationId) return;
+      _agentClarification.value = clarification.copyWith(
+        status: '任务已暂停',
+        paused: true,
+      );
+      final surfaceId = clarification.surfaceIds.firstOrNull;
+      if (surfaceId != null) {
+        clarification.processor.processMessages([
+          {
+            'version': a2ui_core.A2uiProtocolVersion.v0_9.jsonValue,
+            'updateComponents': {
+              'surfaceId': surfaceId,
+              'components': [
+                {
+                  'id': 'root',
+                  'component': 'XiaoqiQuestionPanel',
+                  'questions': clarification.questions,
+                  'draft': clarification.draft,
+                  'currentIndex': clarification.currentIndex,
+                  'paused': true,
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      final actionCompleter = _agentQuestionActionCompleter;
+      if (actionCompleter != null && !actionCompleter.isCompleted) {
+        actionCompleter.complete({'action': 'pause'});
+      }
+      _allowAgentQuestionPop = true;
+      setState(() {});
+      final popped = await Navigator.of(context).maybePop();
+      if (mounted && !popped) {
+        setState(() => _allowAgentQuestionPop = false);
+        final record = await _historyService.get(clarification.conversationId);
+        final pausedQuestion =
+            record?.nodeById(clarification.messageId) ??
+            _conversation?.nodeById(clarification.messageId);
+        if (!mounted || pausedQuestion == null) return;
+        _clearAgentClarification();
+        _showPausedAgentQuestion(clarification.conversationId, pausedQuestion);
+      }
+    } on Object {
+      if (mounted) _showReplyError('暂停任务失败，卡片和当前回答仍保留，请重试');
+    } finally {
+      _agentQuestionPauseInProgress = false;
+    }
+  }
+
+  void _showPausedAgentQuestion(
+    String conversationId,
+    AiConversationMessage question,
+  ) {
+    final saved = question.agentClarification;
+    if (!mounted ||
+        saved == null ||
+        !const {'paused', 'submitting'}.contains(saved['status'])) {
+      return;
+    }
+    final taskId = saved['task_id']?.toString() ?? question.agentTaskId ?? '';
+    final questions = (saved['questions'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) => Map<String, Object?>.from(item))
+        .toList(growable: false);
+    final draft = Map<String, Object?>.from(
+      (saved['draft'] as Map?) ?? const {},
+    );
+    if (taskId.isEmpty || questions.isEmpty) return;
+    final processor =
+        a2ui_core.MessageProcessor<a2ui_flutter.ComponentImplementation>(
+          catalogs: [_agentClarificationCatalog],
+          defaultVersion: a2ui_core.A2uiProtocolVersion.v0_9,
+          validationConfig: a2ui_core.ValidationConfig.relaxed,
+        );
+    final surfaceId = _createAgentQuestionSurface(
+      processor: processor,
+      taskId: taskId,
+      questions: questions,
+      draft: draft,
+      currentIndex: (saved['current_index'] as num? ?? 0).toInt(),
+      paused: true,
+    );
+    _agentClarification.value = _AgentClarification(
+      processor: processor,
+      surfaceIds: [surfaceId],
+      conversationId: conversationId,
+      messageId: question.id,
+      generation: _requestGeneration,
+      status: '任务已暂停',
+      taskId: taskId,
+      questions: questions,
+      draft: draft,
+      currentIndex: (saved['current_index'] as num? ?? 0).toInt(),
+      questionPanel: true,
+      paused: true,
+    );
+    _lockAgentQuestionLayout();
+    _agentQuestionRestoreSubscription?.unsubscribe();
+    _agentQuestionRestoreSubscription = processor.model.onAction.subscribe((
+      event,
+    ) {
+      final action = a2uiActionToMessage(event).action;
+      final name = action['name']?.toString();
+      if (name == 'question_draft') {
+        _acceptAgentQuestionDraft(action);
+        return;
+      }
+      _agentQuestionDraftPersistTimer?.cancel();
+      _acceptAgentQuestionDraft(action);
+      _agentQuestionDraftPersistTimer?.cancel();
+      final current = _agentClarification.value;
+      if (current == null) return;
+      final rawContext = action['context'];
+      final context = rawContext is Map
+          ? Map<String, dynamic>.from(rawContext)
+          : const <String, dynamic>{};
+      final updatedDraft = context['draft'] is Map
+          ? Map<String, Object?>.from(context['draft'] as Map)
+          : current.draft;
+      final currentIndex =
+          (context['current_index'] as num? ?? current.currentIndex).toInt();
+      if (name == 'question_continue_task') {
+        unawaited(() async {
+          if (_isGenerating ||
+              _isPreparingToSend ||
+              _isDeletingReply ||
+              _savingMessageEdit ||
+              _isSelectingAnswerVersion ||
+              _isSelectingQuestionVersion) {
+            if (mounted) _showReplyError('当前有其他操作进行，请完成后再继续任务');
+            return;
+          }
+          try {
+            await _persistAgentQuestionState(
+              conversationId: conversationId,
+              messageId: question.id,
+              taskId: taskId,
+              questions: questions,
+              draft: updatedDraft,
+              currentIndex: currentIndex,
+              status: 'waiting_for_user',
+            );
+          } on Object {
+            if (mounted) _showReplyError('回答草稿暂未保存，任务未继续');
+            return;
+          }
+          if (!mounted || _conversation?.id != conversationId) return;
+          _clearAgentClarification();
+          _unlockAgentQuestionLayout();
+          await _continueStoppedReply(parentMessageId: question.id);
+          if (!mounted || _conversation?.id != conversationId) return;
+          final current = _conversation?.nodeById(question.id);
+          if (!_isGenerating &&
+              current?.agentClarification?['status'] == 'waiting_for_user') {
+            await _persistAgentQuestionState(
+              conversationId: conversationId,
+              messageId: question.id,
+              taskId: taskId,
+              questions: questions,
+              draft: updatedDraft,
+              currentIndex: currentIndex,
+              status: 'paused',
+            );
+            final restored = _conversation?.nodeById(question.id);
+            if (restored != null) {
+              _showPausedAgentQuestion(conversationId, restored);
+            }
+          }
+        }());
+      } else if (name == 'question_cancel') {
+        unawaited(() async {
+          try {
+            final status = await CapabilityCloudSync.instance.cancelTask(
+              taskId,
+            );
+            if (status != 'cancelled') {
+              throw StateError('服务端未确认任务已取消');
+            }
+            await _persistAgentQuestionState(
+              conversationId: conversationId,
+              messageId: question.id,
+              taskId: taskId,
+              questions: questions,
+              draft: updatedDraft,
+              currentIndex: currentIndex,
+              status: 'cancelled',
+            );
+            await _clearCapabilityTaskId(conversationId, question.id, taskId);
+          } catch (_) {
+            if (mounted) _showReplyError('取消任务失败，请稍后重试');
+            return;
+          }
+          if (mounted) {
+            _clearAgentClarification();
+            _unlockAgentQuestionLayout();
+          }
+        }());
+      }
+    });
+  }
+
+  Future<bool> _restorePausedAgentQuestionAfterSubmissionFailure(
+    String conversationId,
+    String messageId,
+  ) async {
+    var record = await _historyService.get(conversationId);
+    var question = record?.nodeById(messageId);
+    var saved = question?.agentClarification;
+    if (saved == null ||
+        !const {'paused', 'submitting'}.contains(saved['status'])) {
+      return false;
+    }
+    if (saved['status'] != 'paused') {
+      try {
+        await _persistAgentQuestionState(
+          conversationId: conversationId,
+          messageId: messageId,
+          taskId: saved['task_id']?.toString() ?? question!.agentTaskId ?? '',
+          questions: (saved['questions'] as List? ?? const [])
+              .whereType<Map>()
+              .map((item) => Map<String, Object?>.from(item))
+              .toList(growable: false),
+          draft: Map<String, Object?>.from(
+            (saved['draft'] as Map?) ?? const {},
+          ),
+          currentIndex: (saved['current_index'] as num? ?? 0).toInt(),
+          status: 'paused',
+        );
+      } on Object {
+        // The submitting draft is enough to restore a retryable card.
+      }
+      record = await _historyService.get(conversationId);
+      question = record?.nodeById(messageId) ?? question;
+    }
+    if (!mounted || _conversation?.id != conversationId || question == null) {
+      return false;
+    }
+    _showPausedAgentQuestion(conversationId, question);
+    return _agentClarification.value?.questionPanel == true;
   }
 
   void _clearAgentClarification() {
+    _agentQuestionDraftPersistTimer?.cancel();
+    _agentQuestionDraftPersistTimer = null;
+    final actionCompleter = _agentQuestionActionCompleter;
+    _agentQuestionActionCompleter = null;
+    if (actionCompleter != null && !actionCompleter.isCompleted) {
+      actionCompleter.complete(null);
+    }
+    _agentQuestionRestoreSubscription?.unsubscribe();
+    _agentQuestionRestoreSubscription = null;
     final clarification = _agentClarification.value;
     _agentClarification.value = null;
-    if (clarification != null) _disposeAgentSurface(clarification.controller);
+    if (clarification != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _disposeAgentSurface(clarification.processor);
+      });
+    }
+    _unlockAgentQuestionLayout();
   }
 
   void _clearStreamingReply() {
@@ -5342,19 +6054,38 @@ $text''';
           'waiting_for_user',
           'awaiting_network_permission',
         }.contains(task['status'])) {
+      if (task['status'] == 'waiting_for_user' &&
+          message.agentClarification?['status'] == 'paused') {
+        return;
+      }
       unawaited(_continueStoppedReply(parentMessageId: message.id));
       return;
     }
 
+    final incompleteAnswer = record.messages.reversed
+        .where(
+          (node) =>
+              !node.isUser &&
+              node.parentMessageId == message.id &&
+              node.isIncomplete,
+        )
+        .firstOrNull;
     final generation = ++_requestGeneration;
     _pendingReplyParentId = message.id;
-    _pendingContinuationMessageId = null;
-    _continuingReplyId = null;
-    _isContinuingReply = false;
+    _pendingContinuationMessageId = incompleteAnswer?.id;
+    _continuingReplyId = incompleteAnswer?.id;
+    _isContinuingReply = incompleteAnswer != null;
     _activeCapabilityTaskId = taskId;
     _leaseCapabilityTask(taskId);
     _clearStreamingReply();
-    setState(() => _isGenerating = true);
+    _startAgentReasoningClock();
+    setState(() {
+      _isGenerating = true;
+      _agentStreamPresentation.value = const _AgentStreamPresentation(
+        currentStep: '正在思考',
+        expanded: true,
+      );
+    });
     unawaited(
       _watchRestoredCapabilityTask(
         taskId: taskId,
@@ -5364,6 +6095,7 @@ $text''';
         imageGeneration:
             message.capabilityMetadata?['type'] == 'action' &&
             message.capabilityMetadata?['id'] == 'create-image',
+        continuationMessageId: incompleteAnswer?.id,
       ),
     );
   }
@@ -5374,6 +6106,7 @@ $text''';
     required String conversationId,
     required int generation,
     required bool imageGeneration,
+    String? continuationMessageId,
   }) async {
     List<Map<String, Object?>> artifacts = const [];
     String? completedText;
@@ -5429,6 +6162,12 @@ $text''';
             artifacts = _taskArtifacts(event['artifacts']);
             _prefetchArtifactImages(artifacts);
             break;
+          case 'web_sources':
+            _agentWebSources = (event['sources'] as List? ?? const [])
+                .map(AiChatWebSource.fromJson)
+                .where((source) => source.url.startsWith('http'))
+                .toList(growable: false);
+            break;
           case 'status':
             final status = event['status']?.toString();
             cancelled = status == 'cancelled';
@@ -5440,17 +6179,44 @@ $text''';
             break;
           case 'error':
             throw AiException(event['message']?.toString() ?? '技能任务失败');
+          default:
+            if (event['step_id'] != null) {
+              final previous = _agentStreamPresentation.value;
+              final merged = mergeChatProcessDetails([
+                ..._agentProcessDetails,
+                Map<String, Object?>.from(event),
+              ]);
+              final changed =
+                  jsonEncode(_agentProcessDetails) != jsonEncode(merged);
+              if (changed) {
+                _agentProcessDetails
+                  ..clear()
+                  ..addAll(merged);
+                _agentStreamPresentation.value = previous.copyWith(
+                  currentStep:
+                      event['text']?.toString() ?? previous.currentStep,
+                  phase: event['kind'] == 'reasoning'
+                      ? 'thinking'
+                      : 'using_tool',
+                  processStatus: 'thinking',
+                  events: merged,
+                  details: merged,
+                  detailsRevision: previous.detailsRevision + 1,
+                );
+              }
+            }
         }
       }
 
       if (!_isCurrentRequest(generation, conversationId)) return;
       if (paused) {
-        if (mounted && _conversation?.id == conversationId) {
-          setState(() {
-            _stoppedEmptyReplyConversationId = conversationId;
-            _stoppedEmptyReplyParentId = messageId;
-          });
-        }
+        await _finishStoppedReply(
+          _streamingReplyBuffer.toString(),
+          conversationId: conversationId,
+          parentMessageId: messageId,
+          continuationMessageId: continuationMessageId,
+          stoppedGeneration: generation,
+        );
         return;
       }
       if (cancelled) {
@@ -5471,13 +6237,41 @@ $text''';
         ..clear()
         ..write(result);
       _flushStreamingReply(generation, conversationId);
-      await _appendAssistantReply(
-        result,
-        parentMessageId: messageId,
-        outputArtifacts: artifacts,
-        skillDocument: skillDocument,
-        skillFiles: skillFiles,
+      _agentStreamPresentation.value = _agentStreamPresentation.value.copyWith(
+        currentStep: '已完成',
+        phase: 'answer',
+        processStatus: 'completed',
+        completed: true,
       );
+      final incompleteAnswer = continuationMessageId == null
+          ? null
+          : _conversation?.nodeById(continuationMessageId);
+      if (incompleteAnswer?.isIncomplete == true &&
+          incompleteAnswer?.parentMessageId == messageId) {
+        await _updateIncompleteReply(
+          incompleteAnswer!.id,
+          _mergeAssistantContinuation(incompleteAnswer.text, result),
+          isIncomplete: false,
+          clearAgentTaskId: true,
+          outputArtifacts: artifacts,
+          skillDocument: skillDocument,
+          skillFiles: skillFiles,
+          agentProcessSummary: _agentProcessSummary(),
+          agentProcessStatus: 'completed',
+          agentWebSources: _agentWebSources,
+        );
+      } else {
+        await _appendAssistantReply(
+          result,
+          parentMessageId: messageId,
+          outputArtifacts: artifacts,
+          skillDocument: skillDocument,
+          skillFiles: skillFiles,
+          agentProcessSummary: _agentProcessSummary(),
+          agentProcessStatus: 'completed',
+          agentWebSources: _agentWebSources,
+        );
+      }
     } on TimeoutException {
       if (_isCurrentRequest(generation, conversationId)) {
         _showReplyError('任务仍在云端执行，稍后重新打开会话即可接回');
@@ -6079,9 +6873,7 @@ $text''';
           (partialReply.trim().isNotEmpty || _agentProcessDetails.isNotEmpty)) {
         answerWasSaved = await _updateIncompleteReply(
           continuationMessageId,
-          _conversation?.nodeById(parentMessageId ?? '')?.agentTaskId != null
-              ? (partialReply.trim().isEmpty ? answer.text : partialReply)
-              : '${answer.text}$partialReply',
+          _mergeAssistantContinuation(answer.text, partialReply),
           isIncomplete: true,
           clearAgentTaskId: true,
           agentProcessSummary: _agentProcessSummary(),
@@ -7181,7 +7973,18 @@ $text''';
     } on AiException catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
         _clearStreamingReply();
-        _showAgentTaskError(error);
+        final restoredQuestion =
+            error is _AgentTaskFailure &&
+            error.restoreQuestionSubmission &&
+            await _restorePausedAgentQuestionAfterSubmissionFailure(
+              conversationId,
+              question.id,
+            );
+        if (restoredQuestion) {
+          _showReplyError('补充信息暂未提交，已保留答案。点击“继续任务”重试');
+        } else {
+          _showAgentTaskError(error);
+        }
       }
     } catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -7235,7 +8038,6 @@ $text''';
         (answer == null ||
             answer.isUser ||
             !answer.isIncomplete ||
-            answer.text.trim().isEmpty ||
             answer.parentMessageId != parentMessageId)) {
       return;
     }
@@ -7246,6 +8048,26 @@ $text''';
     if (questionIndex < 0) return;
     final question = current.nodeById(parentMessageId);
     if (question == null || !question.isUser) return;
+    final prefixAnswer =
+        answer ??
+        current.messages.reversed
+            .where(
+              (item) =>
+                  !item.isUser &&
+                  item.parentMessageId == parentMessageId &&
+                  item.isIncomplete,
+            )
+            .firstOrNull;
+    final resumePrefixContent = prefixAnswer?.text;
+    final resumePrefixReasoning = prefixAnswer?.agentProcessDetails
+        .where(
+          (detail) =>
+              detail['kind'] == 'reasoning' &&
+              detail['source'] == 'model_reasoning',
+        )
+        .map((detail) => detail['text']?.toString() ?? '')
+        .where((text) => text.isNotEmpty)
+        .join('\n');
     if (!await _ensureEmailSessionForChat()) return;
     final requestPath = path.take(questionIndex + 1).toList(growable: false);
     final selection = _selectionFor(current);
@@ -7274,9 +8096,7 @@ $text''';
       if (answer != null) {
         return _updateIncompleteReply(
           answer.id,
-          question.agentTaskId != null
-              ? (addedText.trim().isEmpty ? answer.text : addedText)
-              : '${answer.text}$addedText',
+          _mergeAssistantContinuation(answer.text, addedText),
           isIncomplete: true,
           clearAgentTaskId: true,
           agentProcessSummary: _agentProcessSummary(),
@@ -7329,6 +8149,8 @@ $text''';
         modelId: selection.model.id,
         reasoningLevel: selection.reasoningLevel.name,
         resumeTaskId: resumeTaskId,
+        resumePrefixContent: resumePrefixContent,
+        resumePrefixReasoning: resumePrefixReasoning,
       );
       if (taskReply == null ||
           !_isCurrentRequest(requestGeneration, conversationId)) {
@@ -7337,7 +8159,7 @@ $text''';
       if (answer != null) {
         await _updateIncompleteReply(
           answer.id,
-          taskReply.reply,
+          _mergeAssistantContinuation(answer.text, taskReply.reply),
           isIncomplete: false,
           clearAgentTaskId: true,
           outputArtifacts: taskReply.artifacts,
@@ -7375,7 +8197,18 @@ $text''';
       if (_isCurrentRequest(requestGeneration, conversationId)) {
         final answerWasSaved = await retainPartialAfterFailure();
         restoreEmptyStoppedHint(answerWasSaved: answerWasSaved);
-        _showAgentTaskError(error);
+        final restoredQuestion =
+            error is _AgentTaskFailure &&
+            error.restoreQuestionSubmission &&
+            await _restorePausedAgentQuestionAfterSubmissionFailure(
+              conversationId,
+              question.id,
+            );
+        if (restoredQuestion) {
+          _showReplyError('补充信息暂未提交，已保留答案。点击“继续任务”重试');
+        } else {
+          _showAgentTaskError(error);
+        }
       }
     } catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -8069,9 +8902,25 @@ $text''';
         systemNavigationBarDividerColor: Colors.transparent,
       ),
       child: PopScope<void>(
-        canPop: !_voicePanelVisible && !_composerExpanded && !_spaceMenuOpen,
+        canPop:
+            _allowAgentQuestionPop ||
+            (!_voicePanelVisible &&
+                !_composerExpanded &&
+                !_spaceMenuOpen &&
+                _agentClarification.value?.questionPanel != true),
         onPopInvokedWithResult: (didPop, _) {
-          if (didPop) return;
+          if (didPop) {
+            if (_allowAgentQuestionPop) _allowAgentQuestionPop = false;
+            return;
+          }
+          if (_agentClarification.value?.questionPanel == true) {
+            if (MediaQuery.viewInsetsOf(context).bottom > 0) {
+              FocusManager.instance.primaryFocus?.unfocus();
+            } else {
+              unawaited(_pauseAgentQuestionAndPop());
+            }
+            return;
+          }
           if (_voicePanelVisible) {
             unawaited(_cancelVoiceInput());
             return;
@@ -8436,6 +9285,7 @@ $text''';
                     ],
                     if (!_composerExpanded)
                       _buildTopBar(showNewConversation: _messages.isNotEmpty),
+                    _buildAgentQuestionOverlay(constraints),
                   ],
                 );
               },
@@ -8445,6 +9295,82 @@ $text''';
       ),
     );
   }
+
+  Widget _buildAgentQuestionOverlay(BoxConstraints constraints) =>
+      ValueListenableBuilder<_AgentClarification?>(
+        valueListenable: _agentClarification,
+        builder: (context, clarification, _) {
+          if (clarification == null ||
+              !clarification.questionPanel ||
+              clarification.conversationId != _conversation?.id ||
+              clarification.surfaceIds.isEmpty) {
+            return const SizedBox.shrink();
+          }
+          final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+          final composerRenderObject = _composerKey.currentContext
+              ?.findRenderObject();
+          final composerHeight =
+              composerRenderObject is RenderBox && composerRenderObject.hasSize
+              ? composerRenderObject.size.height + 34
+              : 190.0;
+          final bottom = keyboardInset > 0
+              ? keyboardInset + 12
+              : composerHeight;
+          final maxCardHeight = max(220.0, constraints.maxHeight - bottom - 16);
+          final cardHeight = min(560.0, maxCardHeight);
+          final surfaceId = clarification.surfaceIds.first;
+          final surface = clarification.processor.model.getSurface(surfaceId);
+          if (surface == null) return const SizedBox.shrink();
+          return Positioned.fill(
+            child: Stack(
+              children: [
+                if (keyboardInset > 0)
+                  Positioned.fill(
+                    child: ModalBarrier(
+                      color: Colors.black.withValues(alpha: .24),
+                      dismissible: true,
+                      onDismiss: () =>
+                          FocusManager.instance.primaryFocus?.unfocus(),
+                      semanticsLabel: '收起键盘',
+                    ),
+                  ),
+                AnimatedPositioned(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  left: 16,
+                  right: 16,
+                  bottom: bottom,
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 560),
+                      child: Material(
+                        color: Theme.of(context).colorScheme.surface,
+                        elevation: 18,
+                        shadowColor: Colors.black.withValues(alpha: .2),
+                        borderRadius: BorderRadius.circular(20),
+                        clipBehavior: Clip.antiAlias,
+                        child: Padding(
+                          padding: const EdgeInsets.all(18),
+                          child: SizedBox(
+                            height: cardHeight,
+                            child: KeyedSubtree(
+                              key: ValueKey(surfaceId),
+                              child: a2ui_flutter.A2uiSurface(
+                                key: ObjectKey(surface),
+                                surface: surface,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      );
 
   Widget _buildTopBar({required bool showNewConversation}) {
     return Positioned(
@@ -10060,7 +10986,7 @@ class _AgentProcessPanelState extends State<_AgentProcessPanel> {
   Widget _details(ColorScheme colors) {
     final process = widget.presentation;
     final details = process.details;
-    final fallback = details.isEmpty && !_isStreaming ? '本次未记录可展示的过程说明。' : '';
+    if (details.isEmpty) return const SizedBox.shrink();
     final textColor = colors.onSurfaceVariant.withValues(alpha: 0.78);
     final content = Container(
       margin: const EdgeInsets.only(left: 3),
@@ -10074,11 +11000,6 @@ class _AgentProcessPanelState extends State<_AgentProcessPanel> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (fallback.isNotEmpty)
-            Text(
-              fallback,
-              style: TextStyle(color: textColor, fontSize: 12, height: 1.5),
-            ),
           for (final detail in details)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
@@ -10261,6 +11182,447 @@ class _ThinkingStatusTextState extends State<_ThinkingStatusText>
   }
 }
 
+class _AgentQuestionPanelSurface extends StatefulWidget {
+  const _AgentQuestionPanelSurface({
+    required this.data,
+    required this.componentId,
+  });
+
+  final Map<String, Object?> data;
+  final String componentId;
+
+  @override
+  State<_AgentQuestionPanelSurface> createState() =>
+      _AgentQuestionPanelSurfaceState();
+}
+
+class _AgentQuestionPanelSurfaceState extends State<_AgentQuestionPanelSurface>
+    with WidgetsBindingObserver {
+  late final List<Map<String, Object?>> _questions =
+      (widget.data['questions'] as List? ?? const [])
+          .whereType<Map>()
+          .map((question) => Map<String, Object?>.from(question))
+          .toList(growable: false);
+  late int _index = (widget.data['currentIndex'] as num? ?? 0)
+      .toInt()
+      .clamp(0, max(0, _questions.length - 1))
+      .toInt();
+  late bool _paused = widget.data['paused'] == true;
+  final FocusNode _focusNode = FocusNode();
+  final Map<String, TextEditingController> _textControllers = {};
+  final Map<String, Set<String>> _selectedOptions = {};
+  late String _syncedDraftFingerprint;
+  late int _syncedCurrentIndex;
+  String? _error;
+
+  String _id(Map<String, Object?> question) => question['id']?.toString() ?? '';
+
+  Map<String, Object?> get _rawDraft =>
+      Map<String, Object?>.from((widget.data['draft'] as Map?) ?? const {});
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    final saved = _rawDraft;
+    _syncedDraftFingerprint = jsonEncode(saved);
+    _syncedCurrentIndex = _index;
+    for (final question in _questions) {
+      final id = _id(question);
+      if (id.isEmpty) continue;
+      final draft = Map<String, Object?>.from((saved[id] as Map?) ?? const {});
+      _textControllers[id] = TextEditingController(
+        text: draft['custom_text']?.toString() ?? '',
+      );
+      _selectedOptions[id] = (draft['selected_options'] as List? ?? const [])
+          .map((value) => value.toString())
+          .toSet();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _AgentQuestionPanelSurface oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _paused = widget.data['paused'] == true;
+    final incomingIndex = (widget.data['currentIndex'] as num? ?? _index)
+        .toInt()
+        .clamp(0, max(0, _questions.length - 1))
+        .toInt();
+    if (incomingIndex != _syncedCurrentIndex) {
+      _index = incomingIndex;
+      _syncedCurrentIndex = incomingIndex;
+    }
+    final saved = _rawDraft;
+    final incomingFingerprint = jsonEncode(saved);
+    if (incomingFingerprint == _syncedDraftFingerprint) return;
+    _syncedDraftFingerprint = incomingFingerprint;
+    for (final question in _questions) {
+      final id = _id(question);
+      final draft = Map<String, Object?>.from((saved[id] as Map?) ?? const {});
+      final text = draft['custom_text']?.toString() ?? '';
+      final controller = _textControllers[id];
+      if (controller != null && controller.text != text) {
+        controller.value = TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+        );
+      }
+      _selectedOptions[id] = (draft['selected_options'] as List? ?? const [])
+          .map((value) => value.toString())
+          .toSet();
+    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || MediaQuery.viewInsetsOf(context).bottom > 0) return;
+      if (_focusNode.hasFocus) _focusNode.unfocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _focusNode.dispose();
+    for (final controller in _textControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  Map<String, Object?> _currentDraft() => {
+    for (final question in _questions)
+      if (_id(question).isNotEmpty)
+        _id(question): {
+          'selected_options': (_selectedOptions[_id(question)] ?? const {})
+              .toList(growable: false),
+          'custom_text': _textControllers[_id(question)]?.text ?? '',
+        },
+  };
+
+  void _emit(String name) {
+    _dispatchAction(name, {'draft': _currentDraft(), 'current_index': _index});
+  }
+
+  void _dispatchAction(String name, Map<String, Object?> eventContext) {
+    final surface = a2ui_flutter.A2uiSurface.of(context);
+    unawaited(
+      surface.dispatchAction({
+        'event': {'name': name, 'context': eventContext},
+      }, widget.componentId),
+    );
+  }
+
+  bool _answered(Map<String, Object?> question) {
+    final id = _id(question);
+    return (_selectedOptions[id]?.isNotEmpty ?? false) ||
+        (_textControllers[id]?.text.trim().isNotEmpty ?? false);
+  }
+
+  String _optionIconAsset({required bool multiple, required bool selected}) {
+    final control = multiple ? 'checkbox' : 'radio';
+    final state = selected ? 'selected' : 'unselected';
+    return 'assets/images/agent_question_${control}_$state.svg';
+  }
+
+  void _select(String option) {
+    final question = _questions[_index];
+    final id = _id(question);
+    final selected = _selectedOptions.putIfAbsent(id, () => <String>{});
+    final multiple = question['selection_mode'] == 'multiple';
+    setState(() {
+      _error = null;
+      if (multiple) {
+        if (!selected.add(option)) selected.remove(option);
+      } else {
+        selected
+          ..clear()
+          ..add(option);
+        if (_index < _questions.length - 1) _index++;
+      }
+    });
+    _emit('question_draft');
+  }
+
+  void _navigate(int offset) {
+    setState(() {
+      _index = (_index + offset).clamp(0, _questions.length - 1).toInt();
+      _error = null;
+    });
+    _emit('question_draft');
+  }
+
+  void _submit() {
+    final firstMissing = _questions.indexWhere(
+      (question) => question['required'] == true && !_answered(question),
+    );
+    if (firstMissing >= 0) {
+      setState(() {
+        _index = firstMissing;
+        _error = '请回答这道必答题';
+      });
+      return;
+    }
+    _focusNode.unfocus();
+    _dispatchAction('question_submit', {
+      'answers': _currentDraft(),
+      'current_index': _index,
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_questions.isEmpty) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final question = _questions[_index];
+    final options = (question['options'] as List? ?? const [])
+        .map((value) => value.toString())
+        .toList(growable: false);
+    final multiple = question['selection_mode'] == 'multiple';
+    final required = question['required'] == true;
+    final id = _id(question);
+
+    return LayoutBuilder(
+      builder: (context, constraints) => SizedBox(
+        height: constraints.maxHeight.isFinite
+            ? min(560.0, constraints.maxHeight)
+            : 560,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    '补充信息',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                  ),
+                ),
+                if (_questions.length > 1)
+                  Text(
+                    '${_index + 1} / ${_questions.length}',
+                    style: TextStyle(color: colors.onSurfaceVariant),
+                  ),
+              ],
+            ),
+            if (_paused) ...[
+              const SizedBox(height: 6),
+              Text(
+                '任务已暂停，继续后可接着回答。',
+                style: TextStyle(color: colors.onSurfaceVariant),
+              ),
+            ],
+            const SizedBox(height: 14),
+            Text(
+              question['question']?.toString() ?? '',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            if (required) ...[
+              const SizedBox(height: 4),
+              Text(
+                '必答',
+                style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  for (final option in options)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Material(
+                        color: (_selectedOptions[id]?.contains(option) ?? false)
+                            ? colors.onSurface.withValues(alpha: .07)
+                            : colors.surface,
+                        borderRadius: BorderRadius.circular(12),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: _paused ? null : () => _select(option),
+                          child: Container(
+                            constraints: const BoxConstraints(minHeight: 48),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 9,
+                            ),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color:
+                                    (_selectedOptions[id]?.contains(option) ??
+                                        false)
+                                    ? colors.onSurface
+                                    : colors.outlineVariant,
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                SvgPicture.asset(
+                                  _optionIconAsset(
+                                    multiple: multiple,
+                                    selected:
+                                        _selectedOptions[id]?.contains(
+                                          option,
+                                        ) ??
+                                        false,
+                                  ),
+                                  width: 20,
+                                  height: 20,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(child: Text(option)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _textControllers[id],
+              focusNode: _focusNode,
+              enabled: !_paused,
+              minLines: 1,
+              maxLines: 3,
+              textInputAction: TextInputAction.newline,
+              decoration: InputDecoration(
+                hintText: options.isEmpty ? '自定义回答' : '自定义补充',
+                isDense: true,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 12,
+                ),
+              ),
+              onChanged: (_) {
+                setState(() => _error = null);
+                _emit('question_draft');
+              },
+            ),
+            if (_error case final error?) ...[
+              const SizedBox(height: 6),
+              Text(error, style: TextStyle(color: colors.error, fontSize: 12)),
+            ],
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                TextButton(
+                  onPressed: () {
+                    _focusNode.unfocus();
+                    _dispatchAction('question_cancel', {
+                      'draft': _currentDraft(),
+                      'current_index': _index,
+                    });
+                  },
+                  child: const Text('取消任务'),
+                ),
+                const Spacer(),
+                if (_questions.length > 1 && _index > 0)
+                  TextButton(
+                    onPressed: () => _navigate(-1),
+                    child: const Text('上一题'),
+                  ),
+                if (_index < _questions.length - 1)
+                  TextButton(
+                    onPressed: () => _navigate(1),
+                    child: const Text('下一题'),
+                  ),
+                if (_paused)
+                  FilledButton(
+                    onPressed: () => _dispatchAction('question_continue_task', {
+                      'draft': _currentDraft(),
+                      'current_index': _index,
+                    }),
+                    child: const Text('继续任务'),
+                  )
+                else
+                  FilledButton(onPressed: _submit, child: const Text('提交并继续')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AgentClarificationSummary extends StatefulWidget {
+  const _AgentClarificationSummary({required this.value});
+
+  final Map<String, Object?> value;
+
+  @override
+  State<_AgentClarificationSummary> createState() =>
+      _AgentClarificationSummaryState();
+}
+
+class _AgentClarificationSummaryState
+    extends State<_AgentClarificationSummary> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final questions = (widget.value['questions'] as List? ?? const [])
+        .whereType<Map>()
+        .toList(growable: false);
+    final answers = Map<String, Object?>.from(
+      (widget.value['draft'] as Map?) ?? const {},
+    );
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 4),
+      child: Material(
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: .42),
+        borderRadius: BorderRadius.circular(12),
+        child: Column(
+          children: [
+            ListTile(
+              dense: true,
+              title: Text('已补充 ${questions.length} 个问题'),
+              trailing: Icon(_expanded ? Icons.expand_less : Icons.expand_more),
+              onTap: () => setState(() => _expanded = !_expanded),
+            ),
+            if (_expanded)
+              for (final raw in questions)
+                Builder(
+                  builder: (context) {
+                    final question = Map<String, Object?>.from(raw);
+                    final id = question['id']?.toString() ?? '';
+                    final answer = Map<String, Object?>.from(
+                      (answers[id] as Map?) ?? const {},
+                    );
+                    final selected =
+                        (answer['selected_options'] as List? ?? const [])
+                            .map((value) => value.toString())
+                            .join('、');
+                    final custom = answer['custom_text']?.toString() ?? '';
+                    return ListTile(
+                      title: Text(question['question']?.toString() ?? ''),
+                      subtitle: Text(
+                        [
+                          selected,
+                          custom,
+                        ].where((value) => value.isNotEmpty).join('；'),
+                      ),
+                    );
+                  },
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _AgentClarificationCard extends StatelessWidget {
   const _AgentClarificationCard({required this.clarification});
 
@@ -10274,9 +11636,9 @@ class _AgentClarificationCard extends StatelessWidget {
       margin: const EdgeInsets.only(top: 12),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: colors.surfaceContainerHighest.withValues(alpha: 0.42),
+        color: colors.surfaceContainerHighest.withValues(alpha: .42),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.5)),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: .5)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -10292,13 +11654,15 @@ class _AgentClarificationCard extends StatelessWidget {
             ),
           ),
           for (final surfaceId in clarification.surfaceIds)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: genui.Surface(
-                key: ValueKey<String>('xiaoqi-clarification-$surfaceId'),
-                surfaceContext: clarification.controller.contextFor(surfaceId),
+            if (clarification.processor.model.getSurface(surfaceId)
+                case final surface?)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: a2ui_flutter.A2uiSurface(
+                  key: ObjectKey(surface),
+                  surface: surface,
+                ),
               ),
-            ),
           if (clarification.answerSummary case final summary?)
             Padding(
               padding: const EdgeInsets.only(top: 6),
@@ -10734,7 +12098,11 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
   }
 
   _AgentClarification? _currentClarification(_AgentClarification? value) {
-    if (value == null || value.conversationId != widget.record.id) return null;
+    if (value == null ||
+        value.questionPanel ||
+        value.conversationId != widget.record.id) {
+      return null;
+    }
     final latestUser = widget.messages.reversed
         .where((message) => message.isUser)
         .firstOrNull;
@@ -11625,7 +12993,10 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                                       _scheduleReplyBodyMeasurement();
                                       return _assistantStreamingText(
                                         context,
-                                        '${row.message.text}$addition',
+                                        _mergeAssistantContinuation(
+                                          row.message.text,
+                                          addition,
+                                        ),
                                         question: _annotationQuestion(
                                           row.message,
                                         ),
@@ -11873,6 +13244,10 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                   ),
                 ),
               ],
+              if (message.agentClarification?['status'] == 'submitted')
+                _AgentClarificationSummary(
+                  value: Map<String, Object?>.from(message.agentClarification!),
+                ),
               _questionVersionBar(message),
             ],
           ),

@@ -81,6 +81,7 @@ class _StreamingRuntime
     required List<Message> messages,
     List<ToolResponsePart>? respond,
     List<ToolRequestPart>? restart,
+    bool continueAbortedTurn = false,
     required void Function(AgentStreamChunk chunk) onChunk,
     required void Function(Map<String, Object?> event) onProcessEvent,
     required CancellationToken cancellation,

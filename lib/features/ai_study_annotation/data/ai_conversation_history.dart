@@ -46,8 +46,12 @@ class AiConversationMessage {
     this.agentProcessStatus,
     this.agentProcessExpanded = false,
     this.agentWebSources = const [],
+    Map<String, Object?>? agentClarification,
   }) : id = id ?? _newMessageId(),
-       annotations = List<ChatAnnotation>.unmodifiable(annotations);
+       annotations = List<ChatAnnotation>.unmodifiable(annotations),
+       agentClarification = agentClarification == null
+           ? null
+           : Map<String, Object?>.unmodifiable(agentClarification);
 
   final String id;
   final String? parentMessageId;
@@ -81,6 +85,7 @@ class AiConversationMessage {
   final String? agentProcessStatus;
   final bool agentProcessExpanded;
   final List<AiChatWebSource> agentWebSources;
+  final Map<String, Object?>? agentClarification;
 
   bool get hasAgentProcess =>
       agentProcessDetails.isNotEmpty ||
@@ -124,6 +129,8 @@ class AiConversationMessage {
     String? agentProcessStatus,
     bool? agentProcessExpanded,
     List<AiChatWebSource>? agentWebSources,
+    Map<String, Object?>? agentClarification,
+    bool clearAgentClarification = false,
   }) => AiConversationMessage(
     id: id ?? this.id,
     parentMessageId: clearParentMessageId
@@ -166,6 +173,9 @@ class AiConversationMessage {
     agentProcessStatus: agentProcessStatus ?? this.agentProcessStatus,
     agentProcessExpanded: agentProcessExpanded ?? this.agentProcessExpanded,
     agentWebSources: agentWebSources ?? this.agentWebSources,
+    agentClarification: clearAgentClarification
+        ? null
+        : agentClarification ?? this.agentClarification,
   );
 
   Map<String, Object?> toJson() => {
@@ -216,6 +226,7 @@ class AiConversationMessage {
       'agent_web_sources': agentWebSources
           .map((source) => source.toJson())
           .toList(),
+    if (agentClarification != null) 'agent_clarification': agentClarification,
   };
 
   factory AiConversationMessage.fromJson(Object? raw) {
@@ -290,6 +301,9 @@ class AiConversationMessage {
                 .map(AiChatWebSource.fromJson)
                 .toList(growable: false)
           : const [],
+      agentClarification: raw['agent_clarification'] is Map
+          ? Map<String, Object?>.from(raw['agent_clarification'] as Map)
+          : null,
     );
   }
 }

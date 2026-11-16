@@ -5,10 +5,18 @@ packages:
     dependency: "direct main"
     description:
       name: a2ui_core
-      sha256: "81cd97d82d58719e68856e901b8e8cae45be201ed7b1f9a0c9ba79226dc87208"
+      sha256: b55874f4e4eef078fb8548e7f271e21e72c6e8ee49a67a0816a6c150dd016b0c
       url: "https://pub.dev"
     source: hosted
-    version: "0.1.1"
+    version: "0.7.0"
+  a2ui_flutter:
+    dependency: "direct main"
+    description:
+      name: a2ui_flutter
+      sha256: "8c754631872181be743873851686b0260558b34dac71ce647cc4bdbda7c65ad7"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.0"
   android_file_picker:
     dependency: transitive
     description:
@@ -469,14 +477,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.7.7+1"
-  flutter_markdown_plus:
-    dependency: transitive
-    description:
-      name: flutter_markdown_plus
-      sha256: fce641d6c2106cc495de1cd603f97a4f9d615a97a64011928ded380dbdade935
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.0.12"
   flutter_math_fork:
     dependency: "direct main"
     description:
@@ -583,38 +583,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
-  genai_primitives:
-    dependency: transitive
-    description:
-      name: genai_primitives
-      sha256: "5a1e8c7ae9caf01aa609f59c54de47b73f51bf1ae95e0f679b7c7ab6948c4d9d"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.2.4"
   genkit:
     dependency: "direct main"
     description:
       name: genkit
-      sha256: "478f914efde52c6c1c0f2177b5a1632c2e5dc39e88cab29b48930d80137c1a2a"
+      sha256: "13a887363cf0eb0bb265e048573746d68318d005b42afd4a5713ea9e9c645cd6"
       url: "https://pub.dev"
     source: hosted
-    version: "1.0.0"
-  genkit_a2ui:
-    dependency: "direct main"
-    description:
-      name: genkit_a2ui
-      sha256: f5fea7457cbe15437fc1e475eccd351b8af444343be772cfece76f56e7f1f9c0
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.4.0"
-  genui:
-    dependency: "direct main"
-    description:
-      name: genui
-      sha256: fa7e0c78e813fe9f4929e5ab361e660bdb4de03a75ae4ffc81a96dff2246d67d
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.10.4"
+    version: "1.0.2"
   glob:
     dependency: transitive
     description:
@@ -784,7 +760,7 @@ packages:
     source: hosted
     version: "1.0.1"
   json_schema_builder:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: json_schema_builder
       sha256: "657db3229ba10305c48e8686e8b3aca16e12e639c3a7b96687a6eeb7836b6e1b"
@@ -1763,14 +1739,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.4.0"
-  video_player_win:
-    dependency: transitive
-    description:
-      name: video_player_win
-      sha256: df03760c1498ee0c0efe2688b302c331acf46489e9821761d1adb137148502f1
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.3.0"
   vm_service:
     dependency: transitive
     description:

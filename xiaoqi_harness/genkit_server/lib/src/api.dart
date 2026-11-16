@@ -23,8 +23,6 @@ import 'package:genkit/experimental.dart'
         Artifact,
         GenkitAgents,
         SessionRunner,
-        SessionSnapshot,
-        SnapshotStatus,
         TurnResult;
 import 'package:genkit/experimental_io.dart' show GenkitRouterAgents;
 import 'package:genkit/genkit.dart'
@@ -979,6 +977,8 @@ class XiaoqiApi {
     SessionRunner<Map<String, dynamic>> session,
     AgentFnOptions options,
   ) async {
+    String? executedTenantId;
+    String? executedTaskId;
     await session.run((input, turnContext) async {
       final context = options.context ?? const <String, dynamic>{};
       final tenantId = context['tenant_id']?.toString() ?? '';
@@ -988,7 +988,14 @@ class XiaoqiApi {
           status: StatusCode.unauthenticated,
         );
       }
+      executedTenantId = tenantId;
       var messages = session.getMessages();
+      final rawResume = input.message?.metadata?['xiaoqi_agent_resume'];
+      final resumeControl = rawResume is Map
+          ? Map<String, dynamic>.from(rawResume)
+          : null;
+      final resumePrefixContent = resumeControl?['prefix_content'];
+      final resumePrefixReasoning = resumeControl?['prefix_reasoning'];
       var currentUserIndex = messages.lastIndexWhere(
         (message) => message.role == Role.user,
       );
@@ -1015,7 +1022,25 @@ class XiaoqiApi {
       if (config == null) {
         throw const FormatException('Genkit Agent 回合参数缺失');
       }
+      if (resumeControl != null) {
+        // This is a transport marker for an aborted turn, not a user message.
+        // Remove it before the Genkit session is persisted so history remains
+        // the original conversation branch.
+        if (messages.isNotEmpty &&
+            messages.last.metadata?['xiaoqi_agent_resume'] is Map) {
+          messages = messages.take(messages.length - 1).toList();
+          session.setMessages(messages);
+        }
+        currentUserIndex = messages.lastIndexWhere(
+          (message) => message.role == Role.user,
+        );
+        if (currentUserIndex < 0) {
+          throw const FormatException('恢复快照缺少原始用户消息');
+        }
+        currentUser = messages[currentUserIndex];
+      }
       final taskId = _safeId(config['task_id'], '任务 ID');
+      executedTaskId = taskId;
 
       final rawLegacyHistory = config['legacy_history'];
       if (messages.length == 1 && rawLegacyHistory is List) {
@@ -1025,26 +1050,37 @@ class XiaoqiApi {
         ]);
         messages = [...seeded.take(seeded.length - 1), currentUser];
       }
-      final cleanConfig = resolveCapabilityScope(
-        config,
-        messages
-            .take(
-              messages.lastIndexWhere((message) => message.role == Role.user),
+      final cleanConfig =
+          resolveCapabilityScope(
+              config,
+              messages
+                  .take(
+                    messages.lastIndexWhere(
+                      (message) => message.role == Role.user,
+                    ),
+                  )
+                  .toList()
+                  .reversed
+                  .where((message) => message.role == Role.user)
+                  .map(
+                    (message) => message.metadata?[_remoteAgentTurnMetadataKey],
+                  )
+                  .whereType<Map>()
+                  .where((value) {
+                    final contextIds =
+                        config?['work_context_message_ids'] as List?;
+                    return contextIds == null ||
+                        contextIds
+                            .map((id) => id.toString())
+                            .contains(value['user_message_id']?.toString());
+                  })
+                  .map((value) => Map<String, dynamic>.from(value)),
             )
-            .toList()
-            .reversed
-            .where((message) => message.role == Role.user)
-            .map((message) => message.metadata?[_remoteAgentTurnMetadataKey])
-            .whereType<Map>()
-            .where((value) {
-              final contextIds = config?['work_context_message_ids'] as List?;
-              return contextIds == null ||
-                  contextIds
-                      .map((id) => id.toString())
-                      .contains(value['user_message_id']?.toString());
-            })
-            .map((value) => Map<String, dynamic>.from(value)),
-      )..remove('legacy_history');
+            ..remove('legacy_history')
+            // These are one-request transport controls, never conversation data.
+            ..remove('_continue_aborted_turn')
+            ..remove('_resume_prefix_content')
+            ..remove('_resume_prefix_reasoning');
       currentUserIndex = messages.lastIndexWhere(
         (message) => message.role == Role.user,
       );
@@ -1147,6 +1183,15 @@ class XiaoqiApi {
               .whereType<Map>()
               .map((m) => m['task_id']?.toString() ?? ''),
         );
+      if (resumeControl != null) {
+        request['_continue_aborted_turn'] = true;
+        if (resumePrefixContent is String) {
+          request['_resume_prefix_content'] = resumePrefixContent;
+        }
+        if (resumePrefixReasoning is String) {
+          request['_resume_prefix_reasoning'] = resumePrefixReasoning;
+        }
+      }
       _ensureRemoteAgentTask(tenantId, taskId, context['device_id']);
       try {
         _bindRemoteUserMessage(tenantId, taskId, request);
@@ -1169,8 +1214,21 @@ class XiaoqiApi {
         'waiting_for_user',
         'partially_completed',
       };
+      final hasResumeAction =
+          input.resume?.respond?.isNotEmpty == true ||
+          input.resume?.restart?.isNotEmpty == true;
       if (input.message == null &&
+          !hasResumeAction &&
           replayableStatuses.contains(settled['status'])) {
+        session.addArtifacts(_remoteAgentArtifacts(tenantId, taskId));
+        if (settled['status'] == 'waiting_for_user') {
+          final statusArtifact = _remoteAgentStatusArtifact(taskId, settled);
+          session.addArtifacts([statusArtifact]);
+          // Keep Genkit's interrupted model message in the session. Replacing
+          // it with the task result loses the ToolRequestPart, so the client
+          // cannot respond to the original ask_user interrupt.
+          return TurnResult(finishReason: AgentFinishReason.interrupted);
+        }
         session.setMessages([
           ...messages,
           Message(
@@ -1178,11 +1236,6 @@ class XiaoqiApi {
             content: [TextPart(text: settled['result']?.toString() ?? '')],
           ),
         ]);
-        session.addArtifacts(_remoteAgentArtifacts(tenantId, taskId));
-        if (settled['status'] == 'waiting_for_user') {
-          final statusArtifact = _remoteAgentStatusArtifact(taskId, settled);
-          session.addArtifacts([statusArtifact]);
-        }
         return TurnResult(finishReason: AgentFinishReason.stop);
       }
       if (_controllers.containsKey(executionKey)) {
@@ -1191,29 +1244,39 @@ class XiaoqiApi {
           status: StatusCode.failedPrecondition,
         );
       }
+      // The Genkit run itself proves the client is connected. Seed the lease
+      // here so a freshly resumed task cannot be paused using an old heartbeat
+      // timestamp before the client's next 10-second heartbeat arrives.
+      _leasedTaskKeys.add(executionKey);
+      _mutateTask(
+        executionKey,
+        (value) => {
+          ...value,
+          'lease_required': true,
+          'last_client_heartbeat_at': _now(),
+        },
+      );
       final executionCancellation = CancellationController();
       final unlinkCancellation = options.cancel?.link(executionCancellation);
       _controllers[executionKey] = executionCancellation;
       try {
-        final checkpoint = SessionSnapshot(
-          snapshotId: _uuid.v4(),
-          parentId: turnContext.parentSnapshotId,
-          status: SnapshotStatus.completed,
-          createdAt: DateTime.now().toUtc().toIso8601String(),
-          state: session.getState(),
-        );
-        final checkpointId = await CloudSessionStore(
-          store,
-        ).saveSnapshot(null, (_) => checkpoint, context: options.context);
+        // Genkit reserves this ID for the snapshot it will persist after the
+        // handler returns. Bind the task to that exact official snapshot; a
+        // hand-written pre-run snapshot is not a resumable execution point.
+        final checkpointId = turnContext.snapshotId;
+        if (checkpointId.isEmpty) {
+          throw StateError('Genkit 没有为本轮预留恢复快照');
+        }
         final acceptedTask = store.get(executionKey);
-        if (input.message != null &&
+        if (resumeControl == null &&
+            input.message != null &&
             acceptedTask?.value['cancel_requested'] == true) {
           _mutateTask(
             executionKey,
             (value) => {
               ...value,
               'agent_snapshot_id': checkpointId,
-              'status': 'paused',
+              'status': 'pausing',
               'updated_at': _now(),
               'attempt': (value['attempt'] as num? ?? 0).toInt() + 1,
             },
@@ -1330,6 +1393,8 @@ class XiaoqiApi {
                   onChunk: options.sendChunk,
                   onProcessEvent: addProcessEvent,
                   cancellation: executionCancellation.token,
+                  continueAbortedTurn:
+                      request['_continue_aborted_turn'] == true,
                   onImageGenerationStarted: () => addProcessEvent({
                     'type': 'image_generation_started',
                     'tool': 'generate_image',
@@ -1532,7 +1597,7 @@ class XiaoqiApi {
         final problemLimitReached = taskValue['problem_attempt_limit'] is Map;
         final finalTaskStatus = result.finishReason == AgentFinishReason.aborted
             ? pauseRequested
-                  ? 'paused'
+                  ? 'pausing'
                   : 'failed'
             : result.finishReason == AgentFinishReason.interrupted
             ? interruptType == 'user_questions'
@@ -1597,6 +1662,37 @@ class XiaoqiApi {
       }
     });
 
+    // SessionRunner has now written its official end-of-turn snapshot. Only
+    // after that write may the task become resumable in the task API.
+    final lastTaskId = executedTaskId;
+    if (lastTaskId != null &&
+        lastTaskId.isNotEmpty &&
+        executedTenantId != null) {
+      final taskKey = 'task/$executedTenantId/$lastTaskId';
+      final currentTask = store.get(taskKey)?.value;
+      if (currentTask != null) {
+        final finishReason = session.lastTurnFinishReason;
+        final pending = currentTask['status']?.toString();
+        final settledStatus = pending == 'pausing'
+            ? finishReason == AgentFinishReason.aborted
+                  ? 'paused'
+                  : finishReason == AgentFinishReason.failed
+                  ? 'failed'
+                  : pending
+            : pending;
+        _mutateTask(
+          taskKey,
+          (value) => {
+            ...value,
+            if (session.lastSnapshot?.snapshotId != null)
+              'agent_snapshot_id': session.lastSnapshot!.snapshotId,
+            if (settledStatus != null) 'status': settledStatus,
+            'updated_at': _now(),
+          },
+        );
+      }
+    }
+
     final messages = session.getMessages();
     final lastMessage = messages.isNotEmpty ? messages.last : null;
     return AgentResult(
@@ -1625,7 +1721,15 @@ class XiaoqiApi {
           ),
         )
         .toString();
-    final key = 'message-operation/$tenantId/$workflowId/$messageId';
+    final attemptId = _safeId(request['attempt_id'] ?? taskId, '任务尝试 ID');
+    final key = 'message-operation/$tenantId/$workflowId/$messageId/$attemptId';
+    final legacyKey = 'message-operation/$tenantId/$workflowId/$messageId';
+    final legacy = store.get(legacyKey);
+    if (legacy != null && legacy.value['task_id'] == taskId) {
+      if (legacy.value['fingerprint'] != fingerprint) {
+        throw const FormatException('同一任务尝试的消息内容发生变化，请新建一轮对话');
+      }
+    }
     for (var attempt = 0; attempt < 8; attempt++) {
       final previous = store.get(key);
       if (previous != null) {
@@ -3147,6 +3251,13 @@ class XiaoqiApi {
       return _json({
         'events': events,
         'status': _publicTaskStatus(doc.value['status']),
+        'web_sources': [
+          for (final source
+              in (doc.value['web_sources'] as List? ?? const [])
+                  .whereType<Map>())
+            if (source['title'] is String && source['url'] is String)
+              Map<String, Object?>.from(source),
+        ],
         'sandbox_cleanup_pending': false,
       });
     } on FormatException catch (error) {
@@ -3167,21 +3278,34 @@ class XiaoqiApi {
         'running',
         'pausing',
         'awaiting_network_permission',
+        'waiting_for_user',
+        'paused',
       }.contains(current.value['status'])) {
+        final canCancelImmediately = const {
+          'waiting_for_user',
+          'awaiting_network_permission',
+          'paused',
+        }.contains(current.value['status']);
         final nextStatus =
-            remoteAgentTurn && current.value['status'] != 'pausing'
+            remoteAgentTurn &&
+                current.value['status'] != 'pausing' &&
+                !canCancelImmediately
             ? 'pausing'
+            : canCancelImmediately
+            ? 'cancelled'
             : current.value['status'];
         _mutateTask(
           key,
           (value) => {
             ...value,
-            'cancel_requested': true,
+            'cancel_requested': nextStatus == 'pausing',
             'status': remoteAgentTurn ? nextStatus : 'cancelled',
             'updated_at': _now(),
           },
         );
-        _controllers[key]?.cancel(remoteAgentTurn ? '用户暂停当前工作' : '用户取消任务');
+        if (nextStatus == 'pausing') {
+          _controllers[key]?.cancel('用户暂停当前工作');
+        }
         _appendEvent(key, {
           'type': 'status',
           'status': remoteAgentTurn ? nextStatus : 'cancelled',

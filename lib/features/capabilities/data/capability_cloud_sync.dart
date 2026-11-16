@@ -955,6 +955,7 @@ class CapabilityCloudSync {
     var consecutiveNetworkFailures = 0;
     DateTime? disconnectedAt;
     var connectingPublished = false;
+    String? lastWebSourcesJson;
     while (DateTime.now().difference(started) < const Duration(minutes: 20)) {
       late final Map<String, dynamic> response;
       try {
@@ -992,6 +993,14 @@ class CapabilityCloudSync {
           Duration(seconds: consecutiveNetworkFailures),
         );
         continue;
+      }
+      final webSources = response['web_sources'];
+      if (webSources is List) {
+        final encodedSources = jsonEncode(webSources);
+        if (encodedSources != lastWebSourcesJson) {
+          lastWebSourcesJson = encodedSources;
+          yield {'type': 'web_sources', 'sources': webSources};
+        }
       }
       final events = response['events'];
       if (events is List) {
