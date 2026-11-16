@@ -88,7 +88,7 @@ function Test-EcsConnection {
         $result = Invoke-AliyunJson -Arguments @(
             'ecs', 'DescribeInstances', '--profile', $Profile,
             '--region', $Region, '--RegionId', $Region,
-            '--InstanceIds', ('[\"' + $InstanceId + '\"]')
+            '--InstanceIds', (ConvertTo-Json -InputObject @($InstanceId) -Compress)
         )
         $instances = @(Get-OptionalField (Get-OptionalField $result 'Instances') 'Instance')
         if ($instances.Count -ne 1 -or $instances[0].InstanceId -ne $InstanceId) {
