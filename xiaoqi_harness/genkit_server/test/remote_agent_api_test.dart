@@ -512,6 +512,12 @@ void main() {
     }
     await Future.wait([response, drained]).timeout(const Duration(seconds: 5));
     expect(store.get('task/personal/$taskId')!.value['status'], 'paused');
+    expect((await response as dynamic).finishReason, AgentFinishReason.aborted);
+    final stoppedSnapshot = await ownerAgent.getSnapshot(
+      snapshotId: checkpoint,
+    );
+    expect(stoppedSnapshot!.status!.value, 'aborted');
+    expect(stoppedSnapshot.finishReason, AgentFinishReason.aborted);
     runtime.waitForCancellation = false;
     runtime.turnStarted = null;
     final restored = ownerAgent.chat(snapshotId: checkpoint).sendStream();
@@ -542,6 +548,7 @@ void main() {
       }
       final firstResponse = await first.response;
       expect(firstResponse.text, '请确认是否继续处理这份材料。');
+      expect(firstResponse.finishReason, AgentFinishReason.stop);
       expect(
         store.get('task/personal/$taskId')!.value['status'],
         'waiting_for_user',
@@ -549,7 +556,8 @@ void main() {
       expect(
         firstArtifacts.any(
           (artifact) =>
-              artifact.metadata?['pending_question'] == '请确认是否继续处理这份材料。',
+              artifact.metadata?['pending_question'] == '请确认是否继续处理这份材料。' &&
+              artifact.metadata?['task_status'] == 'waiting_for_user',
         ),
         isTrue,
       );

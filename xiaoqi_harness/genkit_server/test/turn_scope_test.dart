@@ -16,6 +16,66 @@ void main() {
   late Directory directory;
   late CloudStore store;
   test(
+    'ordinary text uses direct Agent scope without enabling image output',
+    () {
+      final scope = TurnContract.forDirectAgentTurn(
+        text: '解释麦克斯韦第一定律并联网搜索',
+        workflowSelected: false,
+        imageGenerationSelected: false,
+      );
+
+      expect(scope.mode, 'answer');
+      expect(scope.permitsWorkspace, isTrue);
+      expect(scope.imageLimit, 0);
+      expect(scope.permitsImages, isFalse);
+      expect(scope.allowDiscoveredSkills, isFalse);
+      expect(scope.permitsSkill('skill-not-selected'), isFalse);
+    },
+  );
+
+  test('direct Agent scope defers skill IDs to the tenant catalog', () {
+    final scope = TurnContract.forDirectAgentTurn(
+      text: '整理成便于复习的学习笔记',
+      workflowSelected: false,
+      imageGenerationSelected: false,
+      allowDiscoveredSkills: true,
+    );
+
+    expect(scope.mode, 'answer');
+    expect(scope.skillIds, isEmpty);
+    expect(scope.allowDiscoveredSkills, isTrue);
+    expect(scope.permitsSkill('tenant-discovered-skill'), isTrue);
+    expect(TurnContract.fromJson(scope.toJson()).allowDiscoveredSkills, isTrue);
+  });
+
+  test('explicit capability scope reaches the Agent loop', () {
+    final scope = TurnContract.forDirectAgentTurn(
+      text: '使用所选技能整理这些资料',
+      workflowSelected: true,
+      imageGenerationSelected: false,
+      skillIds: ['skill-notes'],
+      connectionIds: ['mcp-notes'],
+    );
+
+    expect(scope.executesWorkflow, isTrue);
+    expect(scope.skillIds, ['skill-notes']);
+    expect(scope.connectionIds, ['mcp-notes']);
+    expect(scope.imageLimit, 0);
+  });
+
+  test('an explicit image action stays within its one-image limit', () {
+    final scope = TurnContract.forDirectAgentTurn(
+      text: '生成一张图片并解释主题',
+      workflowSelected: true,
+      imageGenerationSelected: true,
+    );
+
+    expect(scope.permitsImages, isTrue);
+    expect(scope.imageLimit, 1);
+    expect(scope.answerRequired, isTrue);
+  });
+
+  test(
     'network decisions survive same-scope resume and expire with a changed request',
     () {
       ToolExecution scope(String identity) => ToolExecution(

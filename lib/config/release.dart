@@ -1,2 +1,2 @@
-const releaseId = '2026-11-16-genkit-a2ui-chat-repair1';
+const releaseId = '2026-11-17-genkit-agent-state-repair';
 const apiContractVersion = '36';

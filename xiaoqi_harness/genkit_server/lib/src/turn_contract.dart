@@ -9,6 +9,7 @@ class TurnContract {
     required this.imageLimit,
     this.answerRequired = false,
     this.skillIds = const [],
+    this.allowDiscoveredSkills = false,
     this.connectionIds = const [],
     this.withdrawnRequirementIds = const [],
     this.targetArtifactId,
@@ -19,6 +20,10 @@ class TurnContract {
   final int imageLimit;
   final bool answerRequired;
   final List<String> skillIds;
+
+  /// Allows Agent selection from this tenant's enabled skill catalog.
+  /// SelectedSkills still resolves each ID and validates its bound version.
+  final bool allowDiscoveredSkills;
   final List<String> connectionIds;
   final List<String> withdrawnRequirementIds;
   final String? targetArtifactId;
@@ -29,6 +34,7 @@ class TurnContract {
     imageLimit: value['image_limit'] as int,
     answerRequired: value['answer_required'] == true,
     skillIds: (value['skill_ids'] as List? ?? const []).cast<String>(),
+    allowDiscoveredSkills: value['allow_discovered_skills'] == true,
     connectionIds: (value['connection_ids'] as List? ?? const [])
         .cast<String>(),
     targetArtifactId: value['target_artifact_id'] as String?,
@@ -38,18 +44,40 @@ class TurnContract {
     clarification: value['clarification'] as String?,
   );
 
+  factory TurnContract.forDirectAgentTurn({
+    required String text,
+    required bool workflowSelected,
+    required bool imageGenerationSelected,
+    List<String> skillIds = const [],
+    bool allowDiscoveredSkills = false,
+    List<String> connectionIds = const [],
+    String? targetArtifactId,
+  }) => TurnContract(
+    mode: workflowSelected ? 'workflow' : 'answer',
+    imageLimit: imageGenerationSelected ? 1 : 0,
+    answerRequired:
+        !imageGenerationSelected || RegExp(r'(解释|说明|讲解|分析)').hasMatch(text),
+    skillIds: skillIds,
+    allowDiscoveredSkills: allowDiscoveredSkills,
+    connectionIds: connectionIds,
+    targetArtifactId: targetArtifactId,
+  ).constrainedBy(text, null);
+
   bool get executesWorkflow =>
       const {'create', 'revise', 'workflow', 'continue'}.contains(mode);
   bool get readsImage => mode == 'inspect';
   bool get permitsImages => imageLimit > 0 && executesWorkflow;
   // Routing recommends a workflow; it does not revoke safe task-local tools.
   bool get permitsWorkspace => !const {'cancel', 'clarify'}.contains(mode);
+  bool permitsSkill(String id) =>
+      skillIds.contains(id) || allowDiscoveredSkills;
 
   Map<String, dynamic> toJson() => {
     'mode': mode,
     'image_limit': imageLimit,
     'answer_required': answerRequired,
     'skill_ids': skillIds,
+    'allow_discovered_skills': allowDiscoveredSkills,
     'connection_ids': connectionIds,
     'withdrawn_requirement_ids': withdrawnRequirementIds,
     if (targetArtifactId != null) 'target_artifact_id': targetArtifactId,
@@ -177,6 +205,7 @@ class TurnContract {
               ? budget.toInt().clamp(0, 12).toInt()
               : imageLimit),
     skillIds: skillIds,
+    allowDiscoveredSkills: allowDiscoveredSkills,
     connectionIds: connectionIds,
     withdrawnRequirementIds: withdrawnRequirementIds,
     targetArtifactId: targetArtifactId,

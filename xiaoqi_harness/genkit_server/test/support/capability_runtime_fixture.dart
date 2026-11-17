@@ -69,9 +69,12 @@ Future<void> main(List<String> args) async {
       scenario.startsWith('text-only-plugin-command') ||
       scenario.startsWith('text-only-network-command');
   final userOnlyCommand = scenario == 'text-only-plugin-command-user-only';
-  final textOnly = scenario.startsWith('text-only');
+  final textOnly =
+      scenario.startsWith('text-only') || scenario == 'implicit-text-skill';
   final taskText = scenario.startsWith('text-only-plugin-command-direct')
       ? '/example:greet "hello world" A'
+      : scenario == 'implicit-text-skill'
+      ? '请整理一份便于复习的学习笔记，只输出文字。'
       : scenario == 'text-only-search'
       ? '请用技能检索三个不同来源并用纯文字说明。'
       : scenario == 'text-only-shell'
@@ -93,7 +96,7 @@ r=json.loads(sys.stdin.readline())
 assert r['language'] == 'python'
 assert r['authorized_domains'] == []
 assert r['skill_files'] == {}
-print(json.dumps({'type':'result','ok':True,'stdout':'ordinary-code-4','artifacts':[],'cleanup_pending':False}))
+print(json.dumps({'type':'result','execution_id':r['execution_id'],'ok':True,'stdout':'ordinary-code-4','artifacts':[],'cleanup_pending':False}),flush=True)
 ''');
     codeExecutor = DockerCodeExecutionService(
       store,
@@ -266,6 +269,13 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
   }
   final events = <Map<String, Object?>>[];
   final legacyText = <String>[];
+  final agentStreamText = StringBuffer();
+  void captureAgentChunk(AgentStreamChunk chunk) {
+    for (final part in chunk.modelChunk?.content ?? const <Part>[]) {
+      if (part.isText) agentStreamText.write(part.text ?? '');
+    }
+  }
+
   void event(Map<String, Object?> value) {
     events.add(value);
     if (const {
@@ -312,7 +322,7 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
           ? [
               {'id': 'commands', 'version_id': 'v1', 'component_id': 'greet'},
             ]
-          : scenario == 'implicit'
+          : scenario == 'implicit' || scenario == 'implicit-text-skill'
           ? []
           : [
               {'id': 'notes', 'version_id': 'v1'},
@@ -372,7 +382,7 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
       messages: agentMessagesFromRequest([
         {'role': 'user', 'content': taskText},
       ]),
-      onChunk: (_) {},
+      onChunk: captureAgentChunk,
       onProcessEvent: event,
       onLegacyDelta: legacyText.add,
       cancellation: CancellationController().token,
@@ -421,14 +431,14 @@ print(json.dumps({'type':'result','ok':True,'stdout':'shell-routing-verified','s
         request: request,
         messages: first.messages,
         restart: [restart],
-        onChunk: (_) {},
+        onChunk: captureAgentChunk,
         onProcessEvent: event,
         onLegacyDelta: legacyText.add,
         cancellation: CancellationController().token,
       );
     }
     stdout.writeln(
-      'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'legacy_text': legacyText.join(), 'code_runs': store.get('task/personal/turn')!.value['code_execution_runs'] ?? 0, 'operation_count': (store.get('task/personal/turn')!.value['scope_operations'] as Map? ?? const {}).length, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length, if (networkScenario) 'network_before_approval': beforeApproval, if (networkScenario) 'network_runs': networkCounter.existsSync() ? int.parse(networkCounter.readAsStringSync()) : 0, if (networkScenario) 'network_grants': store.get('task/personal/turn')!.value['authorized_network_domains'], if (networkScenario) 'network_interrupted': result.finishReason == AgentFinishReason.interrupted})}',
+      'RESULT:${jsonEncode({'text': result.text, 'missing': result.extensionEvidenceMissing, 'active': result.activeCapabilities, 'generated': images.generated.length, 'events': events, 'legacy_text': legacyText.join(), 'agent_stream_text': agentStreamText.toString(), 'code_runs': store.get('task/personal/turn')!.value['code_execution_runs'] ?? 0, 'operation_count': (store.get('task/personal/turn')!.value['scope_operations'] as Map? ?? const {}).length, 'artifacts': (store.get('task/personal/turn')!.value['artifacts'] as List).length, if (networkScenario) 'network_before_approval': beforeApproval, if (networkScenario) 'network_runs': networkCounter.existsSync() ? int.parse(networkCounter.readAsStringSync()) : 0, if (networkScenario) 'network_grants': store.get('task/personal/turn')!.value['authorized_network_domains'], if (networkScenario) 'network_interrupted': result.finishReason == AgentFinishReason.interrupted})}',
     );
   } finally {
     stdout.writeln(

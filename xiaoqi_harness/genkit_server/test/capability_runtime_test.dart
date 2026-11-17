@@ -13,6 +13,7 @@ void main() {
     'scope-withdraw-code',
     'scope-reprepare-code',
     'implicit',
+    'implicit-text-skill',
     'script-available',
     'text-only',
     'text-only-intent-retry',
@@ -263,37 +264,81 @@ void main() {
           requests.add(body);
           final textOnly =
               scenario.startsWith('text-only') ||
+              scenario == 'implicit-text-skill' ||
               (scenario.startsWith('scope-') &&
                   scenario != 'scope-keep-unavailable');
           final tools = (body['tools'] as List? ?? const []).whereType<Map>();
-          final preparing =
-              body['tool_choice'] != 'none' &&
-              tools.any(
-                (tool) => tool['function']?['name'] == 'set_task_deliverables',
-              );
           final alias = RegExp(
             r'skill-[a-f0-9]{24}',
           ).firstMatch(serialized)?.group(0);
           final messages = (body['messages'] as List).whereType<Map>().toList();
+          final systemText = messages
+              .where((message) => message['role'] == 'system')
+              .map((message) => message['content']?.toString() ?? '')
+              .join('\n');
           bool ran(String name) => messages.any(
             (message) => message['role'] == 'tool' && message['name'] == name,
           );
-          // OpenAI adapters do not always retain the tool name on tool responses.
-          bool called(String name) => serialized.contains('"name":"$name"');
+          // Tool requests can appear in an earlier provider request even when
+          // the current turn does not repeat them in the same serialized form.
+          bool called(String name) => requests
+              .expand(
+                (request) =>
+                    (request['messages'] as List? ?? const []).whereType<Map>(),
+              )
+              .expand(
+                (message) => (message['tool_calls'] as List? ?? const [])
+                    .whereType<Map>(),
+              )
+              .any((call) => (call['function'] as Map?)?['name'] == name);
+          final contractJson = RegExp(
+            r'本轮任务契约[^{}]*(\{[^}]+\})',
+          ).firstMatch(systemText)?.group(1);
+          final taskContract = contractJson == null
+              ? const <String, dynamic>{}
+              : jsonDecode(contractJson) as Map<String, dynamic>;
+          final hasPlanTool = tools.any(
+            (tool) => tool['function']?['name'] == 'set_task_deliverables',
+          );
+          final taskCanPlan =
+              taskContract['mode'] != 'answer' ||
+              (taskContract['skill_ids'] as List? ?? const []).isNotEmpty ||
+              (taskContract['connection_ids'] as List? ?? const []).isNotEmpty;
+          final taskMode =
+              body['tool_choice'] != 'none' &&
+              hasPlanTool &&
+              (taskCanPlan ||
+                  (scenario == 'implicit-text-skill' && called('use_skill')));
+          final planDeclared = called('set_task_deliverables');
+          final preparing = taskMode && !planDeclared;
           String? tool;
           Map<String, dynamic>? input;
-          if (preparing &&
+          if (scenario == 'implicit-text-skill' && !called('use_skill')) {
+            tool = 'use_skill';
+            input = {'skillName': alias};
+          } else if (taskMode &&
               scenario.startsWith('scope-') &&
               scenario != 'scope-keep-unavailable') {
-            // The new user request needs only text; no old plan/tools are replayed.
-            if ((scenario == 'scope-withdraw-code' ||
-                    (scenario == 'scope-reprepare-code' &&
-                        serialized.contains('LATE_ORDINARY_CODE'))) &&
-                !called('execute_python')) {
+            final needsCode =
+                scenario == 'scope-withdraw-code' ||
+                (scenario == 'scope-reprepare-code' &&
+                    serialized.contains('LATE_ORDINARY_CODE'));
+            if (preparing) {
+              tool = 'set_task_deliverables';
+              input = {
+                'steps': ['执行普通代码', '用纯文字报告结果'],
+                'skill_ids': [],
+                'no_skill_reason': '用户已撤回扩展，只剩普通代码任务',
+                'tools': [
+                  if (needsCode) {'name': 'execute_python', 'count': 1},
+                ],
+                'artifacts': [],
+              };
+            } else if (needsCode && !called('execute_python')) {
               tool = 'execute_python';
               input = {'code': 'print(2+2)', 'language': 'python'};
             }
-          } else if (preparing &&
+          } else if (taskMode &&
               (scenario.startsWith('text-only-plugin-command') ||
                   scenario.startsWith('text-only-network-command'))) {
             if (!called('set_task_deliverables')) {
@@ -349,7 +394,7 @@ void main() {
                 'purpose': 'Fetch command task data',
               };
             }
-          } else if (preparing && scenario.startsWith('mcp-')) {
+          } else if (taskMode && scenario.startsWith('mcp-')) {
             final large = scenario.startsWith('mcp-large');
             final directoryName = large
                 ? tools.firstWhere(
@@ -488,7 +533,7 @@ void main() {
                 'uri': 'fixture://card/large',
               };
             }
-          } else if (preparing && scenario != 'missing') {
+          } else if (taskMode && scenario != 'missing') {
             if ((scenario == 'implicit' ||
                     scenario == 'scope-keep-unavailable') &&
                 !called('use_skill')) {
@@ -934,19 +979,30 @@ void main() {
             }
           } else if (scenario.startsWith('scope-')) {
             final keep = scenario == 'scope-keep-unavailable';
-            expect(result['missing'], keep);
+            expect(result['missing'], keep, reason: jsonEncode(result));
             expect(result['generated'], keep ? 2 : 0);
             expect(result['active'], hasLength(keep ? 1 : 0));
             expect(jsonEncode(result['events']), contains('steering_applied'));
+            if (!keep) {
+              expect(
+                (result['events'] as List).whereType<Map>().where(
+                  (event) =>
+                      event['type'] == 'tool_succeeded' &&
+                      event['tool'] == 'use_skill',
+                ),
+                isEmpty,
+              );
+            }
             expect(result['text'], contains(keep ? '任务尚未完成' : '纯文字'));
             if (keep) expect(result['text'], contains('Unavailable plugin'));
             if (scenario == 'scope-withdraw-followup') {
-              // A later terse correction preserves the earlier withdrawal.
               expect(
                 (result['events'] as List).whereType<Map>().where(
-                  (e) => e['type'] == 'steering_applied',
+                  (event) =>
+                      event['type'] == 'steering_applied' &&
+                      event['sequence'] == 2,
                 ),
-                hasLength(2),
+                hasLength(1),
               );
             }
             if (scenario == 'scope-withdraw-code') {
@@ -954,14 +1010,56 @@ void main() {
               expect(result['code_runs'], 1);
             }
             if (scenario == 'scope-reprepare-code') {
-              expect(result['legacy_text'], isNot(contains('STALE_FINAL')));
-              expect(result['legacy_text'], contains('ordinary-code-4'));
-              expect(result['code_runs'], 1);
               expect(
-                jsonEncode(result['events']),
-                contains('steering_repreparing'),
+                result['agent_stream_text'],
+                contains('ordinary-code-4'),
+                reason: jsonEncode(result),
               );
+              expect(result['code_runs'], 1);
+              final events = (result['events'] as List)
+                  .whereType<Map>()
+                  .toList();
+              final latestCorrection = events.indexWhere(
+                (event) =>
+                    event['type'] == 'steering_applied' &&
+                    event['sequence'] == 2,
+              );
+              final plan = events.indexWhere(
+                (event) =>
+                    event['type'] == 'tool_requested' &&
+                    event['tool'] == 'set_task_deliverables',
+              );
+              final code = events.indexWhere(
+                (event) =>
+                    event['type'] == 'tool_succeeded' &&
+                    event['tool'] == 'execute_python',
+              );
+              expect(latestCorrection, greaterThanOrEqualTo(0));
+              expect(plan, greaterThan(latestCorrection));
+              expect(code, greaterThan(plan));
             }
+          } else if (scenario == 'implicit-text-skill') {
+            expect(classifierCalls, 0);
+            expect(result['missing'], isFalse);
+            expect(result['generated'], 0);
+            expect(result['text'], contains('纯文字整理已完成'));
+            expect(
+              (result['events'] as List).whereType<Map>().where(
+                (event) =>
+                    event['type'] == 'tool_succeeded' &&
+                    event['tool'] == 'use_skill',
+              ),
+              hasLength(1),
+            );
+            expect(
+              (result['events'] as List).whereType<Map>().where(
+                (event) =>
+                    event['type'] == 'tool_returned' &&
+                    event['tool'] == 'set_task_deliverables' &&
+                    event['status'] == 'completed',
+              ),
+              hasLength(1),
+            );
           } else if (scenario == 'missing') {
             expect(result['missing'], isTrue);
             expect(result['generated'], 0);
@@ -1131,7 +1229,21 @@ void main() {
             if (scenario == 'image-format-repair')
               expect(jsonEncode(requests), contains('图片编码格式尚无可执行保障'));
           }
-          if (!const {
+          if (const {
+            'scope-withdraw-unavailable',
+            'scope-withdraw-followup',
+          }.contains(scenario)) {
+            final visibleTools = jsonEncode(requests.last['tools']);
+            expect(visibleTools, isNot(contains('generate_image')));
+            expect(
+              (result['events'] as List).whereType<Map>().where(
+                (event) =>
+                    event['type'] == 'tool_requested' &&
+                    event['tool'] == 'set_task_deliverables',
+              ),
+              isEmpty,
+            );
+          } else if (!const {
             'missing',
             'explicit-partial',
             'scope-keep-unavailable',
@@ -1145,7 +1257,9 @@ void main() {
             'mcp-user-send-change',
           }.contains(scenario)) {
             final finalRequest = requests.last;
-            expect(finalRequest['tool_choice'], 'none');
+            // Genkit's standard Agent loop may leave tool_choice unset after
+            // the final answer. Do not require a separate forced-final phase.
+            expect(finalRequest['tool_choice'], anyOf('none', isNull));
             expect(finalRequest['tools'], isNotEmpty);
             expect(
               jsonEncode(finalRequest['tools']),

@@ -16,6 +16,9 @@ import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental.dart'
     show
         Agent,
+        AgentInput,
+        AgentOutput,
+        AgentInit,
         AgentFinishReason,
         AgentFnOptions,
         AgentResult,
@@ -24,9 +27,9 @@ import 'package:genkit/experimental.dart'
         GenkitAgents,
         SessionRunner,
         TurnResult;
-import 'package:genkit/experimental_io.dart' show GenkitRouterAgents;
 import 'package:genkit/genkit.dart'
     show
+        Action,
         CancellationController,
         Genkit,
         GenkitException,
@@ -348,9 +351,47 @@ class XiaoqiApi {
       store: CloudSessionStore(store),
       fn: _runRemoteAgent,
     );
-    _agentRouter.addAgent(
-      _remoteAgent,
+    final originalAction = _remoteAgent.action;
+    final cancellableAction =
+        Action<AgentInput, AgentOutput, AgentStreamChunk, AgentInit>(
+          name: originalAction.name,
+          actionType: originalAction.actionType,
+          inputSchema: originalAction.inputSchema,
+          outputSchema: originalAction.outputSchema,
+          streamSchema: originalAction.streamSchema,
+          initSchema: originalAction.initSchema,
+          metadata: originalAction.metadata,
+          fn: (input, ctx) async {
+            final controller = CancellationController();
+            final invocationId = const Uuid().v4();
+            _agentInvocations[invocationId] = controller;
+            final unlink = ctx.cancel?.link(controller);
+            try {
+              return (await originalAction.run(
+                input,
+                inputStream: ctx.inputStream,
+                init: ctx.init,
+                context: {
+                  ...?ctx.context,
+                  '_agent_invocation_id': invocationId,
+                },
+                onChunk: ctx.streamingRequested ? ctx.sendChunk : null,
+                cancel: controller.token,
+              )).result;
+            } finally {
+              unlink?.call();
+              _agentInvocations.remove(invocationId);
+            }
+          },
+        );
+    _agentRouter.addAction(
+      cancellableAction,
       path: '/v1/agent/chat',
+      contextProvider: _agentRequestContext,
+    );
+    _agentRouter.addAction(
+      _remoteAgent.getSnapshotDataAction,
+      path: '/v1/agent/chat/getSnapshot',
       contextProvider: _agentRequestContext,
     );
     _taskLeaseTimer = Timer.periodic(
@@ -373,6 +414,7 @@ class XiaoqiApi {
   late final GenkitRouter _agentRouter;
   late final Agent<Map<String, dynamic>> _remoteAgent;
   final _controllers = <String, CancellationController>{};
+  final _agentInvocations = <String, CancellationController>{};
   final _leasedTaskKeys = <String>{};
   Timer? _taskLeaseTimer;
   final _appControllers =
@@ -994,8 +1036,6 @@ class XiaoqiApi {
       final resumeControl = rawResume is Map
           ? Map<String, dynamic>.from(rawResume)
           : null;
-      final resumePrefixContent = resumeControl?['prefix_content'];
-      final resumePrefixReasoning = resumeControl?['prefix_reasoning'];
       var currentUserIndex = messages.lastIndexWhere(
         (message) => message.role == Role.user,
       );
@@ -1078,9 +1118,7 @@ class XiaoqiApi {
             )
             ..remove('legacy_history')
             // These are one-request transport controls, never conversation data.
-            ..remove('_continue_aborted_turn')
-            ..remove('_resume_prefix_content')
-            ..remove('_resume_prefix_reasoning');
+            ..remove('_continue_aborted_turn');
       currentUserIndex = messages.lastIndexWhere(
         (message) => message.role == Role.user,
       );
@@ -1185,12 +1223,6 @@ class XiaoqiApi {
         );
       if (resumeControl != null) {
         request['_continue_aborted_turn'] = true;
-        if (resumePrefixContent is String) {
-          request['_resume_prefix_content'] = resumePrefixContent;
-        }
-        if (resumePrefixReasoning is String) {
-          request['_resume_prefix_reasoning'] = resumePrefixReasoning;
-        }
       }
       _ensureRemoteAgentTask(tenantId, taskId, context['device_id']);
       try {
@@ -1256,7 +1288,9 @@ class XiaoqiApi {
           'last_client_heartbeat_at': _now(),
         },
       );
-      final executionCancellation = CancellationController();
+      final executionCancellation =
+          _agentInvocations[options.context?['_agent_invocation_id']] ??
+          CancellationController();
       final unlinkCancellation = options.cancel?.link(executionCancellation);
       _controllers[executionKey] = executionCancellation;
       try {
@@ -1630,16 +1664,25 @@ class XiaoqiApi {
               : null,
         );
         if (finalTaskStatus == 'waiting_for_user') {
+          final settledTaskValue =
+              store.get('task/$tenantId/$taskId')?.value ?? taskValue;
           final statusArtifact = _remoteAgentStatusArtifact(
             taskId,
-            taskValue,
+            settledTaskValue,
             pendingQuestion: pendingQuestion,
             interruptType: interruptType,
           );
           session.addArtifacts([statusArtifact]);
           options.sendChunk(AgentStreamChunk(artifact: statusArtifact));
         }
-        return TurnResult(finishReason: result.finishReason);
+        // A business-level clarification ends this Genkit turn normally. It
+        // waits for a new user message, but it is not a Genkit tool interrupt
+        // that needs AgentResume.respond/restart.
+        return TurnResult(
+          finishReason:
+              result.finishReason ??
+              (result.waitingForUser ? AgentFinishReason.stop : null),
+        );
       } on Object {
         final status = store.get(executionKey)?.value['status'];
         if (status == 'running' || status == 'pausing') {

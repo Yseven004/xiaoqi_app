@@ -12,6 +12,28 @@
 - Before handing off an Agent change, report the capability mapping, any justified exceptions, and evidence for the affected cancellation/recovery, branching and tool identity behavior. Code compilation or tests passing alone do not establish architecture compliance. Any new model phase, execution-history owner or recovery mechanism that departs from the confirmed architecture requires updating the plan and explaining the deviation before implementing it. A previously documented deficiency is not approval to silently weaken the user's requested behavior.
 - Reference baseline: `docs/diagnostics/2026-11-15-genkit-1.0-reuse-repair-plan.md`. Recheck its version-dependent statements when dependencies change. These are mandatory design/review requirements; they do not imply that an automated architecture gate is already installed, and they do not authorize implementation when the user requested discussion only.
 
+## 日常运行与 Agent 调试工作流
+
+日常运行 Flutter 客户端与调试 Genkit 服务端是不同操作。启动 App 使用项目根目录的 `./flutterw.cmd run`（项目 Flutter 包装入口）。排查 Agent、工具、技能/插件、流式、停止/继续/重新生成时，默认只启动本地服务和 Genkit Developer UI；不启动 Flutter App，也不要求用户先操作平板。只有问题明确属于 Flutter 展示/客户端状态/平台行为，或用户明确要求客户端/真机验收时，才启动 App。
+
+### 固定调试顺序
+
+1. **先核对运行目标与隔离边界。** 看当前 Genkit CLI/SDK 锁定版本、端口、模型配置和本地数据目录；不为 Agent 链路问题先查或启动 Android 设备。先看 `git status`，不覆盖用户已有改动。测试数据默认写入本地隔离目录，不接生产数据，不把密钥放入 Flow 输入、Trace 或命令输出。
+2. **启动小栖 Agent 测试 Flow 和 Developer UI。** 在项目根目录运行 `./tools/start_genkit_devtools.ps1`，入口为 `xiaoqi_harness/genkit_server/tool/genkit_devtools_agent.dart`。它提供本地合成身份和真实的 `/v1/agent/chat` 请求上下文，执行同一条小栖 Agent/工具链；这只用于本地诊断，不是生产认证或权限绕过。Developer UI 的“代理人”直连页不会自动带小栖的租户身份及 `xiaoqi_agent_turn` 元数据，不能用它代表业务 Agent 测试；需运行 `xiaoqi_agent_dev_test` Flow。普通请求和工具请求可在 Flow 中复现；Genkit Developer UI 的 Flow 运行面板没有单独的停止按钮，停止恢复通过 Flow 的本地调试参数 `cancel_after_ms` 触发相同任务取消 API，再用输出的 `resume_input` 从 snapshot 继续。重新生成/后续问题用 `branch_input` 验证分支。
+   - 本地启动脚本将 `XIAOQI_CAPTURE_TRACES=0`，只让 API 与 DevTools Flow 注册 reflection runtime；Genkit CLI 在 Flow runtime 上触发 Evaluation。不要改回 `1`：每个请求临时创建的 Agent Genkit 会各自启动 reflection runtime，CLI 的 `eval:flow` 又按最近 runtime 查找 Flow，导致 Evaluation 报 `Cannot find action`。Genkit instrumentation 仍由 Dev 环境提供，Trace 中保留内层 Agent span。
+3. **用一条明确场景复现。** 在 Flow 页输入问题，只测试一条目标路径。新对话、取消/继续、工具中断恢复和重新生成/分支需区分操作，保留 task、session、snapshot、attempt、模型和操作次序。涉及重复调用的状态用 Flow 输出的官方 snapshot/session 标识复现，不另建执行历史作为权威。
+4. **在 Traces 逐 Span 定位。** 打开 CLI 提示的 Developer UI（通常 `http://localhost:4000`），先从 Flow 的 Trace 打开 Agent 子步骤，再检查模型真实输入、工具定义/参数、工具结果、后续模型调用、耗时和错误。使用 `genkit trace:list` 和 `genkit trace:get <traceId> --format json` 导出本地证据。检查具体 finishReason、snapshot 和业务任务状态；Trace 绿灯或 UI 文案本身不能证明业务成功。
+5. **必要时建立 Evaluation Dataset。** 使用 Developer UI 的 Datasets 创建 Flow 类型数据集，保存可重复的普通对话、应触发工具、工具失败、技能/插件选择等输入；对比时确认目标 Flow、模型和能力安装状态相同。评估没有自动指标时先人工检查输出和 Trace。合成租户没有安装的技能/插件，不能靠提示词或评估结果宣称真实账号能力可用；应明确报告测试 Fixture、账号安装版本和权限范围。
+6. **只有客户端问题才启动 App。** Flutter 界面状态、客户端事件处理、网络切换或平台问题确需复现时，再检查设备并由用户选择目标 serial；用 `adb reverse` 和 `CAPABILITIES_BASE_URL` 指向本地服务。设备验证与 Developer UI 后端验证分别记录，不能互相代替。
+
+### 使用边界与职责
+
+- **CLI** 负责启动、运行、查询和导出；**Developer UI** 用于交互式 Flow 试跑、数据集评估与 Trace 可视化。只运行 `genkit start` 而不带应用启动命令，不能代表业务后端已接通。Agent 链路问题默认用本地 DevTools Agent Flow，不启动 Flutter App。
+- Trace 反映实际被接入采集的 Genkit 执行链，不自动包含所有 Flutter 状态、所有服务器日志、模型未返回的内部思考或 SDK 之后由 HTTP 适配器修改的最终请求字段。必要时关联官方 snapshot、任务/副作用记录和经过脱敏的请求边界信息；不得另建一套执行历史权威。
+- 技能/插件验收应区分宿主加载正文、模型选择技能、命令/脚本执行和 MCP 调用，并核实当前账号安装版本、选择与权限。模拟模型的 Trace 只能证明对应本地调用路径；UI 的“使用技能”提示不能独立证明模型实际调用或真实任务交付成功。
+- Agent 负责准备命令、检查版本、启动本地服务和分析证据；Agent 链路调试不要求用户先操作 App 或设备。指导用户查看仪表盘时一次给一个可执行步骤并说明当前进度。仅需正常运行客户端时，不强制启动本地后端或仪表盘。
+- 本地调试不替代既有发布流程；仅文档或诊断准备无需部署，涉及生产服务代码/API 行为修改时继续遵守下方部署规则。Trace 和凭据只保存在合适的本地私有位置；不把未经检查的原始 Trace 提交到仓库或公开分享。
+
 ## ARTEMIS availability
 
 - If ARTEMIS tools are absent from the current tool list, ignore ARTEMIS-specific workflows and do not attempt to diagnose or install ARTEMIS. Continue with the tools that are available and state any device-level verification that could not be performed.
