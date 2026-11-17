@@ -22,6 +22,7 @@ Future<void> verifyStdioAgent(
   const task = 'agent-mcp-shell';
   const text = '使用文件插件写入文件，运行 Shell 核对，再调用插件命令脚本生成结果文件。';
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 40443);
+  var classifierCalls = 0;
   final serving = server.listen((request) async {
     try {
       final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
@@ -62,6 +63,7 @@ Future<void> verifyStdioAgent(
         return;
       }
       if (serialized.contains('XIAOQI_TURN_INTENT_V1')) {
+        classifierCalls++;
         request.response.headers.contentType = ContentType.json;
         request.response.write(
           jsonEncode({
@@ -569,6 +571,9 @@ print('ROOT_PROMPT_CONTEXT')
           onProcessEvent: events.add,
           cancellation: CancellationController().token,
         );
+    if (classifierCalls != 0) {
+      throw StateError('Ordinary selected-plugin text used an intent classifier');
+    }
     if (result.extensionEvidenceMissing) {
       throw StateError(
         'Agent delivery evidence incomplete; hooks=${jsonEncode(events.where((e) => e['tool'] == 'plugin_hook').map((e) => {'type': e['type'], 'event': e['hook_event'], if (e['message'] != null) 'message': e['message'].toString().substring(0, e['message'].toString().length.clamp(0, 300))}).toList())}',

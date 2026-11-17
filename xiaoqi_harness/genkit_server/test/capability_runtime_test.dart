@@ -747,7 +747,6 @@ void main() {
           );
           if (scenario.startsWith('text-only-intent-'))
             expect(classifierCalls, 2);
-          if (scenario == 'mcp-success') expect(classifierCalls, 0);
           if (scenario == 'text-only-intent-unavailable') {
             expect(requests, isEmpty);
             expect(result['generated'], 0);

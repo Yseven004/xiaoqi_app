@@ -70,4 +70,4 @@
 
 ## 发布门禁发现的显式能力选择问题
 
-首轮 CI `44046619453` 的服务端测试通过，但隔离 stdio Agent 门禁发现“Selected skill was not exposed alongside MCP”。普通文字在显式选择插件/MCP 时仍因路由条件进入分类阶段，分类返回空 skill_ids，导致已授权技能没有进入作用域。复用决定：普通文字（包括显式选择能力）使用已有 `TurnContract.forDirectAgentTurn` + 官方 Agent loop；技能 ID 来自服务器校验后的 `SelectedSkills.explicitIds`，MCP 来自现有连接校验，分类模型不再拥有这些选择。附件/图片/动作/已有范围和 steering 的专项路径本次不改变。普通 MCP 成功用例增加分类调用数为 0 的断言；含图片约束的原分类专项测试保留。
+首轮 CI `44046619453` 的服务端测试通过，但隔离 stdio Agent 门禁发现“Selected skill was not exposed alongside MCP”。普通文字在显式选择插件/MCP 时仍因路由条件进入分类阶段，分类返回空 skill_ids，导致已授权技能没有进入作用域。复用决定：普通文字（包括显式选择能力）使用已有 `TurnContract.forDirectAgentTurn` + 官方 Agent loop；技能 ID 来自服务器校验后的 `SelectedSkills.explicitIds`，MCP 来自现有连接校验，分类模型不再拥有这些选择。附件/图片/动作/已有范围和 steering 的专项路径本次不改变。普通文字的 stdio 插件联合门禁增加分类调用数为 0 的断言；含图片约束的原 MCP 分类专项测试保留。第二轮 CI 的 143 项通过，唯一失败是将“不分类”断言误加到图片专项 MCP 用例，现已移到正确的普通文字门禁。
