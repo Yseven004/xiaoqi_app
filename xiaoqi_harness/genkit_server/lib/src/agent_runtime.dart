@@ -2050,9 +2050,7 @@ class GenkitXiaoqiAgentRuntime
         throw StateError('插件交互结果的原始任务范围已变化');
       } else if (!needsSpecialIntentRouting &&
           savedScope is! Map &&
-          !taskHasPendingSteering &&
-          (request['selected_capabilities'] as List? ?? const []).isEmpty &&
-          selectedMcpConnections.isEmpty) {
+          !taskHasPendingSteering) {
         // Ordinary text enters the standard Agent/tool loop directly. Explicit
         // capability selections and their server-owned permissions remain in
         // scope; discovered skills are available through the Agent tool loop.

@@ -67,3 +67,7 @@
 - 继续：同任务、同停止快照，Flow 42.67 秒返回 `stop` / `completed`，正文 7524 字；新快照 `078173ef-3977-4e69-a751-434292f7eb17` 的 parentId 指向上述停止快照。没有发送 provider prefix。前两次尝试因直连 DeepSeek 超时/TLS 中断失败；通过已经运行的 localhost:7890 代理恢复网络后成功。可选 `XIAOQI_DEVTOOLS_PROXY` 仅作用于本地 harness 的 DeepSeek 域名，不修改生产网络配置。
 - 重新生成：从 `078173ef-3977-4e69-a751-434292f7eb17` 对同一问题“不要联网或调用工具。基于前文，用三句话概括狭义相对论。”重复运行两次 branch 输入。两次均 `stop` / `completed`；版本 A `497eaef0-ddc4-4909-881c-463fccb77783`、版本 B `05cff19b-fdce-4ea6-bd82-03f78b6c1383` 不同，parentId 都是同一基点；只读数据库确认 A 没有被 B 覆盖。这验证后台官方分支行为，不代表 Flutter 按钮真机验收。
 - 修复后 `remote_agent_api_test.dart` 15 项通过，并加强停止用例：除了 task paused，还断言真实响应 aborted 以及官方 snapshot status/finishReason aborted；相关 Dart analyze 无问题。
+
+## 发布门禁发现的显式能力选择问题
+
+首轮 CI `44046619453` 的服务端测试通过，但隔离 stdio Agent 门禁发现“Selected skill was not exposed alongside MCP”。普通文字在显式选择插件/MCP 时仍因路由条件进入分类阶段，分类返回空 skill_ids，导致已授权技能没有进入作用域。复用决定：普通文字（包括显式选择能力）使用已有 `TurnContract.forDirectAgentTurn` + 官方 Agent loop；技能 ID 来自服务器校验后的 `SelectedSkills.explicitIds`，MCP 来自现有连接校验，分类模型不再拥有这些选择。附件/图片/动作/已有范围和 steering 的专项路径本次不改变。普通 MCP 成功用例增加分类调用数为 0 的断言；含图片约束的原分类专项测试保留。
