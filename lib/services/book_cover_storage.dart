@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
@@ -69,8 +70,13 @@ class BookCoverStorage {
       );
       await directory.create(recursive: true);
       final extension = _extension(contentType, uri.path);
+      final random = Random.secure();
+      final downloadId = List.generate(
+        4,
+        (_) => random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0'),
+      ).join();
       final target = File(
-        p.join(directory.path, 'cover_${book.isbn13}$extension'),
+        p.join(directory.path, 'cover_${book.isbn13}_$downloadId$extension'),
       );
       await target.writeAsBytes(response.bodyBytes, flush: true);
       return book.copyWith(

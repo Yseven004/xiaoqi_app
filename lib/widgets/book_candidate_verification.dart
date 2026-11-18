@@ -23,10 +23,8 @@ class BookCandidateVerification extends StatelessWidget {
     final needsReview = candidate.requiresManualReview;
     final foreground = needsReview
         ? BookFlowTheme.inkSecondary
-        : BookFlowTheme.primary;
-    final background = needsReview
-        ? BookFlowTheme.warningSoft
-        : BookFlowTheme.primarySoft;
+        : BookFlowTheme.ink;
+    const background = Color(0xFFF2F2F2);
 
     return Semantics(
       container: true,

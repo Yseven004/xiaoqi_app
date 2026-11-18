@@ -14,9 +14,9 @@ Future<BookAddAction?> showBookAddSourceSheet(BuildContext context) {
   return showModalBottomSheet<BookAddAction>(
     context: context,
     isScrollControlled: true,
-    useSafeArea: true,
     backgroundColor: Colors.transparent,
-    barrierColor: const Color(0x990C1712),
+    barrierColor: const Color(0x99000000),
+    constraints: const BoxConstraints(maxWidth: double.infinity),
     builder: (_) => const _BookAddSourceSheet(),
   );
 }
@@ -31,7 +31,7 @@ Future<BookPdfImportSelection?> showBookPdfImportSheet({
     isScrollControlled: true,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
-    barrierColor: const Color(0x990C1712),
+    barrierColor: const Color(0x99000000),
     builder: (_) => _BookPdfImportSheet(file: file, books: books),
   );
 }
@@ -65,7 +65,7 @@ class _BookAddSourceSheet extends StatelessWidget {
     clipBehavior: Clip.antiAlias,
     child: SafeArea(
       top: false,
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -76,34 +76,44 @@ class _BookAddSourceSheet extends StatelessWidget {
                 width: 42,
                 height: 5,
                 decoration: BoxDecoration(
-                  color: BookFlowTheme.lineStrong,
+                  color: const Color(0xFFD5D8DE),
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
             ),
-            const SizedBox(height: 24),
-            const Text('添加到阅读空间', style: BookFlowTheme.heading),
-            const SizedBox(height: 6),
-            const Text('选择你手边已有的资料，或先确认一本书。', style: BookFlowTheme.caption),
-            const SizedBox(height: 18),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Expanded(
+                  child: Text('添加到阅读空间', style: BookFlowTheme.heading),
+                ),
+                IconButton(
+                  tooltip: '关闭',
+                  onPressed: () => Navigator.of(context).pop(),
+                  constraints: const BoxConstraints.tightFor(
+                    width: 48,
+                    height: 48,
+                  ),
+                  style: IconButton.styleFrom(
+                    foregroundColor: BookFlowTheme.ink,
+                  ),
+                  icon: const Icon(Icons.close_rounded),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
             _SourceActionCard(
-              icon: Icons.menu_book_rounded,
+              icon: Icons.drive_folder_upload_outlined,
               title: '导入资料',
               subtitle: '支持 PDF、EPUB',
-              primary: true,
               onTap: () => Navigator.of(context).pop(BookAddAction.importPdf),
             ),
-            const SizedBox(height: 10),
+            const Divider(height: 1, color: Color(0xFFD5D8DE)),
             _SourceActionCard(
               icon: Icons.qr_code_scanner_rounded,
               title: '扫描 / 输入 ISBN',
               subtitle: '从实体书条码确认书籍资料',
               onTap: () => Navigator.of(context).pop(BookAddAction.scan),
-            ),
-            const SizedBox(height: 10),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('取消'),
             ),
           ],
         ),
@@ -118,55 +128,43 @@ class _SourceActionCard extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.onTap,
-    this.primary = false,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
-  final bool primary;
 
   @override
   Widget build(BuildContext context) => Material(
-    color: primary ? BookFlowTheme.primarySoft : BookFlowTheme.surface,
-    borderRadius: BorderRadius.circular(18),
+    color: Colors.transparent,
     child: InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(18),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          children: [
-            DecoratedBox(
-              decoration: BoxDecoration(
-                color: primary
-                    ? BookFlowTheme.ochreSoft
-                    : BookFlowTheme.surfaceSoft,
-                shape: BoxShape.circle,
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 80),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 48,
+                height: 48,
                 child: Icon(icon, color: BookFlowTheme.ink, size: 24),
               ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: _bookCardTitle),
-                  const SizedBox(height: 3),
-                  Text(subtitle, style: BookFlowTheme.caption),
-                ],
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(title, style: _bookCardTitle),
+                    const SizedBox(height: 3),
+                    Text(subtitle, style: BookFlowTheme.caption),
+                  ],
+                ),
               ),
-            ),
-            const Icon(
-              Icons.chevron_right_rounded,
-              color: BookFlowTheme.inkSecondary,
-              size: 24,
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     ),
@@ -193,26 +191,16 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
   }
 
   Future<void> _createNewBook() async {
-    final selected = await showModalBottomSheet<BookRecord>(
+    final selected = await showBookMetadataForm(
       context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Material(
-        color: BookFlowTheme.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        clipBehavior: Clip.antiAlias,
-        child: BookMetadataFormSheet(
-          initial: BookRecord(
-            title: _suggestedTitle(widget.file.name),
-            source: 'local_${inferBookSourceFormat(widget.file.name)}',
-            isCustom: true,
-          ),
-        ),
+      initial: BookRecord(
+        title: _suggestedTitle(widget.file.name),
+        source: 'local_${inferBookSourceFormat(widget.file.name)}',
+        isCustom: true,
       ),
     );
     if (!mounted || selected == null) return;
-    Navigator.of(context).pop(BookPdfImportSelection.newBook(selected));
+    Navigator.of(context).pop(BookPdfImportSelection.newBook(selected.book));
   }
 
   @override
@@ -233,7 +221,7 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
                   width: 42,
                   height: 5,
                   decoration: BoxDecoration(
-                    color: BookFlowTheme.lineStrong,
+                    color: const Color(0xFFD5D8DE),
                     borderRadius: BorderRadius.circular(8),
                   ),
                 ),
@@ -251,12 +239,6 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
               if (widget.books.isNotEmpty) ...[
                 _ImportChoiceCard(
                   selected: _selectedBookId != null,
-                  onTap: () {
-                    if (_selectedBookId == null) return;
-                    Navigator.of(
-                      context,
-                    ).pop(BookPdfImportSelection.existing(_selectedBookId!));
-                  },
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -269,7 +251,7 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
                           ),
                           DecoratedBox(
                             decoration: BoxDecoration(
-                              color: BookFlowTheme.warning,
+                              color: const Color(0xFFF2F2F2),
                               borderRadius: BorderRadius.circular(20),
                             ),
                             child: const Padding(
@@ -280,7 +262,7 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
                               child: Text(
                                 '推荐',
                                 style: TextStyle(
-                                  color: BookFlowTheme.ink,
+                                  color: BookFlowTheme.inkSecondary,
                                   fontSize: 12,
                                   fontWeight: FontWeight.w700,
                                 ),
@@ -298,7 +280,38 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
                         ),
                       ),
                       const SizedBox(height: 12),
-                      ...widget.books.take(2).map(_BookChoiceRow.new),
+                      ...widget.books
+                          .take(2)
+                          .map(
+                            (item) => _BookChoiceRow(
+                              item: item,
+                              selected: item.book.id == _selectedBookId,
+                              onTap: item.book.id == null
+                                  ? null
+                                  : () => setState(
+                                      () => _selectedBookId = item.book.id,
+                                    ),
+                            ),
+                          ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: _selectedBookId == null
+                              ? null
+                              : () => Navigator.of(context).pop(
+                                  BookPdfImportSelection.existing(
+                                    _selectedBookId!,
+                                  ),
+                                ),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: BookFlowTheme.ink,
+                            foregroundColor: Colors.white,
+                            minimumSize: const Size.fromHeight(48),
+                          ),
+                          child: const Text('确认关联并导入'),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -350,6 +363,10 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
               const SizedBox(height: 12),
               TextButton(
                 onPressed: () => Navigator.of(context).pop(),
+                style: TextButton.styleFrom(
+                  foregroundColor: BookFlowTheme.ink,
+                  minimumSize: const Size(48, 48),
+                ),
                 child: const Text('取消'),
               ),
             ],
@@ -373,11 +390,11 @@ class _ImportChoiceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-    color: selected ? BookFlowTheme.ochreSoft : BookFlowTheme.surface,
+    color: selected ? const Color(0xFFF2F2F2) : BookFlowTheme.surface,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(18),
       side: BorderSide(
-        color: selected ? BookFlowTheme.warning : BookFlowTheme.line,
+        color: selected ? BookFlowTheme.ink : const Color(0xFFD5D8DE),
         width: selected ? 1.5 : 1,
       ),
     ),
@@ -397,12 +414,11 @@ class _PdfFileCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final format = inferBookSourceFormat(file.name);
     final formatLabel = _formatLabel(file.name);
     final fileSize = file.lengthSync();
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: BookFlowTheme.primarySoft,
+        color: const Color(0xFFF2F2F2),
         borderRadius: BorderRadius.circular(16),
       ),
       child: Padding(
@@ -411,9 +427,7 @@ class _PdfFileCard extends StatelessWidget {
           children: [
             DecoratedBox(
               decoration: BoxDecoration(
-                color: format == 'epub'
-                    ? const Color(0xFF4E6DD8)
-                    : const Color(0xFFE84444),
+                color: BookFlowTheme.ink,
                 borderRadius: BorderRadius.circular(10),
               ),
               child: SizedBox(
@@ -450,7 +464,14 @@ class _PdfFileCard extends StatelessWidget {
                 ],
               ),
             ),
-            TextButton(onPressed: onReselect, child: const Text('重新选择')),
+            TextButton(
+              onPressed: onReselect,
+              style: TextButton.styleFrom(
+                foregroundColor: BookFlowTheme.ink,
+                minimumSize: const Size(48, 48),
+              ),
+              child: const Text('重新选择'),
+            ),
           ],
         ),
       ),
@@ -469,7 +490,7 @@ class _ChoiceIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) => DecoratedBox(
     decoration: const BoxDecoration(
-      color: BookFlowTheme.surfaceSoft,
+      color: Color(0xFFF2F2F2),
       shape: BoxShape.circle,
     ),
     child: Padding(
@@ -480,43 +501,55 @@ class _ChoiceIcon extends StatelessWidget {
 }
 
 class _BookChoiceRow extends StatelessWidget {
-  const _BookChoiceRow(this.item);
+  const _BookChoiceRow({
+    required this.item,
+    required this.selected,
+    required this.onTap,
+  });
 
   final BookLibraryItem item;
+  final bool selected;
+  final VoidCallback? onTap;
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(10),
-    decoration: BoxDecoration(
-      color: BookFlowTheme.surface,
-      borderRadius: BorderRadius.circular(14),
-    ),
-    child: Row(
-      children: [
-        SizedBox(width: 44, height: 60, child: BookCover(book: item.book)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(item.book.title, style: _bookCardTitle),
-              const SizedBox(height: 3),
-              Text(
-                item.book.metadataLabel.isEmpty
-                    ? '资料 ${item.recognizedPageCount + item.noteCount} 条'
-                    : item.book.metadataLabel,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: BookFlowTheme.caption,
+  Widget build(BuildContext context) => Material(
+    color: selected ? const Color(0xFFF2F2F2) : Colors.white,
+    borderRadius: BorderRadius.circular(8),
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(
+          children: [
+            SizedBox(width: 44, height: 60, child: BookCover(book: item.book)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(item.book.title, style: _bookCardTitle),
+                  const SizedBox(height: 3),
+                  Text(
+                    item.book.metadataLabel.isEmpty
+                        ? '资料 ${item.recognizedPageCount + item.noteCount} 条'
+                        : item.book.metadataLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: BookFlowTheme.caption,
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+            Icon(
+              selected
+                  ? Icons.radio_button_checked_rounded
+                  : Icons.radio_button_off_rounded,
+              color: selected ? BookFlowTheme.ink : BookFlowTheme.inkSecondary,
+            ),
+          ],
         ),
-        const Icon(
-          Icons.chevron_right_rounded,
-          color: BookFlowTheme.inkSecondary,
-        ),
-      ],
+      ),
     ),
   );
 }

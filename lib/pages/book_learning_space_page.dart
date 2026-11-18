@@ -6,7 +6,6 @@ import '../config/book_flow_theme.dart';
 import '../models/book_category.dart';
 import '../models/book_library_item.dart';
 import '../models/book_library_query.dart';
-import '../models/book_recognition.dart';
 import '../services/book_learning_preferences.dart';
 import '../services/book_library_service.dart';
 import '../widgets/book_spine_shading.dart';
@@ -32,12 +31,14 @@ class BookLearningSpacePage extends StatefulWidget {
     required this.onCreateBook,
     this.bookLibraryService,
     this.preferences,
+    this.refreshVersion = 0,
   });
 
   final ValueChanged<int> onOpenBook;
   final VoidCallback onCreateBook;
   final BookLibraryService? bookLibraryService;
   final BookLearningPreferences? preferences;
+  final int refreshVersion;
 
   @override
   State<BookLearningSpacePage> createState() => _BookLearningSpacePageState();
@@ -72,6 +73,14 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
   }
 
   @override
+  void didUpdateWidget(covariant BookLearningSpacePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.refreshVersion != widget.refreshVersion) {
+      unawaited(refresh(showLoading: false));
+    }
+  }
+
+  @override
   void dispose() {
     _filterMenuOverlay?.remove();
     _filterMenuOverlay = null;
@@ -103,10 +112,16 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
     await _loadBooks();
   }
 
-  Future<void> refresh() async {
-    _categories = await _library.listCategories();
-    if (mounted) setState(() {});
-    await _loadBooks();
+  Future<void> refresh({bool showLoading = true}) async {
+    try {
+      final categories = await _library.listCategories();
+      if (!mounted) return;
+      setState(() => _categories = categories);
+      await _loadBooks(showLoading: showLoading);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = '书籍暂时无法加载：$error');
+    }
   }
 
   Future<void> _loadBooks({bool showLoading = true}) async {
@@ -323,7 +338,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
                     ? Icons.radio_button_checked_rounded
                     : Icons.radio_button_off_rounded,
                 color: _query.categoryId == null && !_query.uncategorizedOnly
-                    ? BookFlowTheme.primary
+                    ? BookFlowTheme.ink
                     : BookFlowTheme.muted,
               ),
               title: const Text('全部书籍'),
@@ -335,7 +350,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
                     ? Icons.radio_button_checked_rounded
                     : Icons.radio_button_off_rounded,
                 color: _query.uncategorizedOnly
-                    ? BookFlowTheme.primary
+                    ? BookFlowTheme.ink
                     : BookFlowTheme.muted,
               ),
               title: const Text('未分类'),
@@ -348,7 +363,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
                       ? Icons.radio_button_checked_rounded
                       : Icons.radio_button_off_rounded,
                   color: _query.categoryId == category.id
-                      ? BookFlowTheme.primary
+                      ? BookFlowTheme.ink
                       : BookFlowTheme.muted,
                 ),
                 title: Text(category.name),
@@ -585,7 +600,15 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
                       sheetContext,
                       selected.toList(growable: false),
                     ),
-                    style: BookFlowTheme.primaryButtonStyle(),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: BookFlowTheme.ink,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size.fromHeight(48),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
                     child: const Text('保存分类'),
                   ),
                 ),
@@ -603,24 +626,37 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
   Future<void> _editBookMetadata(BookLibraryItem item) async {
     final book = item.book;
     if (book.id == null) return;
-    final updated = await showModalBottomSheet<BookRecord>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Material(
-        color: BookFlowTheme.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        child: BookMetadataFormSheet(initial: book),
-      ),
+    var draft = BookMetadataFormResult(
+      book: book,
+      categoryIds: item.categories
+          .map((category) => category.id!)
+          .toList(growable: false),
     );
-    if (updated == null) return;
-    try {
-      await _library.updateBookMetadata(updated);
-      await _loadBooks(showLoading: false);
-    } catch (error) {
+    while (true) {
       if (!mounted) return;
-      AppToast.show(context, '书籍资料保存失败：$error');
+      final updated = await showBookMetadataForm(
+        context: context,
+        initial: draft.book,
+        categories: _categories,
+        initialCategoryIds: draft.categoryIds,
+        saveError: draft.saveError,
+      );
+      if (!mounted || updated == null) return;
+      try {
+        await _library.updateBookMetadataAndCategories(
+          updated.book,
+          updated.categoryIds,
+        );
+        await _loadBooks(showLoading: false);
+        return;
+      } catch (error) {
+        if (!mounted) return;
+        draft = BookMetadataFormResult(
+          book: updated.book,
+          categoryIds: updated.categoryIds,
+          saveError: error.toString(),
+        );
+      }
     }
   }
 
@@ -761,7 +797,15 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
                 child: FilledButton(
-                  style: BookFlowTheme.primaryButtonStyle(),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: BookFlowTheme.ink,
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size.fromHeight(48),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
                   onPressed: () => Navigator.pop(
                     sheetContext,
                     selectedCategories.toList(growable: false),
@@ -882,7 +926,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
       child: InputChip(
         visualDensity: VisualDensity.compact,
         backgroundColor: Colors.transparent,
-        side: const BorderSide(color: BookFlowTheme.primary),
+        side: const BorderSide(color: Color(0xFFD5D8DE)),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         label: Text(
           categoryName,
@@ -989,7 +1033,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
 
   Widget _buildFilterMenuButton({
     required LayerLink link,
-    double dimension = 46,
+    double dimension = 48,
   }) {
     final active = _query.categoryId != null || _query.uncategorizedOnly;
     return CompositedTransformTarget(
@@ -1007,9 +1051,9 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  Icon(
+                  const Icon(
                     Icons.filter_alt_outlined,
-                    color: active ? BookFlowTheme.primary : BookFlowTheme.ink,
+                    color: BookFlowTheme.ink,
                     size: 22,
                   ),
                   if (active)
@@ -1018,7 +1062,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
                       right: 5,
                       child: DecoratedBox(
                         decoration: BoxDecoration(
-                          color: BookFlowTheme.primary,
+                          color: BookFlowTheme.ink,
                           shape: BoxShape.circle,
                         ),
                         child: SizedBox(width: 7, height: 7),
@@ -1094,91 +1138,93 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
   Widget _buildToolbar() => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      SizedBox(
-        height: 46,
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  const Text(
-                    '阅读空间',
-                    style: TextStyle(
-                      color: BookFlowTheme.ink,
-                      fontSize: 21,
-                      height: 1.25,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: -.5,
-                    ),
+      Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        runSpacing: 8,
+        children: [
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.end,
+            spacing: 7,
+            children: [
+              const Text(
+                '阅读空间',
+                style: TextStyle(
+                  color: BookFlowTheme.ink,
+                  fontSize: 21,
+                  height: 1.25,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -.5,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 1),
+                child: Text(
+                  '${_items.length} 本',
+                  style: const TextStyle(
+                    color: BookFlowTheme.muted,
+                    fontSize: 11,
+                    height: 1.3,
                   ),
-                  const SizedBox(width: 7),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 1),
-                    child: Text(
-                      '${_items.length} 本',
-                      style: const TextStyle(
-                        color: BookFlowTheme.muted,
-                        fontSize: 11,
-                        height: 1.3,
-                      ),
-                    ),
+                ),
+              ),
+            ],
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PopupMenuButton<BookLibraryViewMode>(
+                tooltip: '展示方式',
+                position: PopupMenuPosition.under,
+                offset: const Offset(0, 5),
+                constraints: const BoxConstraints(minWidth: 120, maxWidth: 132),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                color: BookFlowTheme.surface,
+                elevation: 8,
+                onOpened: _clearInputFocus,
+                onSelected: _changeViewMode,
+                itemBuilder: (_) => [
+                  _popupOption(
+                    value: BookLibraryViewMode.grid,
+                    label: '双列展示',
+                    icon: Icons.grid_view_rounded,
+                    selected: _viewMode == BookLibraryViewMode.grid,
+                  ),
+                  _popupOption(
+                    value: BookLibraryViewMode.learningList,
+                    label: '列表展示',
+                    icon: Icons.view_list_rounded,
+                    selected: _viewMode == BookLibraryViewMode.learningList,
                   ),
                 ],
-              ),
-            ),
-            PopupMenuButton<BookLibraryViewMode>(
-              tooltip: '展示方式',
-              position: PopupMenuPosition.under,
-              offset: const Offset(0, 5),
-              constraints: const BoxConstraints(minWidth: 120, maxWidth: 132),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
-              ),
-              color: BookFlowTheme.surface,
-              elevation: 8,
-              onOpened: _clearInputFocus,
-              onSelected: _changeViewMode,
-              itemBuilder: (_) => [
-                _popupOption(
-                  value: BookLibraryViewMode.grid,
-                  label: '双列展示',
-                  icon: Icons.grid_view_rounded,
-                  selected: _viewMode == BookLibraryViewMode.grid,
-                ),
-                _popupOption(
-                  value: BookLibraryViewMode.learningList,
-                  label: '列表展示',
-                  icon: Icons.view_list_rounded,
-                  selected: _viewMode == BookLibraryViewMode.learningList,
-                ),
-              ],
-              child: SizedBox(
-                width: 40,
-                height: 40,
-                child: Icon(
-                  _viewMode == BookLibraryViewMode.grid
-                      ? Icons.grid_view_rounded
-                      : Icons.view_list_rounded,
-                  color: BookFlowTheme.inkSecondary,
-                  size: 21,
+                child: SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: Icon(
+                    _viewMode == BookLibraryViewMode.grid
+                        ? Icons.grid_view_rounded
+                        : Icons.view_list_rounded,
+                    color: BookFlowTheme.inkSecondary,
+                    size: 21,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: 4),
-            _CreateBookButton(
-              onTap: () {
-                _clearInputFocus();
-                widget.onCreateBook();
-              },
-            ),
-          ],
-        ),
+              const SizedBox(width: 4),
+              _CreateBookButton(
+                onTap: () {
+                  _clearInputFocus();
+                  widget.onCreateBook();
+                },
+              ),
+            ],
+          ),
+        ],
       ),
       const SizedBox(height: 8),
       SizedBox(
-        height: 46,
+        height: 48,
         child: TextField(
           controller: _searchController,
           focusNode: _searchFocusNode,
@@ -1202,16 +1248,16 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
             fillColor: BookFlowTheme.surface,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
-              borderSide: const BorderSide(color: BookFlowTheme.line),
+              borderSide: const BorderSide(color: Color(0xFFD5D8DE)),
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
-              borderSide: const BorderSide(color: BookFlowTheme.line),
+              borderSide: const BorderSide(color: Color(0xFFD5D8DE)),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
               borderSide: const BorderSide(
-                color: BookFlowTheme.primary,
+                color: BookFlowTheme.ink,
                 width: 1.3,
               ),
             ),
@@ -1244,12 +1290,12 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
               for (final mode in BookLibrarySortMode.values)
                 ListTile(
                   selected: mode == _query.sortMode,
-                  selectedColor: BookFlowTheme.primary,
+                  selectedColor: BookFlowTheme.ink,
                   title: Text(_sortModeLabel(mode)),
                   trailing: mode == _query.sortMode
                       ? const Icon(
                           Icons.check_rounded,
-                          color: BookFlowTheme.primary,
+                          color: BookFlowTheme.ink,
                         )
                       : null,
                   onTap: () => Navigator.pop(
@@ -1263,13 +1309,13 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
                   _query.direction == BookLibrarySortDirection.descending
                       ? Icons.south_rounded
                       : Icons.north_rounded,
-                  color: BookFlowTheme.primary,
+                  color: BookFlowTheme.ink,
                 ),
                 title: Text('当前顺序：$_directionLabel'),
                 trailing: const Text(
                   '切换',
                   style: TextStyle(
-                    color: BookFlowTheme.primary,
+                  color: BookFlowTheme.ink,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -1306,49 +1352,61 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
   Widget _buildLibraryActionBar() {
     if (_selectionMode) {
       final hasSelection = _selectedBookIds.isNotEmpty;
-      return SizedBox(
-        height: 40,
-        child: Row(
-          children: [
-            TextButton(
-              onPressed: _exitSelectionMode,
-              style: TextButton.styleFrom(
-                foregroundColor: BookFlowTheme.inkSecondary,
-                padding: const EdgeInsets.symmetric(horizontal: 4),
+      return Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        runSpacing: 4,
+        children: [
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 7,
+            children: [
+              TextButton(
+                onPressed: _exitSelectionMode,
+                style: TextButton.styleFrom(
+                  foregroundColor: BookFlowTheme.inkSecondary,
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                ),
+                child: const Text('取消'),
               ),
-              child: const Text('取消'),
-            ),
-            const SizedBox(width: 7),
-            Text(
-              '已选 ${_selectedBookIds.length} 本',
-              style: const TextStyle(
+              Text(
+                '已选 ${_selectedBookIds.length} 本',
+                style: const TextStyle(
+                  color: BookFlowTheme.ink,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                tooltip: _selectedBookIds.length > 1 ? '批量编辑分类' : '编辑书籍',
+                onPressed: hasSelection ? _editSelectedBooks : null,
                 color: BookFlowTheme.ink,
-                fontSize: 15,
-                fontWeight: FontWeight.w700,
+                disabledColor: BookFlowTheme.muted,
+                icon: const Icon(Icons.edit_outlined, size: 21),
               ),
-            ),
-            const Spacer(),
-            IconButton(
-              tooltip: _selectedBookIds.length > 1 ? '批量编辑分类' : '编辑书籍',
-              onPressed: hasSelection ? _editSelectedBooks : null,
-              color: BookFlowTheme.primary,
-              disabledColor: BookFlowTheme.muted,
-              icon: const Icon(Icons.edit_outlined, size: 21),
-            ),
-            IconButton(
-              tooltip: '删除所选书籍',
-              onPressed: hasSelection ? _deleteSelectedBooks : null,
-              color: const Color(0xFFCB3D36),
-              disabledColor: BookFlowTheme.muted,
-              icon: const Icon(Icons.delete_outline_rounded, size: 22),
-            ),
-          ],
-        ),
+              IconButton(
+                tooltip: '删除所选书籍',
+                onPressed: hasSelection ? _deleteSelectedBooks : null,
+                color: const Color(0xFFCB3D36),
+                disabledColor: BookFlowTheme.muted,
+                icon: const Icon(Icons.delete_outline_rounded, size: 22),
+              ),
+            ],
+          ),
+        ],
       );
     }
-    return SizedBox(
-      height: 40,
-      child: Row(
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 48),
+      child: Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        runSpacing: 4,
         children: [
           const Text(
             '全部书籍',
@@ -1359,33 +1417,37 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
               fontWeight: FontWeight.w700,
             ),
           ),
-          const Spacer(),
-          _buildFilterMenuButton(link: _libraryFilterMenuLink, dimension: 38),
-          const SizedBox(width: 4),
-          _SortMenuButton(
-            sortMode: _query.sortMode,
-            onSortChanged: _applySortMode,
-            onOpened: _clearInputFocus,
-          ),
-          const SizedBox(width: 4),
-          Tooltip(
-            message: '多选编辑',
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: _enterSelectionMode,
-                customBorder: const CircleBorder(),
-                child: const SizedBox(
-                  width: 38,
-                  height: 38,
-                  child: Icon(
-                    Icons.checklist_rounded,
-                    size: 24,
-                    color: BookFlowTheme.ink,
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildFilterMenuButton(link: _libraryFilterMenuLink),
+              const SizedBox(width: 4),
+              _SortMenuButton(
+                sortMode: _query.sortMode,
+                onSortChanged: _applySortMode,
+                onOpened: _clearInputFocus,
+              ),
+              const SizedBox(width: 4),
+              Tooltip(
+                message: '多选编辑',
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: _enterSelectionMode,
+                    customBorder: const CircleBorder(),
+                    child: const SizedBox(
+                      width: 48,
+                      height: 48,
+                      child: Icon(
+                        Icons.checklist_rounded,
+                        size: 22,
+                        color: BookFlowTheme.ink,
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
+            ],
           ),
         ],
       ),
@@ -1419,6 +1481,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
           _query.categoryId != null ||
           _query.uncategorizedOnly;
       return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
@@ -1445,7 +1508,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
       );
     }
     return RefreshIndicator(
-      color: BookFlowTheme.primary,
+      color: BookFlowTheme.ink,
       onRefresh: refresh,
       child: _viewMode == BookLibraryViewMode.grid
           ? _BookGrid(
@@ -1459,6 +1522,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
               onToggleSelection: _toggleBookSelection,
             )
           : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
@@ -1657,7 +1721,7 @@ class _CategoryManagementDialogState extends State<_CategoryManagementDialog> {
           : ListView.separated(
               itemCount: _categories.length,
               separatorBuilder: (_, _) =>
-                  const Divider(height: 1, color: BookFlowTheme.line),
+                  const Divider(height: 1, color: Color(0xFFD5D8DE)),
               itemBuilder: (context, index) {
                 final category = _categories[index];
                 final count = _bookCounts[category.id] ?? 0;
@@ -1794,21 +1858,21 @@ class _FilterMenuPanelState extends State<_FilterMenuPanel>
           child: Material(
             color: BookFlowTheme.surface,
             elevation: 10,
-            shadowColor: const Color(0x2E173226),
+            shadowColor: const Color(0x1F000000),
             borderRadius: BorderRadius.circular(14),
             clipBehavior: Clip.antiAlias,
             child: DecoratedBox(
               decoration: BoxDecoration(
-                border: Border.all(color: BookFlowTheme.line),
+                border: Border.all(color: const Color(0xFFD5D8DE)),
                 borderRadius: BorderRadius.circular(14),
               ),
               child: SizedBox(
                 width: 164,
-                height: visibleRows * 44.0 + 98,
+                height: visibleRows * 48.0 + 98,
                 child: Column(
                   children: [
                     SizedBox(
-                      height: visibleRows * 44.0,
+                      height: visibleRows * 48.0,
                       child: Scrollbar(
                         controller: _scrollController,
                         thumbVisibility: hasOverflow,
@@ -1817,7 +1881,7 @@ class _FilterMenuPanelState extends State<_FilterMenuPanel>
                         child: ListView.builder(
                           controller: _scrollController,
                           padding: EdgeInsets.zero,
-                          itemExtent: 44,
+                          itemExtent: 48,
                           itemCount: rowCount,
                           itemBuilder: (context, index) {
                             if (index == 0) {
@@ -1850,7 +1914,7 @@ class _FilterMenuPanelState extends State<_FilterMenuPanel>
                         ),
                       ),
                     ),
-                    const Divider(height: 1, color: BookFlowTheme.line),
+                    const Divider(height: 1, color: Color(0xFFD5D8DE)),
                     SizedBox(
                       height: 48,
                       child: InkWell(
@@ -1862,13 +1926,13 @@ class _FilterMenuPanelState extends State<_FilterMenuPanel>
                               Icon(
                                 Icons.add_rounded,
                                 size: 19,
-                                color: BookFlowTheme.primary,
+                                color: BookFlowTheme.ink,
                               ),
                               SizedBox(width: 9),
                               Text(
                                 '自定义分类',
                                 style: TextStyle(
-                                  color: BookFlowTheme.primary,
+                                  color: BookFlowTheme.ink,
                                   fontSize: 14,
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -1878,7 +1942,7 @@ class _FilterMenuPanelState extends State<_FilterMenuPanel>
                         ),
                       ),
                     ),
-                    const Divider(height: 1, color: BookFlowTheme.line),
+                    const Divider(height: 1, color: Color(0xFFD5D8DE)),
                     SizedBox(
                       height: 48,
                       child: InkWell(
@@ -1932,7 +1996,7 @@ class _FilterMenuRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-    color: selected ? const Color(0xFFF0F5F2) : Colors.transparent,
+    color: selected ? const Color(0xFFF2F2F2) : Colors.transparent,
     child: InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
@@ -1946,7 +2010,7 @@ class _FilterMenuRow extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: selected ? BookFlowTheme.primary : BookFlowTheme.ink,
+                  color: BookFlowTheme.ink,
                   fontSize: 14,
                   fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                 ),
@@ -1966,11 +2030,11 @@ PopupMenuItem<T> _popupOption<T>({
   required bool selected,
 }) => PopupMenuItem<T>(
   value: value,
-  height: 44,
+  height: 48,
   padding: const EdgeInsets.symmetric(horizontal: 4),
   child: DecoratedBox(
     decoration: BoxDecoration(
-      color: selected ? const Color(0xFFE7F0EB) : Colors.transparent,
+      color: selected ? const Color(0xFFF2F2F2) : Colors.transparent,
       borderRadius: BorderRadius.circular(9),
     ),
     child: Padding(
@@ -1980,16 +2044,14 @@ PopupMenuItem<T> _popupOption<T>({
           Icon(
             icon,
             size: 19,
-            color: selected
-                ? BookFlowTheme.primary
-                : BookFlowTheme.inkSecondary,
+            color: selected ? BookFlowTheme.ink : BookFlowTheme.inkSecondary,
           ),
           const SizedBox(width: 7),
           Expanded(
             child: Text(
               label,
               style: TextStyle(
-                color: selected ? BookFlowTheme.primary : BookFlowTheme.ink,
+                color: BookFlowTheme.ink,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
               ),
             ),
@@ -2022,7 +2084,7 @@ class _ViewModeToggle extends StatelessWidget {
         borderRadius: BorderRadius.circular(11),
         child: SizedBox(
           width: 40,
-          height: 40,
+          height: 48,
           child: Icon(
             value == BookLibraryViewMode.grid
                 ? Icons.grid_view_rounded
@@ -2049,13 +2111,13 @@ class _CreateBookButton extends StatelessWidget {
     button: true,
     label: '新建书籍',
     child: Material(
-      color: BookFlowTheme.primary,
+      color: BookFlowTheme.ink,
       borderRadius: BorderRadius.circular(11),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(11),
         child: const SizedBox(
-          height: 40,
+          height: 48,
           child: Padding(
             padding: EdgeInsets.symmetric(horizontal: 11),
             child: Row(
@@ -2113,9 +2175,9 @@ class _SortMenuButton extends StatelessWidget {
         ),
     ],
     child: const SizedBox(
-      width: 38,
-      height: 38,
-      child: Icon(Icons.swap_vert_rounded, size: 24, color: BookFlowTheme.ink),
+      width: 48,
+      height: 48,
+      child: Icon(Icons.swap_vert_rounded, size: 22, color: BookFlowTheme.ink),
     ),
   );
 
@@ -2206,15 +2268,15 @@ class _SelectionMark extends StatelessWidget {
     width: 23,
     height: 23,
     decoration: BoxDecoration(
-      color: selected ? BookFlowTheme.primary : BookFlowTheme.surface,
+      color: selected ? BookFlowTheme.ink : BookFlowTheme.surface,
       shape: BoxShape.circle,
       border: Border.all(
-        color: selected ? BookFlowTheme.primary : BookFlowTheme.muted,
+        color: selected ? BookFlowTheme.ink : BookFlowTheme.muted,
         width: 1.5,
       ),
       boxShadow: const [
         BoxShadow(
-          color: Color(0x1A173226),
+          color: Color(0x1A000000),
           blurRadius: 5,
           offset: Offset(0, 2),
         ),
@@ -2256,10 +2318,9 @@ class _CompactBookCard extends StatelessWidget {
           Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
-                color: BookFlowTheme.surfaceElevated,
+                color: BookFlowTheme.surface,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: BookFlowTheme.line),
-                boxShadow: BookFlowTheme.cardShadow,
+                border: Border.all(color: Colors.transparent),
               ),
               child: Material(
                 color: Colors.transparent,
@@ -2343,7 +2404,7 @@ class _BookGridMetaRow extends StatelessWidget {
     children: [
       _BookGridMetaItem(
         icon: Icons.article_outlined,
-        iconColor: BookFlowTheme.bookGold,
+        iconColor: BookFlowTheme.inkSecondary,
         label: '$noteCount 篇笔记',
       ),
       const SizedBox(width: 8),
@@ -2407,7 +2468,7 @@ class _BookPinMarker extends StatelessWidget {
     child: Icon(
       active ? Icons.push_pin_rounded : Icons.push_pin_outlined,
       size: size,
-      color: active ? BookFlowTheme.bookGold : BookFlowTheme.inkSecondary,
+      color: BookFlowTheme.inkSecondary,
       shadows: active
           ? const [
               Shadow(
@@ -2450,10 +2511,9 @@ class _BookLearningList extends StatelessWidget {
       final id = item.book.id;
       return DecoratedBox(
         decoration: BoxDecoration(
-          color: BookFlowTheme.surfaceElevated,
+          color: BookFlowTheme.surface,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: BookFlowTheme.line),
-          boxShadow: BookFlowTheme.cardShadow,
+          border: Border.all(color: const Color(0xFFD5D8DE)),
         ),
         child: Material(
           color: Colors.transparent,
@@ -2566,7 +2626,7 @@ class _BookLearningList extends StatelessWidget {
                                 ),
                                 iconSize: 26,
                                 color: item.isPinned
-                                    ? BookFlowTheme.primaryStrong
+                                    ? BookFlowTheme.ink
                                     : BookFlowTheme.inkSecondary,
                                 constraints: const BoxConstraints.tightFor(
                                   width: 48,
@@ -2670,7 +2730,7 @@ class _StatusView extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 46, color: BookFlowTheme.primary),
+          Icon(icon, size: 46, color: BookFlowTheme.inkSecondary),
           const SizedBox(height: 14),
           Text(title, style: BookFlowTheme.heading),
           const SizedBox(height: 6),

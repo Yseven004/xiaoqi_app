@@ -3627,8 +3627,6 @@ $materialIndex
     required String modelId,
     required String reasoningLevel,
     String? resumeTaskId,
-    String? resumePrefixContent,
-    String? resumePrefixReasoning,
   }) async {
     final workId = question.workId;
     final materials = await _agentTaskMaterials(
@@ -3871,12 +3869,7 @@ $materialIndex
               content: const [],
               metadata: {
                 ...?userMessage.metadata,
-                'xiaoqi_agent_resume': {
-                  if ((resumePrefixContent ?? '').isNotEmpty)
-                    'prefix_content': resumePrefixContent,
-                  if ((resumePrefixReasoning ?? '').isNotEmpty)
-                    'prefix_reasoning': resumePrefixReasoning,
-                },
+                'xiaoqi_agent_resume': const <String, dynamic>{},
               },
             ),
           )
@@ -8048,26 +8041,6 @@ $text''';
     if (questionIndex < 0) return;
     final question = current.nodeById(parentMessageId);
     if (question == null || !question.isUser) return;
-    final prefixAnswer =
-        answer ??
-        current.messages.reversed
-            .where(
-              (item) =>
-                  !item.isUser &&
-                  item.parentMessageId == parentMessageId &&
-                  item.isIncomplete,
-            )
-            .firstOrNull;
-    final resumePrefixContent = prefixAnswer?.text;
-    final resumePrefixReasoning = prefixAnswer?.agentProcessDetails
-        .where(
-          (detail) =>
-              detail['kind'] == 'reasoning' &&
-              detail['source'] == 'model_reasoning',
-        )
-        .map((detail) => detail['text']?.toString() ?? '')
-        .where((text) => text.isNotEmpty)
-        .join('\n');
     if (!await _ensureEmailSessionForChat()) return;
     final requestPath = path.take(questionIndex + 1).toList(growable: false);
     final selection = _selectionFor(current);
@@ -8149,8 +8122,6 @@ $text''';
         modelId: selection.model.id,
         reasoningLevel: selection.reasoningLevel.name,
         resumeTaskId: resumeTaskId,
-        resumePrefixContent: resumePrefixContent,
-        resumePrefixReasoning: resumePrefixReasoning,
       );
       if (taskReply == null ||
           !_isCurrentRequest(requestGeneration, conversationId)) {
@@ -8941,352 +8912,376 @@ $text''';
                 _keyboardOverlayLayoutLocked || _taskSearchKeepsComposerFixed,
             child: LayoutBuilder(
               builder: (context, constraints) {
-                return Stack(
-                  children: [
-                    if (_messages.isEmpty)
-                      Builder(
-                        builder: (context) {
-                          final keyboardVisible =
-                              MediaQuery.viewInsetsOf(context).bottom > 0;
-                          return Positioned(
-                            top: constraints.maxHeight * 0.415,
-                            left: 20,
-                            right: 20,
-                            child: AnimatedOpacity(
-                              duration: const Duration(milliseconds: 240),
-                              curve: Curves.easeInOut,
-                              opacity:
-                                  keyboardVisible &&
-                                      !_taskSearchKeepsComposerFixed &&
-                                      !_keyboardOverlayLayoutLocked
-                                  ? 0
-                                  : 1,
-                              child: const _WelcomeCopy(),
-                            ),
-                          );
-                        },
-                      ),
-                    AnimatedPositioned(
-                      duration: const Duration(milliseconds: 220),
-                      curve: Curves.easeInOutCubic,
-                      top: _composerExpanded ? 0 : 44,
-                      left: _composerExpanded ? 0 : 20,
-                      right: _composerExpanded ? 0 : 20,
-                      bottom: 0,
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          final expanded = _composerExpanded;
-                          return Column(
-                            children: [
-                              Expanded(
-                                child: _messages.isEmpty
-                                    ? const SizedBox.expand()
-                                    : Stack(
-                                        fit: StackFit.expand,
-                                        children: [
-                                          _ConversationMessages(
-                                            key: ValueKey(_conversation?.id),
-                                            onSendMcpAppMessage:
-                                                _sendMcpAppMessage,
-                                            annotations: _annotations,
-                                            annotationBottomPadding:
-                                                _textAnnotationEditorVisible
-                                                ? MediaQuery.viewInsetsOf(
-                                                        context,
-                                                      ).bottom +
-                                                      160
-                                                : 0,
-                                            onAnnotate: _annotateText,
-                                            onAnnotationNavigation: () {
-                                              _latestScrollEpoch++;
-                                              _latestScrollAnimating = false;
-                                              _scrollToBottomAnimating = false;
-                                              _followLatestMessage = false;
-                                            },
-                                            onPreviewImages: _openImageGallery,
-                                            record:
-                                                _conversation ??
-                                                AiConversationRecord.empty(
-                                                  enableAutoTitle: true,
-                                                ),
-                                            presentationRevision:
-                                                _conversationPresentationRevision,
-                                            targetMessageId:
-                                                _conversationFocusMessageId,
-                                            messages: _messages,
-                                            scrollController:
-                                                _messagesScrollController,
-                                            isGenerating: _isGenerating,
-                                            isContinuingReply:
-                                                _isContinuingReply,
-                                            continuingReplyId:
-                                                _continuingReplyId,
-                                            stoppedEmptyReplyParentId:
-                                                _stoppedEmptyReplyConversationId ==
-                                                    _conversation?.id
-                                                ? _stoppedEmptyReplyParentId
-                                                : null,
-                                            isPreparingToSend:
-                                                _isPreparingToSend,
-                                            isSelectingVersion:
-                                                _isSelectingAnswerVersion ||
-                                                _isSelectingQuestionVersion,
-                                            isUserScrollingMessages:
-                                                _userScrollingMessages,
-                                            streamingReply: _streamingReply,
-                                            agentClarification:
-                                                _agentClarification,
-                                            attachmentPreparationStates:
-                                                _attachmentPreparer.states,
-                                            onRetryAttachment: _retryAttachment,
-                                            agentStreamPresentation:
-                                                _agentStreamPresentation,
-                                            onToggleAgentProcess:
-                                                _toggleAgentProcessExpansion,
-                                            imageGenerationInProgress:
-                                                _imageGenerationInProgress,
-                                            onScrollNotification:
-                                                _onMessagesScrollNotification,
-                                            onScrollMetricsChanged:
-                                                _onMessagesMetricsChanged,
-                                            onReplyBodyOverflowChanged:
-                                                _onReplyBodyOverflowChanged,
-                                            onCopy: _copyReply,
-                                            onCopySelectedText:
-                                                _copySelectedMessageText,
-                                            onEditMessage: _beginMessageEdit,
-                                            onFeedback: _showReplyFeedbackForm,
-                                            onNote: _captureChatTextToNote,
-                                            onShare: _shareReply,
-                                            onDelete: _confirmDeleteReply,
-                                            onRegenerate: _regenerateReply,
-                                            onContinueIncompleteReply:
-                                                _continueIncompleteReply,
-                                            onContinueEmptyReply: (parentId) =>
-                                                _continueStoppedReply(
-                                                  parentMessageId: parentId,
-                                                ),
-                                            onSelectVersion:
-                                                _selectAnswerVersion,
-                                            onSelectQuestionVersion:
-                                                _selectQuestionVersion,
-                                            onOpenDraftReview:
-                                                _openSkillDraftReview,
-                                          ),
-                                          if (_showScrollToBottom &&
-                                              !_composerExpanded)
-                                            Positioned(
-                                              right: 16,
-                                              bottom: 12,
-                                              child: _ScrollToBottomButton(
-                                                isGenerating: _isGenerating,
-                                                onPressed: _jumpToLatestMessage,
-                                              ),
-                                            ),
-                                        ],
-                                      ),
+                return SizedBox.expand(
+                  child: Stack(
+                    children: [
+                      if (_messages.isEmpty)
+                        Builder(
+                          builder: (context) {
+                            final keyboardVisible =
+                                MediaQuery.viewInsetsOf(context).bottom > 0;
+                            return Positioned(
+                              top: constraints.maxHeight * 0.415,
+                              left: 20,
+                              right: 20,
+                              child: AnimatedOpacity(
+                                duration: const Duration(milliseconds: 240),
+                                curve: Curves.easeInOut,
+                                opacity:
+                                    keyboardVisible &&
+                                        !_taskSearchKeepsComposerFixed &&
+                                        !_keyboardOverlayLayoutLocked
+                                    ? 0
+                                    : 1,
+                                child: const _WelcomeCopy(),
                               ),
-                              LearningNotesStatusBar(
-                                conversationId: _conversation?.id,
-                              ),
-                              ValueListenableBuilder<bool>(
-                                valueListenable: _keyboardInsetsChanging,
-                                builder: (context, keyboardInsetsChanging, _) {
-                                  final keyboardVisible =
-                                      MediaQuery.viewInsetsOf(context).bottom >
-                                      0;
-                                  return AnimatedSize(
-                                    duration:
-                                        _composerSizeTransitioning &&
-                                            !keyboardInsetsChanging &&
-                                            !(expanded && keyboardVisible)
-                                        ? const Duration(milliseconds: 220)
-                                        // Duration.zero can synchronously
-                                        // re-dirty RenderAnimatedSize.
-                                        : const Duration(milliseconds: 1),
-                                    curve: Curves.easeInOutCubic,
-                                    alignment: Alignment.bottomCenter,
-                                    child: ConstrainedBox(
-                                      constraints: BoxConstraints(
-                                        maxHeight: expanded
-                                            ? constraints.maxHeight
-                                            : constraints.maxHeight * .65,
-                                      ),
-                                      child: SizedBox(
-                                        height: expanded
-                                            ? constraints.maxHeight
-                                            : null,
-                                        width: double.infinity,
-                                        child: Padding(
-                                          padding: EdgeInsets.only(
-                                            bottom: expanded ? 0 : 12,
-                                          ),
-                                          child: _HomeComposer(
-                                            key: _composerKey,
-                                            annotations: _annotations,
-                                            onReviewAnnotations:
-                                                _reviewAnnotations,
-                                            onRemoveAnnotations: () =>
-                                                _applyAnnotations(const []),
-                                            onPreviewImage: (item) => unawaited(
-                                              _openPendingImage(item),
-                                            ),
-                                            onRequestLogin: _openEmailLogin,
-                                            isSignedIn: _emailSignedIn,
-                                            onSessionChanged: (signedIn) {
-                                              if (_emailSignedIn != signedIn) {
-                                                setState(() {
-                                                  _emailSignedIn = signedIn;
-                                                  if (!signedIn)
-                                                    _pendingSkillDraftReview =
-                                                        null;
-                                                });
-                                              }
-                                            },
-                                            controller: _composerController,
-                                            focusNode: _composerFocusNode,
-                                            modelSelection: _selectedModel,
-                                            onDrawingSelected: () =>
-                                                unawaited(_openDrawingBoard()),
-                                            onCapabilitySelected: (capability) {
-                                              _activeSkillWorkflow = null;
-                                              _composerController
-                                                  .insertCapability(capability);
-                                              _composerFocusNode.unfocus();
-                                            },
-                                            onOpenExtensionMarket: () =>
-                                                _openExtensionMarket(
-                                                  kind: ExtensionKind.mcp,
-                                                ),
-                                            pendingSkillDraftReview:
-                                                _pendingSkillDraftReview,
-                                            onSaveSkillDraft: _saveSkillDraft,
-                                            onReviseSkillDraft:
-                                                _requestSkillDraftRevision,
-                                            onDismissSkillDraftReview:
-                                                _dismissSkillDraftReview,
-                                            onDeleteSkillDraft:
-                                                _deleteSkillDraft,
-                                            onModelSelectionChanged:
-                                                _setSelectedModel,
-                                            showReadingTasks:
-                                                _space == _HomeSpace.reading,
-                                            bookLibrary: _bookLibrary,
-                                            selectedBookId:
-                                                _selectedReadingTaskBookId,
-                                            selectedBookName:
-                                                _selectedReadingTaskBookName,
-                                            onSelectReadingBook:
-                                                _activateReadingBook,
-                                            onReadingTaskSearchFocusChanged:
-                                                _onReadingTaskSearchFocusChanged,
-                                            onStartIndependent:
-                                                _startIndependentConversation,
-                                            onAddReadingBook:
-                                                _createReadingTaskBook,
-                                            isGenerating: _isGenerating,
-                                            canSteerActiveTask:
-                                                _activeRemoteAgentTaskId !=
-                                                null,
-                                            isEditingMessage:
-                                                _editingQuestion != null,
-                                            isSavingMessageEdit:
-                                                _savingMessageEdit,
-                                            expanded: expanded,
-                                            onToggleExpanded: () =>
-                                                _setComposerExpanded(
-                                                  !_composerExpanded,
-                                                ),
-                                            onSend: _editingQuestion == null
-                                                ? _sendMessage
-                                                : _saveMessageEdit,
-                                            onSteer: _sendAgentInterruption,
-                                            onCancelMessageEdit:
-                                                _cancelMessageEdit,
-                                            onStop: _stopReply,
-                                            voiceRecording: _voicePanelVisible,
-                                            voiceCancelArmed: _voiceCancelArmed,
-                                            voiceStarting: _voiceStarting,
-                                            voiceTranscribing:
-                                                _voiceTranscribing,
-                                            voiceSoundLevel: _voiceSoundLevel,
-                                            attachments: _attachments,
-                                            attachmentPreparationStates:
-                                                _attachmentPreparer.states,
-                                            onRetryAttachment: _retryAttachment,
-                                            recentPhotos: _recentPhotos,
-                                            loadingRecentPhotos:
-                                                _loadingRecentPhotos,
-                                            preparingAttachments:
-                                                _preparingAttachments,
-                                            attachmentPanelOpen:
-                                                _attachmentPanelOpen,
-                                            attachmentPanelPending:
-                                                _attachmentPanelPending,
-                                            resizeToAvoidBottomInset:
-                                                !_keyboardOverlayLayoutLocked &&
-                                                !_taskSearchKeepsComposerFixed,
-                                            onToggleAttachmentPanel:
-                                                _toggleAttachmentPanel,
-                                            onAddAttachment: _addAttachments,
-                                            onAddRecentPhoto: _addRecentPhoto,
-                                            onRemoveAttachment:
-                                                _removeAttachment,
-                                            onEditDrawing: (attachment) =>
-                                                unawaited(
-                                                  _openDrawingBoard(
-                                                    editing: attachment,
+                            );
+                          },
+                        ),
+                      AnimatedPositioned(
+                        duration: const Duration(milliseconds: 220),
+                        curve: Curves.easeInOutCubic,
+                        top: _composerExpanded ? 0 : 44,
+                        left: _composerExpanded ? 0 : 20,
+                        right: _composerExpanded ? 0 : 20,
+                        bottom: 0,
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            final expanded = _composerExpanded;
+                            return Column(
+                              children: [
+                                Expanded(
+                                  child: _messages.isEmpty
+                                      ? const SizedBox.expand()
+                                      : Stack(
+                                          fit: StackFit.expand,
+                                          children: [
+                                            _ConversationMessages(
+                                              key: ValueKey(_conversation?.id),
+                                              onSendMcpAppMessage:
+                                                  _sendMcpAppMessage,
+                                              annotations: _annotations,
+                                              annotationBottomPadding:
+                                                  _textAnnotationEditorVisible
+                                                  ? MediaQuery.viewInsetsOf(
+                                                          context,
+                                                        ).bottom +
+                                                        160
+                                                  : 0,
+                                              onAnnotate: _annotateText,
+                                              onAnnotationNavigation: () {
+                                                _latestScrollEpoch++;
+                                                _latestScrollAnimating = false;
+                                                _scrollToBottomAnimating =
+                                                    false;
+                                                _followLatestMessage = false;
+                                              },
+                                              onPreviewImages:
+                                                  _openImageGallery,
+                                              record:
+                                                  _conversation ??
+                                                  AiConversationRecord.empty(
+                                                    enableAutoTitle: true,
                                                   ),
+                                              presentationRevision:
+                                                  _conversationPresentationRevision,
+                                              targetMessageId:
+                                                  _conversationFocusMessageId,
+                                              messages: _messages,
+                                              scrollController:
+                                                  _messagesScrollController,
+                                              isGenerating: _isGenerating,
+                                              isContinuingReply:
+                                                  _isContinuingReply,
+                                              continuingReplyId:
+                                                  _continuingReplyId,
+                                              stoppedEmptyReplyParentId:
+                                                  _stoppedEmptyReplyConversationId ==
+                                                      _conversation?.id
+                                                  ? _stoppedEmptyReplyParentId
+                                                  : null,
+                                              isPreparingToSend:
+                                                  _isPreparingToSend,
+                                              isSelectingVersion:
+                                                  _isSelectingAnswerVersion ||
+                                                  _isSelectingQuestionVersion,
+                                              isUserScrollingMessages:
+                                                  _userScrollingMessages,
+                                              streamingReply: _streamingReply,
+                                              agentClarification:
+                                                  _agentClarification,
+                                              attachmentPreparationStates:
+                                                  _attachmentPreparer.states,
+                                              onRetryAttachment:
+                                                  _retryAttachment,
+                                              agentStreamPresentation:
+                                                  _agentStreamPresentation,
+                                              onToggleAgentProcess:
+                                                  _toggleAgentProcessExpansion,
+                                              imageGenerationInProgress:
+                                                  _imageGenerationInProgress,
+                                              onScrollNotification:
+                                                  _onMessagesScrollNotification,
+                                              onScrollMetricsChanged:
+                                                  _onMessagesMetricsChanged,
+                                              onReplyBodyOverflowChanged:
+                                                  _onReplyBodyOverflowChanged,
+                                              onCopy: _copyReply,
+                                              onCopySelectedText:
+                                                  _copySelectedMessageText,
+                                              onEditMessage: _beginMessageEdit,
+                                              onFeedback:
+                                                  _showReplyFeedbackForm,
+                                              onNote: _captureChatTextToNote,
+                                              onShare: _shareReply,
+                                              onDelete: _confirmDeleteReply,
+                                              onRegenerate: _regenerateReply,
+                                              onContinueIncompleteReply:
+                                                  _continueIncompleteReply,
+                                              onContinueEmptyReply:
+                                                  (parentId) =>
+                                                      _continueStoppedReply(
+                                                        parentMessageId:
+                                                            parentId,
+                                                      ),
+                                              onSelectVersion:
+                                                  _selectAnswerVersion,
+                                              onSelectQuestionVersion:
+                                                  _selectQuestionVersion,
+                                              onOpenDraftReview:
+                                                  _openSkillDraftReview,
+                                            ),
+                                            if (_showScrollToBottom &&
+                                                !_composerExpanded)
+                                              Positioned(
+                                                right: 16,
+                                                bottom: 12,
+                                                child: _ScrollToBottomButton(
+                                                  isGenerating: _isGenerating,
+                                                  onPressed:
+                                                      _jumpToLatestMessage,
                                                 ),
-                                            onVoiceLongPressStart:
-                                                _startVoiceInput,
-                                            onVoiceLongPressMove:
-                                                _updateVoiceCancelGesture,
-                                            onVoiceLongPressEnd:
-                                                _finishVoiceInput,
-                                            onVoiceLongPressCancel: () =>
-                                                unawaited(_cancelVoiceInput()),
+                                              ),
+                                          ],
+                                        ),
+                                ),
+                                LearningNotesStatusBar(
+                                  conversationId: _conversation?.id,
+                                ),
+                                ValueListenableBuilder<bool>(
+                                  valueListenable: _keyboardInsetsChanging,
+                                  builder: (context, keyboardInsetsChanging, _) {
+                                    final keyboardVisible =
+                                        MediaQuery.viewInsetsOf(
+                                          context,
+                                        ).bottom >
+                                        0;
+                                    return AnimatedSize(
+                                      duration:
+                                          _composerSizeTransitioning &&
+                                              !keyboardInsetsChanging &&
+                                              !(expanded && keyboardVisible)
+                                          ? const Duration(milliseconds: 220)
+                                          // Duration.zero can synchronously
+                                          // re-dirty RenderAnimatedSize.
+                                          : const Duration(milliseconds: 1),
+                                      curve: Curves.easeInOutCubic,
+                                      alignment: Alignment.bottomCenter,
+                                      child: ConstrainedBox(
+                                        constraints: BoxConstraints(
+                                          maxHeight: expanded
+                                              ? constraints.maxHeight
+                                              : constraints.maxHeight * .65,
+                                        ),
+                                        child: SizedBox(
+                                          height: expanded
+                                              ? constraints.maxHeight
+                                              : null,
+                                          width: double.infinity,
+                                          child: Padding(
+                                            padding: EdgeInsets.only(
+                                              bottom: expanded ? 0 : 12,
+                                            ),
+                                            child: _HomeComposer(
+                                              key: _composerKey,
+                                              annotations: _annotations,
+                                              onReviewAnnotations:
+                                                  _reviewAnnotations,
+                                              onRemoveAnnotations: () =>
+                                                  _applyAnnotations(const []),
+                                              onPreviewImage: (item) =>
+                                                  unawaited(
+                                                    _openPendingImage(item),
+                                                  ),
+                                              onRequestLogin: _openEmailLogin,
+                                              isSignedIn: _emailSignedIn,
+                                              onSessionChanged: (signedIn) {
+                                                if (_emailSignedIn !=
+                                                    signedIn) {
+                                                  setState(() {
+                                                    _emailSignedIn = signedIn;
+                                                    if (!signedIn)
+                                                      _pendingSkillDraftReview =
+                                                          null;
+                                                  });
+                                                }
+                                              },
+                                              controller: _composerController,
+                                              focusNode: _composerFocusNode,
+                                              modelSelection: _selectedModel,
+                                              onDrawingSelected: () =>
+                                                  unawaited(
+                                                    _openDrawingBoard(),
+                                                  ),
+                                              onCapabilitySelected:
+                                                  (capability) {
+                                                    _activeSkillWorkflow = null;
+                                                    _composerController
+                                                        .insertCapability(
+                                                          capability,
+                                                        );
+                                                    _composerFocusNode
+                                                        .unfocus();
+                                                  },
+                                              onOpenExtensionMarket: () =>
+                                                  _openExtensionMarket(
+                                                    kind: ExtensionKind.mcp,
+                                                  ),
+                                              pendingSkillDraftReview:
+                                                  _pendingSkillDraftReview,
+                                              onSaveSkillDraft: _saveSkillDraft,
+                                              onReviseSkillDraft:
+                                                  _requestSkillDraftRevision,
+                                              onDismissSkillDraftReview:
+                                                  _dismissSkillDraftReview,
+                                              onDeleteSkillDraft:
+                                                  _deleteSkillDraft,
+                                              onModelSelectionChanged:
+                                                  _setSelectedModel,
+                                              showReadingTasks:
+                                                  _space == _HomeSpace.reading,
+                                              bookLibrary: _bookLibrary,
+                                              selectedBookId:
+                                                  _selectedReadingTaskBookId,
+                                              selectedBookName:
+                                                  _selectedReadingTaskBookName,
+                                              onSelectReadingBook:
+                                                  _activateReadingBook,
+                                              onReadingTaskSearchFocusChanged:
+                                                  _onReadingTaskSearchFocusChanged,
+                                              onStartIndependent:
+                                                  _startIndependentConversation,
+                                              onAddReadingBook:
+                                                  _createReadingTaskBook,
+                                              isGenerating: _isGenerating,
+                                              canSteerActiveTask:
+                                                  _activeRemoteAgentTaskId !=
+                                                  null,
+                                              isEditingMessage:
+                                                  _editingQuestion != null,
+                                              isSavingMessageEdit:
+                                                  _savingMessageEdit,
+                                              expanded: expanded,
+                                              onToggleExpanded: () =>
+                                                  _setComposerExpanded(
+                                                    !_composerExpanded,
+                                                  ),
+                                              onSend: _editingQuestion == null
+                                                  ? _sendMessage
+                                                  : _saveMessageEdit,
+                                              onSteer: _sendAgentInterruption,
+                                              onCancelMessageEdit:
+                                                  _cancelMessageEdit,
+                                              onStop: _stopReply,
+                                              voiceRecording:
+                                                  _voicePanelVisible,
+                                              voiceCancelArmed:
+                                                  _voiceCancelArmed,
+                                              voiceStarting: _voiceStarting,
+                                              voiceTranscribing:
+                                                  _voiceTranscribing,
+                                              voiceSoundLevel: _voiceSoundLevel,
+                                              attachments: _attachments,
+                                              attachmentPreparationStates:
+                                                  _attachmentPreparer.states,
+                                              onRetryAttachment:
+                                                  _retryAttachment,
+                                              recentPhotos: _recentPhotos,
+                                              loadingRecentPhotos:
+                                                  _loadingRecentPhotos,
+                                              preparingAttachments:
+                                                  _preparingAttachments,
+                                              attachmentPanelOpen:
+                                                  _attachmentPanelOpen,
+                                              attachmentPanelPending:
+                                                  _attachmentPanelPending,
+                                              resizeToAvoidBottomInset:
+                                                  !_keyboardOverlayLayoutLocked &&
+                                                  !_taskSearchKeepsComposerFixed,
+                                              onToggleAttachmentPanel:
+                                                  _toggleAttachmentPanel,
+                                              onAddAttachment: _addAttachments,
+                                              onAddRecentPhoto: _addRecentPhoto,
+                                              onRemoveAttachment:
+                                                  _removeAttachment,
+                                              onEditDrawing: (attachment) =>
+                                                  unawaited(
+                                                    _openDrawingBoard(
+                                                      editing: attachment,
+                                                    ),
+                                                  ),
+                                              onVoiceLongPressStart:
+                                                  _startVoiceInput,
+                                              onVoiceLongPressMove:
+                                                  _updateVoiceCancelGesture,
+                                              onVoiceLongPressEnd:
+                                                  _finishVoiceInput,
+                                              onVoiceLongPressCancel: () =>
+                                                  unawaited(
+                                                    _cancelVoiceInput(),
+                                                  ),
+                                            ),
                                           ),
                                         ),
                                       ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ],
-                          );
-                        },
-                      ),
-                    ),
-                    // Keep the menu above the conversation canvas and composer.
-                    if (_spaceMenuOpen) ...[
-                      Positioned(
-                        top: 45,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: GestureDetector(
-                          onTap: () => setState(() => _spaceMenuOpen = false),
-                          behavior: HitTestBehavior.opaque,
-                          child: const SizedBox.expand(),
+                                    );
+                                  },
+                                ),
+                              ],
+                            );
+                          },
                         ),
                       ),
-                      Positioned(
-                        top: 45,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: _SpaceMenu(
-                            selectedSpace: _space,
-                            onSelect: _switchSpace,
+                      // Keep the menu above the conversation canvas and composer.
+                      if (_spaceMenuOpen) ...[
+                        Positioned(
+                          top: 45,
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: GestureDetector(
+                            onTap: () => setState(() => _spaceMenuOpen = false),
+                            behavior: HitTestBehavior.opaque,
+                            child: const SizedBox.expand(),
                           ),
                         ),
-                      ),
+                        Positioned(
+                          top: 45,
+                          left: 0,
+                          right: 0,
+                          child: Center(
+                            child: _SpaceMenu(
+                              selectedSpace: _space,
+                              onSelect: _switchSpace,
+                            ),
+                          ),
+                        ),
+                      ],
+                      if (!_composerExpanded)
+                        _buildTopBar(showNewConversation: _messages.isNotEmpty),
+                      _buildAgentQuestionOverlay(constraints),
                     ],
-                    if (!_composerExpanded)
-                      _buildTopBar(showNewConversation: _messages.isNotEmpty),
-                    _buildAgentQuestionOverlay(constraints),
-                  ],
+                  ),
                 );
               },
             ),

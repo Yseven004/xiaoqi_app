@@ -1,26 +1,82 @@
 import 'package:flutter/material.dart';
 
 import '../config/book_flow_theme.dart';
+import '../models/book_category.dart';
 import '../models/book_recognition.dart';
 import 'book_cover.dart';
 import 'book_cover_picker_sheet.dart';
 
+class BookMetadataFormResult {
+  const BookMetadataFormResult({
+    required this.book,
+    required this.categoryIds,
+    this.saveError,
+  });
+
+  final BookRecord book;
+  final List<int> categoryIds;
+  final String? saveError;
+}
+
+Future<BookMetadataFormResult?> showBookMetadataForm({
+  required BuildContext context,
+  required BookRecord initial,
+  List<BookCategory> categories = const [],
+  List<int> initialCategoryIds = const [],
+  String? saveError,
+}) => showModalBottomSheet<BookMetadataFormResult>(
+  context: context,
+  isScrollControlled: true,
+  useSafeArea: true,
+  requestFocus: false,
+  backgroundColor: Colors.transparent,
+  barrierColor: const Color(0x99000000),
+  builder: (_) => Material(
+    color: Colors.white,
+    borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+    clipBehavior: Clip.antiAlias,
+    child: BookMetadataFormSheet(
+      initial: initial,
+      categories: categories,
+      initialCategoryIds: initialCategoryIds,
+      saveError: saveError,
+    ),
+  ),
+);
+
 class BookMetadataFormSheet extends StatefulWidget {
-  const BookMetadataFormSheet({super.key, required this.initial});
+  const BookMetadataFormSheet({
+    super.key,
+    required this.initial,
+    this.categories = const [],
+    this.initialCategoryIds = const [],
+    this.saveError,
+  });
 
   final BookRecord initial;
+  final List<BookCategory> categories;
+  final List<int> initialCategoryIds;
+  final String? saveError;
 
   @override
   State<BookMetadataFormSheet> createState() => _BookMetadataFormSheetState();
 }
 
-class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
+class _BookMetadataFormSheetState extends State<BookMetadataFormSheet>
+    with WidgetsBindingObserver {
   late final TextEditingController _title;
   late final TextEditingController _author;
   late final TextEditingController _publisher;
   late final TextEditingController _edition;
+  late final FocusNode _titleFocus;
+  late final FocusNode _authorFocus;
+  late final FocusNode _publisherFocus;
+  late final FocusNode _editionFocus;
   late BookRecord _cover;
+  late final Set<int> _selectedCategoryIds;
   String? _titleError;
+  String? _categoryError;
+  bool _keyboardVisible = false;
 
   @override
   void initState() {
@@ -31,16 +87,47 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
     _author = TextEditingController(text: widget.initial.authorLabel);
     _publisher = TextEditingController(text: widget.initial.publisher);
     _edition = TextEditingController(text: widget.initial.edition);
+    _titleFocus = FocusNode();
+    _authorFocus = FocusNode();
+    _publisherFocus = FocusNode();
+    _editionFocus = FocusNode();
     _cover = widget.initial;
+    _selectedCategoryIds = widget.initialCategoryIds.toSet();
+    WidgetsBinding.instance.addObserver(this);
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    _keyboardVisible = views.isNotEmpty && views.first.viewInsets.bottom > 0;
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _title.dispose();
     _author.dispose();
     _publisher.dispose();
     _edition.dispose();
+    _titleFocus.dispose();
+    _authorFocus.dispose();
+    _publisherFocus.dispose();
+    _editionFocus.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    final keyboardVisible =
+        views.isNotEmpty && views.first.viewInsets.bottom > 0;
+    if (_keyboardVisible && !keyboardVisible) {
+      _unfocusEmptyField(_titleFocus, _title);
+      _unfocusEmptyField(_authorFocus, _author);
+      _unfocusEmptyField(_publisherFocus, _publisher);
+      _unfocusEmptyField(_editionFocus, _edition);
+    }
+    _keyboardVisible = keyboardVisible;
+  }
+
+  void _unfocusEmptyField(FocusNode focus, TextEditingController controller) {
+    if (focus.hasFocus && controller.text.isEmpty) focus.unfocus();
   }
 
   void _save() {
@@ -49,28 +136,40 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
       setState(() => _titleError = '请填写书名');
       return;
     }
+    if (_selectedCategoryIds.length > 3) {
+      setState(() => _categoryError = '一本书最多选择 3 个分类');
+      return;
+    }
     final authors = _author.text
         .split(RegExp(r'[、,，/]'))
         .map((item) => item.trim())
         .where((item) => item.isNotEmpty)
         .toList(growable: false);
     Navigator.of(context).pop(
-      widget.initial.copyWith(
-        title: title,
-        authors: authors,
-        publisher: _publisher.text.trim(),
-        edition: _edition.text.trim(),
-        coverUrl: _cover.coverUrl,
-        coverPath: _cover.coverPath,
-        coverType: _cover.coverType,
-        coverTemplate: _cover.coverTemplate,
-        isCustom: widget.initial.isCustom || widget.initial.title == '待确认书籍',
+      BookMetadataFormResult(
+        book: widget.initial.copyWith(
+          title: title,
+          authors: authors,
+          publisher: _publisher.text.trim(),
+          edition: _edition.text.trim(),
+          coverUrl: _cover.coverUrl,
+          coverPath: _cover.coverPath,
+          coverType: _cover.coverType,
+          coverTemplate: _cover.coverTemplate,
+          isCustom: widget.initial.isCustom || widget.initial.title == '待确认书籍',
+        ),
+        categoryIds: _selectedCategoryIds.toList(growable: false),
       ),
     );
   }
 
   Future<void> _chooseCover() async {
-    final selected = await showBookCoverPicker(context, initial: _cover);
+    FocusManager.instance.primaryFocus?.unfocus();
+    final selected = await showBookCoverPicker(
+      context,
+      initial: _cover,
+      persistOnSelect: false,
+    );
     if (!mounted || selected == null) return;
     setState(() => _cover = selected);
   }
@@ -90,15 +189,56 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('确认书籍资料', style: BookFlowTheme.heading),
+            const Center(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Color(0xFFD5D8DE),
+                  borderRadius: BorderRadius.all(Radius.circular(8)),
+                ),
+                child: SizedBox(width: 42, height: 5),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Expanded(
+                  child: Text('确认书籍资料', style: BookFlowTheme.heading),
+                ),
+                IconButton(
+                  tooltip: '关闭',
+                  onPressed: () => Navigator.of(context).pop(),
+                  constraints: const BoxConstraints.tightFor(
+                    width: 48,
+                    height: 48,
+                  ),
+                  style: IconButton.styleFrom(
+                    foregroundColor: BookFlowTheme.ink,
+                  ),
+                  icon: const Icon(Icons.close_rounded),
+                ),
+              ],
+            ),
             const SizedBox(height: 4),
             const Text('书名为必填项，其余信息可稍后补充。', style: BookFlowTheme.caption),
+            if (widget.saveError != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                '上次保存失败，修改仍保留，可继续调整或重试：${widget.saveError}',
+                style: const TextStyle(
+                  color: BookFlowTheme.danger,
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+            ],
             const SizedBox(height: 18),
             TextField(
               controller: _title,
+              focusNode: _titleFocus,
               autofocus: false,
               textInputAction: TextInputAction.next,
-              decoration: InputDecoration(
+              onTapOutside: (_) => _titleFocus.unfocus(),
+              decoration: _metadataInputDecoration(
                 labelText: '书名 *',
                 errorText: _titleError,
               ),
@@ -112,8 +252,10 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
             const SizedBox(height: 12),
             TextField(
               controller: _author,
+              focusNode: _authorFocus,
               textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(
+              onTapOutside: (_) => _authorFocus.unfocus(),
+              decoration: _metadataInputDecoration(
                 labelText: '作者',
                 hintText: '多个作者可用顿号分隔',
               ),
@@ -121,16 +263,61 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
             const SizedBox(height: 12),
             TextField(
               controller: _publisher,
+              focusNode: _publisherFocus,
               textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(labelText: '出版社'),
+              onTapOutside: (_) => _publisherFocus.unfocus(),
+              decoration: _metadataInputDecoration(labelText: '出版社'),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: _edition,
+              focusNode: _editionFocus,
               textInputAction: TextInputAction.done,
-              decoration: const InputDecoration(labelText: '版本 / 出版年份'),
+              onTapOutside: (_) => _editionFocus.unfocus(),
+              decoration: _metadataInputDecoration(labelText: '版本 / 出版年份'),
               onSubmitted: (_) => _save(),
             ),
+            if (widget.categories.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              const Text('分类', style: BookFlowTheme.heading),
+              const SizedBox(height: 4),
+              const Text('最多选择 3 个分类', style: BookFlowTheme.caption),
+              if (_categoryError != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  _categoryError!,
+                  style: const TextStyle(color: BookFlowTheme.danger),
+                ),
+              ],
+              const SizedBox(height: 6),
+              for (final category in widget.categories)
+                CheckboxListTile(
+                  value: _selectedCategoryIds.contains(category.id),
+                  title: Text(category.name),
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  activeColor: BookFlowTheme.ink,
+                  onChanged: category.id == null
+                      ? null
+                      : (checked) {
+                          FocusManager.instance.primaryFocus?.unfocus();
+                          final id = category.id!;
+                          if (checked == true &&
+                              _selectedCategoryIds.length >= 3) {
+                            setState(() => _categoryError = '一本书最多选择 3 个分类');
+                            return;
+                          }
+                          setState(() {
+                            if (checked == true) {
+                              _selectedCategoryIds.add(id);
+                            } else {
+                              _selectedCategoryIds.remove(id);
+                            }
+                            _categoryError = null;
+                          });
+                        },
+                ),
+            ],
             if (widget.initial.description.isNotEmpty) ...[
               const SizedBox(height: 18),
               _MetadataPreviewCard(
@@ -192,7 +379,7 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
               decoration: BoxDecoration(
                 color: BookFlowTheme.canvas,
                 borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: BookFlowTheme.line),
+                border: Border.all(color: const Color(0xFFD5D8DE)),
               ),
               child: Row(
                 children: [
@@ -212,7 +399,7 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
                         ),
                         SizedBox(height: 4),
                         Text(
-                          '原书封面、模板、上传照片都可以在这里选择',
+                          '原书封面或上传照片',
                           style: TextStyle(fontSize: 12, height: 1.35),
                         ),
                       ],
@@ -222,6 +409,14 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
                   OutlinedButton(
                     key: const Key('book_cover_choose_button'),
                     onPressed: _chooseCover,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: BookFlowTheme.ink,
+                      minimumSize: const Size(48, 48),
+                      side: const BorderSide(color: Color(0xFFD5D8DE)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
                     child: const Text('更换'),
                   ),
                 ],
@@ -230,7 +425,15 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet> {
             const SizedBox(height: 20),
             FilledButton(
               onPressed: _save,
-              style: BookFlowTheme.primaryButtonStyle(),
+              style: FilledButton.styleFrom(
+                backgroundColor: BookFlowTheme.ink,
+                foregroundColor: Colors.white,
+                minimumSize: const Size.fromHeight(48),
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
               child: const Text('保存书籍'),
             ),
           ],
@@ -257,14 +460,14 @@ class _MetadataPreviewCard extends StatelessWidget {
     decoration: BoxDecoration(
       color: BookFlowTheme.canvas,
       borderRadius: BorderRadius.circular(16),
-      border: Border.all(color: BookFlowTheme.line),
+      border: Border.all(color: const Color(0xFFD5D8DE)),
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
-            Icon(icon, size: 17, color: BookFlowTheme.primary),
+            Icon(icon, size: 17, color: BookFlowTheme.inkSecondary),
             const SizedBox(width: 7),
             Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
           ],
@@ -273,6 +476,32 @@ class _MetadataPreviewCard extends StatelessWidget {
         child,
       ],
     ),
+  );
+}
+
+InputDecoration _metadataInputDecoration({
+  required String labelText,
+  String? hintText,
+  String? errorText,
+}) {
+  const borderColor = Color(0xFFD5D8DE);
+  OutlineInputBorder border(Color color, [double width = 1]) =>
+      OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide(color: color, width: width),
+      );
+  return InputDecoration(
+    labelText: labelText,
+    hintText: hintText,
+    errorText: errorText,
+    filled: true,
+    fillColor: Colors.white,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+    border: border(borderColor),
+    enabledBorder: border(borderColor),
+    focusedBorder: border(BookFlowTheme.ink, 1.3),
+    errorBorder: border(BookFlowTheme.danger),
+    focusedErrorBorder: border(BookFlowTheme.danger, 1.3),
   );
 }
 
@@ -285,7 +514,7 @@ class _SourceTag extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
     decoration: BoxDecoration(
-      color: BookFlowTheme.primarySoft,
+      color: const Color(0xFFF2F2F2),
       borderRadius: BorderRadius.circular(99),
     ),
     child: Text(label, style: const TextStyle(fontSize: 12)),

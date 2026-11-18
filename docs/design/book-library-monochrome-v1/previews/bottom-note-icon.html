@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" />
+  <title>Book library bottom note icon preview</title>
+  <style>
+    :root { color-scheme: light; font: 12px Arial, sans-serif; color: #303134; }
+    body { margin: 16px; width: 176px; background: #fff; }
+    .states { display: flex; gap: 8px; margin-top: 8px; }
+    .state { width: 72px; text-align: center; }
+    .icon-box { height: 48px; display: grid; place-items: center; border: 1px solid #d5d8de; border-radius: 8px; }
+    .icon { width: 27px; height: 27px; object-fit: contain; }
+    .selected { filter: brightness(0); }
+    .unselected { opacity: .55; }
+    .label { margin-top: 4px; }
+  </style>
+  <body>
+    <div>BookLearningBottomBar · SVG · 27×27</div>
+    <div class="states">
+      <div class="state"><div class="icon-box"><img class="icon selected" src="../../../../assets/images/home_reply_note.svg" alt="" /></div><div class="label">selected</div></div>
+      <div class="state"><div class="icon-box"><img class="icon unselected" src="../../../../assets/images/home_reply_note.svg" alt="" /></div><div class="label">unselected</div></div>
+    </div>
+  </body>
+</html>

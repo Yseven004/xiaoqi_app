@@ -5,18 +5,14 @@ import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../config/book_flow_theme.dart';
-import '../models/book_category.dart';
 import '../models/book_library_item.dart';
 import '../models/book_recognition.dart';
 import '../models/book_source.dart';
 import '../services/book_library_service.dart';
-import '../utils/book_cover_palette.dart';
 import '../widgets/book_cover.dart';
-import '../widgets/book_spine_shading.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/book_cover_picker_sheet.dart';
 import '../widgets/book_metadata_form_sheet.dart';
-import '../widgets/book_paper_background.dart';
 import 'book_sources_page.dart';
 import 'note_management_page.dart';
 import '../models/notebook.dart';
@@ -39,12 +35,13 @@ class BookStudyPage extends StatefulWidget {
   State<BookStudyPage> createState() => _BookStudyPageState();
 }
 
+enum _BookAction { edit, association, delete }
+
 class _BookStudyPageState extends State<BookStudyPage> {
   late final BookLibraryService _library;
   BookLibraryItem? _item;
   List<Notebook> _notebooks = const [];
   List<BookSourceRecord> _sources = const [];
-  List<BookCategory> _categories = const [];
   bool _loading = true;
   String? _error;
 
@@ -71,14 +68,12 @@ class _BookStudyPageState extends State<BookStudyPage> {
         bookId: widget.bookId,
       );
       final sources = await _library.listSourcesForBook(widget.bookId);
-      final categories = await _library.listCategories();
       unawaited(_library.recordStudyActivity(widget.bookId));
       if (!mounted) return;
       setState(() {
         _item = item;
         _notebooks = notebooks;
         _sources = sources;
-        _categories = categories;
         _loading = false;
         _error = null;
       });
@@ -126,24 +121,38 @@ class _BookStudyPageState extends State<BookStudyPage> {
   Future<void> _editMetadata() async {
     final item = _item;
     if (item == null) return;
-    final updated = await showModalBottomSheet<BookRecord>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Material(
-        color: BookFlowTheme.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        child: BookMetadataFormSheet(initial: item.book),
-      ),
+    final categories = await _library.listCategories();
+    if (!mounted) return;
+    var draft = BookMetadataFormResult(
+      book: item.book,
+      categoryIds: item.categories
+          .map((category) => category.id!)
+          .toList(growable: false),
     );
-    if (updated == null || !mounted) return;
-    try {
-      await _library.updateBookMetadata(updated);
-      await _load();
-    } catch (error) {
-      if (mounted) {
-        AppToast.show(context, '书籍资料保存失败：$error');
+    while (true) {
+      if (!mounted) return;
+      final updated = await showBookMetadataForm(
+        context: context,
+        initial: draft.book,
+        categories: categories,
+        initialCategoryIds: draft.categoryIds,
+        saveError: draft.saveError,
+      );
+      if (!mounted || updated == null) return;
+      try {
+        await _library.updateBookMetadataAndCategories(
+          updated.book,
+          updated.categoryIds,
+        );
+        await _load();
+        return;
+      } catch (error) {
+        if (!mounted) return;
+        draft = BookMetadataFormResult(
+          book: updated.book,
+          categoryIds: updated.categoryIds,
+          saveError: error.toString(),
+        );
       }
     }
   }
@@ -152,84 +161,23 @@ class _BookStudyPageState extends State<BookStudyPage> {
     final item = _item;
     if (item == null) return;
     final selected = await showBookCoverPicker(context, initial: item.book);
-    if (!mounted || selected == null) return;
+    if (selected == null) return;
+    if (!mounted) {
+      if (selected.coverPath != item.book.coverPath) {
+        await _library.discardUnreferencedBookCover(selected.coverPath);
+      }
+      return;
+    }
     try {
       await _library.updateBookMetadata(selected);
       await _load();
     } catch (error) {
+      if (selected.coverPath != item.book.coverPath) {
+        await _library.discardUnreferencedBookCover(selected.coverPath);
+      }
       if (!mounted) return;
       AppToast.show(context, '封面保存失败，请重试：$error');
     }
-  }
-
-  Future<void> _editCategories() async {
-    final item = _item;
-    if (item == null) return;
-    final selected = item.categories.map((category) => category.id!).toSet();
-    final result = await showModalBottomSheet<List<int>>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (sheetContext) => StatefulBuilder(
-        builder: (context, setSheetState) => SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.only(bottom: 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const ListTile(
-                  title: Text(
-                    '调整分类',
-                    style: TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                  subtitle: Text('最多选择 3 个分类'),
-                ),
-                Flexible(
-                  child: ListView(
-                    shrinkWrap: true,
-                    children: [
-                      for (final category in _categories)
-                        CheckboxListTile(
-                          value: selected.contains(category.id),
-                          title: Text(category.name),
-                          onChanged: (checked) {
-                            if (checked == true && selected.length >= 3) {
-                              AppToast.show(context, '一本书最多选择 3 个分类');
-                              return;
-                            }
-                            setSheetState(() {
-                              if (checked == true) {
-                                selected.add(category.id!);
-                              } else {
-                                selected.remove(category.id);
-                              }
-                            });
-                          },
-                        ),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: FilledButton(
-                    style: BookFlowTheme.primaryButtonStyle(),
-                    onPressed: () => Navigator.pop(
-                      sheetContext,
-                      selected.toList(growable: false),
-                    ),
-                    child: const Text('保存分类'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-    if (result == null) return;
-    await _library.setBookCategories(widget.bookId, result);
-    await _load();
   }
 
   Future<void> _deleteBook() async {
@@ -290,24 +238,14 @@ class _BookStudyPageState extends State<BookStudyPage> {
           padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
           decoration: BoxDecoration(
             color: BookFlowTheme.surface,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: BookFlowTheme.line),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x330C1712),
-                blurRadius: 28,
-                offset: Offset(0, 12),
-              ),
-            ],
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFD5D8DE)),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(
-                Icons.link_rounded,
-                color: BookFlowTheme.detailPrimary,
-              ),
+              const Icon(Icons.link_rounded, color: BookFlowTheme.ink),
               const SizedBox(height: 14),
               const Text('微信读书关联', style: BookFlowTheme.heading),
               const SizedBox(height: 8),
@@ -348,17 +286,13 @@ class _BookStudyPageState extends State<BookStudyPage> {
               padding: const EdgeInsets.fromLTRB(22, 18, 18, 16),
               decoration: BoxDecoration(
                 color: BookFlowTheme.surface,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: BookFlowTheme.line),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Color(0x330C1712),
-                    blurRadius: 28,
-                    offset: Offset(0, 12),
-                  ),
-                ],
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFD5D8DE)),
               ),
               child: Column(
+                // 卡片随正文收缩；只有正文超出最大高度时才在剩余空间内滚动，
+                // 不再被固定最大高度撑满而留下大片空白。
+                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
@@ -374,7 +308,7 @@ class _BookStudyPageState extends State<BookStudyPage> {
                     ],
                   ),
                   const SizedBox(height: 6),
-                  Expanded(
+                  Flexible(
                     child: Scrollbar(
                       child: SingleChildScrollView(
                         padding: const EdgeInsets.only(right: 8, bottom: 4),
@@ -394,61 +328,28 @@ class _BookStudyPageState extends State<BookStudyPage> {
     );
   }
 
-  void _showBookActions() {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        top: false,
-        child: Wrap(
-          children: [
-            ListTile(
-              leading: const Icon(Icons.edit_outlined),
-              title: const Text('编辑书籍资料'),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                _editMetadata();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.category_outlined),
-              title: const Text('调整分类'),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                _editCategories();
-              },
-            ),
-            ListTile(
-              leading: const Icon(
-                Icons.delete_outline_rounded,
-                color: Color(0xFFB94A45),
-              ),
-              title: const Text(
-                '删除该书籍',
-                style: TextStyle(color: Color(0xFFB94A45)),
-              ),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                _deleteBook();
-              },
-            ),
-          ],
-        ),
-      ),
-    );
+  void _handleBookAction(_BookAction action) {
+    switch (action) {
+      case _BookAction.edit:
+        unawaited(_editMetadata());
+        break;
+      case _BookAction.association:
+        unawaited(_showAssociationInfo());
+        break;
+      case _BookAction.delete:
+        unawaited(_deleteBook());
+        break;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const ColoredBox(
-        color: BookFlowTheme.detailCanvas,
-        child: SizedBox.shrink(),
-      );
+      return const ColoredBox(color: Colors.white, child: SizedBox.shrink());
     }
     if (_error != null || _item == null) {
       return ColoredBox(
-        color: BookFlowTheme.detailCanvas,
+        color: Colors.white,
         child: Center(
           child: Padding(
             padding: const EdgeInsets.all(32),
@@ -470,13 +371,12 @@ class _BookStudyPageState extends State<BookStudyPage> {
       );
     }
     final item = _item!;
-    return BookPaperBackground(
-      showBotanicalShadow: true,
-      warmEditorial: true,
+    return ColoredBox(
+      color: Colors.white,
       child: SafeArea(
         bottom: false,
         child: RefreshIndicator(
-          color: BookFlowTheme.detailPrimary,
+          color: BookFlowTheme.ink,
           onRefresh: _load,
           child: ListView(
             padding: const EdgeInsets.fromLTRB(20, 6, 20, 32),
@@ -489,7 +389,7 @@ class _BookStudyPageState extends State<BookStudyPage> {
                       tooltip: '返回阅读空间',
                       onTap: widget.onBack,
                       icon: PhosphorIconsRegular.caretLeft,
-                      size: 44,
+                      size: 48,
                       iconSize: 23,
                     ),
                   ),
@@ -503,18 +403,47 @@ class _BookStudyPageState extends State<BookStudyPage> {
                           tooltip: '分享书籍',
                           onTap: _shareBook,
                           icon: PhosphorIconsRegular.export,
-                          size: 44,
+                          size: 48,
                           iconSize: 22,
                           radius: 13,
                           backgroundColor: const Color(0x12FFFFFF),
                         ),
                         const SizedBox(width: 2),
-                        _RoundIconButton(
+                        PopupMenuButton<_BookAction>(
                           tooltip: '更多书籍操作',
-                          onTap: _showBookActions,
-                          icon: PhosphorIconsBold.dotsThree,
-                          size: 44,
-                          iconSize: 24,
+                          onSelected: _handleBookAction,
+                          offset: const Offset(0, 44),
+                          color: Colors.white,
+                          constraints: const BoxConstraints(minWidth: 196),
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: _BookAction.edit,
+                              height: 48,
+                              child: Text('编辑书籍资料'),
+                            ),
+                            const PopupMenuItem(
+                              value: _BookAction.association,
+                              height: 48,
+                              child: Text('微信读书关联（准备中）'),
+                            ),
+                            const PopupMenuItem(
+                              value: _BookAction.delete,
+                              height: 48,
+                              child: Text(
+                                '删除该书籍',
+                                style: TextStyle(color: Color(0xFFB94A45)),
+                              ),
+                            ),
+                          ],
+                          child: const SizedBox(
+                            width: 48,
+                            height: 48,
+                            child: Icon(
+                              PhosphorIconsBold.dotsThree,
+                              color: BookFlowTheme.ink,
+                              size: 24,
+                            ),
+                          ),
                         ),
                       ],
                     ),
@@ -524,10 +453,9 @@ class _BookStudyPageState extends State<BookStudyPage> {
               const SizedBox(height: 10),
               LayoutBuilder(
                 builder: (context, constraints) {
-                  final coverWidth = (constraints.maxWidth * .405).clamp(
-                    122.0,
-                    148.0,
-                  );
+                  final coverWidth = constraints.maxWidth >= 600
+                      ? (constraints.maxWidth * .255).clamp(180.0, 220.0)
+                      : (constraints.maxWidth * .405).clamp(122.0, 148.0);
                   final coverHeight = coverWidth * 1.43;
                   return Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -553,7 +481,7 @@ class _BookStudyPageState extends State<BookStudyPage> {
                         child: ConstrainedBox(
                           constraints: BoxConstraints(minHeight: coverHeight),
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             mainAxisSize: MainAxisSize.min,
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
@@ -622,8 +550,6 @@ class _BookStudyPageState extends State<BookStudyPage> {
                   onShowDescription: _showBookDescription,
                 ),
               ],
-              const SizedBox(height: 14),
-              _OptionalAssociationCard(onTap: _showAssociationInfo),
               const SizedBox(height: 26),
               Row(
                 children: [
@@ -657,6 +583,9 @@ class _BookStudyPageState extends State<BookStudyPage> {
               if (_notebooks.isEmpty)
                 TextButton(
                   onPressed: () => _openNotebook(),
+                  style: TextButton.styleFrom(
+                    foregroundColor: BookFlowTheme.inkSecondary,
+                  ),
                   child: const Text('还没有关联笔记本，开始记笔记'),
                 )
               else
@@ -749,137 +678,90 @@ class _BookMetadataSummary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasDescription = book.description.trim().isNotEmpty;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: hasDescription ? onShowDescription : null,
-        borderRadius: BorderRadius.circular(18),
-        child: Ink(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: const Color(0xDFFAF6EE),
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: const Color(0xFFDDDBC7)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (hasDescription) ...[
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        '本书简介',
-                        style: TextStyle(fontWeight: FontWeight.w800),
-                      ),
+    return Column(
+      children: [
+        const Divider(height: 1, color: BookFlowTheme.line),
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: hasDescription ? onShowDescription : null,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (hasDescription) ...[
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            '本书简介',
+                            style: TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                        const Icon(
+                          Icons.open_in_new_rounded,
+                          size: 15,
+                          color: BookFlowTheme.inkSecondary,
+                        ),
+                        const SizedBox(width: 4),
+                        const Text(
+                          '查看全文',
+                          style: TextStyle(
+                            color: BookFlowTheme.inkSecondary,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     ),
-                    const Icon(
-                      Icons.open_in_new_rounded,
-                      size: 15,
-                      color: BookFlowTheme.inkSecondary,
-                    ),
-                    const SizedBox(width: 4),
-                    const Text(
-                      '查看全文',
-                      style: TextStyle(
-                        color: BookFlowTheme.inkSecondary,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 7),
-                ConstrainedBox(
-                  // 保持原来约 4 行简介的卡片高度，长简介仍可在此区域内滚动。
-                  constraints: const BoxConstraints(maxHeight: 84),
-                  child: Scrollbar(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: Text(
-                        book.description,
-                        style: const TextStyle(fontSize: 13, height: 1.55),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-              if (book.tableOfContents.isNotEmpty) ...[
-                if (hasDescription) const SizedBox(height: 14),
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.format_list_bulleted_rounded,
-                      size: 18,
-                      color: BookFlowTheme.detailPrimary,
-                    ),
-                    const SizedBox(width: 7),
-                    Text(
-                      '已保存 ${book.tableOfContents.length} 项目录',
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
+                    const SizedBox(height: 7),
+                    ConstrainedBox(
+                      // 保持原来约 4 行简介的卡片高度，长简介仍可在此区域内滚动。
+                      constraints: const BoxConstraints(maxHeight: 84),
+                      child: Scrollbar(
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: Text(
+                            book.description,
+                            style: const TextStyle(fontSize: 13, height: 1.55),
+                          ),
+                        ),
                       ),
                     ),
                   ],
-                ),
-              ],
-            ],
+                  if (book.tableOfContents.isNotEmpty) ...[
+                    if (hasDescription) const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.format_list_bulleted_rounded,
+                          size: 18,
+                          color: BookFlowTheme.ink,
+                        ),
+                        const SizedBox(width: 7),
+                        Text(
+                          '已保存 ${book.tableOfContents.length} 项目录',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
         ),
-      ),
+        const Divider(height: 1, color: BookFlowTheme.line),
+      ],
     );
   }
 }
 
-class _OptionalAssociationCard extends StatelessWidget {
-  const _OptionalAssociationCard({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    label: '微信读书关联，可选，暂未开放正式授权',
-    child: InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Ink(
-        padding: const EdgeInsets.all(15),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF3F0E7),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: BookFlowTheme.line),
-        ),
-        child: const Row(
-          children: [
-            Icon(Icons.link_rounded, color: BookFlowTheme.inkSecondary),
-            SizedBox(width: 11),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '微信读书关联（可选）',
-                    style: TextStyle(fontWeight: FontWeight.w800),
-                  ),
-                  SizedBox(height: 3),
-                  Text('正式授权准备中，不影响本书识别和使用', style: BookFlowTheme.caption),
-                ],
-              ),
-            ),
-            Icon(
-              Icons.chevron_right_rounded,
-              color: BookFlowTheme.inkSecondary,
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
-class _BookHeroCover extends StatefulWidget {
+class _BookHeroCover extends StatelessWidget {
   const _BookHeroCover({
     required this.book,
     required this.width,
@@ -891,193 +773,11 @@ class _BookHeroCover extends StatefulWidget {
   final double height;
 
   @override
-  State<_BookHeroCover> createState() => _BookHeroCoverState();
-}
-
-class _BookHeroCoverState extends State<_BookHeroCover> {
-  BookCoverPalette _palette = BookCoverPalette.fallback;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadPalette();
-  }
-
-  Future<void> _loadPalette() async {
-    final palette = await BookCoverPalette.fromBook(widget.book);
-    if (mounted) setState(() => _palette = palette);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final width = widget.width;
-    final height = widget.height;
-    // The cover artwork wraps the whole book; this shading layer only adds
-    // physical light and shadow, tinted by the cover's own palette.
-    final spineWidth = (width * .075).clamp(8.0, 11.0);
-
-    return SizedBox(
-      width: width + 4,
-      height: height + 6,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Positioned(
-            left: -18,
-            top: 7,
-            width: width + 34,
-            height: height + 38,
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: _DirectionalBookShadowPainter(palette: _palette),
-              ),
-            ),
-          ),
-          Positioned(
-            left: 1,
-            top: 0,
-            width: width,
-            height: height,
-            child: BookCover(
-              book: widget.book,
-              borderRadius: 8,
-              topLeftRadius: 8,
-              bottomLeftRadius: 8,
-              topRightRadius: 5,
-              bottomRightRadius: 5,
-              builtInSpineShading: false,
-            ),
-          ),
-          Positioned(
-            left: 1,
-            top: 0,
-            width: spineWidth + 2,
-            height: height,
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: BookSpineShadingPainter(
-                  palette: _palette,
-                  foldX: spineWidth,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Paints the cast shadow with physical light from the top-right: the
-/// shadow projects to the bottom-left in a wide, slanted sweep, tinted by
-/// the cover's own palette.
-class _DirectionalBookShadowPainter extends CustomPainter {
-  const _DirectionalBookShadowPainter({required this.palette});
-
-  final BookCoverPalette palette;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    // The cover occupies (19, 2) inside this larger paint area.
-    final bookLeft = 19.0;
-    final bookTop = 2.0;
-    final bookWidth = size.width - 34;
-    final bookHeight = size.height - 38;
-    final shadowBase = palette.shadow;
-
-    // 1) Ambient: a strongly slanted projection toward the bottom-left.
-    // Light arrives from the upper-right, so the left edge of the shadow
-    // sweeps far left-down while the right edge stays close to the book.
-    final ambientBounds = Rect.fromLTRB(
-      bookLeft - 70,
-      bookTop + 4,
-      bookLeft + bookWidth + 12,
-      bookTop + bookHeight + 36,
-    );
-    final ambientPath = Path()
-      ..moveTo(bookLeft + bookWidth + 10, bookTop + 8)
-      ..lineTo(bookLeft - 22, bookTop + 22)
-      ..lineTo(bookLeft - 66, bookTop + bookHeight + 32)
-      ..lineTo(bookLeft + bookWidth - 6, bookTop + bookHeight + 22)
-      ..close();
-    canvas.drawPath(
-      ambientPath,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.centerLeft,
-          end: Alignment.centerRight,
-          colors: [
-            shadowBase.withValues(alpha: .34),
-            shadowBase.withValues(alpha: .10),
-          ],
-        ).createShader(ambientBounds)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 24),
-    );
-
-    // 2) Core: tighter version of the same slanted projection.
-    final coreBounds = Rect.fromLTRB(
-      bookLeft - 34,
-      bookTop + 6,
-      bookLeft + bookWidth + 6,
-      bookTop + bookHeight + 22,
-    );
-    final corePath = Path()
-      ..moveTo(bookLeft + bookWidth + 4, bookTop + 10)
-      ..lineTo(bookLeft - 10, bookTop + 16)
-      ..lineTo(bookLeft - 30, bookTop + bookHeight + 18)
-      ..lineTo(bookLeft + bookWidth - 2, bookTop + bookHeight + 12)
-      ..close();
-    canvas.drawPath(
-      corePath,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.centerLeft,
-          end: Alignment.centerRight,
-          colors: [
-            shadowBase.withValues(alpha: .46),
-            shadowBase.withValues(alpha: .20),
-          ],
-        ).createShader(coreBounds)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12),
-    );
-
-    // 3) Contact: hugs the left and bottom edges only.
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(
-          bookLeft - 8,
-          bookTop + 2,
-          bookWidth + 12,
-          bookHeight + 8,
-        ),
-        const Radius.circular(9),
-      ),
-      Paint()
-        ..color = shadowBase.withValues(alpha: .45)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
-    );
-
-    // 4) Bottom contact: a soft blurred band under the book. No hard line,
-    // so the bottom edge blends naturally into the desk.
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(
-          bookLeft - 4,
-          bookTop + bookHeight + .5,
-          bookWidth + 8,
-          5,
-        ),
-        const Radius.circular(3),
-      ),
-      Paint()
-        ..color = shadowBase.withValues(alpha: .18)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _DirectionalBookShadowPainter oldDelegate) =>
-      oldDelegate.palette != palette;
+  Widget build(BuildContext context) => SizedBox(
+    width: width,
+    height: height,
+    child: BookCover(book: book, borderRadius: 8),
+  );
 }
 
 class _RoundIconButton extends StatelessWidget {
@@ -1138,46 +838,58 @@ class _BookStats extends StatelessWidget {
   final VoidCallback onOpenSources;
 
   @override
-  Widget build(BuildContext context) => IntrinsicHeight(
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _Stat(
-          icon: Icons.note_alt_outlined,
-          value: '${item.noteCount}',
-          label: '篇笔记',
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final spread = constraints.maxWidth >= 440;
+      Widget stat(Widget child) => spread ? Expanded(child: child) : child;
+      return IntrinsicHeight(
+        child: Row(
+          mainAxisSize: spread ? MainAxisSize.max : MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            stat(
+              _Stat(
+                icon: Icons.note_alt_outlined,
+                value: '${item.noteCount}',
+                label: '篇笔记',
+              ),
+            ),
+            const SizedBox(
+              width: 28,
+              child: VerticalDivider(
+                width: 1,
+                thickness: 1,
+                color: BookFlowTheme.lineStrong,
+              ),
+            ),
+            stat(
+              _Stat(
+                icon: Icons.file_copy_outlined,
+                value: '${item.recognizedPageCount}',
+                label: '页已整理',
+              ),
+            ),
+            const SizedBox(
+              width: 28,
+              child: VerticalDivider(
+                width: 1,
+                thickness: 1,
+                color: BookFlowTheme.lineStrong,
+              ),
+            ),
+            stat(
+              _Stat(
+                icon: Icons.description_outlined,
+                value: '$sourceCount',
+                label: '本书资料',
+                onTap: onOpenSources,
+                color: BookFlowTheme.ink,
+              ),
+            ),
+          ],
         ),
-        const SizedBox(
-          width: 28,
-          child: VerticalDivider(
-            width: 1,
-            thickness: 1,
-            color: BookFlowTheme.detailLineStrong,
-          ),
-        ),
-        _Stat(
-          icon: Icons.file_copy_outlined,
-          value: '${item.recognizedPageCount}',
-          label: '页已整理',
-        ),
-        const SizedBox(
-          width: 28,
-          child: VerticalDivider(
-            width: 1,
-            thickness: 1,
-            color: BookFlowTheme.detailLineStrong,
-          ),
-        ),
-        _Stat(
-          icon: Icons.description_outlined,
-          value: '$sourceCount',
-          label: '本书资料',
-          onTap: onOpenSources,
-          color: BookFlowTheme.detailPrimary,
-        ),
-      ],
-    ),
+      );
+    },
   );
 }
 

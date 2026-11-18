@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../config/book_flow_theme.dart';
 
-/// Warm paper surface used by the approved book-learning visual direction.
-/// Editorial detail pages use a generated paper/light bitmap so the grain and
-/// botanical shadow stay natural instead of looking like repeated vector marks.
+/// Optional paper textures for reading surfaces that explicitly request them.
+/// The book library redesign keeps its surface white and passes no texture.
 class BookPaperBackground extends StatelessWidget {
   const BookPaperBackground({
     super.key,

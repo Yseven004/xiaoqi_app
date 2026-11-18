@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -30,7 +31,8 @@ class BookIsbnScannerPage extends StatefulWidget {
   State<BookIsbnScannerPage> createState() => _BookIsbnScannerPageState();
 }
 
-class _BookIsbnScannerPageState extends State<BookIsbnScannerPage> {
+class _BookIsbnScannerPageState extends State<BookIsbnScannerPage>
+    with WidgetsBindingObserver {
   late final MobileScannerController _scannerController;
   late final BookLibraryService _bookLibrary;
   bool _lookingUp = false;
@@ -41,21 +43,79 @@ class _BookIsbnScannerPageState extends State<BookIsbnScannerPage> {
   BookCandidate? _candidate;
   BookMetadataLookupResult? _metadataResult;
   String? _message;
+  bool _manualInputOpen = false;
+  bool _appInForeground = true;
+  Future<void>? _scannerStartFuture;
 
   @override
   void initState() {
     super.initState();
     _bookLibrary = widget.bookLibraryService ?? BookLibraryService();
     _scannerController = MobileScannerController(
+      autoStart: false,
       detectionSpeed: DetectionSpeed.normal,
       detectionTimeoutMs: 650,
       formats: const [BarcodeFormat.ean13],
       autoZoom: false,
     );
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_startScanner());
+    });
+  }
+
+  bool get _canScan =>
+      mounted &&
+      _appInForeground &&
+      !_manualInputOpen &&
+      !_lookingUp &&
+      _candidate == null;
+
+  Future<void> _startScanner() {
+    if (!_canScan) return Future<void>.value();
+    final existing = _scannerStartFuture;
+    if (existing != null) return existing;
+    late final Future<void> startFuture;
+    startFuture = _startScannerInternal().whenComplete(() {
+      if (identical(_scannerStartFuture, startFuture)) {
+        _scannerStartFuture = null;
+      }
+    });
+    _scannerStartFuture = startFuture;
+    return startFuture;
+  }
+
+  Future<void> _startScannerInternal() async {
+    try {
+      await _scannerController.start();
+      if (!_canScan) await _scannerController.stop();
+    } catch (_) {
+      if (mounted && _canScan) {
+        setState(() => _message = '相机暂时无法启动，请手动输入');
+      }
+    }
+  }
+
+  Future<void> _stopScanner() async {
+    final starting = _scannerStartFuture;
+    if (starting != null) await starting;
+    try {
+      await _scannerController.stop();
+    } catch (_) {}
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appInForeground = state == AppLifecycleState.resumed;
+    if (_appInForeground) {
+      unawaited(_startScanner());
+    } else {
+      unawaited(_stopScanner());
+    }
   }
 
   Future<void> _onDetect(BarcodeCapture capture) async {
-    if (_lookingUp || _candidate != null) return;
+    if (!_canScan) return;
     String? detectedIsbn;
     for (final barcode in capture.barcodes) {
       final raw = barcode.rawValue;
@@ -117,9 +177,7 @@ class _BookIsbnScannerPageState extends State<BookIsbnScannerPage> {
       _message = null;
     });
     unawaited(HapticFeedback.mediumImpact());
-    try {
-      await _scannerController.stop();
-    } catch (_) {}
+    await _stopScanner();
     try {
       final local = await _bookLibrary.findByIsbn(isbn);
       if (!mounted) return;
@@ -202,25 +260,27 @@ class _BookIsbnScannerPageState extends State<BookIsbnScannerPage> {
       _message = null;
     });
     _resetDetectedIsbn();
-    try {
-      await _scannerController.start();
-    } catch (_) {
-      if (mounted) setState(() => _message = '相机暂时无法启动，请手动输入');
-    }
+    await _startScanner();
   }
 
   Future<void> _enterManually() async {
+    if (!mounted || _manualInputOpen || _lookingUp) return;
+    setState(() => _manualInputOpen = true);
+    await _stopScanner();
     if (!mounted) return;
+    String? value;
     try {
-      await _scannerController.stop();
-    } catch (_) {}
-    final value = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _ManualIsbnSheet(initialValue: _isbn ?? ''),
-    );
+      value = await showModalBottomSheet<String>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        barrierColor: Colors.transparent,
+        constraints: const BoxConstraints(maxWidth: double.infinity),
+        builder: (_) => _ManualIsbnSheet(initialValue: _isbn ?? ''),
+      );
+    } finally {
+      if (mounted) setState(() => _manualInputOpen = false);
+    }
     _resetDetectedIsbn();
     if (!mounted) return;
     if (value != null) {
@@ -228,16 +288,13 @@ class _BookIsbnScannerPageState extends State<BookIsbnScannerPage> {
       return;
     }
     if (_candidate == null && !_lookingUp) {
-      try {
-        await _scannerController.start();
-      } catch (_) {
-        if (mounted) setState(() => _message = '相机暂时无法启动，请手动输入');
-      }
+      await _startScanner();
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(_scannerController.dispose());
     super.dispose();
   }
@@ -261,104 +318,131 @@ class _BookIsbnScannerPageState extends State<BookIsbnScannerPage> {
           return Stack(
             fit: StackFit.expand,
             children: [
-              MobileScanner(
-                controller: _scannerController,
-                scanWindow: scanWindow,
-                tapToFocus: true,
-                onDetect: _onDetect,
-                errorBuilder: (_, _) => _ScannerError(onManual: _enterManually),
-                placeholderBuilder: (_) => const ColoredBox(
-                  color: BookFlowTheme.camera,
-                  child: SizedBox.shrink(),
+              RepaintBoundary(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    MobileScanner(
+                      controller: _scannerController,
+                      scanWindow: scanWindow,
+                      tapToFocus: true,
+                      onDetect: _onDetect,
+                      errorBuilder: (_, _) =>
+                          _ScannerError(onManual: _enterManually),
+                      placeholderBuilder: (_) => const ColoredBox(
+                        color: BookFlowTheme.camera,
+                        child: SizedBox.shrink(),
+                      ),
+                    ),
+                    IgnorePointer(
+                      child: CustomPaint(
+                        painter: _ScannerOverlayPainter(scanWindow),
+                      ),
+                    ),
+                    if (_manualInputOpen)
+                      Positioned.fill(
+                        child: ClipRect(
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                            child: const ColoredBox(color: Color(0x80000000)),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
-              IgnorePointer(
-                child: CustomPaint(painter: _ScannerOverlayPainter(scanWindow)),
-              ),
               SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-                  child: Column(
-                    children: [
-                      Row(
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                      child: Column(
                         children: [
-                          IconButton.filledTonal(
-                            tooltip: '返回',
-                            onPressed: () => Navigator.of(context).pop(),
-                            style: IconButton.styleFrom(
-                              minimumSize: const Size(48, 48),
-                              backgroundColor: Colors.black45,
-                              foregroundColor: Colors.white,
-                            ),
-                            icon: const Icon(Icons.arrow_back_rounded),
+                          Row(
+                            children: [
+                              IconButton.filledTonal(
+                                tooltip: '返回',
+                                onPressed: () => Navigator.of(context).pop(),
+                                style: IconButton.styleFrom(
+                                  minimumSize: const Size(48, 48),
+                                  backgroundColor: Colors.black45,
+                                  foregroundColor: Colors.white,
+                                ),
+                                icon: const Icon(Icons.arrow_back_rounded),
+                              ),
+                              Expanded(
+                                child: Text(
+                                  widget.title,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                              ValueListenableBuilder<MobileScannerState>(
+                                valueListenable: _scannerController,
+                                builder: (_, state, _) =>
+                                    IconButton.filledTonal(
+                                      tooltip: state.torchState == TorchState.on
+                                          ? '关闭闪光灯'
+                                          : '打开闪光灯',
+                                      onPressed:
+                                          state.torchState ==
+                                              TorchState.unavailable
+                                          ? null
+                                          : _scannerController.toggleTorch,
+                                      style: IconButton.styleFrom(
+                                        minimumSize: const Size(48, 48),
+                                        backgroundColor: Colors.black45,
+                                        foregroundColor: Colors.white,
+                                      ),
+                                      icon: Icon(
+                                        state.torchState == TorchState.on
+                                            ? Icons.flash_on_rounded
+                                            : Icons.flash_off_rounded,
+                                      ),
+                                    ),
+                              ),
+                            ],
                           ),
-                          Expanded(
-                            child: Text(
-                              widget.title,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.w700,
-                              ),
+                          const SizedBox(height: 28),
+                          const Text(
+                            '对准书背面的条形码',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 20,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
-                          ValueListenableBuilder<MobileScannerState>(
-                            valueListenable: _scannerController,
-                            builder: (_, state, _) => IconButton.filledTonal(
-                              tooltip: state.torchState == TorchState.on
-                                  ? '关闭闪光灯'
-                                  : '打开闪光灯',
-                              onPressed:
-                                  state.torchState == TorchState.unavailable
-                                  ? null
-                                  : _scannerController.toggleTorch,
-                              style: IconButton.styleFrom(
-                                minimumSize: const Size(48, 48),
-                                backgroundColor: Colors.black45,
-                                foregroundColor: Colors.white,
-                              ),
-                              icon: Icon(
-                                state.torchState == TorchState.on
-                                    ? Icons.flash_on_rounded
-                                    : Icons.flash_off_rounded,
-                              ),
+                          const SizedBox(height: 6),
+                          Text(
+                            _lookingUp
+                                ? '条形码已识别，正在查询书名…'
+                                : '把完整条形码放进框内，模糊时点按条码对焦',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 28),
-                      const Text(
-                        '对准书背面的条形码',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        _lookingUp ? '条形码已识别，正在查询书名…' : '把完整条形码放进框内，模糊时点按条码对焦',
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 13,
-                        ),
-                      ),
-                      const Spacer(),
-                      _BottomPanel(
-                        isbn: _isbn,
-                        candidate: _candidate,
-                        metadata: _metadataResult,
-                        lookingUp: _lookingUp,
-                        message: _message,
-                        onConfirm: _candidate == null
-                            ? null
-                            : () => Navigator.of(context).pop(_candidate),
-                        onAgain: _scanAgain,
-                        onManual: _enterManually,
-                      ),
-                    ],
-                  ),
+                    ),
+                    const Spacer(),
+                    _BottomPanel(
+                      isbn: _isbn,
+                      candidate: _candidate,
+                      metadata: _metadataResult,
+                      lookingUp: _lookingUp,
+                      message: _message,
+                      onConfirm: _candidate == null
+                          ? null
+                          : () => Navigator.of(context).pop(_candidate),
+                      onAgain: _scanAgain,
+                      onManual: _enterManually,
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -378,20 +462,43 @@ class _ManualIsbnSheet extends StatefulWidget {
   State<_ManualIsbnSheet> createState() => _ManualIsbnSheetState();
 }
 
-class _ManualIsbnSheetState extends State<_ManualIsbnSheet> {
+class _ManualIsbnSheetState extends State<_ManualIsbnSheet>
+    with WidgetsBindingObserver {
   late final TextEditingController _controller;
+  late final FocusNode _focusNode;
   String? _error;
+  bool _keyboardVisible = false;
 
   @override
   void initState() {
     super.initState();
     _controller = TextEditingController(text: widget.initialValue);
+    _focusNode = FocusNode();
+    WidgetsBinding.instance.addObserver(this);
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    _keyboardVisible = views.isNotEmpty && views.first.viewInsets.bottom > 0;
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
+    _focusNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    final keyboardVisible =
+        views.isNotEmpty && views.first.viewInsets.bottom > 0;
+    final wasKeyboardVisible = _keyboardVisible;
+    if (wasKeyboardVisible != keyboardVisible) {
+      setState(() => _keyboardVisible = keyboardVisible);
+    }
+    if (wasKeyboardVisible && !keyboardVisible && _controller.text.isEmpty) {
+      _focusNode.unfocus();
+    }
   }
 
   void _submit() {
@@ -400,88 +507,124 @@ class _ManualIsbnSheetState extends State<_ManualIsbnSheet> {
       setState(() => _error = Isbn.explainInvalid(_controller.text));
       return;
     }
-    FocusManager.instance.primaryFocus?.unfocus();
+    _focusNode.unfocus();
     Navigator.of(context).pop(normalized);
   }
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: BookFlowTheme.surface,
-    borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-    clipBehavior: Clip.antiAlias,
-    child: SafeArea(
-      top: false,
-      child: SingleChildScrollView(
-        padding: EdgeInsets.fromLTRB(
-          20,
-          12,
-          20,
-          20 + MediaQuery.viewInsetsOf(context).bottom,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: BookFlowTheme.line,
-                  borderRadius: BorderRadius.circular(99),
+  Widget build(BuildContext context) => PopScope<Object?>(
+    canPop: !_keyboardVisible,
+    child: Material(
+      color: BookFlowTheme.surface,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+      clipBehavior: Clip.antiAlias,
+      child: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            20,
+            12,
+            20,
+            20 + MediaQuery.viewInsetsOf(context).bottom,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFD5D8DE),
+                    borderRadius: BorderRadius.circular(99),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 20),
-            const Text('手动输入 ISBN', style: BookFlowTheme.heading),
-            const SizedBox(height: 6),
-            const Text(
-              '支持 ISBN-10 或 ISBN-13，连字符可省略。',
-              style: BookFlowTheme.caption,
-            ),
-            const SizedBox(height: 18),
-            TextField(
-              key: const Key('manual_isbn_field'),
-              controller: _controller,
-              autofocus: true,
-              keyboardType: TextInputType.number,
-              textInputAction: TextInputAction.search,
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'[0-9Xx\-\s]')),
-              ],
-              decoration: InputDecoration(
-                hintText: '例如 9787508614007',
-                errorText: _error,
-                filled: true,
-                fillColor: BookFlowTheme.canvas,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: const BorderSide(color: BookFlowTheme.line),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: const BorderSide(color: BookFlowTheme.line),
-                ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text('手动输入 ISBN', style: BookFlowTheme.heading),
+                  ),
+                  IconButton(
+                    tooltip: '关闭',
+                    onPressed: () {
+                      _focusNode.unfocus();
+                      Navigator.of(context).pop();
+                    },
+                    constraints: const BoxConstraints.tightFor(
+                      width: 48,
+                      height: 48,
+                    ),
+                    style: IconButton.styleFrom(
+                      foregroundColor: BookFlowTheme.ink,
+                    ),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ],
               ),
-              onChanged: (_) {
-                if (_error != null) setState(() => _error = null);
-              },
-              onSubmitted: (_) => _submit(),
-            ),
-            const SizedBox(height: 18),
-            FilledButton(
-              onPressed: _submit,
-              style: BookFlowTheme.primaryButtonStyle(),
-              child: const Text('查询书籍'),
-            ),
-            const SizedBox(height: 4),
-            TextButton(
-              onPressed: () {
-                FocusManager.instance.primaryFocus?.unfocus();
-                Navigator.of(context).pop();
-              },
-              child: const Text('取消'),
-            ),
-          ],
+              const SizedBox(height: 6),
+              const Text(
+                '支持 ISBN-10 或 ISBN-13，连字符可省略。',
+                style: BookFlowTheme.caption,
+              ),
+              const SizedBox(height: 18),
+              TextField(
+                key: const Key('manual_isbn_field'),
+                controller: _controller,
+                focusNode: _focusNode,
+                autofocus: true,
+                keyboardType: TextInputType.text,
+                textCapitalization: TextCapitalization.characters,
+                autocorrect: false,
+                enableSuggestions: false,
+                textInputAction: TextInputAction.search,
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9Xx\-\s]')),
+                ],
+                decoration: InputDecoration(
+                  hintText: '例如 9787508614007',
+                  errorText: _error,
+                  filled: true,
+                  fillColor: BookFlowTheme.canvas,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD5D8DE)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD5D8DE)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(
+                      color: BookFlowTheme.ink,
+                      width: 1.3,
+                    ),
+                  ),
+                ),
+                onTapOutside: (_) => _focusNode.unfocus(),
+                onChanged: (_) {
+                  if (_error != null) setState(() => _error = null);
+                },
+                onSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: 18),
+              FilledButton(
+                onPressed: _submit,
+                style: FilledButton.styleFrom(
+                  backgroundColor: BookFlowTheme.ink,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size.fromHeight(48),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: const Text('查询书籍'),
+              ),
+            ],
+          ),
         ),
       ),
     ),
@@ -516,17 +659,10 @@ class _BottomPanel extends StatelessWidget {
       liveRegion: lookingUp || message != null,
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(40, 48, 40, 72),
         decoration: BoxDecoration(
           color: BookFlowTheme.surface,
-          borderRadius: BorderRadius.circular(22),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x33000000),
-              blurRadius: 24,
-              offset: Offset(0, 8),
-            ),
-          ],
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         ),
         child: lookingUp
             ? const _LookupPlaceholder()
@@ -534,26 +670,31 @@ class _BottomPanel extends StatelessWidget {
             ? Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text(
-                    '扫一次，以后拍这本书会更快',
-                    style: TextStyle(
-                      color: BookFlowTheme.ink,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
+                  OutlinedButton.icon(
+                    key: const Key('manual_isbn_button'),
+                    onPressed: onManual,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: BookFlowTheme.ink,
+                      minimumSize: const Size.fromHeight(56),
+                      side: const BorderSide(color: BookFlowTheme.inkSecondary),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    icon: const Icon(Icons.keyboard_outlined),
+                    label: const Text(
+                      '手动输入 ISBN',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 10),
                   Text(
                     message ?? '只读取条形码数字，不会保存封底照片',
                     textAlign: TextAlign.center,
-                    style: BookFlowTheme.caption,
-                  ),
-                  const SizedBox(height: 8),
-                  TextButton.icon(
-                    key: const Key('manual_isbn_button'),
-                    onPressed: onManual,
-                    icon: const Icon(Icons.keyboard_outlined),
-                    label: const Text('扫不清？手动输入数字'),
+                    style: BookFlowTheme.caption.copyWith(fontSize: 15),
                   ),
                 ],
               )
@@ -652,14 +793,34 @@ class _BottomPanel extends StatelessWidget {
                   const SizedBox(height: 14),
                   FilledButton(
                     key: const Key('confirm_scanned_book'),
-                    style: BookFlowTheme.primaryButtonStyle(),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: BookFlowTheme.ink,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size.fromHeight(48),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
                     onPressed: onConfirm,
                     child: Text(item.book.title == '待确认书籍' ? '补充书名' : '确认是这本书'),
                   ),
                   const SizedBox(height: 4),
                   TextButton(
                     onPressed: onAgain,
+                    style: TextButton.styleFrom(
+                      foregroundColor: BookFlowTheme.ink,
+                      minimumSize: const Size(48, 48),
+                    ),
                     child: const Text('不是这个条形码，重新扫'),
+                  ),
+                  TextButton(
+                    onPressed: onManual,
+                    style: TextButton.styleFrom(
+                      foregroundColor: BookFlowTheme.ink,
+                      minimumSize: const Size(48, 48),
+                    ),
+                    child: const Text('手动输入或修改 ISBN'),
                   ),
                 ],
               ),
@@ -698,7 +859,7 @@ class _StaticSkeleton extends StatelessWidget {
     width: width,
     height: 10,
     decoration: BoxDecoration(
-      color: BookFlowTheme.primarySoft,
+      color: Color(0xFFF2F2F2),
       borderRadius: BorderRadius.circular(99),
     ),
   );
@@ -714,13 +875,13 @@ class _MetadataPill extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
     decoration: BoxDecoration(
-      color: BookFlowTheme.primarySoft,
+      color: Color(0xFFF2F2F2),
       borderRadius: BorderRadius.circular(99),
     ),
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 13, color: BookFlowTheme.primary),
+        Icon(icon, size: 13, color: BookFlowTheme.inkSecondary),
         const SizedBox(width: 4),
         Text(label, style: const TextStyle(fontSize: 11)),
       ],
@@ -747,9 +908,9 @@ class _ScannedBookCover extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const fallback = ColoredBox(
-      color: BookFlowTheme.primarySoft,
+      color: Color(0xFFF2F2F2),
       child: Center(
-        child: Icon(Icons.menu_book_rounded, color: BookFlowTheme.primary),
+        child: Icon(Icons.menu_book_rounded, color: BookFlowTheme.inkSecondary),
       ),
     );
     return ClipRRect(
@@ -795,7 +956,19 @@ class _ScannerError extends StatelessWidget {
                 style: TextStyle(color: Colors.white, fontSize: 17),
               ),
               const SizedBox(height: 12),
-              FilledButton(onPressed: onManual, child: const Text('手动输入数字')),
+              FilledButton(
+                onPressed: onManual,
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: BookFlowTheme.ink,
+                  minimumSize: const Size(48, 48),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: const Text('手动输入数字'),
+              ),
             ],
           ),
         ),
@@ -819,7 +992,7 @@ class _ScannerOverlayPainter extends CustomPainter {
     canvas.drawPath(overlay, Paint()..color = const Color(0x8F000000));
 
     final border = Paint()
-      ..color = BookFlowTheme.warning
+      ..color = Colors.white
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3
       ..strokeCap = StrokeCap.round;

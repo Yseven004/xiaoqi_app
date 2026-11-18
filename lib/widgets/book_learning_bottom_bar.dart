@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../config/book_flow_theme.dart';
 
@@ -23,7 +24,7 @@ class BookLearningBottomBar extends StatelessWidget {
       padding: EdgeInsets.only(bottom: bottomInset),
       decoration: const BoxDecoration(
         color: Colors.white,
-        border: Border(top: BorderSide(color: BookFlowTheme.line)),
+        border: Border(top: BorderSide(color: Color(0xFFD5D8DE))),
       ),
       child: Row(
         children: [
@@ -36,8 +37,9 @@ class BookLearningBottomBar extends StatelessWidget {
           ),
           _DestinationItem(
             label: '笔记',
-            icon: Icons.note_alt_outlined,
-            selectedIcon: Icons.note_alt_rounded,
+            icon: null,
+            selectedIcon: null,
+            asset: 'assets/images/home_reply_note.svg',
             selected: selected == BookLearningDestination.notes,
             onTap: () => onDestinationSelected(BookLearningDestination.notes),
           ),
@@ -67,19 +69,21 @@ class _DestinationItem extends StatelessWidget {
     required this.label,
     required this.icon,
     required this.selectedIcon,
+    this.asset,
     required this.selected,
     required this.onTap,
   });
 
   final String label;
-  final IconData icon;
-  final IconData selectedIcon;
+  final IconData? icon;
+  final IconData? selectedIcon;
+  final String? asset;
   final bool selected;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final color = selected ? BookFlowTheme.primaryStrong : BookFlowTheme.muted;
+    final color = selected ? BookFlowTheme.ink : BookFlowTheme.muted;
     return Expanded(
       child: Semantics(
         button: true,
@@ -93,7 +97,19 @@ class _DestinationItem extends StatelessWidget {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(selected ? selectedIcon : icon, color: color, size: 27),
+                  if (asset case final path?)
+                    SvgPicture.asset(
+                      path,
+                      width: 27,
+                      height: 27,
+                      colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+                    )
+                  else
+                    Icon(
+                      selected ? selectedIcon : icon,
+                      color: color,
+                      size: 27,
+                    ),
                   const SizedBox(height: 5),
                   Text(
                     label,

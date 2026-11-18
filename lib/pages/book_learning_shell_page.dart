@@ -49,6 +49,7 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
   BookLearningDestination _destination = BookLearningDestination.books;
   int? _openBookId;
   int _bookDetailVersion = 0;
+  int _libraryRefreshVersion = 0;
 
   @override
   void initState() {
@@ -66,17 +67,18 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
   Future<void> _changeDestination(BookLearningDestination value) async {
     FocusManager.instance.primaryFocus?.unfocus();
     if (value == BookLearningDestination.books) {
-      if (_destination == value && _openBookId != null) {
-        setState(() => _openBookId = null);
-      } else {
-        setState(() {
-          _destination = value;
-          _openBookId = null;
-        });
-      }
+      _closeBook();
       return;
     }
     setState(() => _destination = value);
+  }
+
+  void _closeBook() {
+    setState(() {
+      _destination = BookLearningDestination.books;
+      _openBookId = null;
+      _libraryRefreshVersion++;
+    });
   }
 
   Future<void> _createBook() async {
@@ -105,35 +107,19 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
     // Give every new book access to the cover chooser, including recognised
     // ISBN results. The following legacy branch remains as a defensive path
     // for malformed candidates and will be skipped after this confirmation.
-    final coverReady = await showModalBottomSheet<BookRecord>(
+    final coverReady = await showBookMetadataForm(
       context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Colors.transparent,
-      barrierColor: const Color(0x990C1712),
-      builder: (_) => Material(
-        color: BookFlowTheme.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        clipBehavior: Clip.antiAlias,
-        child: BookMetadataFormSheet(initial: book),
-      ),
+      initial: book,
     );
     if (!mounted || coverReady == null) return;
-    book = coverReady;
+    book = coverReady.book;
     if (book.title.trim().isEmpty || book.title == '待确认书籍') {
-      final completed = await showModalBottomSheet<BookRecord>(
+      final completed = await showBookMetadataForm(
         context: context,
-        isScrollControlled: true,
-        useSafeArea: true,
-        backgroundColor: Colors.transparent,
-        builder: (_) => Material(
-          color: BookFlowTheme.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-          child: BookMetadataFormSheet(initial: book),
-        ),
+        initial: book,
       );
       if (!mounted || completed == null) return;
-      book = completed;
+      book = completed.book;
     }
     try {
       final bookId = await _library.saveBook(book);
@@ -198,7 +184,9 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
           _bookDetailVersion++;
         });
       } catch (error) {
-        if (mounted) AppToast.show(context, '资料导入失败：$error');
+        if (mounted) {
+          AppToast.show(context, '资料导入失败，已保留书籍资料：$error');
+        }
       }
       return;
     }
@@ -245,7 +233,7 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
     onPopInvokedWithResult: (didPop, _) {
       if (didPop) return;
       if (_openBookId != null) {
-        setState(() => _openBookId = null);
+        _closeBook();
       } else if (_destination != BookLearningDestination.books) {
         setState(() => _destination = BookLearningDestination.books);
       }
@@ -260,24 +248,36 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
                 ? 'book-library'
                 : 'book-detail-$_openBookId',
             forward: _openBookId != null,
-            child: _openBookId == null
-                ? BookLearningSpacePage(
-                    key: const PageStorageKey('book_learning_space'),
-                    bookLibraryService: _library,
-                    onCreateBook: _createBook,
-                    onOpenBook: (bookId) => setState(() {
-                      _destination = BookLearningDestination.books;
-                      _openBookId = bookId;
-                    }),
-                  )
-                : BookStudyPage(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Offstage(
+                  offstage: _openBookId != null,
+                  child: Theme(
+                    data: _bookLibraryTheme(context),
+                    child: BookLearningSpacePage(
+                      key: const PageStorageKey('book_learning_space'),
+                      refreshVersion: _libraryRefreshVersion,
+                      bookLibraryService: _library,
+                      onCreateBook: _createBook,
+                      onOpenBook: (bookId) => setState(() {
+                        _destination = BookLearningDestination.books;
+                        _openBookId = bookId;
+                      }),
+                    ),
+                  ),
+                ),
+                if (_openBookId != null)
+                  BookStudyPage(
                     key: ValueKey(
                       'book-study-$_openBookId-$_bookDetailVersion',
                     ),
                     bookId: _openBookId!,
                     bookLibraryService: _library,
-                    onBack: () => setState(() => _openBookId = null),
+                    onBack: _closeBook,
                   ),
+              ],
+            ),
           ),
           NoteManagementPage(
             key: const PageStorageKey('book_learning_notes'),
@@ -291,10 +291,12 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
           const _EmptyDestinationPage(),
         ],
       ),
-      bottomNavigationBar: BookLearningBottomBar(
-        selected: _destination,
-        onDestinationSelected: (destination) => _changeDestination(destination),
-      ),
+      bottomNavigationBar: _openBookId == null
+          ? BookLearningBottomBar(
+              selected: _destination,
+              onDestinationSelected: _changeDestination,
+            )
+          : null,
     ),
   );
 }
@@ -308,7 +310,7 @@ class _EmptyDestinationPage extends StatelessWidget {
   );
 }
 
-class _BookPageTransition extends StatelessWidget {
+class _BookPageTransition extends StatefulWidget {
   const _BookPageTransition({
     required this.transitionKey,
     required this.forward,
@@ -320,24 +322,128 @@ class _BookPageTransition extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
-    final reduceMotion =
-        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    if (reduceMotion) return child;
+  State<_BookPageTransition> createState() => _BookPageTransitionState();
+}
 
-    final beginOffset = forward ? 18.0 : -14.0;
+class _BookPageTransitionState extends State<_BookPageTransition>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 190),
+  )..forward();
+
+  @override
+  void didUpdateWidget(covariant _BookPageTransition oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.transitionKey != widget.transitionKey) {
+      _controller.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final beginOffset = widget.forward ? 18.0 : -14.0;
     return ClipRect(
-      child: TweenAnimationBuilder<double>(
-        key: ValueKey<Object>(transitionKey),
-        tween: Tween<double>(begin: 0, end: 1),
-        duration: const Duration(milliseconds: 190),
-        curve: Curves.easeOutQuart,
-        child: RepaintBoundary(child: child),
-        builder: (context, value, child) => Transform.translate(
-          offset: Offset(beginOffset * (1 - value), 0),
+      child: AnimatedBuilder(
+        animation: _controller,
+        child: RepaintBoundary(child: widget.child),
+        builder: (context, child) => Transform.translate(
+          offset: reduceMotion
+              ? Offset.zero
+              : Offset(
+                  beginOffset *
+                      (1 - Curves.easeOutQuart.transform(_controller.value)),
+                  0,
+                ),
           child: child,
         ),
       ),
     );
   }
+}
+
+ThemeData _bookLibraryTheme(BuildContext context) {
+  final base = Theme.of(context);
+  final borderColor = const Color(0xFFD5D8DE);
+  final outline = OutlineInputBorder(
+    borderRadius: BorderRadius.circular(8),
+    borderSide: BorderSide(color: borderColor),
+  );
+  return base.copyWith(
+    colorScheme: base.colorScheme.copyWith(
+      primary: BookFlowTheme.ink,
+      onPrimary: Colors.white,
+      secondary: BookFlowTheme.ink,
+      onSecondary: Colors.white,
+      surface: Colors.white,
+      onSurface: BookFlowTheme.ink,
+      outline: borderColor,
+      outlineVariant: borderColor,
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        foregroundColor: BookFlowTheme.ink,
+        minimumSize: const Size(48, 48),
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        backgroundColor: BookFlowTheme.ink,
+        foregroundColor: Colors.white,
+        minimumSize: const Size(48, 48),
+        elevation: 0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        foregroundColor: BookFlowTheme.ink,
+        minimumSize: const Size(48, 48),
+        side: BorderSide(color: borderColor),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    ),
+    iconButtonTheme: IconButtonThemeData(
+      style: IconButton.styleFrom(
+        foregroundColor: BookFlowTheme.ink,
+        minimumSize: const Size(48, 48),
+      ),
+    ),
+    checkboxTheme: base.checkboxTheme.copyWith(
+      fillColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.selected)) return BookFlowTheme.ink;
+        return Colors.white;
+      }),
+      checkColor: WidgetStateProperty.all(Colors.white),
+      side: BorderSide(color: borderColor),
+    ),
+    inputDecorationTheme: base.inputDecorationTheme.copyWith(
+      filled: true,
+      fillColor: Colors.white,
+      border: outline,
+      enabledBorder: outline,
+      focusedBorder: outline.copyWith(
+        borderSide: const BorderSide(color: BookFlowTheme.ink, width: 1.3),
+      ),
+    ),
+    dialogTheme: base.dialogTheme.copyWith(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.white,
+    ),
+    popupMenuTheme: base.popupMenuTheme.copyWith(
+      color: Colors.white,
+      surfaceTintColor: Colors.white,
+    ),
+    bottomSheetTheme: base.bottomSheetTheme.copyWith(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.white,
+    ),
+  );
 }

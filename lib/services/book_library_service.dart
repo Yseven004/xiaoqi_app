@@ -44,6 +44,13 @@ class RecoveredCaptureBatch {
   final int? selectedBookId;
 }
 
+class _PreparedBookCover {
+  const _PreparedBookCover(this.book, this.createdPath);
+
+  final BookRecord book;
+  final String? createdPath;
+}
+
 class BookLibraryService {
   BookLibraryService({
     DatabaseService? databaseService,
@@ -56,39 +63,108 @@ class BookLibraryService {
   final PdfCatalogService _pdfCatalogService = const PdfCatalogService();
 
   Future<int> saveBook(BookRecord book) async {
-    final db = await _databaseService.database;
-    final now = DateTime.now().toIso8601String();
-    final normalized = book.copyWith(
-      createdAt: book.createdAt.isEmpty ? now : book.createdAt,
-      updatedAt: now,
-    );
-    await db.insert(
-      'books',
-      normalized.toMap()..remove('id'),
-      conflictAlgorithm: ConflictAlgorithm.ignore,
-    );
-    final rows = await db.query(
-      'books',
-      columns: ['id'],
-      where: 'canonical_key = ?',
-      whereArgs: [normalized.canonicalKey],
-      limit: 1,
-    );
-    if (rows.isEmpty) throw StateError('书籍资料保存失败');
-    final id = rows.first['id'] as int;
-    await db.update(
-      'books',
-      normalized.toMap()
-        ..remove('id')
-        ..remove('created_at'),
-      where: 'id = ? AND is_deleted = 0',
-      whereArgs: [id],
-    );
-    if (normalized.coverPath.isEmpty && normalized.coverUrl.isNotEmpty) {
-      // Keep confirmation fast; the local cover is an enhancement.
-      unawaited(_persistCatalogueCover(id, normalized));
+    final preparedCover = await _prepareUploadedCover(book);
+    final normalizedBook = preparedCover.book;
+    try {
+      final db = await _databaseService.database;
+      final now = DateTime.now().toIso8601String();
+      final normalized = normalizedBook.copyWith(
+        createdAt: normalizedBook.createdAt.isEmpty
+            ? now
+            : normalizedBook.createdAt,
+        updatedAt: now,
+      );
+      await db.insert(
+        'books',
+        normalized.toMap()..remove('id'),
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+      final rows = await db.query(
+        'books',
+        columns: ['id'],
+        where: 'canonical_key = ?',
+        whereArgs: [normalized.canonicalKey],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('书籍资料保存失败');
+      final id = rows.first['id'] as int;
+      await db.update(
+        'books',
+        normalized.toMap()
+          ..remove('id')
+          ..remove('created_at'),
+        where: 'id = ? AND is_deleted = 0',
+        whereArgs: [id],
+      );
+      if (normalized.coverPath.isEmpty && normalized.coverUrl.isNotEmpty) {
+        // Keep confirmation fast; the local cover is an enhancement.
+        unawaited(_persistCatalogueCover(id, normalized));
+      }
+      return id;
+    } catch (_) {
+      await discardUnreferencedBookCover(preparedCover.createdPath);
+      rethrow;
     }
-    return id;
+  }
+
+  Future<_PreparedBookCover> _prepareUploadedCover(BookRecord book) async {
+    if (book.coverType != 'uploaded' || book.coverPath.trim().isEmpty) {
+      return _PreparedBookCover(book, null);
+    }
+    final documents = await getApplicationDocumentsDirectory();
+    final directory = p.normalize(p.join(documents.path, 'book_covers'));
+    final sourcePath = p.normalize(p.absolute(book.coverPath));
+    if (p.isWithin(directory, sourcePath)) {
+      if (!await File(sourcePath).exists()) {
+        throw StateError('找不到已选择的封面图片');
+      }
+      return _PreparedBookCover(book.copyWith(coverPath: sourcePath), null);
+    }
+    final source = File(sourcePath);
+    if (!await source.exists()) throw StateError('找不到已选择的封面图片');
+    await Directory(directory).create(recursive: true);
+    final extension = p.extension(sourcePath).toLowerCase();
+    const allowedExtensions = {
+      '.jpg',
+      '.jpeg',
+      '.png',
+      '.webp',
+      '.heic',
+      '.heif',
+    };
+    final safeExtension = allowedExtensions.contains(extension)
+        ? extension
+        : '.jpg';
+    final target = p.join(
+      directory,
+      'cover_${DateTime.now().microsecondsSinceEpoch}$safeExtension',
+    );
+    await source.copy(target);
+    return _PreparedBookCover(book.copyWith(coverPath: target), target);
+  }
+
+  Future<void> discardUnreferencedBookCover(String? path) async {
+    if (path == null || path.trim().isEmpty) return;
+    try {
+      final documents = await getApplicationDocumentsDirectory();
+      final directory = p.normalize(p.join(documents.path, 'book_covers'));
+      final normalizedPath = p.normalize(p.absolute(path));
+      if (!p.isWithin(directory, normalizedPath)) return;
+      final db = await _databaseService.database;
+      final references = await db.query(
+        'books',
+        columns: ['id'],
+        where: 'cover_path = ?',
+        whereArgs: [normalizedPath],
+        limit: 1,
+      );
+      if (references.isEmpty) {
+        final file = File(normalizedPath);
+        if (await file.exists()) await file.delete();
+      }
+    } catch (_) {
+      // Cleanup is best-effort and never masks the original save error.
+    }
   }
 
   Future<bool> _isStoredSourceValid({
@@ -136,11 +212,18 @@ class BookLibraryService {
           'cover_type': stored.coverType,
           'updated_at': DateTime.now().toIso8601String(),
         },
-        where: 'id = ?',
-        whereArgs: [id],
+        where: 'id = ? AND cover_path = ? AND cover_type = ? AND cover_url = ?',
+        whereArgs: [id, book.coverPath, book.coverType, book.coverUrl],
       );
       if (updated == 0) {
-        await File(stored.coverPath).delete();
+        final references = await db.query(
+          'books',
+          columns: ['id'],
+          where: 'cover_path = ?',
+          whereArgs: [stored.coverPath],
+          limit: 1,
+        );
+        if (references.isEmpty) await File(stored.coverPath).delete();
       }
     } catch (_) {
       // A cover enhancement must never turn a successful book save into an
@@ -567,26 +650,106 @@ class BookLibraryService {
   Future<int> updateBookMetadata(BookRecord book) async {
     final id = book.id;
     if (id == null) return saveBook(book);
-    final db = await _databaseService.database;
-    final duplicate = await db.query(
-      'books',
-      columns: ['id'],
-      where: 'canonical_key = ? AND id != ?',
-      whereArgs: [book.canonicalKey, id],
-      limit: 1,
-    );
-    if (duplicate.isNotEmpty) {
-      throw StateError('已有相同书籍，不能保存为重复记录');
+    final preparedCover = await _prepareUploadedCover(book);
+    final preparedBook = preparedCover.book;
+    try {
+      final db = await _databaseService.database;
+      final duplicate = await db.query(
+        'books',
+        columns: ['id'],
+        where: 'canonical_key = ? AND id != ?',
+        whereArgs: [preparedBook.canonicalKey, id],
+        limit: 1,
+      );
+      if (duplicate.isNotEmpty) {
+        throw StateError('已有相同书籍，不能保存为重复记录');
+      }
+      final values =
+          preparedBook
+              .copyWith(updatedAt: DateTime.now().toIso8601String())
+              .toMap()
+            ..remove('id')
+            ..remove('created_at');
+      final updated = await db.update(
+        'books',
+        values,
+        where: 'id = ? AND is_deleted = 0',
+        whereArgs: [id],
+      );
+      if (updated == 0) throw StateError('这本书已经不存在');
+      if (preparedBook.coverPath.isEmpty && preparedBook.coverUrl.isNotEmpty) {
+        unawaited(_persistCatalogueCover(id, preparedBook));
+      }
+      return id;
+    } catch (_) {
+      await discardUnreferencedBookCover(preparedCover.createdPath);
+      rethrow;
     }
-    final values =
-        book.copyWith(updatedAt: DateTime.now().toIso8601String()).toMap()
+  }
+
+  Future<int> updateBookMetadataAndCategories(
+    BookRecord book,
+    Iterable<int> categoryIds,
+  ) async {
+    final id = book.id;
+    if (id == null) throw ArgumentError('编辑书籍必须包含书籍 ID');
+    final ids = categoryIds.toSet().toList(growable: false);
+    if (ids.length > 3) throw ArgumentError('一本书最多选择 3 个分类');
+    final preparedCover = await _prepareUploadedCover(book);
+    final preparedBook = preparedCover.book;
+    try {
+      final db = await _databaseService.database;
+      await db.transaction((txn) async {
+        final duplicate = await txn.query(
+          'books',
+          columns: ['id'],
+          where: 'canonical_key = ? AND id != ?',
+          whereArgs: [preparedBook.canonicalKey, id],
+          limit: 1,
+        );
+        if (duplicate.isNotEmpty) {
+          throw StateError('已有相同书籍，不能保存为重复记录');
+        }
+        if (ids.isNotEmpty) {
+          final placeholders = List.filled(ids.length, '?').join(',');
+          final valid = await txn.rawQuery(
+            'SELECT id FROM book_categories WHERE id IN ($placeholders)',
+            ids,
+          );
+          if (valid.length != ids.length) throw ArgumentError('存在无效分类');
+        }
+        final now = DateTime.now().toIso8601String();
+        final values = preparedBook.copyWith(updatedAt: now).toMap()
           ..remove('id')
           ..remove('created_at');
-    await db.update('books', values, where: 'id = ?', whereArgs: [id]);
-    if (book.coverPath.isEmpty && book.coverUrl.isNotEmpty) {
-      unawaited(_persistCatalogueCover(id, book));
+        final updated = await txn.update(
+          'books',
+          values,
+          where: 'id = ? AND is_deleted = 0',
+          whereArgs: [id],
+        );
+        if (updated == 0) throw StateError('这本书已经不存在');
+        await txn.delete(
+          'book_category_links',
+          where: 'book_id = ?',
+          whereArgs: [id],
+        );
+        for (final categoryId in ids) {
+          await txn.insert('book_category_links', {
+            'book_id': id,
+            'category_id': categoryId,
+            'created_at': now,
+          });
+        }
+      });
+      if (preparedBook.coverPath.isEmpty && preparedBook.coverUrl.isNotEmpty) {
+        unawaited(_persistCatalogueCover(id, preparedBook));
+      }
+      return id;
+    } catch (_) {
+      await discardUnreferencedBookCover(preparedCover.createdPath);
+      rethrow;
     }
-    return id;
   }
 
   Future<BookSourceImportResult> importPdfForBook({
