@@ -1,0 +1,7 @@
+// Agent 配置的单一事实源。
+// 源：Codex（codexcli）迁移而来；目标：DeepSeek Harness（dsh）。
+// 改了规则请改 .rulesync/rules/*.md，再 `rulesync generate` 重新生成 AGENTS.md。
+{
+  "targets": ["dsh"],
+  "features": ["rules"]
+}

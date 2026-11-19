@@ -14,13 +14,19 @@ Future<BookRecord?> showBookCoverPicker(
   BuildContext context, {
   required BookRecord initial,
   bool persistOnSelect = true,
+  double maxWidth = _defaultCoverPickerWidth,
 }) => showDialog<BookRecord>(
   context: context,
   barrierDismissible: true,
   barrierColor: const Color(0x99000000),
-  builder: (_) =>
-      BookCoverPickerSheet(initial: initial, persistOnSelect: persistOnSelect),
+  builder: (_) => BookCoverPickerSheet(
+    initial: initial,
+    persistOnSelect: persistOnSelect,
+    maxWidth: maxWidth,
+  ),
 );
+
+const _defaultCoverPickerWidth = 440.0;
 
 Future<String> persistBookCoverImage(String sourcePath) async {
   final documents = await getApplicationDocumentsDirectory();
@@ -59,10 +65,12 @@ class BookCoverPickerSheet extends StatefulWidget {
     super.key,
     required this.initial,
     required this.persistOnSelect,
+    this.maxWidth = _defaultCoverPickerWidth,
   });
 
   final BookRecord initial;
   final bool persistOnSelect;
+  final double maxWidth;
 
   @override
   State<BookCoverPickerSheet> createState() => _BookCoverPickerSheetState();
@@ -147,7 +155,10 @@ class _BookCoverPickerSheetState extends State<BookCoverPickerSheet> {
       backgroundColor: Colors.white,
       insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: 440, maxHeight: maxHeight),
+        constraints: BoxConstraints(
+          maxWidth: widget.maxWidth,
+          maxHeight: maxHeight,
+        ),
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
           child: Column(

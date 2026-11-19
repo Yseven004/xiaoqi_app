@@ -20,6 +20,7 @@ import '../widgets/book_learning_bottom_bar.dart';
 import '../widgets/book_metadata_form_sheet.dart';
 import '../widgets/book_pdf_import_sheet.dart';
 import 'book_isbn_scanner_page.dart';
+import '../widgets/book_keyboard_layout.dart';
 import 'book_learning_space_page.dart';
 import 'book_study_page.dart';
 import 'discover_empty_page.dart';
@@ -224,11 +225,21 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
     return fallback.path;
   }
 
+  bool _librarySearchHasFocus = false;
+
   bool get _canPop =>
       _destination == BookLearningDestination.books && _openBookId == null;
 
   @override
-  Widget build(BuildContext context) => PopScope(
+  Widget build(BuildContext context) => BookKeyboardLayout(
+    avoidKeyboard:
+        _canPop &&
+        _librarySearchHasFocus &&
+        (ModalRoute.of(context)?.isCurrent ?? true),
+    child: _buildPage(context),
+  );
+
+  Widget _buildPage(BuildContext context) => PopScope(
     canPop: _canPop,
     onPopInvokedWithResult: (didPop, _) {
       if (didPop) return;
@@ -257,6 +268,11 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
                     data: _bookLibraryTheme(context),
                     child: BookLearningSpacePage(
                       key: const PageStorageKey('book_learning_space'),
+                      onSearchFocusChanged: (hasFocus) {
+                        if (mounted && _librarySearchHasFocus != hasFocus) {
+                          setState(() => _librarySearchHasFocus = hasFocus);
+                        }
+                      },
                       refreshVersion: _libraryRefreshVersion,
                       bookLibraryService: _library,
                       onCreateBook: _createBook,

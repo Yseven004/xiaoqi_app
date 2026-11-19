@@ -8,6 +8,8 @@ import '../models/book_library_item.dart';
 import '../models/book_library_query.dart';
 import '../services/book_learning_preferences.dart';
 import '../services/book_library_service.dart';
+import '../widgets/book_editor_dialog.dart';
+import '../widgets/book_metadata_editor.dart';
 import '../widgets/book_spine_shading.dart';
 import '../widgets/book_metadata_form_sheet.dart';
 import '../widgets/book_paper_background.dart';
@@ -27,6 +29,7 @@ class _FilterMenuAction {
 class BookLearningSpacePage extends StatefulWidget {
   const BookLearningSpacePage({
     super.key,
+    this.onSearchFocusChanged,
     required this.onOpenBook,
     required this.onCreateBook,
     this.bookLibraryService,
@@ -35,6 +38,7 @@ class BookLearningSpacePage extends StatefulWidget {
   });
 
   final ValueChanged<int> onOpenBook;
+  final ValueChanged<bool>? onSearchFocusChanged;
   final VoidCallback onCreateBook;
   final BookLibraryService? bookLibraryService;
   final BookLearningPreferences? preferences;
@@ -288,14 +292,9 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
 
   Future<void> _renameCategory(BookCategory category) async {
     _clearInputFocus();
-    final value = await showDialog<String>(
-      context: context,
-      requestFocus: false,
-      builder: (_) => _CategoryNameDialog(
-        title: '重新命名分类',
-        initialValue: category.name,
-        confirmLabel: '保存',
-      ),
+    final value = await showBookCategoryNameDialog(
+      context,
+      initialValue: category.name,
     );
     if (mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -417,7 +416,9 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
   }
 
   void _handleSearchFocusChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    widget.onSearchFocusChanged?.call(_searchFocusNode.hasFocus);
   }
 
   void _activateSearch() {
@@ -431,11 +432,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
 
   Future<void> _createCategory() async {
     _clearInputFocus();
-    final value = await showDialog<String>(
-      context: context,
-      requestFocus: false,
-      builder: (_) => const _CategoryNameDialog(),
-    );
+    final value = await showBookCategoryNameDialog(context);
     if (mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _clearInputFocus();
@@ -634,11 +631,19 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
     );
     while (true) {
       if (!mounted) return;
-      final updated = await showBookMetadataForm(
+      final updated = await showBookMetadataEditor(
         context: context,
         initial: draft.book,
         categories: _categories,
         initialCategoryIds: draft.categoryIds,
+        onCreateCategory: (name) async {
+          final created = await _library.saveCustomCategory(name);
+          if (mounted &&
+              !_categories.any((category) => category.id == created.id)) {
+            setState(() => _categories = [..._categories, created]);
+          }
+          return created;
+        },
         saveError: draft.saveError,
       );
       if (!mounted || updated == null) return;
@@ -1546,61 +1551,6 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
   }
 }
 
-class _CategoryNameDialog extends StatefulWidget {
-  const _CategoryNameDialog({
-    this.title = '新建分类',
-    this.initialValue = '',
-    this.confirmLabel = '保存',
-  });
-
-  final String title;
-  final String initialValue;
-  final String confirmLabel;
-
-  @override
-  State<_CategoryNameDialog> createState() => _CategoryNameDialogState();
-}
-
-class _CategoryNameDialogState extends State<_CategoryNameDialog> {
-  late final TextEditingController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = TextEditingController(text: widget.initialValue);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _submit() {
-    final value = _controller.text.trim();
-    if (value.isNotEmpty) Navigator.pop(context, value);
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: Text(widget.title),
-    content: TextField(
-      controller: _controller,
-      autofocus: false,
-      maxLength: 20,
-      decoration: const InputDecoration(labelText: '分类名称', hintText: '例如：教育学'),
-      onSubmitted: (_) => _submit(),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('取消'),
-      ),
-      FilledButton(onPressed: _submit, child: Text(widget.confirmLabel)),
-    ],
-  );
-}
-
 class _CategoryManagementDialog extends StatefulWidget {
   const _CategoryManagementDialog({required this.library});
 
@@ -1643,14 +1593,9 @@ class _CategoryManagementDialogState extends State<_CategoryManagementDialog> {
   }
 
   Future<void> _rename(BookCategory category) async {
-    final value = await showDialog<String>(
-      context: context,
-      requestFocus: false,
-      builder: (_) => _CategoryNameDialog(
-        title: '重新命名分类',
-        initialValue: category.name,
-        confirmLabel: '保存',
-      ),
+    final value = await showBookCategoryNameDialog(
+      context,
+      initialValue: category.name,
     );
     if (!mounted || value == null || value.isEmpty || value == category.name) {
       return;

@@ -671,24 +671,27 @@ class NoteTrashPage extends StatefulWidget {
 
 class _NoteTrashPageState extends State<NoteTrashPage> {
   final _db = DatabaseService();
-  late Future<List<Note>> _future;
+  late Future<(List<Notebook>, List<Note>)> _future;
   bool _busy = false;
 
   @override
   void initState() {
     super.initState();
-    _future = _db.queryDeletedNotes();
+    _future = _loadTrash();
   }
+
+  Future<(List<Notebook>, List<Note>)> _loadTrash() =>
+      (_db.queryNotebooks(status: 'deleted'), _db.queryDeletedNotes()).wait;
 
   void _reload() {
-    if (mounted) setState(() => _future = _db.queryDeletedNotes());
+    if (mounted) setState(() => _future = _loadTrash());
   }
 
-  Future<void> _restore(Note note) async {
-    if (note.id == null || _busy) return;
+  Future<void> _restore(Future<void> Function() restore) async {
+    if (_busy) return;
     setState(() => _busy = true);
     try {
-      await _db.restoreNotes([note.id!]);
+      await restore();
       _reload();
     } catch (_) {
       if (mounted) AppToast.show(context, '恢复失败，请重试');
@@ -738,7 +741,7 @@ class _NoteTrashPageState extends State<NoteTrashPage> {
       surfaceTintColor: Colors.white,
       elevation: 0,
     ),
-    body: FutureBuilder<List<Note>>(
+    body: FutureBuilder<(List<Notebook>, List<Note>)>(
       future: _future,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
@@ -750,14 +753,35 @@ class _NoteTrashPageState extends State<NoteTrashPage> {
           );
         }
         if (!snapshot.hasData) return const _NotePagePlaceholder();
-        final notes = snapshot.data!;
-        if (notes.isEmpty) return const Center(child: Text('回收站为空'));
+        final (notebooks, notes) = snapshot.data!;
+        if (notebooks.isEmpty && notes.isEmpty) {
+          return const Center(child: Text('回收站为空'));
+        }
+        final busy =
+            _busy || snapshot.connectionState == ConnectionState.waiting;
         return ListView.separated(
           padding: const EdgeInsets.all(16),
-          itemCount: notes.length,
+          itemCount: notebooks.length + notes.length,
           separatorBuilder: (_, _) => const Divider(height: 1),
           itemBuilder: (context, index) {
-            final note = notes[index];
+            if (index < notebooks.length) {
+              final notebook = notebooks[index];
+              final id = notebook.id;
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(notebook.name),
+                subtitle: Text('笔记本 · ${notebook.noteCount} 篇笔记'),
+                trailing: TextButton(
+                  onPressed: busy || id == null
+                      ? null
+                      : () => _restore(() => _db.restoreNotebook(id)),
+                  child: const Text('恢复'),
+                ),
+              );
+            }
+
+            final note = notes[index - notebooks.length];
+            final id = note.id;
             return ListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(note.title.trim().isEmpty ? '未命名笔记' : note.title),
@@ -768,12 +792,14 @@ class _NoteTrashPageState extends State<NoteTrashPage> {
                 spacing: 4,
                 children: [
                   TextButton(
-                    onPressed: _busy ? null : () => _restore(note),
+                    onPressed: busy || id == null
+                        ? null
+                        : () => _restore(() => _db.restoreNotes([id])),
                     child: const Text('恢复'),
                   ),
                   IconButton(
                     tooltip: '永久删除',
-                    onPressed: _busy ? null : () => _deleteForever(note),
+                    onPressed: busy ? null : () => _deleteForever(note),
                     icon: const Icon(Icons.delete_forever_outlined),
                   ),
                 ],

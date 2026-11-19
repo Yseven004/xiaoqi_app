@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -15,7 +16,7 @@ import '../services/epub_document_service.dart';
 import '../services/pdf_catalog_service.dart';
 import '../services/source_document_loader.dart';
 import '../widgets/app_toast.dart';
-import '../widgets/book_paper_background.dart';
+import '../widgets/book_editor_dialog.dart';
 
 enum _SourceAction { move, share, remove, deleteFile }
 
@@ -23,17 +24,16 @@ class BookSourcesPage extends StatefulWidget {
   const BookSourcesPage({
     super.key,
     required this.bookId,
-    required this.bookTitle,
     required this.bookLibraryService,
   });
 
   final int bookId;
-  final String bookTitle;
   final BookLibraryService bookLibraryService;
 
   @override
   State<BookSourcesPage> createState() => _BookSourcesPageState();
 }
+
 class _BookSourcesPageState extends State<BookSourcesPage> {
   List<BookSourceRecord> _sources = const [];
   bool _loading = true;
@@ -105,18 +105,18 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
 
   Future<void> _importBookSource() async {
     if (_importing) return;
-    final file = await FilePicker.pickFile(
-      type: FileType.custom,
-      allowedExtensions: supportedBookSourceFileExtensions,
-    );
-    if (!mounted || file == null) return;
-    final format = inferBookSourceFormat(file.name);
-    if (!supportedBookSourceFormats.contains(format)) {
-      _showMessage('目前支持导入 PDF 或 EPUB 文件');
-      return;
-    }
     setState(() => _importing = true);
     try {
+      final file = await FilePicker.pickFile(
+        type: FileType.custom,
+        allowedExtensions: supportedBookSourceFileExtensions,
+      );
+      if (!mounted || file == null) return;
+      final format = inferBookSourceFormat(file.name);
+      if (!supportedBookSourceFormats.contains(format)) {
+        _showMessage('目前支持导入 PDF 或 EPUB 文件');
+        return;
+      }
       final sourcePath = await _ensurePickedFilePath(file);
       final outcome = await widget.bookLibraryService.importBookSourceForBook(
         bookId: widget.bookId,
@@ -340,9 +340,7 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
       await _loadSources();
       if (mounted) {
         _showMessage(
-          fileDeleted
-              ? '资料文件已删除，已有笔记保留'
-              : '资料记录已移除；原文件未删除（仍被笔记引用或文件已不存在）',
+          fileDeleted ? '资料文件已删除，已有笔记保留' : '资料记录已移除；原文件未删除（仍被笔记引用或文件已不存在）',
         );
       }
     } catch (error) {
@@ -359,11 +357,9 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
   }
 
   @override
-  Widget build(BuildContext context) => BookPaperBackground(
-    showBotanicalShadow: true,
-    warmEditorial: true,
-    child: SafeArea(
-      bottom: false,
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: BookFlowTheme.canvas,
+    body: SafeArea(
       child: Column(
         children: [
           _buildHeader(),
@@ -374,36 +370,29 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
   );
 
   Widget _buildHeader() => Padding(
-    padding: const EdgeInsets.fromLTRB(20, 6, 20, 8),
+    padding: const EdgeInsets.fromLTRB(20, 6, 24, 8),
     child: Row(
       children: [
-        _SourcesIconButton(
+        IconButton(
           tooltip: '返回书籍详情',
-          icon: Icons.chevron_left_rounded,
-          onTap: () => Navigator.of(context).pop(),
+          icon: RotatedBox(
+            quarterTurns: 2,
+            child: bookEditorIcon('caret-right', size: 20),
+          ),
+          onPressed: () => Navigator.of(context).pop(),
         ),
         const SizedBox(width: 8),
         Expanded(
           child: Text(
             '本书资料',
-            style: BookFlowTheme.heading.copyWith(fontSize: 20),
+            style: BookFlowTheme.heading.copyWith(fontSize: 26),
           ),
         ),
-        TextButton.icon(
-          onPressed: _importing ? null : _importBookSource,
-          icon: _importing
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.add_circle_outline_rounded, size: 20),
-          label: const Text('导入资料'),
-          style: TextButton.styleFrom(
-            foregroundColor: BookFlowTheme.detailPrimary,
-            textStyle: const TextStyle(fontWeight: FontWeight.w700),
+        if (_sources.isNotEmpty)
+          _ImportSourceButton(
+            importing: _importing,
+            onImport: _importBookSource,
           ),
-        ),
       ],
     ),
   );
@@ -434,21 +423,15 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
       );
     }
     if (_sources.isEmpty) {
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(20, 10, 20, 32),
-        children: [_EmptySources(onImport: _importBookSource)],
-      );
+      return _EmptySources(importing: _importing, onImport: _importBookSource);
     }
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(20, 10, 20, 32),
-      itemCount: _sources.length + 1,
-      separatorBuilder: (_, _) => const SizedBox(height: 12),
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
+      itemCount: _sources.length,
       itemBuilder: (context, index) {
-        if (index == _sources.length) {
-          return _SourcesFootnote(bookTitle: widget.bookTitle);
-        }
         final source = _sources[index];
-        return _SourceCard(
+        return _SourceRow(
+          key: ValueKey(source.id),
           source: source,
           onTap: () => _openSource(source),
           onSelectSource: () => _setPrimarySource(source),
@@ -458,8 +441,10 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
     );
   }
 }
-class _SourceCard extends StatelessWidget {
-  const _SourceCard({
+
+class _SourceRow extends StatelessWidget {
+  const _SourceRow({
+    super.key,
     required this.source,
     required this.onTap,
     required this.onSelectSource,
@@ -472,127 +457,143 @@ class _SourceCard extends StatelessWidget {
   final ValueChanged<_SourceAction> onAction;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: BookFlowTheme.surface,
-    borderRadius: BorderRadius.circular(18),
-    child: InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(18),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+  Widget build(BuildContext context) {
+    final metadata = [
+      if (source.isPrimary) '主资料',
+      _formatBytes(source.fileSize),
+      if (source.status != 'ready') _statusLabel(source.status),
+    ].join(' · ');
+    final selectPrimary = source.isPrimary
+        ? null
+        : TextButton(
+            onPressed: onSelectSource,
+            style: TextButton.styleFrom(
+              foregroundColor: BookFlowTheme.inkSecondary,
+              padding: EdgeInsets.zero,
+              minimumSize: const Size(0, 48),
+              tapTargetSize: MaterialTapTargetSize.padded,
+            ),
+            child: const Text('设为主资料'),
+          );
+    final textScale = MediaQuery.textScalerOf(context);
+
+    return Column(
+      children: [
+        InkWell(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 104),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final compact =
+                      constraints.maxWidth < 360 || textScale.scale(14) > 21;
+                  return Row(
+                    children: [
+                      _SourceFormatBadge(format: source.format),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              source.displayName,
+                              style: _sourceTitle.copyWith(fontSize: 20),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              metadata,
+                              style: BookFlowTheme.body.copyWith(fontSize: 15),
+                            ),
+                            if (source.originUri.trim().isNotEmpty)
+                              Text(
+                                source.originUri,
+                                style: BookFlowTheme.body,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            if (compact) ?selectPrimary,
+                          ],
+                        ),
+                      ),
+                      if (!compact) ?selectPrimary,
+                      PopupMenuButton<_SourceAction>(
+                        tooltip: '资料操作',
+                        onSelected: onAction,
+                        color: BookFlowTheme.surface,
+                        surfaceTintColor: Colors.transparent,
+                        icon: bookEditorIcon('dots', size: 22),
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(
+                            value: _SourceAction.move,
+                            child: Text('移动到其他书籍'),
+                          ),
+                          PopupMenuItem(
+                            value: _SourceAction.share,
+                            child: Text('共享到其他书籍'),
+                          ),
+                          PopupMenuItem(
+                            value: _SourceAction.remove,
+                            child: Text('从本书移除'),
+                          ),
+                          PopupMenuItem(
+                            value: _SourceAction.deleteFile,
+                            child: Text('彻底删除文件'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+        const Divider(height: 1, thickness: 1, color: Color(0xFFDDE0E4)),
+      ],
+    );
+  }
+}
+
+class _EmptySources extends StatelessWidget {
+  const _EmptySources({required this.importing, required this.onImport});
+
+  final bool importing;
+  final VoidCallback onImport;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(
+        24,
+        (constraints.maxHeight * .11).clamp(24.0, 120.0),
+        24,
+        32,
+      ),
+      child: Center(
         child: Column(
           children: [
-            Row(
-              children: [
-                _SourceFormatBadge(format: source.format),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(source.displayName, style: _sourceTitle),
-                      const SizedBox(height: 4),
-                      Text(
-                        source.isPrimary
-                            ? '主资料 · ${_formatBytes(source.fileSize)} · ${_statusLabel(source.status)}'
-                            : '${_formatBytes(source.fileSize)} · ${_statusLabel(source.status)}',
-                        style: const TextStyle(
-                          color: BookFlowTheme.detailPrimary,
-                          fontSize: 13,
-                          height: 1.4,
-                        ),
-                      ),
-                      if (source.originUri.trim().isNotEmpty) ...[
-                        const SizedBox(height: 3),
-                        Text(
-                          source.originUri,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: BookFlowTheme.inkSecondary,
-                            fontSize: 12,
-                            height: 1.25,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                PopupMenuButton<_SourceAction>(
-                  tooltip: '资料操作',
-                  onSelected: (action) {
-                    onAction(action);
-                  },
-                  itemBuilder: (_) => [
-                    const PopupMenuItem(
-                      value: _SourceAction.move,
-                      child: Text('移动到其他书籍'),
-                    ),
-                    const PopupMenuItem(
-                      value: _SourceAction.share,
-                      child: Text('共享到其他书籍'),
-                    ),
-                    const PopupMenuItem(
-                      value: _SourceAction.remove,
-                      child: Text('从本书移除'),
-                    ),
-                    const PopupMenuItem(
-                      value: _SourceAction.deleteFile,
-                      child: Text('彻底删除文件'),
-                    ),
-                  ],
-                  icon: const Icon(
-                    Icons.more_horiz_rounded,
-                    color: BookFlowTheme.inkSecondary,
-                  ),
-                ),
-              ],
+            bookEditorIcon('file-text', size: 64),
+            const SizedBox(height: 28),
+            Text(
+              '还没有导入资料',
+              style: BookFlowTheme.heading.copyWith(fontSize: 24),
+              textAlign: TextAlign.center,
             ),
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 12),
-              child: Divider(height: 1, color: BookFlowTheme.line),
+            const SizedBox(height: 10),
+            Text(
+              '支持 PDF 和 EPUB',
+              style: BookFlowTheme.body.copyWith(fontSize: 16),
+              textAlign: TextAlign.center,
             ),
-            Row(
-              children: [
-                const Icon(
-                  Icons.menu_book_outlined,
-                  color: BookFlowTheme.inkSecondary,
-                  size: 20,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    source.status == 'ready'
-                        ? '最近阅读：尚未开始阅读'
-                        : '资料状态：${_statusLabel(source.status)}',
-                    style: BookFlowTheme.caption,
-                  ),
-                ),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    TextButton.icon(
-                      onPressed: onSelectSource,
-                      icon: Icon(
-                        source.isPrimary
-                            ? Icons.check_circle_rounded
-                            : Icons.swap_horiz_rounded,
-                        size: 18,
-                        color: source.isPrimary
-                            ? const Color(0xFF2F8F55)
-                            : null,
-                      ),
-                      label: Text(source.isPrimary ? '主资料' : '设为主资料'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: BookFlowTheme.inkSecondary,
-                        padding: EdgeInsets.zero,
-                        minimumSize: const Size(0, 44),
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+            const SizedBox(height: 40),
+            _ImportSourceButton(
+              importing: importing,
+              onImport: onImport,
+              prominent: true,
             ),
           ],
         ),
@@ -601,58 +602,38 @@ class _SourceCard extends StatelessWidget {
   );
 }
 
-class _EmptySources extends StatelessWidget {
-  const _EmptySources({required this.onImport});
+class _ImportSourceButton extends StatelessWidget {
+  const _ImportSourceButton({
+    required this.importing,
+    required this.onImport,
+    this.prominent = false,
+  });
 
+  final bool importing;
   final VoidCallback onImport;
+  final bool prominent;
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 34),
-    decoration: BoxDecoration(
-      color: BookFlowTheme.surface.withValues(alpha: .58),
-      borderRadius: BorderRadius.circular(18),
-      border: Border.all(color: BookFlowTheme.detailLineStrong),
+  Widget build(BuildContext context) => FilledButton.icon(
+    onPressed: importing ? null : onImport,
+    icon: SvgPicture.asset(
+      'assets/icons/extension_market/detail/plus-light.svg',
+      width: 18,
+      height: 18,
+      excludeFromSemantics: true,
+      colorFilter: ColorFilter.mode(
+        importing ? BookFlowTheme.inkSecondary : Colors.white,
+        BlendMode.srcIn,
+      ),
     ),
-    child: Column(
-      children: [
-        const Icon(
-          Icons.description_outlined,
-          size: 34,
-          color: BookFlowTheme.inkSecondary,
-        ),
-        const SizedBox(height: 10),
-        const Text('还没有导入资料', style: _sourceTitle),
-        const SizedBox(height: 5),
-        const Text(
-          '导入 PDF 或 EPUB 后，可以在这里查看资料。',
-          style: BookFlowTheme.caption,
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 14),
-        FilledButton.icon(
-          onPressed: onImport,
-          icon: const Icon(Icons.add_rounded),
-          label: const Text('导入资料'),
-          style: BookFlowTheme.primaryButtonStyle(),
-        ),
-      ],
+    label: Text(
+      importing ? '导入中' : '导入资料',
+      style: prominent ? const TextStyle(fontSize: 16) : null,
     ),
-  );
-}
-
-class _SourcesFootnote extends StatelessWidget {
-  const _SourcesFootnote({required this.bookTitle});
-
-  final String bookTitle;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
-    child: Text(
-      '资料属于《$bookTitle》，同一份文件可以被多个学习空间引用。',
-      style: BookFlowTheme.caption,
-      textAlign: TextAlign.center,
+    style: bookEditorActionStyle(
+      context,
+      width: prominent ? 208 : 128,
+      height: prominent ? 56 : 42,
     ),
   );
 }
@@ -663,24 +644,30 @@ class _SourceFormatBadge extends StatelessWidget {
   final String format;
 
   @override
-  Widget build(BuildContext context) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: _sourceFormatColor(format),
-      borderRadius: BorderRadius.circular(9),
-    ),
-    child: SizedBox(
-      width: 48,
-      height: 58,
-      child: Center(
-        child: Text(
-          _sourceFormatLabel(format),
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 13,
-            fontWeight: FontWeight.w800,
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: 56,
+    child: Stack(
+      children: [
+        bookEditorIcon('file', size: 56),
+        Align(
+          alignment: const Alignment(0, .42),
+          child: SizedBox(
+            width: 29,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                _sourceFormatLabel(format),
+                style: const TextStyle(
+                  color: BookFlowTheme.ink,
+                  fontSize: 10,
+                  height: 1,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
           ),
         ),
-      ),
+      ],
     ),
   );
 }
@@ -799,7 +786,6 @@ class _PdfSourceReaderPageState extends State<_PdfSourceReaderPage> {
       ),
     ),
   );
-
 }
 
 class EpubSourceReaderPage extends StatefulWidget {
@@ -990,10 +976,7 @@ class _ReaderError extends StatelessWidget {
             size: 42,
           ),
           const SizedBox(height: 12),
-          Text(
-            '这份 ${_sourceFormatLabel(format)} 资料暂时打不开',
-            style: _sourceTitle,
-          ),
+          Text('这份 ${_sourceFormatLabel(format)} 资料暂时打不开', style: _sourceTitle),
           const SizedBox(height: 6),
           Text(
             '$error',
@@ -1117,20 +1100,3 @@ class _TextSourceReaderPageState extends State<TextSourceReaderPage> {
 
 String _sourceFormatLabel(String format) =>
     format == 'markdown' ? 'MD' : format.toUpperCase();
-
-Color _sourceFormatColor(String format) {
-  switch (format) {
-    case 'epub':
-      return const Color(0xFF4E6DD8);
-    case 'markdown':
-      return const Color(0xFF6956B8);
-    case 'txt':
-      return const Color(0xFF5F6B73);
-    case 'docx':
-      return const Color(0xFF2B579A);
-    case 'html':
-      return const Color(0xFF2F8F76);
-    default:
-      return const Color(0xFFE84444);
-  }
-}

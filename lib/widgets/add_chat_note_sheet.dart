@@ -1,22 +1,19 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../config/notebook_theme.dart';
 import '../models/chat_note_capture.dart';
 import '../models/note.dart';
 import '../models/notebook.dart';
 import '../services/database_service.dart';
 import '../utils/date_formatter.dart';
-import 'notebook_cover.dart';
+import 'notebook_editor_overlay.dart';
 
 const _sheetInk = Color(0xFF20242A);
 const _sheetMuted = Color(0xFF9296A0);
 const _sheetDivider = Color(0xFFE9EBEF);
 const _sheetChip = Color(0xFFE9ECF1);
-const _sheetAccent = Color(0xFF4964B8);
 
 class AddChatNoteSheet extends StatefulWidget {
   const AddChatNoteSheet({
@@ -66,9 +63,7 @@ class AddChatNoteSheet extends StatefulWidget {
 
 class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
   final _db = DatabaseService();
-  final _newNotebookController = TextEditingController();
   final _searchController = TextEditingController();
-  final _newNotebookFocusNode = FocusNode();
   final _ownedListScrollController = ScrollController();
 
   ScrollController get _listScrollController =>
@@ -77,17 +72,12 @@ class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
   late List<Notebook> _notebooks = List.of(widget.notebooks);
   List<Note> _notes = const [];
   int? _filteredNotebookId;
-  int _coverIndex = 0;
   int _loadRevision = 0;
   bool _loading = true;
   bool _failed = false;
-  bool _showNewNotebook = false;
-  bool _savingNotebook = false;
+  bool _openingNotebookEditor = false;
   bool _openingEditor = false;
   bool _searchOpen = false;
-  String? _newNotebookError;
-  Notebook? _editingNotebook;
-  bool _associateNewNotebook = true;
   bool _filterAutomaticNotebook = false;
 
   @override
@@ -128,9 +118,7 @@ class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
 
   @override
   void dispose() {
-    _newNotebookController.dispose();
     _searchController.dispose();
-    _newNotebookFocusNode.dispose();
     _ownedListScrollController.dispose();
     super.dispose();
   }
@@ -183,105 +171,51 @@ class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
     }
   }
 
-  void _openNewNotebook() {
-    _newNotebookController.clear();
-    _newNotebookFocusNode.unfocus();
-    setState(() {
-      _coverIndex = 0;
-      _editingNotebook = null;
-      _associateNewNotebook = widget.bookId != null;
-      _newNotebookError = null;
-      _showNewNotebook = true;
-    });
-  }
-
-  void _editNotebook(Notebook notebook) {
-    if (_openingEditor || _savingNotebook || notebook.isDefault) return;
-    _newNotebookController.text = notebook.name;
-    _newNotebookFocusNode.unfocus();
-    setState(() {
-      _editingNotebook = notebook;
-      _coverIndex = notebook.coverIndex;
-      _associateNewNotebook = notebook.bookId != null;
-      _newNotebookError = null;
-      _showNewNotebook = true;
-    });
-  }
-
-  void _closeNewNotebook() {
-    if (_savingNotebook) return;
-    _newNotebookFocusNode.unfocus();
-    setState(() {
-      _showNewNotebook = false;
-      _newNotebookError = null;
-    });
-  }
-
-  Future<void> _saveNewNotebook() async {
-    if (_savingNotebook) return;
-    final name = _newNotebookController.text.trim();
-    if (name.isEmpty) {
-      setState(() => _newNotebookError = '请输入笔记本名称');
-      _newNotebookFocusNode.requestFocus();
+  Future<void> _openNotebookEditor([Notebook? notebook]) async {
+    if (_openingEditor ||
+        _openingNotebookEditor ||
+        notebook?.isDefault == true) {
       return;
     }
-
-    setState(() {
-      _savingNotebook = true;
-      _newNotebookError = null;
-    });
+    FocusManager.instance.primaryFocus?.unfocus();
+    _openingNotebookEditor = true;
     try {
-      final editing = _editingNotebook;
-      final bookId = editing != null
-          ? editing.bookId
-          : (_associateNewNotebook ? widget.bookId : null);
-      final int id;
-      if (editing?.id != null) {
-        id = editing!.id!;
-        final changed = await _db.updateNotebook(
-          editing.copyWith(name: name, coverIndex: _coverIndex),
-        );
-        if (changed != 1) throw StateError('笔记本不可用');
-      } else {
-        id = await _db.createNotebook(
-          name: name,
-          coverIndex: _coverIndex,
-          bookId: bookId,
-        );
-      }
-      final createdAt = DateTime.now().toIso8601String();
-      final notebook = Notebook(
-        id: id,
-        name: name,
-        coverIndex: _coverIndex,
-        bookId: bookId,
-        createdAt: createdAt,
-        updatedAt: createdAt,
+      final result = await showNotebookEditor(
+        context: context,
+        notebook: notebook,
+        bookId: widget.bookId,
+        bookName: widget.bookName,
       );
-      if (!mounted) return;
+      if (mounted && result != null) _finishNotebookEdit(result);
+    } finally {
+      _openingNotebookEditor = false;
+    }
+  }
 
-      setState(() {
+  void _finishNotebookEdit(Notebook notebook) {
+    setState(() {
+      if (notebook.isDeleted) {
+        _notebooks = _notebooks
+            .where((item) => item.id != notebook.id)
+            .toList();
+        if (_filteredNotebookId == notebook.id) {
+          _filteredNotebookId = null;
+          _filterAutomaticNotebook = false;
+        }
+      } else {
         _notebooks = [
           notebook,
           ..._notebooks.where(
             (item) =>
                 item.id != notebook.id &&
-                !(item.id == null && item.bookId == bookId),
+                !(item.id == null && item.bookId == notebook.bookId),
           ),
         ];
         _filteredNotebookId = notebook.id;
         _filterAutomaticNotebook = false;
-        _savingNotebook = false;
-        _showNewNotebook = false;
-      });
-      _loadNotes();
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _savingNotebook = false;
-        _newNotebookError = '保存失败，请重试';
-      });
-    }
+      }
+    });
+    _loadNotes();
   }
 
   Notebook _notebookFor(Note note) => _notebooks.firstWhere(
@@ -399,87 +333,44 @@ class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final reduceMotion = MediaQuery.of(context).disableAnimations;
-    final cardTransition = reduceMotion
-        ? Duration.zero
-        : const Duration(milliseconds: 220);
-
-    return PopScope<void>(
-      canPop:
-          !widget.active ||
-          (!_showNewNotebook &&
-              (widget.onToggleExpanded == null || !widget.expanded)),
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop || !widget.active) return;
-        if (_showNewNotebook) {
-          _closeNewNotebook();
-        } else if (widget.expanded) {
-          widget.onToggleExpanded?.call();
-        }
-      },
-      child: LayoutBuilder(
-        builder: (context, constraints) => Stack(
-          fit: StackFit.expand,
-          children: [
-            SafeArea(
-              top: false,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onVerticalDragStart: widget.onHeaderDragStart,
-                        onVerticalDragUpdate: widget.onHeaderDragUpdate,
-                        onVerticalDragEnd: widget.onHeaderDragEnd,
-                        child: Column(
-                          children: [
-                            if (widget.onToggleExpanded != null)
-                              _buildDragHandle(),
-                            _buildHeader(),
-                          ],
-                        ),
-                      ),
-                      _buildNotebookRail(),
-                      Expanded(child: _buildNoteList()),
-                    ],
-                  ),
-                  Positioned(right: 22, bottom: 34, child: _buildAddButton()),
-                ],
-              ),
-            ),
-            Positioned.fill(
-              child: AnimatedSwitcher(
-                duration: cardTransition,
-                reverseDuration: reduceMotion
-                    ? Duration.zero
-                    : const Duration(milliseconds: 160),
-                transitionBuilder: (child, animation) => FadeTransition(
-                  opacity: animation,
-                  child: SlideTransition(
-                    position: Tween<Offset>(
-                      begin: const Offset(0, 0.025),
-                      end: Offset.zero,
-                    ).animate(animation),
-                    child: child,
-                  ),
+  Widget build(BuildContext context) => PopScope<void>(
+    canPop:
+        !widget.active || widget.onToggleExpanded == null || !widget.expanded,
+    onPopInvokedWithResult: (didPop, _) {
+      if (didPop || !widget.active) return;
+      if (widget.expanded) {
+        widget.onToggleExpanded?.call();
+      }
+    },
+    child: SafeArea(
+      top: false,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onVerticalDragStart: widget.onHeaderDragStart,
+                onVerticalDragUpdate: widget.onHeaderDragUpdate,
+                onVerticalDragEnd: widget.onHeaderDragEnd,
+                child: Column(
+                  children: [
+                    if (widget.onToggleExpanded != null) _buildDragHandle(),
+                    _buildHeader(),
+                  ],
                 ),
-                child: _showNewNotebook
-                    ? _buildNewNotebookOverlay(
-                        constraints,
-                        key: const ValueKey('new-notebook'),
-                      )
-                    : const SizedBox.shrink(key: ValueKey('no-new-notebook')),
               ),
-            ),
-          ],
-        ),
+              _buildNotebookRail(),
+              Expanded(child: _buildNoteList()),
+            ],
+          ),
+          Positioned(right: 22, bottom: 34, child: _buildAddButton()),
+        ],
       ),
-    );
-  }
+    ),
+  );
 
   Widget _buildDragHandle() => SizedBox(
     height: 28,
@@ -577,7 +468,7 @@ class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
             borderRadius: BorderRadius.circular(16),
             child: InkWell(
               borderRadius: BorderRadius.circular(16),
-              onTap: _openNewNotebook,
+              onTap: _openNotebookEditor,
               child: SizedBox(
                 width: 48,
                 height: 48,
@@ -623,7 +514,9 @@ class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
       selected: selected,
       label: notebook.name,
       hint: notebook.isDefault ? '全局默认笔记本，不关联书籍' : '长按编辑笔记本',
-      onLongPress: notebook.isDefault ? null : () => _editNotebook(notebook),
+      onLongPress: notebook.isDefault
+          ? null
+          : () => _openNotebookEditor(notebook),
       child: Material(
         color: selected ? _sheetChip : Colors.white,
         elevation: selected ? 2 : 1,
@@ -635,7 +528,7 @@ class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
           onTap: () => _selectNotebook(notebook),
           onLongPress: notebook.isDefault
               ? null
-              : () => _editNotebook(notebook),
+              : () => _openNotebookEditor(notebook),
           child: SizedBox(
             height: 48,
             child: Container(
@@ -963,271 +856,6 @@ class _AddChatNoteSheetState extends State<AddChatNoteSheet> {
           ),
         ),
       ),
-    ),
-  );
-
-  Widget _buildNewNotebookOverlay(
-    BoxConstraints constraints, {
-    required Key key,
-  }) {
-    final availableWidth = constraints.maxWidth;
-    final width = availableWidth >= 500
-        ? math.min(availableWidth * 0.65, 620.0).toDouble()
-        : availableWidth - 32;
-
-    return Stack(
-      key: key,
-      fit: StackFit.expand,
-      children: [
-        ModalBarrier(
-          color: const Color(0x14000000),
-          dismissible: !_savingNotebook,
-          onDismiss: _closeNewNotebook,
-          semanticsLabel: '关闭新增笔记本',
-        ),
-        Center(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: width,
-              maxHeight: constraints.maxHeight - 28,
-            ),
-            child: Material(
-              color: Colors.white,
-              elevation: 12,
-              shadowColor: const Color(0x26000000),
-              borderRadius: BorderRadius.circular(20),
-              clipBehavior: Clip.antiAlias,
-              child: _buildNewNotebookCard(),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildNewNotebookCard() => SingleChildScrollView(
-    padding: const EdgeInsets.fromLTRB(22, 16, 22, 20),
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                _editingNotebook == null ? '新增笔记本' : '编辑笔记本',
-                style: TextStyle(
-                  color: _sheetInk,
-                  fontSize: 21,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-            IconButton(
-              tooltip: '关闭',
-              onPressed: _savingNotebook ? null : _closeNewNotebook,
-              icon: const Icon(Icons.close, color: _sheetInk),
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        const Text(
-          '笔记本名称',
-          style: TextStyle(
-            color: _sheetInk,
-            fontSize: 15,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        const SizedBox(height: 7),
-        TextField(
-          controller: _newNotebookController,
-          enabled: !_savingNotebook,
-          focusNode: _newNotebookFocusNode,
-          textInputAction: TextInputAction.done,
-          onSubmitted: (_) => _newNotebookFocusNode.unfocus(),
-          onChanged: (_) {
-            if (_newNotebookError != null) {
-              setState(() => _newNotebookError = null);
-            }
-          },
-          decoration: InputDecoration(
-            hintText: '输入笔记本名称',
-            hintStyle: const TextStyle(color: _sheetMuted),
-            filled: true,
-            fillColor: _sheetChip,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 18,
-              vertical: 17,
-            ),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide.none,
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide.none,
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: _sheetAccent, width: 1.4),
-            ),
-          ),
-        ),
-        if (_newNotebookError != null) ...[
-          const SizedBox(height: 6),
-          Text(
-            _newNotebookError!,
-            style: const TextStyle(color: Color(0xFFB5473D), fontSize: 13),
-          ),
-        ],
-        if (_editingNotebook == null && widget.bookId != null)
-          SwitchListTile.adaptive(
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              '关联书籍：${widget.bookName}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            value: _associateNewNotebook,
-            onChanged: _savingNotebook
-                ? null
-                : (value) => setState(() => _associateNewNotebook = value),
-          )
-        else
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: Text(
-              _editingNotebook?.bookId != null ? '改名不改变书籍关联' : '不关联书籍',
-              style: const TextStyle(color: _sheetMuted, fontSize: 13),
-            ),
-          ),
-        const SizedBox(height: 18),
-        const Divider(height: 1, color: _sheetDivider),
-        const SizedBox(height: 14),
-        const Text(
-          '选择封面样式',
-          style: TextStyle(
-            color: _sheetInk,
-            fontSize: 15,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        const SizedBox(height: 12),
-        SizedBox(
-          height: 96,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: NotebookTheme.covers.length,
-            separatorBuilder: (context, index) => const SizedBox(width: 10),
-            itemBuilder: (context, index) {
-              final selected = _coverIndex == index;
-              return Semantics(
-                button: true,
-                selected: selected,
-                label: '封面样式 ${index + 1}',
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(12),
-                  onTap: _savingNotebook
-                      ? null
-                      : () => setState(() => _coverIndex = index),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 160),
-                    width: 64,
-                    height: 88,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: selected ? _sheetAccent : Colors.transparent,
-                        width: selected ? 2.5 : 1,
-                      ),
-                    ),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        NotebookCover(
-                          notebook: Notebook(
-                            name: '',
-                            coverIndex: index,
-                            createdAt: '',
-                            updatedAt: '',
-                          ),
-                          showTitle: false,
-                        ),
-                        if (selected)
-                          Align(
-                            alignment: Alignment.bottomRight,
-                            child: Container(
-                              width: 23,
-                              height: 23,
-                              margin: const EdgeInsets.all(4),
-                              decoration: const BoxDecoration(
-                                color: _sheetAccent,
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.check,
-                                color: Colors.white,
-                                size: 16,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        const SizedBox(height: 20),
-        Row(
-          children: [
-            Expanded(
-              child: SizedBox(
-                height: 52,
-                child: FilledButton(
-                  onPressed: _savingNotebook ? null : _closeNewNotebook,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: _sheetChip,
-                    foregroundColor: _sheetInk,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: const Text('取消'),
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: SizedBox(
-                height: 52,
-                child: FilledButton(
-                  onPressed: _savingNotebook ? null : _saveNewNotebook,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: _sheetAccent,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: _savingNotebook
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.3,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text('保存'),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ],
     ),
   );
 }

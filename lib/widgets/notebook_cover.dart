@@ -16,6 +16,13 @@ class NotebookCover extends StatelessWidget {
   final Notebook notebook;
   final bool showTitle;
 
+  static const radius = BorderRadius.only(
+    topLeft: Radius.circular(8),
+    bottomLeft: Radius.circular(8),
+    topRight: Radius.circular(5),
+    bottomRight: Radius.circular(5),
+  );
+
   @override
   Widget build(BuildContext context) {
     final color = NotebookTheme
@@ -28,12 +35,7 @@ class NotebookCover extends StatelessWidget {
         builder: (context, constraints) {
           final spineWidth = (constraints.maxWidth * .075).clamp(8.0, 11.0);
           return ClipRRect(
-            borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(8),
-              bottomLeft: Radius.circular(8),
-              topRight: Radius.circular(5),
-              bottomRight: Radius.circular(5),
-            ),
+            borderRadius: radius,
             child: Stack(
               fit: StackFit.expand,
               children: [

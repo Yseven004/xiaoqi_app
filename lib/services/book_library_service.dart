@@ -647,6 +647,20 @@ class BookLibraryService {
     });
   }
 
+  Future<void> updateBookDescription(int bookId, String description) async {
+    final db = await _databaseService.database;
+    final updated = await db.update(
+      'books',
+      {
+        'description': description.trim(),
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      where: 'id = ? AND is_deleted = 0',
+      whereArgs: [bookId],
+    );
+    if (updated == 0) throw StateError('这本书已经不存在');
+  }
+
   Future<int> updateBookMetadata(BookRecord book) async {
     final id = book.id;
     if (id == null) return saveBook(book);

@@ -1,0 +1,38 @@
+---
+root: true
+targets:
+  - '*'
+globs:
+  - '**/*'
+---
+# Project agent instructions
+
+## ARTEMIS availability
+
+- If ARTEMIS tools are absent from the current tool list, ignore ARTEMIS-specific workflows and do not attempt to diagnose or install ARTEMIS. Continue with the tools that are available and state any device-level verification that could not be performed.
+
+## Single-version development policy
+
+- During the solo-development stage, maintain one current product version. Treat the Flutter client, server code, API contract, and ECS deployment as one release rather than as independently managed versions.
+- Every release must carry a shared release identifier and API contract version. Before normal API use, the client and server must verify that their contract versions match; on mismatch, stop the affected flow and show both versions with a clear instruction to rebuild the client or redeploy the server.
+- When a client-server contract changes, update and verify both sides in the same task. Do not add legacy-client compatibility or preserve old request formats unless the user explicitly requests it.
+- Run only the current release. Keep at most one non-running emergency restore point, replace it after each successful deployment, and remove all older images, tags, backups, staging uploads, and temporary files after health and data checks pass.
+- The user is responsible for product decisions and client verification. The agent is responsible for version matching, server deployment, health and data checks, automatic rollback on failure, cleanup, and a plain-language report of what actually succeeded.
+
+## Remote service deployment
+
+### Validated scope and reuse defaults
+
+- Follow `docs/architecture/release-flow-validation-2026-11-05.md` and `xiaoqi_harness/deploy/README.docker.md`. The full baseline, Linux isolated recovery, production activation and a four-component reuse run were verified on 2026-11-05. Use the existing workflow and deployment entry point for future releases.
+- Select checks against the latest successful main whose workflow supports cumulative checking, not merely the previous commit. Failed or cancelled runs do not erase unverified changes. Bootstrap a new checking policy with a complete baseline.
+- Reuse only verified images whose component input and base-image fingerprints match. Preserve actual component source commits and image IDs; build only changed or missing components. A release artifact still belongs to the exact current main, and image export/import verification remains mandatory. Scope business probes to affected behavior while keeping backup, health, contract, data verification and rollback for every actual activation.
+- Official capability sources and releases live in `Yseven004/xiaoqi-capabilities`; package-only updates do not rebuild or deploy the host. Package installation/update is manual. Preserve installed history and versions bound to active work; the product's single-version cleanup policy must not delete capability versions referenced by work. A package version switch never rewinds user data or grants permissions.
+
+- During solo development, deployment is the agent's automatic responsibility, not a manual user step. After changing production server code under `xiaoqi_harness/genkit_server/`, runtime deployment files under `xiaoqi_harness/deploy/`, or a Flutter/server API contract, the agent must run the relevant checks and then run `xiaoqi_harness/deploy/deploy_current.ps1` before claiming the task is complete. Do not ask the user to run the deployment command.
+- Do not deploy for Flutter-only UI changes, documentation-only changes, test-only changes, or comments/formatting that cannot affect the running service. When uncertain, inspect the actual diff and deploy only if the ECS runtime or its API behavior can change.
+- If required checks fail, do not deploy broken code. Fix the failure first; if it cannot be fixed within the task, leave the current healthy server untouched and report the blocker. If deployment starts and fails, rely on the scripted automatic rollback and verify that the restored service is healthy.
+- Every final report for a development task must say either “server deployed and verified” or “server deployment not needed”, with one plain-language reason. Local implementation, server deployment, and verified effectiveness must not be presented as the same milestone.
+- When Alibaba Cloud authorization is needed, launch `aliyun configure --mode OAuth --profile xiaoqi-remote-deploy` so the user can authorize in the browser. Never ask the user to paste access keys or passwords into chat.
+- Preserve the remote service's existing environment, secrets, and persistent data. Keep exactly one emergency restore point and report any deployment or verification blocker explicitly.
+- Preferred deployment workflow: if authorization is needed, start the OAuth flow above and let the user complete login in the browser; never request credentials in chat. Then identify and confirm the target ECS and its running service with read-only Cloud Assistant commands. After reviewing and checking the authorized changes, commit the coherent release to `main` and push normally, without force-pushing or including unrelated work. Use `xiaoqi_harness/deploy/deploy_current.ps1` as the deployment entry point: it requires a clean local `main` matching `origin/main`, waits for the exact main commit's GitHub Actions artifact, then delivers the verified prebuilt artifact through Cloud Assistant (`SendFile`/`RunCommand`). Do not create a separate build branch or an uncommitted source snapshot. An expired artifact may be rebuilt from the same main commit by workflow_dispatch; another branch or commit's artifact must never be substituted. Recheck main before activation. Do not build Docker images or compile Dart on the production ECS, and do not fall back to an on-server build when CI fails. The build runner must use the same containerd image storage as production and verify an actual image export/import roundtrip before uploading the artifact. Keep server credentials and persistent data out of GitHub and the artifact.
+- Before replacing files or restarting services, check disk, available memory, architecture and current health; create or refresh the single emergency restore point, record the running image/revision, and preserve environment files, secrets and persistent data. Load and verify prebuilt images on ECS, run the synthetic runtime gate, then hold ordinary requests while backing up, activating and checking data, public health, release and API contract. Resume traffic only after verification. Restore the recorded release automatically if activation or verification fails. Run the remote job independently of the Cloud Assistant connection; a polling failure must not trigger a duplicate deploy or delete active inputs. Keep complete deployment logs and retrieve them in bounded chunks. After success, keep only the current release and one non-running emergency restore point, and remove older project images, backups, staging uploads and temporary files. Report build, deployment, data and health verification separately in plain language.
