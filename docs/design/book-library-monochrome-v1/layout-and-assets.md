@@ -22,6 +22,21 @@ reference-49 至 reference-54 均为 965×1629／1630 px；reference-55 为 1487
 
 手机上搜索、工具和书卡随可用宽度纵向重排；平板按可用宽度增列并扩展详情内容列。两种尺寸都需保留 48dp 触控区、安全区和系统返回行为。字体增大时标题、书名和操作允许换行，不裁主操作。
 
+## 2026-11-20 导入弹窗取代贴底面板
+
+[确认图](confirmed/book-import-dialogs-2026-11-20.png) 左右各为约 700 × 1122 像素的独立画面。左卡约 322 × 332 像素，右卡约 307 × 323 像素。原图 DPR 未知。Flutter 实现采用居中卡 320 dp、锚定卡 304 dp 的宽度上限。安全区内至少留 16 dp 横边距，卡片圆角 16 dp，内边距约 20 dp。每行触控至少 48 dp，高度随文字展开。高字号或矮屏时卡内可滚动。锚定卡右侧对齐「＋ 新建」，小尖角中心对齐按钮，稳定逻辑间距为 14 dp。
+
+独立 SVG 在 72 × 72 像素预览中核对了形状、比例、描边和边界。实际页面同状态视觉验收待完成。
+
+| 图形 | SVG 与来源 | viewBox、尺寸及使用状态 |
+| --- | --- | --- |
+| 扫描框 | `assets/images/book_import_scan.svg`，[Lucide 0.468.0 scan-line，ISC](https://github.com/lucide-icons/lucide/blob/0.468.0/icons/scan-line.svg)，描边调至 1.75 | 0 0 24 24，24 dp，导入卡 ISBN 行 |
+| 文件夹 | `assets/icons/extension_market/detail/folder.svg`，仓库已有 Phosphor MIT 资产 | 0 0 256 256，24 dp，导入卡本机行 |
+| 双对话气泡 | `assets/images/home_attachment_wechat.svg`，仓库已有 IconPark 1.4.2 Apache-2.0 资产 | 0 0 48 48，24 dp，导入卡微信行 |
+| 地球放大镜 | `assets/images/book_import_web_search.svg`，[Tabler v3.34.1 world-search，MIT](https://github.com/tabler/tabler-icons/blob/v3.34.1/icons/outline/world-search.svg)，描边调至 1.75 | 0 0 24 24，24 dp，导入卡网上找书行 |
+| 关闭 | `assets/icons/extension_market/detail/close.svg`，仓库已有 Phosphor MIT 资产 | 0 0 256 256，18 dp，居中卡标题行 |
+| 指向尖角 | `assets/images/book_import_menu_pointer.svg`，按定稿几何轮廓制作 | 0 0 26 15，26 × 15 dp，仅贴在书库锚定卡上沿 |
+
 ## SVG 资产清单
 
 | 图形 | 来源和路径 | viewBox／尺寸 | 状态与消费组件 | 预览 |

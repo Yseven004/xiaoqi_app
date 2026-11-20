@@ -10,6 +10,7 @@ import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/attachment_service.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/api.dart';
+import 'package:xiaoqi_genkit_server/src/image_service.dart';
 import 'package:xiaoqi_genkit_server/src/release.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
@@ -27,6 +28,12 @@ class _PdfCommands {
   final ocrResources = <(String, int)>[];
   Completer<void>? blockOcr;
   Completer<void>? ocrStarted;
+  Completer<void>? blockBookConversion;
+  Completer<void>? bookConversionStarted;
+  final bookFormats = <String>[];
+  int? bookSourcePages;
+  int skippedBookPages = 0;
+  List<String> bookUnits = const [];
 
   Future<AttachmentCommandResult> call(
     String command,
@@ -34,6 +41,23 @@ class _PdfCommands {
     required Duration timeout,
     required String workingDirectory,
   }) async {
+    if (arguments.length == 4 &&
+        p.basename(arguments.first) == 'book_markitdown.py') {
+      bookFormats.add(arguments[2]);
+      if (bookConversionStarted?.isCompleted == false) {
+        bookConversionStarted!.complete();
+      }
+      await blockBookConversion?.future;
+      await File(arguments.last).writeAsString(bookUnits.join('\n'));
+      return AttachmentCommandResult(
+        0,
+        jsonEncode({
+          'page_count': bookSourcePages,
+          'skipped_pages': skippedBookPages,
+          'has_text': bookUnits.isNotEmpty,
+        }),
+      );
+    }
     commands.add(command);
     switch (command) {
       case 'pdfinfo':
@@ -98,6 +122,9 @@ void main() {
 
   tearDown(() async {
     if (commands.blockOcr?.isCompleted == false) commands.blockOcr!.complete();
+    if (commands.blockBookConversion?.isCompleted == false) {
+      commands.blockBookConversion!.complete();
+    }
     await service.close();
     store.close();
     if (directory.existsSync()) directory.deleteSync(recursive: true);
@@ -112,6 +139,7 @@ void main() {
     String name = 'sample.pdf',
     String mime = 'application/pdf',
     List<int>? bytes,
+    bool book = false,
   }) async {
     final response = await service.upload(
       Request(
@@ -120,6 +148,9 @@ void main() {
         headers: {
           'content-type': mime,
           'x-xiaoqi-filename': Uri.encodeComponent(name),
+          if (book)
+            'x-xiaoqi-attachment-profile':
+                AttachmentService.readingBookMarkItDownProfile,
         },
         body: bytes ?? ascii.encode('%PDF-1.4\nfixture'),
       ),
@@ -141,6 +172,145 @@ void main() {
     }
     throw StateError('Attachment did not settle');
   }
+
+  Request readBook() => Request(
+    'POST',
+    Uri.parse('http://localhost/'),
+    body: jsonEncode({'mode': 'overview'}),
+  );
+
+  String unit(String locator, String markdown) =>
+      jsonEncode({'locator': locator, 'markdown': markdown});
+
+  test(
+    'MarkItDown book publishes complete text and keeps original PDF locators',
+    () async {
+      commands.bookSourcePages = 8;
+      commands.skippedBookPages = 6;
+      commands.bookUnits = [
+        unit('PDF 第 2 页', '# 第 2 页\n## 开头\n\n样本文字'),
+        unit('PDF 第 8 页', '# 第 8 页\n## 谐振\n\n后段书籍文字'),
+      ];
+      commands.bookConversionStarted = Completer<void>();
+      commands.blockBookConversion = Completer<void>();
+      final book = await upload(book: true);
+      final id = book['id'] as String;
+      await commands.bookConversionStarted!.future;
+      expect(
+        book['parser_profile'],
+        AttachmentService.readingBookMarkItDownProfile,
+      );
+      expect(book['source_format'], 'pdf');
+      expect(book['ready'], false);
+      expect(book['segments'], isEmpty);
+      expect((await service.status('other', id)).statusCode, 404);
+      expect(
+        (await service.submitSegments(
+          Request('PUT', Uri.parse('http://localhost/'), body: '{}'),
+          'owner',
+          id,
+        )).statusCode,
+        400,
+      );
+      await expectLater(
+        service.material('owner', id),
+        throwsA(isA<AttachmentFailure>()),
+      );
+      final duplicate = await upload(book: true);
+      expect(duplicate['id'], id);
+      expect(duplicate['cache_hit'], true);
+      commands.blockBookConversion!.complete();
+      final ready = await waitStatus(id);
+      expect(ready['ready'], true);
+      expect(ready['coverage'], 'full');
+      expect(ready['source_page_count'], 8);
+      expect(ready['skipped_pdf_pages'], 6);
+      expect(ready['completed_pages'], [1, 2]);
+      expect(commands.bookFormats, ['pdf']);
+      expect(commands.commands, isEmpty);
+
+      final material = await service.material(
+        'owner',
+        id,
+        mode: 'query',
+        query: 'PDF 第 8 页',
+      );
+      expect(material['text'], contains('后段书籍文字'));
+      expect(material['text'], isNot(contains('样本文字')));
+      expect(material['read_pages'], [2]);
+      expect(material['skipped_pdf_pages'], 6);
+      final scanned = await service.material(
+        'owner',
+        id,
+        mode: 'query',
+        query: 'PDF 第 6 页',
+      );
+      expect(scanned['text'], isEmpty);
+      final script = await service.scriptMaterial('owner', id);
+      expect(script['name'], 'sample.md');
+      final markdown = utf8.decode(base64Decode(script['base64'] as String));
+      expect(markdown, contains('## 开头'));
+      expect(markdown, contains('## 谐振'));
+      expect(markdown, isNot(contains('%PDF-')));
+    },
+  );
+
+  test(
+    'MarkItDown EPUB retries from the same original and hides partial output',
+    () async {
+      commands.bookUnits = [unit('第一章', '# 第一章\n\n临时文本'), 'invalid-unit'];
+      final source = [80, 75, 3, 4, 1];
+      final original = await upload(
+        name: 'sample.epub',
+        mime: 'application/epub+zip',
+        bytes: source,
+      );
+      final book = await upload(
+        name: 'sample.epub',
+        mime: 'application/epub+zip',
+        bytes: source,
+        book: true,
+      );
+      final id = book['id'] as String;
+      expect(id, isNot(original['id']));
+      final failed = await waitStatus(id);
+      expect(failed['ready'], false);
+      expect(failed['status'], 'failed');
+      expect(failed['retryable'], true);
+      expect(failed['segments'], isEmpty);
+
+      commands.bookUnits = [unit('第二章', '# 第二章\n\n已完成的正文')];
+      final retry = await service.read(readBook(), 'owner', id);
+      expect(retry.statusCode, 202);
+      final ready = await waitStatus(id);
+      expect(ready['ready'], true);
+      expect(ready['source_format'], 'epub');
+      expect(ready['skipped_pdf_pages'], 0);
+      final material = await service.material('owner', id);
+      expect(material['text'], contains('已完成的正文'));
+      expect(material['text'], isNot(contains('临时文本')));
+      expect(commands.bookFormats, ['epub', 'epub']);
+    },
+  );
+
+  test(
+    'MarkItDown textless PDF stays available as an original and skips OCR',
+    () async {
+      commands.bookSourcePages = 4;
+      commands.skippedBookPages = 4;
+      final id = (await upload(book: true))['id'] as String;
+      final failed = await waitStatus(id);
+      expect(failed['ready'], false);
+      expect(failed['error_code'], 'no_readable_text');
+      expect(failed['retryable'], false);
+      expect(failed['skipped_pdf_pages'], 4);
+      await service.read(readBook(), 'owner', id);
+      await upload(book: true);
+      expect((await waitStatus(id))['error_code'], 'no_readable_text');
+      expect(commands.bookFormats, ['pdf']);
+      expect(commands.commands, isEmpty);
+    },
+  );
 
   test(
     'script materials preserve owned source bytes and reject another tenant',
@@ -506,6 +676,67 @@ void main() {
       expect((exact['segments'] as List).first['text'], text);
       expect(exact['text_truncated'], false);
       expect(exact['total_pages'], 2);
+    },
+  );
+
+  test(
+    'the Agent can query a late chapter from a prepared Markdown book',
+    () async {
+      const chapterTitle = '回声坐标';
+      const chapterText = '晚期章节中的真实答案样本。';
+      final chapters = [
+        for (var i = 1; i < 36; i++) '## 第 $i 章\n\n前序段落。' * 150,
+        '## 第 36 章 $chapterTitle\n\n$chapterText',
+      ];
+      final id =
+          (await upload(
+                name: '样本书.md',
+                mime: 'text/markdown',
+                bytes: utf8.encode(chapters.join('\n\n')),
+              ))['id']
+              as String;
+      final prepared = await service.submitSegments(
+        Request(
+          'PUT',
+          Uri.parse('http://localhost/'),
+          body: jsonEncode({
+            'full': true,
+            'segments': [
+              for (final (index, chapter) in chapters.indexed)
+                {
+                  'index': index,
+                  'locator': '第 ${index + 1} 章',
+                  'text': chapter,
+                },
+            ],
+          }),
+        ),
+        'owner',
+        id,
+      );
+      expect(prepared.statusCode, 200);
+      final runtime = GenkitXiaoqiAgentRuntime(
+        store,
+        ImageService(store),
+        attachments: service,
+      );
+      final result = await runtime.readTaskMaterial(
+        tenantId: 'owner',
+        materials: [
+          {
+            'id': 'book-source-markdown',
+            'name': '样本书.md',
+            'attachment_id': id,
+            'kind': 'document',
+          },
+        ],
+        materialId: 'book-source-markdown',
+        mode: 'query',
+        query: chapterTitle,
+      );
+      expect(result['text'], contains(chapterText));
+      expect(result['read_pages'], contains(36));
+      expect(result['text'], isNot(contains('第 1 章')));
     },
   );
 

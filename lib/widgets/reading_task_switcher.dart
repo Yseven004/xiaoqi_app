@@ -31,6 +31,31 @@ List<BookLibraryItem> _filterBooksByQuery(
       .toList(growable: false);
 }
 
+Future<BookLibraryItem?> showNewReadingTaskDialog(
+  BuildContext context, {
+  required BookLibraryService library,
+  required int? selectedBookId,
+  required ValueChanged<bool> onSearchFocusChanged,
+  required Future<BookLibraryItem?> Function(BuildContext) onAddBook,
+}) => showGeneralDialog<BookLibraryItem>(
+  context: context,
+  barrierDismissible: true,
+  barrierLabel: '关闭新建阅读任务',
+  barrierColor: const Color(0x4032363C),
+  transitionDuration: const Duration(milliseconds: 160),
+  pageBuilder: (dialogContext, _, _) => _NewReadingTaskDialog(
+    library: library,
+    selectedBookId: selectedBookId,
+    onSearchFocusChanged: onSearchFocusChanged,
+    onSelectBook: (item) => Navigator.of(dialogContext).pop(item),
+    onAddBook: onAddBook,
+  ),
+  transitionBuilder: (context, animation, _, child) => FadeTransition(
+    opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+    child: child,
+  ),
+);
+
 /// A compact book-task control and its two glass panels, anchored to the
 /// composer edge so the list opens upward without changing the page layout.
 class ReadingTaskSwitcher extends StatefulWidget {
@@ -53,7 +78,7 @@ class ReadingTaskSwitcher extends StatefulWidget {
   final ValueChanged<BookLibraryItem> onSelectBook;
   final ValueChanged<bool> onSearchFocusChanged;
   final VoidCallback onStartIndependent;
-  final VoidCallback onAddBook;
+  final Future<BookLibraryItem?> Function(BuildContext) onAddBook;
 
   @override
   State<ReadingTaskSwitcher> createState() => _ReadingTaskSwitcherState();
@@ -446,31 +471,16 @@ class _ReadingTaskSwitcherState extends State<ReadingTaskSwitcher>
 
   Future<void> _showNewTaskDialog() async {
     widget.composerFocusNode.unfocus();
-    await showGeneralDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: '关闭新建阅读任务',
-      barrierColor: const Color(0x4032363C),
-      transitionDuration: const Duration(milliseconds: 160),
-      pageBuilder: (dialogContext, _, _) => _NewReadingTaskDialog(
-        library: widget.library,
-        selectedBookId: widget.selectedBookId,
-        onSearchFocusChanged: widget.onSearchFocusChanged,
-        onSelectBook: (item) {
-          Navigator.of(dialogContext).pop();
-          widget.onSelectBook(item);
-        },
-        onAddBook: () {
-          Navigator.of(dialogContext).pop();
-          widget.onAddBook();
-        },
-      ),
-      transitionBuilder: (context, animation, _, child) => FadeTransition(
-        opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
-        child: child,
-      ),
+    final selected = await showNewReadingTaskDialog(
+      context,
+      library: widget.library,
+      selectedBookId: widget.selectedBookId,
+      onSearchFocusChanged: widget.onSearchFocusChanged,
+      onAddBook: widget.onAddBook,
     );
-    if (mounted) widget.composerFocusNode.unfocus();
+    if (!mounted) return;
+    widget.composerFocusNode.unfocus();
+    if (selected != null) widget.onSelectBook(selected);
   }
 
   @override
@@ -578,7 +588,7 @@ class _NewReadingTaskDialog extends StatefulWidget {
   final int? selectedBookId;
   final ValueChanged<bool> onSearchFocusChanged;
   final ValueChanged<BookLibraryItem> onSelectBook;
-  final VoidCallback onAddBook;
+  final Future<BookLibraryItem?> Function(BuildContext) onAddBook;
 
   @override
   State<_NewReadingTaskDialog> createState() => _NewReadingTaskDialogState();
@@ -590,6 +600,7 @@ class _NewReadingTaskDialogState extends State<_NewReadingTaskDialog> {
   final _booksScrollController = ScrollController();
   List<BookLibraryItem> _books = const [];
   bool _loading = true;
+  bool _addingBook = false;
   String? _loadError;
   String _query = '';
 
@@ -637,6 +648,22 @@ class _NewReadingTaskDialogState extends State<_NewReadingTaskDialog> {
 
   List<BookLibraryItem> get _filteredBooks {
     return _filterBooksByQuery(_books, _query);
+  }
+
+  Future<void> _addBook() async {
+    if (_addingBook) return;
+    _searchFocusNode.unfocus();
+    _addingBook = true;
+    try {
+      final item = await widget.onAddBook(context);
+      if (item != null &&
+          mounted &&
+          ModalRoute.of(context)?.isCurrent == true) {
+        widget.onSelectBook(item);
+      }
+    } finally {
+      _addingBook = false;
+    }
   }
 
   @override
@@ -813,7 +840,7 @@ class _NewReadingTaskDialogState extends State<_NewReadingTaskDialog> {
                       child: Divider(height: 1, color: Color(0x557D858F)),
                     ),
                     const SizedBox(height: 8),
-                    _AddBookButton(onPressed: widget.onAddBook),
+                    _AddBookButton(onPressed: _addBook),
                   ],
                 ),
               ),

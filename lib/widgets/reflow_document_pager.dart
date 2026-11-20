@@ -30,6 +30,7 @@ class ReflowDocumentPager extends StatefulWidget {
     this.onAnchorChanged,
     this.onChapterChanged,
     this.onProgressChanged,
+    this.verticalChapterTitleStyle,
   });
 
   final XiaoqiDocument document;
@@ -41,6 +42,7 @@ class ReflowDocumentPager extends StatefulWidget {
   final ValueChanged<FlowReaderAnchor>? onAnchorChanged;
   final ValueChanged<String>? onChapterChanged;
   final ValueChanged<ReaderPaginationProgress>? onProgressChanged;
+  final TextStyle? verticalChapterTitleStyle;
 
   @override
   State<ReflowDocumentPager> createState() => _ReflowDocumentPagerState();
@@ -78,6 +80,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     _pageController = PageController();
     _verticalController = ScrollController();
     _requestedAnchor = widget.initialAnchor;
+    _verticalRestoreScheduled = widget.mode == ReaderPaginationMode.vertical;
   }
 
   @override
@@ -364,27 +367,31 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         blocks.first.text != chapter.title;
     final result = ColoredBox(
       color: Colors.white,
-      child: SingleChildScrollView(
-        key: const Key('book_body_document_vertical_scroll'),
-        controller: _verticalController,
-        padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
-        child: NotificationListener<ScrollEndNotification>(
-          onNotification: (_) {
+      child: NotificationListener<ScrollEndNotification>(
+        onNotification: (notification) {
+          if (notification.depth == 0) {
             _emitVerticalAnchor(chapter.id, blocks, blockKeys);
-            return false;
-          },
+          }
+          return false;
+        },
+        child: SingleChildScrollView(
+          key: const Key('book_body_document_vertical_scroll'),
+          controller: _verticalController,
+          padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (showTitle) ...[
                 Text(
                   chapter.title,
-                  style: const TextStyle(
-                    color: Color(0xFF252525),
-                    fontSize: 22,
-                    height: 1.3,
-                    fontWeight: FontWeight.w700,
-                  ),
+                  style:
+                      widget.verticalChapterTitleStyle ??
+                      const TextStyle(
+                        color: Color(0xFF252525),
+                        fontSize: 22,
+                        height: 1.3,
+                        fontWeight: FontWeight.w700,
+                      ),
                 ),
                 const SizedBox(height: 18),
               ],

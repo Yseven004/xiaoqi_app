@@ -48,8 +48,9 @@ class AttachmentPreparationState {
 }
 
 class _PreparationOperation {
-  _PreparationOperation(this.fingerprint);
+  _PreparationOperation(this.fingerprint, this.expectedAuthorization);
   final String fingerprint;
+  final String? expectedAuthorization;
   final abort = Completer<void>();
   String? remoteId;
   String? account;
@@ -64,12 +65,15 @@ class HomeChatAttachmentPreparer {
   HomeChatAttachmentPreparer({
     CapabilityCloudSync? cloud,
     HomeChatAttachmentReader? reader,
+    String? attachmentProfile,
   }) : _cloud = cloud ?? CapabilityCloudSync.instance,
-       _reader = reader ?? HomeChatAttachmentReader();
+       _reader = reader ?? HomeChatAttachmentReader(),
+       _attachmentProfile = attachmentProfile;
 
   static const _parserVersion = 'attachment-local-2';
   final CapabilityCloudSync _cloud;
   final HomeChatAttachmentReader _reader;
+  final String? _attachmentProfile;
   final states = ValueNotifier<Map<String, AttachmentPreparationState>>(
     const {},
   );
@@ -123,12 +127,13 @@ class HomeChatAttachmentPreparer {
     };
   }
 
-  void start(HomeChatAttachment attachment) {
+  void start(HomeChatAttachment attachment, {String? expectedAuthorization}) {
     if (_disposed) return;
     final fingerprint = _fingerprint(attachment);
     final previous = _operations[attachment.id];
     if (previous != null &&
         previous.fingerprint == fingerprint &&
+        previous.expectedAuthorization == expectedAuthorization &&
         (_prepared[attachment.id]?.preparationExpiresAt?.isBefore(
               DateTime.now(),
             ) !=
@@ -137,7 +142,7 @@ class HomeChatAttachmentPreparer {
     }
     if (previous != null) cancel(attachment.id);
     _prepared.remove(attachment.id);
-    final operation = _PreparationOperation(fingerprint);
+    final operation = _PreparationOperation(fingerprint, expectedAuthorization);
     _operations[attachment.id] = operation;
     _publish(attachment, operation, phase: 'validating', label: '正在准备');
     operation.result = _run(attachment, operation);
@@ -154,15 +159,16 @@ class HomeChatAttachmentPreparer {
   Future<HomeChatAttachment> prepare(
     HomeChatAttachment attachment, {
     bool Function()? isCancelled,
+    String? expectedAuthorization,
   }) async {
     if (_disposed) throw const FormatException('附件准备已关闭');
-    start(attachment);
+    start(attachment, expectedAuthorization: expectedAuthorization);
     var operation = _operations[attachment.id]!;
     final account = (await _cloud.signedInEmail)?.trim().toLowerCase() ?? '';
     if (operation.cancelled ||
         operation.failed ||
         (operation.account != null && operation.account != account)) {
-      retry(attachment);
+      retry(attachment, expectedAuthorization: expectedAuthorization);
       operation = _operations[attachment.id]!;
     }
     final current = operation;
@@ -211,18 +217,21 @@ class HomeChatAttachmentPreparer {
     final id = operation.remoteId;
     if (id != null && old?.ready != true) {
       final cancellation = _cloud
-          .cancelAttachment(id)
+          .cancelAttachment(
+            id,
+            expectedAuthorization: operation.expectedAuthorization,
+          )
           .catchError((Object _) {});
       _cancellations[attachmentId] = cancellation;
       unawaited(cancellation);
     }
   }
 
-  void retry(HomeChatAttachment attachment) {
+  void retry(HomeChatAttachment attachment, {String? expectedAuthorization}) {
     cancel(attachment.id);
     _operations.remove(attachment.id);
     _prepared.remove(attachment.id);
-    start(attachment);
+    start(attachment, expectedAuthorization: expectedAuthorization);
   }
 
   bool _current(
@@ -276,12 +285,16 @@ class HomeChatAttachmentPreparer {
       _check(attachment, operation);
       final hash = (await sha256.bind(File(attachment.path).openRead()).first)
           .toString();
+      _check(attachment, operation);
       attachment = attachment.copyWith(contentHash: hash);
+      final extension = attachment.name.split('.').last.toLowerCase();
       final account = (await _cloud.signedInEmail)?.trim().toLowerCase() ?? '';
       operation.account = account;
-      final cacheKey = sha256
-          .convert(utf8.encode('$account|$hash|$_parserVersion|chi_sim+eng'))
-          .toString();
+      final profile = _attachmentProfile;
+      final cacheIdentity = profile == null
+          ? '$account|$hash|$_parserVersion|chi_sim+eng'
+          : '$account|$hash|$profile|$extension';
+      final cacheKey = sha256.convert(utf8.encode(cacheIdentity)).toString();
       Map<String, dynamic>? snapshot;
       String? id;
       if (account.isNotEmpty) {
@@ -290,7 +303,8 @@ class HomeChatAttachmentPreparer {
       }
       // Model metadata is persisted with chat history. A matching content hash
       // permits its reference to recover after app restart as well.
-      if (id == null &&
+      if (profile == null &&
+          id == null &&
           original.contentHash == hash &&
           original.preparationExpiresAt?.isAfter(DateTime.now()) == true) {
         id = original.remoteAttachmentId;
@@ -301,6 +315,7 @@ class HomeChatAttachmentPreparer {
           snapshot = await _cloud.getAttachment(
             id,
             abortTrigger: operation.abort.future,
+            expectedAuthorization: operation.expectedAuthorization,
           );
         } on AttachmentCloudException catch (error) {
           if (error.statusCode != 404 && error.statusCode != 410) rethrow;
@@ -328,6 +343,8 @@ class HomeChatAttachmentPreparer {
                 : (await sha256.bind(File(upload.path).openRead()).first)
                       .toString(),
             abortTrigger: operation.abort.future,
+            expectedAuthorization: operation.expectedAuthorization,
+            attachmentProfile: profile,
             onProgress: (sent, total) => _publish(
               attachment,
               operation,
@@ -346,6 +363,7 @@ class HomeChatAttachmentPreparer {
         }
       }
       _check(attachment, operation);
+      if (profile != null) _checkProfileSnapshot(snapshot, profile, extension);
       attachment = attachment.copyWith(remoteAttachmentId: id);
       final expires =
           _resourceExpiry(snapshot?['expires_at']) ??
@@ -356,8 +374,8 @@ class HomeChatAttachmentPreparer {
         await _saveCache(attachment, cacheKey, id, expires);
       }
       _check(attachment, operation);
-      final extension = attachment.name.split('.').last.toLowerCase();
-      if (!attachment.isImage &&
+      if (profile == null &&
+          !attachment.isImage &&
           extension != 'pdf' &&
           snapshot?['ready'] != true) {
         _publish(attachment, operation, phase: 'extracting', label: '正在解析');
@@ -366,31 +384,43 @@ class HomeChatAttachmentPreparer {
           operation.abort.future.then<List<String>>((_) => throw _cancelled),
         ]);
         _check(attachment, operation);
-        snapshot = await _cloud.submitAttachmentSegments(id, [
-          for (var index = 0; index < chunks.length; index++)
-            {
-              'index': index,
-              'locator':
-                  RegExp(
-                    r'^\[([^\]]+)\]',
-                  ).firstMatch(chunks[index])?.group(1) ??
-                  '片段 ${index + 1}',
-              'text': chunks[index],
-            },
-        ], abortTrigger: operation.abort.future);
+        snapshot = await _cloud.submitAttachmentSegments(
+          id,
+          [
+            for (var index = 0; index < chunks.length; index++)
+              {
+                'index': index,
+                'locator':
+                    RegExp(
+                      r'^\[([^\]]+)\]',
+                    ).firstMatch(chunks[index])?.group(1) ??
+                    '片段 ${index + 1}',
+                'text': chunks[index],
+              },
+          ],
+          abortTrigger: operation.abort.future,
+          expectedAuthorization: operation.expectedAuthorization,
+        );
       }
       _check(attachment, operation);
-      if (!attachment.isImage) {
+      final needsProfileRetry =
+          profile != null &&
+          (snapshot?['status'] == 'cancelled' ||
+              (snapshot?['status'] == 'failed' &&
+                  snapshot?['retryable'] == true));
+      if ((profile == null && !attachment.isImage) || needsProfileRetry) {
         _publish(attachment, operation, phase: 'reading', label: '正在阅读');
         snapshot = await _cloud.readAttachment(
           id,
           abortTrigger: operation.abort.future,
+          expectedAuthorization: operation.expectedAuthorization,
         );
       }
       snapshot = await _cloud.waitForAttachment(
         id,
         initial: snapshot,
         abortTrigger: operation.abort.future,
+        expectedAuthorization: operation.expectedAuthorization,
         isCancelled: () => operation.cancelled,
         onSnapshot: (value) {
           attachment = _withSnapshot(attachment, value);
@@ -419,6 +449,7 @@ class HomeChatAttachmentPreparer {
         },
       );
       _check(attachment, operation);
+      if (profile != null) _checkProfileSnapshot(snapshot, profile, extension);
       attachment = _withSnapshot(
         attachment,
         snapshot,
@@ -461,6 +492,21 @@ class HomeChatAttachmentPreparer {
     }
   }
 
+  void _checkProfileSnapshot(
+    Map<String, dynamic>? snapshot,
+    String profile,
+    String extension,
+  ) {
+    if (snapshot?['parser_profile'] == profile &&
+        snapshot?['source_format'] == extension) {
+      return;
+    }
+    throw const AttachmentCloudException(
+      '服务端没有返回预期的文档转换结果',
+      code: 'unexpected_attachment_profile',
+    );
+  }
+
   String _fingerprint(HomeChatAttachment attachment) {
     try {
       final stat = File(attachment.path).statSync();
@@ -484,6 +530,8 @@ class HomeChatAttachmentPreparer {
       preparationPhase: value['phase']?.toString() ?? '',
       preparationPageCount: count,
       preparationCompletedPages: completed,
+      preparationSkippedPages:
+          (value['skipped_pdf_pages'] as num?)?.toInt() ?? 0,
       preparationExpiresAt: _resourceExpiry(value['expires_at']),
       sourceLabel: attachment.isImage
           ? '图片'
@@ -520,8 +568,12 @@ class HomeChatAttachmentPreparer {
     final file = File(attachment.path);
     if (!await file.exists()) throw FormatException('找不到文件：${attachment.name}');
     final length = await file.length();
-    if (length == 0 || length > 50 * 1024 * 1024) {
-      throw const FormatException('附件为空或超过 50 MB 限制');
+    final limit = attachmentUploadLimitBytes(_attachmentProfile);
+    if (length == 0 || length > limit) {
+      throw AttachmentCloudException(
+        '附件为空或超过 ${limit ~/ (1024 * 1024)} MB 限制',
+        code: 'invalid_size',
+      );
     }
     final handle = await file.open();
     final List<int> header;
@@ -647,8 +699,9 @@ class HomeChatAttachmentPreparer {
     }
   }
 
-  File _cacheFile(HomeChatAttachment attachment) =>
-      File('${attachment.path}.attachment-preparation.json');
+  File _cacheFile(HomeChatAttachment attachment) => File(
+    '${attachment.path}.${_attachmentProfile ?? 'attachment-preparation'}.json',
+  );
 
   Future<Map<String, dynamic>?> _loadCache(
     HomeChatAttachment attachment,

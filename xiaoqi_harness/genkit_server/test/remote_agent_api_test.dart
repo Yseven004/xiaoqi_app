@@ -462,6 +462,14 @@ void main() {
     runtime.effectStore = store;
     runtime.turnStarted = Completer<void>();
     const taskId = 'pause-resume-task';
+    const bookMaterials = [
+      {
+        'id': 'book-source-markdown',
+        'name': '示例书籍.md',
+        'kind': 'document',
+        'attachment_id': 'fixture-ready-book',
+      },
+    ];
     final initial = ownerAgent.chat().sendStream(
       message: Message(
         role: Role.user,
@@ -472,6 +480,7 @@ void main() {
             'workflow_id': 'pause-conversation',
             'user_message_id': 'pause-question',
             'current_turn_text': 'explain and draw',
+            'materials': bookMaterials,
           },
         },
       ),
@@ -520,12 +529,21 @@ void main() {
     expect(stoppedSnapshot.finishReason, AgentFinishReason.aborted);
     runtime.waitForCancellation = false;
     runtime.turnStarted = null;
-    final restored = ownerAgent.chat(snapshotId: checkpoint).sendStream();
+    final restored = ownerAgent
+        .chat(snapshotId: checkpoint)
+        .sendStream(
+          message: Message(
+            role: Role.user,
+            content: const [],
+            metadata: {'xiaoqi_agent_resume': const <String, dynamic>{}},
+          ),
+        );
     await restored.stream.drain<void>();
     expect((await restored.response).text, '你好');
     expect(runtime.turnCount, 2);
     expect(runtime.lastRequest!['task_id'], taskId);
     expect(runtime.lastRequest!['user_message_id'], 'pause-question');
+    expect(runtime.lastRequest!['materials'], bookMaterials);
     expect(runtime.imageSubmissions, 1);
     final completedRetry = ownerAgent.chat(snapshotId: checkpoint).sendStream();
     await completedRetry.stream.drain<void>();

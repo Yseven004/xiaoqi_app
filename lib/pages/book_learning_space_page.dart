@@ -13,6 +13,7 @@ import '../widgets/book_metadata_editor.dart';
 import '../widgets/book_spine_shading.dart';
 import '../widgets/book_metadata_form_sheet.dart';
 import '../widgets/book_paper_background.dart';
+import '../widgets/book_pdf_import_sheet.dart';
 import '../widgets/app_toast.dart';
 
 enum _FilterMenuActionType { all, category, create }
@@ -39,7 +40,7 @@ class BookLearningSpacePage extends StatefulWidget {
 
   final ValueChanged<int> onOpenBook;
   final ValueChanged<bool>? onSearchFocusChanged;
-  final VoidCallback onCreateBook;
+  final ValueChanged<BookAddAction> onCreateBook;
   final BookLibraryService? bookLibraryService;
   final BookLearningPreferences? preferences;
   final int refreshVersion;
@@ -1218,9 +1219,15 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
               ),
               const SizedBox(width: 4),
               _CreateBookButton(
-                onTap: () {
+                onTap: (anchorContext) async {
                   _clearInputFocus();
-                  widget.onCreateBook();
+                  final action = await showBookAddSourceSheet(
+                    context,
+                    anchorContext: anchorContext,
+                  );
+                  if (mounted && action != null) {
+                    widget.onCreateBook(action);
+                  }
                 },
               ),
             ],
@@ -2049,7 +2056,7 @@ class _ViewModeToggle extends StatelessWidget {
 class _CreateBookButton extends StatelessWidget {
   const _CreateBookButton({required this.onTap});
 
-  final VoidCallback onTap;
+  final ValueChanged<BuildContext> onTap;
 
   @override
   Widget build(BuildContext context) => Semantics(
@@ -2059,7 +2066,7 @@ class _CreateBookButton extends StatelessWidget {
       color: BookFlowTheme.ink,
       borderRadius: BorderRadius.circular(11),
       child: InkWell(
-        onTap: onTap,
+        onTap: () => onTap(context),
         borderRadius: BorderRadius.circular(11),
         child: const SizedBox(
           height: 48,

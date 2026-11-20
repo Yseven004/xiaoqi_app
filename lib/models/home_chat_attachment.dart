@@ -24,6 +24,7 @@ class HomeChatAttachment {
     this.preparationPhase = '',
     this.preparationPageCount,
     this.preparationCompletedPages,
+    this.preparationSkippedPages = 0,
     this.preparationExpiresAt,
     this.originalImagePath,
     this.originalImageName,
@@ -50,6 +51,7 @@ class HomeChatAttachment {
   final String preparationPhase;
   final int? preparationPageCount;
   final int? preparationCompletedPages;
+  final int preparationSkippedPages;
   final DateTime? preparationExpiresAt;
   final String? originalImagePath;
   final String? originalImageName;
@@ -79,6 +81,8 @@ class HomeChatAttachment {
     'preparation_phase': preparationPhase,
     'preparation_page_count': preparationPageCount,
     'preparation_completed_pages': preparationCompletedPages,
+    if (preparationSkippedPages > 0)
+      'preparation_skipped_pages': preparationSkippedPages,
     'preparation_expires_at': preparationExpiresAt?.toUtc().toIso8601String(),
     if (originalImagePath != null) 'original_image_path': originalImagePath,
     if (originalImageName != null) 'original_image_name': originalImageName,
@@ -118,6 +122,8 @@ class HomeChatAttachment {
       preparationCompletedPages: int.tryParse(
         raw['preparation_completed_pages']?.toString() ?? '',
       ),
+      preparationSkippedPages:
+          int.tryParse(raw['preparation_skipped_pages']?.toString() ?? '') ?? 0,
       preparationExpiresAt: DateTime.tryParse(
         raw['preparation_expires_at']?.toString() ?? '',
       ),
@@ -147,6 +153,7 @@ class HomeChatAttachment {
     String? preparationPhase,
     int? preparationPageCount,
     int? preparationCompletedPages,
+    int? preparationSkippedPages,
     DateTime? preparationExpiresAt,
     List<ChatAnnotation>? imageAnnotations,
     bool? annotationSnapshotDirty,
@@ -176,6 +183,8 @@ class HomeChatAttachment {
     preparationPageCount: preparationPageCount ?? this.preparationPageCount,
     preparationCompletedPages:
         preparationCompletedPages ?? this.preparationCompletedPages,
+    preparationSkippedPages:
+        preparationSkippedPages ?? this.preparationSkippedPages,
     preparationExpiresAt: preparationExpiresAt ?? this.preparationExpiresAt,
     originalImagePath: originalImagePath,
     originalImageName: originalImageName,

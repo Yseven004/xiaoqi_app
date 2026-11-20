@@ -24,6 +24,8 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
     this.tableRowsOverride,
     this.continuation = false,
     this.onSelectionChanged,
+    this.contextMenuBuilder,
+    this.textStyleBuilder,
     this.editable = false,
     this.controller,
     this.onTextChanged,
@@ -35,6 +37,8 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
   final List<List<String>>? tableRowsOverride;
   final bool continuation;
   final ValueChanged<bool>? onSelectionChanged;
+  final EditableTextContextMenuBuilder? contextMenuBuilder;
+  final TextStyle Function(TextStyle)? textStyleBuilder;
   final bool editable;
   final TextEditingController? controller;
   final ValueChanged<String>? onTextChanged;
@@ -78,7 +82,9 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
           margin: const EdgeInsets.only(bottom: 12),
           padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
           decoration: const BoxDecoration(
-            border: Border(left: BorderSide(color: NotePageTheme.gold, width: 3)),
+            border: Border(
+              left: BorderSide(color: NotePageTheme.gold, width: 3),
+            ),
             color: NotePageTheme.soft,
           ),
           child: _textFieldOrSelectable(
@@ -120,6 +126,7 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
           textOverride: textOverride,
           rowsOverride: tableRowsOverride,
           onSelectionChanged: onSelectionChanged,
+          contextMenuBuilder: contextMenuBuilder,
         );
       case 'math':
       case 'formula':
@@ -181,7 +188,8 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
     }
     return SelectableText(
       text,
-      style: style,
+      style: textStyleBuilder?.call(style) ?? style,
+      contextMenuBuilder: contextMenuBuilder ?? _standardDocumentContextMenu,
       onSelectionChanged: (selection, _) =>
           onSelectionChanged?.call(!selection.isCollapsed),
     );
@@ -223,12 +231,14 @@ class XiaoqiDocumentTableBlock extends StatelessWidget {
     this.textOverride,
     this.rowsOverride,
     this.onSelectionChanged,
+    this.contextMenuBuilder,
   });
 
   final XiaoqiDocumentBlock block;
   final String? textOverride;
   final List<List<String>>? rowsOverride;
   final ValueChanged<bool>? onSelectionChanged;
+  final EditableTextContextMenuBuilder? contextMenuBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -265,6 +275,8 @@ class XiaoqiDocumentTableBlock extends StatelessWidget {
                         fontSize: 15,
                         height: 1.45,
                       ),
+                      contextMenuBuilder:
+                          contextMenuBuilder ?? _standardDocumentContextMenu,
                       onSelectionChanged: (selection, _) =>
                           onSelectionChanged?.call(!selection.isCollapsed),
                     ),
@@ -292,11 +304,17 @@ class XiaoqiDocumentTableBlock extends StatelessWidget {
         fontSize: 16,
         height: 1.55,
       ),
+      contextMenuBuilder: contextMenuBuilder ?? _standardDocumentContextMenu,
       onSelectionChanged: (selection, _) =>
           onSelectionChanged?.call(!selection.isCollapsed),
     ),
   );
 }
+
+Widget _standardDocumentContextMenu(
+  BuildContext context,
+  EditableTextState editable,
+) => AdaptiveTextSelectionToolbar.editableText(editableTextState: editable);
 
 class XiaoqiDocumentImageBlock extends StatelessWidget {
   const XiaoqiDocumentImageBlock({
@@ -402,7 +420,9 @@ List<List<String>>? _decodeRows(XiaoqiDocumentBlock block) {
     if (decoded is! List) return null;
     final rows = decoded
         .whereType<List>()
-        .map((row) => row.map((cell) => cell.toString()).toList(growable: false))
+        .map(
+          (row) => row.map((cell) => cell.toString()).toList(growable: false),
+        )
         .where((row) => row.isNotEmpty)
         .toList(growable: false);
     return rows.isEmpty ? null : rows;

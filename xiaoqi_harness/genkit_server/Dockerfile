@@ -13,10 +13,15 @@ RUN dart pub get --no-precompile
 
 FROM dart-deps AS tests
 ARG DART_TEST_ARGS="--concurrency=1"
-RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
  && rm -rf /var/lib/apt/lists/*
+COPY genkit_server/bin/requirements-book-markitdown.txt /tmp/requirements-book-markitdown.txt
+RUN python3 -m venv /opt/book-markitdown \
+ && /opt/book-markitdown/bin/pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements-book-markitdown.txt
 COPY genkit_server/ ./
-RUN dart analyze && dart test ${DART_TEST_ARGS}
+ENV XIAOQI_BOOK_MARKITDOWN_PYTHON=/opt/book-markitdown/bin/python XIAOQI_BOOK_MARKITDOWN_PATH=/app/bin/book_markitdown.py
+RUN /opt/book-markitdown/bin/python bin/tests/test_book_markitdown.py \
+ && dart analyze && dart test ${DART_TEST_ARGS}
 
 FROM dart-deps AS build
 COPY genkit_server/lib/ ./lib/
@@ -25,6 +30,14 @@ RUN dart build cli --target bin/server.dart --output /out \
  && dart build cli --target bin/verify_capability_chain.dart --output /probe \
  && dart build cli --target bin/verify_web_tools.dart --output /web-probe \
  && dart build cli --target bin/verify_stdio_runtime.dart --output /stdio-probe
+
+FROM debian:bookworm-slim AS book-markitdown-deps
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/*
+COPY genkit_server/bin/requirements-book-markitdown.txt /tmp/requirements-book-markitdown.txt
+RUN python3 -m venv /opt/book-markitdown \
+ && /opt/book-markitdown/bin/pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements-book-markitdown.txt
 
 FROM debian:bookworm-slim
 COPY --from=compression-deps /usr/local/bin/node /usr/local/bin/node
@@ -42,7 +55,10 @@ COPY --from=build /web-probe/bundle/bin/verify_web_tools /app/bin/verify_web_too
 COPY --from=build /stdio-probe/bundle/bin/verify_stdio_runtime /app/bin/verify_stdio_runtime
 COPY genkit_server/bin/docker_worker.py /app/docker_worker.py
 COPY genkit_server/bin/prepare_dependencies.py /app/prepare_dependencies.py
+COPY genkit_server/bin/book_markitdown.py /app/book_markitdown.py
+COPY --from=book-markitdown-deps /opt/book-markitdown /opt/book-markitdown
 ENV PORT=8080 MCP_PORT=8081 XIAOQI_DATA_DIR=/var/lib/xiaoqi SANDBOX_WORKER_PYTHON=/usr/bin/python3 SANDBOX_WORKER_PATH=/app/docker_worker.py PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH=/app/lib
+ENV XIAOQI_BOOK_MARKITDOWN_PYTHON=/opt/book-markitdown/bin/python XIAOQI_BOOK_MARKITDOWN_PATH=/app/book_markitdown.py
 EXPOSE 8080 8081
 USER 10001:10001
 ENTRYPOINT ["/app/bin/server"]

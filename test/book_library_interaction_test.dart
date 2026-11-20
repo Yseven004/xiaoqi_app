@@ -244,7 +244,7 @@ void main() {
           body: BookLearningSpacePage(
             bookLibraryService: library,
             onOpenBook: (_) {},
-            onCreateBook: () {},
+            onCreateBook: (_) {},
           ),
         ),
       ),
@@ -284,8 +284,15 @@ void main() {
     await tester.tap(find.text('添加'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    await tester.ensureVisible(find.text('扫描或输入 ISBN'));
-    await tester.tap(find.text('扫描或输入 ISBN'));
+    final sourceRows = [
+      '扫描/输入 ISBN',
+      '本机导入',
+      '微信导入',
+      '网上找书',
+    ].map((label) => tester.getTopLeft(find.text(label)).dy).toList();
+    expect(sourceRows, orderedEquals([...sourceRows]..sort()));
+    await tester.ensureVisible(find.text('扫描/输入 ISBN'));
+    await tester.tap(find.text('扫描/输入 ISBN'));
     await tester.pumpAndSettle();
     expect(result, BookAddAction.scan);
   });

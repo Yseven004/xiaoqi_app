@@ -24,6 +24,12 @@ class AttachmentService {
   static const maxTextBytes = 10 * 1024 * 1024;
   static const maxPdfPages = 500;
   static const parserProfile = 'pages-v1-poppler-tesseract-chi_sim+eng-2200';
+  static const readingBookMarkItDownProfile = 'reading-book-markitdown-v1';
+  static const maxReadingBookFileBytes = 256 * 1024 * 1024;
+  static const _maxReadingBookMarkdownBytes = 50 * 1024 * 1024;
+  static const _maxReadingBookOutputBytes = 64 * 1024 * 1024;
+  static const _maxReadingBookSegments = 10000;
+  static const _bookSegmentChars = 6000;
   static const ttl = Duration(hours: 24);
   static const _uuid = Uuid();
   final CloudStore store;
@@ -74,11 +80,27 @@ class AttachmentService {
         .first
         .trim()
         .toLowerCase();
-    final kind = _kind(name, mime);
-    final length = int.tryParse(request.headers['content-length'] ?? '');
-    if (length != null && (length < 1 || length > maxFileBytes)) {
+    final uploadProfile = request.headers['x-xiaoqi-attachment-profile'];
+    if (uploadProfile != null &&
+        uploadProfile != readingBookMarkItDownProfile) {
       throw const AttachmentFailure(
-        '附件大小必须在 1 字节至 50 MB 之间',
+        '附件处理方式无效',
+        code: 'invalid_attachment_profile',
+        statusCode: 400,
+      );
+    }
+    final bookFormat = uploadProfile == null
+        ? null
+        : _readingBookFormat(name, mime);
+    final kind = bookFormat == null ? _kind(name, mime) : 'document';
+    final sizeLimit = bookFormat == null
+        ? maxFileBytes
+        : maxReadingBookFileBytes;
+    final sizeLabel = bookFormat == null ? '50 MB' : '256 MB';
+    final length = int.tryParse(request.headers['content-length'] ?? '');
+    if (length != null && (length < 1 || length > sizeLimit)) {
+      throw AttachmentFailure(
+        '附件大小必须在 1 字节至 $sizeLabel 之间',
         code: 'file_limit',
         statusCode: 413,
       );
@@ -106,9 +128,9 @@ class AttachmentService {
       try {
         await for (final bytes in request.read()) {
           total += bytes.length;
-          if (total > maxFileBytes) {
-            throw const AttachmentFailure(
-              '附件超过 50 MB 限制',
+          if (total > sizeLimit) {
+            throw AttachmentFailure(
+              '附件超过 $sizeLabel 限制',
               code: 'file_limit',
               statusCode: 413,
             );
@@ -142,10 +164,23 @@ class AttachmentService {
       final header = await source
           .openRead(0, total < 1024 ? total : 1024)
           .fold<List<int>>([], (a, b) => a..addAll(b));
-      if (kind == 'pdf' && !String.fromCharCodes(header).contains('%PDF-')) {
+      if ((kind == 'pdf' || bookFormat == 'pdf') &&
+          !String.fromCharCodes(header).contains('%PDF-')) {
         throw const AttachmentFailure(
           '文件不是有效的 PDF',
           code: 'invalid_pdf',
+          statusCode: 400,
+        );
+      }
+      if (bookFormat == 'epub' &&
+          (header.length < 4 ||
+              header[0] != 80 ||
+              header[1] != 75 ||
+              header[2] != 3 ||
+              header[3] != 4)) {
+        throw const AttachmentFailure(
+          '文件不是有效的 EPUB',
+          code: 'invalid_epub',
           statusCode: 400,
         );
       }
@@ -159,8 +194,12 @@ class AttachmentService {
           statusCode: 415,
         );
       }
+      final resourceProfile = uploadProfile ?? parserProfile;
+      final identityProfile = bookFormat == null
+          ? resourceProfile
+          : '$resourceProfile|$bookFormat';
       final id = sha256
-          .convert(utf8.encode('$tenantHash|$hash|$kind|$parserProfile'))
+          .convert(utf8.encode('$tenantHash|$hash|$kind|$identityProfile'))
           .toString();
       final key = _key(tenant, id);
       while (_commits.containsKey(key)) {
@@ -174,7 +213,7 @@ class AttachmentService {
           _patch(key, {
             'expires_at': DateTime.now().add(ttl).millisecondsSinceEpoch,
           });
-          if (kind == 'pdf' &&
+          if ((kind == 'pdf' || bookFormat != null) &&
               cached.value['status'] != 'ready' &&
               !_work.containsKey(key))
             _schedule(key, mode: 'overview');
@@ -194,7 +233,8 @@ class AttachmentService {
               ? detectedMime
               : 'application/octet-stream',
           'sha256': hash,
-          'parser_profile': parserProfile,
+          'parser_profile': resourceProfile,
+          if (bookFormat != null) 'source_format': bookFormat,
           'size': total,
           'created_at': now.millisecondsSinceEpoch,
           'expires_at': now.add(ttl).millisecondsSinceEpoch,
@@ -212,7 +252,9 @@ class AttachmentService {
         } else {
           store.put(key, record, cached.revision);
         }
-        if (kind == 'pdf') _schedule(key, mode: 'overview');
+        if (kind == 'pdf' || bookFormat != null) {
+          _schedule(key, mode: 'overview');
+        }
         return _json(await _snapshot(key), 202);
       } finally {
         _commits.remove(key);
@@ -234,7 +276,7 @@ class AttachmentService {
         await _initialization;
         final key = _existingKey(tenant, id);
         final record = store.get(key)!.value;
-        if (record['kind'] != 'document') {
+        if (record['kind'] != 'document' || _isReadingBook(record)) {
           throw const AttachmentFailure(
             '该附件由服务器解析，不接受客户端片段',
             code: 'segments_not_allowed',
@@ -374,6 +416,14 @@ class AttachmentService {
       requestedPages = reading.selected;
       record = store.get(key)!.value;
     } else if (record['kind'] == 'document' && record['ready'] != true) {
+      if (_isReadingBook(record) && record['status'] == 'failed') {
+        throw AttachmentFailure(
+          record['message'] as String? ?? '书籍正文转换失败',
+          code: record['error_code'] as String? ?? 'parse_failed',
+          statusCode: 422,
+          retryable: record['retryable'] == true,
+        );
+      }
       throw const AttachmentFailure(
         '附件文字仍在准备，请稍后重试',
         code: 'attachment_not_ready',
@@ -398,6 +448,11 @@ class AttachmentService {
       'name': record['name'],
       'kind': record['kind'],
       'mime_type': record['mime_type'],
+      if (_isReadingBook(record)) ...{
+        'source_format': record['source_format'],
+        'source_page_count': record['source_page_count'],
+        'skipped_pdf_pages': record['skipped_pdf_pages'],
+      },
       'coverage': record['coverage'],
       'read_pages': supplied.toList(),
       'completed_pages': record['completed_pages'],
@@ -426,8 +481,31 @@ class AttachmentService {
     await _initialization;
     _ensureOpen();
     final record = store.get(_existingKey(tenant, id))!.value;
+    const scriptLimit = 20 * 1024 * 1024;
+    if (_isReadingBook(record)) {
+      if (record['ready'] != true) {
+        throw const FormatException('书籍正文仍在准备，请稍后重试');
+      }
+      if ((record['text_bytes'] as int? ?? 0) > scriptLimit) {
+        throw const FormatException('脚本处理的附件不能超过 20 MB，请拆分资料后再试');
+      }
+      final markdown = StringBuffer();
+      for (final page in _ints(record['completed_pages'])) {
+        final segment = await _loadSegment(record, page);
+        if (segment == null) throw const FormatException('书籍正文资料不完整');
+        markdown.write(segment['text']);
+      }
+      final bytes = utf8.encode(markdown.toString());
+      if (bytes.length > scriptLimit) {
+        throw const FormatException('脚本处理的附件不能超过 20 MB，请拆分资料后再试');
+      }
+      return {
+        'name': '${p.basenameWithoutExtension(record['name'] as String)}.md',
+        'base64': base64Encode(bytes),
+      };
+    }
     final file = _source(record);
-    if (await file.length() > 20 * 1024 * 1024) {
+    if (await file.length() > scriptLimit) {
       throw const FormatException('脚本处理的附件不能超过 20 MB，请拆分资料后再试');
     }
     return {
@@ -486,13 +564,19 @@ class AttachmentService {
     final result = _AttachmentRead(mode, query, pages, done);
     // API callers do not await completion; consume errors without changing the Future.
     unawaited(done.future.catchError((Object _) {}));
-    if (record['kind'] != 'pdf') {
+    final readingBook = _isReadingBook(record);
+    if ((!readingBook && record['kind'] != 'pdf') ||
+        (readingBook &&
+            (record['ready'] == true ||
+                (record['status'] == 'failed' &&
+                    record['retryable'] != true)))) {
       done.complete();
       return result;
     }
     final previousWork = _work[key];
     final work = _work.putIfAbsent(key, _AttachmentWork.new);
     work.requests.add(result);
+    if (readingBook && previousWork != null) return result;
     work.requests.sort(
       (a, b) => (a.mode == 'full' ? 1 : 0).compareTo(b.mode == 'full' ? 1 : 0),
     );
@@ -535,6 +619,14 @@ class AttachmentService {
             'phase': 'extracting',
             'timings_ms': timings,
           });
+          if (_isReadingBook(record)) {
+            await _prepareReadingBook(key, work, record);
+            for (final request in work.requests) {
+              if (!request.done.isCompleted) request.done.complete();
+            }
+            _work.remove(key);
+            continue;
+          }
           if (record['native_extracted'] != true) {
             await _extractNative(key, work);
             _checkActive(key, work);
@@ -631,6 +723,196 @@ class AttachmentService {
       _draining = false;
       done.complete();
       if (identical(_drainDone, done)) _drainDone = null;
+    }
+  }
+
+  Future<void> _prepareReadingBook(
+    String key,
+    _AttachmentWork work,
+    Map<String, dynamic> record,
+  ) async {
+    final watch = Stopwatch()..start();
+    final directory = await Directory(
+      p.join(p.absolute(_root.path), '.parse-${_uuid.v4()}'),
+    ).create();
+    try {
+      _checkActive(key, work);
+      final format = record['source_format'] as String;
+      final environment = Platform.environment;
+      final executable =
+          environment['XIAOQI_BOOK_MARKITDOWN_PYTHON'] ??
+          (Platform.isWindows ? 'python' : 'python3');
+      final worker = p.absolute(
+        environment['XIAOQI_BOOK_MARKITDOWN_PATH'] ??
+            p.join('bin', 'book_markitdown.py'),
+      );
+      final output = File(p.join(directory.path, 'book.jsonl'));
+      final result = await _run(
+        executable,
+        [worker, p.absolute(_source(record).path), format, output.path],
+        directory,
+        const Duration(minutes: 4),
+        inheritEnvironment: false,
+      );
+      _checkActive(key, work);
+      switch (result.exitCode) {
+        case 0:
+          break;
+        case 2:
+          throw AttachmentFailure(
+            format == 'pdf' ? 'PDF 无法打开，可能损坏或受密码保护' : 'EPUB 结构无效或不支持',
+            code: 'invalid_$format',
+            statusCode: 422,
+          );
+        case 3:
+          throw const AttachmentFailure(
+            '书籍页数或解压后大小超出转换上限，请拆分书籍后重试',
+            code: 'book_limit',
+            statusCode: 413,
+          );
+        default:
+          throw const AttachmentFailure(
+            '书籍正文转换失败，请稍后重试',
+            code: 'parse_failed',
+            statusCode: 422,
+            retryable: true,
+          );
+      }
+
+      final metadata = jsonDecode(result.stdout);
+      if (metadata is! Map ||
+          metadata['has_text'] is! bool ||
+          metadata['skipped_pages'] is! int) {
+        throw const FormatException('Invalid book conversion metadata');
+      }
+      final totalPages = metadata['page_count'];
+      final skipped = metadata['skipped_pages'] as int;
+      if (skipped < 0 ||
+          (format == 'pdf' &&
+              (totalPages is! int || totalPages < 1 || skipped > totalPages)) ||
+          (format == 'epub' && (totalPages != null || skipped != 0))) {
+        throw const FormatException('Invalid book conversion page counts');
+      }
+      if (metadata['has_text'] == false) {
+        _patch(key, {
+          'source_page_count': totalPages,
+          'skipped_pdf_pages': skipped,
+        });
+        throw const AttachmentFailure(
+          '整份资料没有可读取文字，扫描页可在阅读空间查看原页',
+          code: 'no_readable_text',
+          statusCode: 422,
+        );
+      }
+      if (await output.length() > _maxReadingBookOutputBytes) {
+        throw const AttachmentFailure(
+          '书籍转换输出超过限制，请拆分书籍后重试',
+          code: 'book_limit',
+          statusCode: 413,
+        );
+      }
+
+      var count = 0;
+      var bytes = 0;
+      var hasContent = false;
+      final sourcePages = <int>{};
+      await for (final line
+          in output
+              .openRead()
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())) {
+        _checkActive(key, work);
+        final unit = jsonDecode(line);
+        if (unit is! Map ||
+            unit['markdown'] is! String ||
+            unit['locator'] is! String ||
+            (unit['locator'] as String).length > 512 ||
+            (unit['locator'] as String).trim().isEmpty) {
+          throw const FormatException('Invalid book conversion unit');
+        }
+        final locator = unit['locator'] as String;
+        if (format == 'pdf') {
+          final page = _originalPdfPage(locator);
+          if (page == null || page < 1 || page > (totalPages as int)) {
+            throw const FormatException('Invalid original PDF page');
+          }
+          sourcePages.add(page);
+        }
+        final markdown = unit['markdown'] as String;
+        if (markdown.isEmpty) continue;
+        hasContent = hasContent || markdown.trim().isNotEmpty;
+        bytes += utf8.encode(markdown).length;
+        if (bytes > _maxReadingBookMarkdownBytes) {
+          throw const AttachmentFailure(
+            '书籍 Markdown 正文超过 50 MB，请拆分书籍后重试',
+            code: 'text_limit',
+            statusCode: 413,
+          );
+        }
+        for (final segment in _splitBookMarkdown(markdown)) {
+          _checkActive(key, work);
+          if (count >= _maxReadingBookSegments) {
+            throw const AttachmentFailure(
+              '书籍正文片段过多，请拆分书籍后重试',
+              code: 'book_limit',
+              statusCode: 413,
+            );
+          }
+          await _saveSegment(record, {
+            'index': count,
+            'page': count + 1,
+            'locator': locator,
+            'text': segment,
+            'source': 'markitdown',
+          });
+          count++;
+        }
+      }
+      if (!hasContent ||
+          (format == 'pdf' && sourcePages.length + skipped != totalPages)) {
+        throw const FormatException('Incomplete book conversion');
+      }
+      _checkActive(key, work);
+      final completed = List.generate(count, (index) => index + 1);
+      final timings = store.get(key)?.value['timings_ms'] as Map?;
+      _patch(key, {
+        'status': 'ready',
+        'phase': 'ready',
+        'ready': true,
+        'coverage': 'full',
+        'page_count': count,
+        'source_page_count': totalPages,
+        'skipped_pdf_pages': skipped,
+        'completed_pages': completed,
+        'selected_pages': <int>[],
+        'text_bytes': bytes,
+        'timings_ms': {...?timings, 'conversion': watch.elapsedMilliseconds},
+      });
+    } finally {
+      try {
+        await _delete(directory);
+      } on FileSystemException {
+        // Recovery also removes book conversion staging directories.
+      }
+    }
+  }
+
+  static Iterable<String> _splitBookMarkdown(String text) sync* {
+    var start = 0;
+    while (start < text.length) {
+      var end = start + _bookSegmentChars;
+      if (end >= text.length) {
+        yield text.substring(start);
+        break;
+      }
+      final newline = text.lastIndexOf('\n', end - 1);
+      if (newline >= start + _bookSegmentChars - 512) {
+        end = newline + 1;
+      } else if ((text.codeUnitAt(end) & 0xfc00) == 0xdc00) {
+        end--;
+      }
+      yield text.substring(start, end);
+      start = end;
     }
   }
 
@@ -859,6 +1141,14 @@ class AttachmentService {
       return selected.toList()..sort();
     }
     if (mode == 'query' && query.trim().isNotEmpty) {
+      final isBook = _isReadingBook(record);
+      final originalPages = isBook && record['source_format'] == 'pdf'
+          ? RegExp(r'第\s*([0-9]+)\s*页')
+                .allMatches(query)
+                .map((match) => int.tryParse(match.group(1)!))
+                .whereType<int>()
+                .toSet()
+          : const <int>{};
       final terms = RegExp(
         r'[\p{L}\p{N}]{2,}',
         unicode: true,
@@ -866,12 +1156,19 @@ class AttachmentService {
       final ranked = <(int, int)>[];
       for (final page in _ints(record['completed_pages'])) {
         final segment = await _loadSegment(record, page);
-        final text = segment?['text']?.toString().toLowerCase() ?? '';
-        var score = terms.where(text.contains).length;
+        if (originalPages.isNotEmpty) {
+          if (originalPages.contains(_originalPdfPage(segment?['locator']))) {
+            ranked.add((page, 1));
+          }
+          continue;
+        }
+        final locator = isBook ? (segment?['locator'] ?? '') : '';
+        final text = '$locator ${segment?['text'] ?? ''}'.toLowerCase();
+        final score = terms.where(text.contains).length;
         if (score > 0) ranked.add((page, score));
       }
       ranked.sort((a, b) => b.$2.compareTo(a.$2));
-      if (ranked.isNotEmpty)
+      if (ranked.isNotEmpty || originalPages.isNotEmpty)
         return ranked.take(8).map((x) => x.$1).toList()..sort();
       final completed = _ints(record['completed_pages']).toSet();
       final unread = List.generate(
@@ -966,6 +1263,9 @@ class AttachmentService {
   }
 
   void _cancel(String key) {
+    final record = store.get(key)?.value;
+    final readingBook = record != null && _isReadingBook(record);
+    if (readingBook && record['ready'] == true) return;
     final work = _work.remove(key);
     if (work != null) {
       work.cancelled = true;
@@ -986,7 +1286,7 @@ class AttachmentService {
     _patch(key, {
       'status': 'cancelled',
       'phase': 'cancelled',
-      if (store.get(key)?.value['kind'] == 'pdf') 'ready': false,
+      if (record?['kind'] == 'pdf' || readingBook) 'ready': false,
       'current_page': null,
       'error_code': 'cancelled',
       'message': '已取消阅读，已完成的内容已保留',
@@ -1009,8 +1309,9 @@ class AttachmentService {
     String executable,
     List<String> arguments,
     Directory directory,
-    Duration timeout,
-  ) async {
+    Duration timeout, {
+    bool inheritEnvironment = true,
+  }) async {
     if (_commandRunner != null)
       return _commandRunner(
         executable,
@@ -1019,11 +1320,22 @@ class AttachmentService {
         workingDirectory: directory.path,
       );
     final key = _runningKey!;
+    final work = _work[key];
     final process = await Process.start(
       executable,
       arguments,
       workingDirectory: directory.path,
+      includeParentEnvironment: inheritEnvironment,
       environment: {
+        if (!inheritEnvironment) ...{
+          'PATH': Platform.environment['PATH'] ?? '/usr/bin:/bin',
+          if (Platform.isWindows)
+            'SystemRoot': Platform.environment['SystemRoot'] ?? r'C:\Windows',
+          'PYTHONUTF8': '1',
+          'PYTHONIOENCODING': 'utf-8',
+          'PYTHONDONTWRITEBYTECODE': '1',
+          'PYTHONNOUSERSITE': '1',
+        },
         'LC_ALL': 'C.UTF-8',
         'OMP_THREAD_LIMIT': '1',
         'OMP_NUM_THREADS': '1',
@@ -1034,7 +1346,7 @@ class AttachmentService {
       },
     );
     _processes[key] = process;
-    if (_closed || _work[key] == null) process.kill();
+    if (_closed || work == null || !identical(_work[key], work)) process.kill();
     var total = 0;
     final output = <int>[];
     final stdoutDone = process.stdout.forEach((chunk) {
@@ -1147,6 +1459,14 @@ class AttachmentService {
         'expires_at',
       ])
         if (record.containsKey(field)) field: record[field],
+      if (_isReadingBook(record))
+        for (final field in const [
+          'parser_profile',
+          'source_format',
+          'source_page_count',
+          'skipped_pdf_pages',
+        ])
+          if (record.containsKey(field)) field: record[field],
       'segments': await _segments(
         record,
         pages.take(8).toList(),
@@ -1214,7 +1534,9 @@ class AttachmentService {
   Future<void> _recover() async {
     await _root.create(recursive: true);
     for (final entry in _root.listSync()) {
-      if (entry is Directory && p.basename(entry.path).startsWith('.upload-'))
+      if (entry is Directory &&
+          (p.basename(entry.path).startsWith('.upload-') ||
+              p.basename(entry.path).startsWith('.parse-')))
         await _delete(entry);
     }
     for (final (key, document) in store.list('attachment/', limit: 10000)) {
@@ -1314,6 +1636,33 @@ class AttachmentService {
       .whereType<num>()
       .map((n) => n.toInt())
       .toList();
+
+  static bool _isReadingBook(Map<String, dynamic> record) =>
+      record['parser_profile'] == readingBookMarkItDownProfile;
+
+  static final _pdfPageLocator = RegExp(r'^PDF 第 ([0-9]+) 页$');
+
+  static int? _originalPdfPage(Object? locator) => locator is String
+      ? int.tryParse(_pdfPageLocator.firstMatch(locator)?.group(1) ?? '')
+      : null;
+
+  static String _readingBookFormat(String name, String mime) {
+    return switch (p.extension(name).toLowerCase()) {
+      '.pdf'
+          when mime == 'application/pdf' ||
+              mime == 'application/octet-stream' =>
+        'pdf',
+      '.epub'
+          when mime == 'application/epub+zip' ||
+              mime == 'application/octet-stream' =>
+        'epub',
+      _ => throw const AttachmentFailure(
+        '阅读任务只接受 PDF 或 EPUB 书籍',
+        code: 'unsupported_book_format',
+        statusCode: 415,
+      ),
+    };
+  }
 
   static String _kind(String name, String mime) {
     final extension = p.extension(name).toLowerCase();

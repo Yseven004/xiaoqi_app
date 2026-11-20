@@ -1,2 +1,2 @@
-const releaseId = '2026-11-17-genkit-agent-state-repair';
-const apiContractVersion = '36';
+const releaseId = '2026-11-20-markitdown-reading-materials';
+const apiContractVersion = '37';

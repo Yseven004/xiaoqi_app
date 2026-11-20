@@ -46,6 +46,9 @@ import '../models/book_library_item.dart';
 import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
 import '../services/book_library_service.dart';
+import '../services/reading_companion_preferences.dart';
+import '../services/reading_task_context.dart';
+import '../services/reading_task_materials.dart';
 import '../services/ai_service.dart';
 import '../services/a2ui_genkit_bridge.dart';
 import '../services/learning_notes_service.dart';
@@ -61,6 +64,8 @@ import '../services/speech_recognition_service.dart';
 import '../widgets/reading_task_book_creation.dart';
 import '../widgets/reading_space_sidebar.dart';
 import '../widgets/reading_task_switcher.dart';
+import '../widgets/reading_companion.dart';
+import '../widgets/reading_companion_composer.dart';
 import '../widgets/composer_action_capsule.dart';
 import '../widgets/home_chat_attachment_controls.dart';
 import '../widgets/home_chat_model_selector.dart';
@@ -69,6 +74,7 @@ import '../widgets/app_toast.dart';
 import 'email_login_page.dart';
 import 'note_management_page.dart';
 import 'book_learning_shell_page.dart';
+import 'book_sources_page.dart';
 import 'drawing_board_page.dart';
 import 'extension_market_page.dart';
 
@@ -567,6 +573,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _conversationDrafts = <String, CapabilityTextSnapshot>{};
   final _bookConversationFallbacks = <int, AiConversationRecord>{};
   final _attachmentPreparer = HomeChatAttachmentPreparer();
+  final _readingTaskMaterials = ReadingTaskMaterials();
   final _attachmentCopies = <String, Future<HomeChatAttachment>>{};
   final _cancelledAttachmentPreparations = <String>{};
   final _removedAttachmentIds = <String>{};
@@ -615,6 +622,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _latestScrollRequiresFollow = false;
   bool _userScrollingMessages = false;
   AiConversationRecord? _conversation;
+  final _readingCompanionKey = GlobalKey<ReadingCompanionState>();
+  final _companionPreferences = ReadingCompanionPreferences.instance;
+  bool _readingCompanionOpen = false;
+  bool _companionMenuOpen = false;
+  String? _passageConversationId;
+  ReadingCompanionPassage? _readingPassage;
+  AiConversationRecord? _conversationBeforeCompanion;
   AiConversationRecord? _readingConversationForSpaceSwitch;
   int _conversationPresentationRevision = 0;
   String? _conversationFocusMessageId;
@@ -685,6 +699,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _companionPreferences.enabled.addListener(_companionPreferenceChanged);
+    unawaited(_companionPreferences.load());
     _attachmentPreparer.states.addListener(_onAttachmentPreparationChanged);
     WidgetsBinding.instance.addObserver(this);
     _modelPreferences.defaultSelection.addListener(_onDefaultModelChanged);
@@ -775,6 +791,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _companionPreferences.enabled.removeListener(_companionPreferenceChanged);
     _dismissAnnotationComment?.call();
     WidgetsBinding.instance.removeObserver(this);
     _modelPreferences.defaultSelection.removeListener(_onDefaultModelChanged);
@@ -793,6 +810,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _agentClarification.dispose();
     _attachmentPreparer.states.removeListener(_onAttachmentPreparationChanged);
     _attachmentPreparer.dispose();
+    unawaited(_readingTaskMaterials.dispose());
     _imageGenerationInProgress.dispose();
     _keyboardInsetsChanging.dispose();
     unawaited(_cancelVoiceInput());
@@ -904,6 +922,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) _showReplyError('微信分享中没有可添加的图片或文件');
       return;
     }
+    if (!mounted) return;
+    _closeReadingCompanion();
     if (_space != _HomeSpace.reading) _switchSpace(_HomeSpace.reading);
     await _startNewConversation();
     if (!mounted) return;
@@ -2229,6 +2249,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (keyboardInset == _lastKeyboardInset) return;
     var releasedKeyboardOverlayLock = false;
     _lastKeyboardInset = keyboardInset;
+    if (_readingCompanionOpen &&
+        keyboardInset == 0 &&
+        _composerController.messageText.isEmpty) {
+      _dismissComposerFocus();
+    }
     _keyboardInsetSettleTimer?.cancel();
     if (_keyboardOverlayLayoutLocked) {
       _keyboardInsetSettleTimer = null;
@@ -2822,6 +2847,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _composerController.hasExplicitCapability && selectedCapability != null;
     final current =
         _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
+    final passage = current.id == _passageConversationId
+        ? _readingPassage
+        : null;
     final continuesWork = current.hasOpenWork && !_startsSeparateWork(text);
     final workId = continuesWork
         ? current.activeWorkId ?? CapabilityCloudSync.newTaskId()
@@ -2882,6 +2910,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     var userMessage = AiConversationMessage(
       text: text,
       displayText: rawText.trim(),
+      readingPassage: passage == null
+          ? null
+          : readingPassageMarkdown(
+              source: passage.sourceName,
+              locator: passage.locator,
+              text: passage.text,
+            ),
       annotations: annotationsForMessage,
       capabilityTagOrigin: capabilityTagOrigin,
       workId: workId,
@@ -3428,7 +3463,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           : attachments.isEmpty
           ? '请继续当前对话。'
           : '请概括附件内容与重点，并询问我接下来想了解什么。';
-      final requestText = _messageTextWithCapabilityIntent(message, text);
+      final requestText = [
+        _messageTextWithCapabilityIntent(message, text),
+        if (message.readingPassage case final passage?) passage,
+      ].join('\n\n');
       if (attachments.isEmpty) {
         aiMessages.add({
           'role': message.isUser ? 'user' : 'assistant',
@@ -3629,11 +3667,82 @@ $materialIndex
     String? resumeTaskId,
   }) async {
     final workId = question.workId;
-    final materials = await _agentTaskMaterials(
-      history,
-      workId: workId,
-      referenceQuestionId: question.workReferenceQuestionId,
-    );
+    final conversation = _conversation;
+    bool isCurrent() => _isCurrentRequest(generation, conversationId);
+    if (!isCurrent()) return null;
+    final conversationBookName = conversation?.bookName.trim() ?? '';
+    final bookId =
+        conversation?.bookId ??
+        (conversationBookName.isNotEmpty &&
+                conversationBookName == _selectedReadingTaskBookName.trim()
+            ? _selectedReadingTaskBookId
+            : null);
+    final resumesBookTask = resumeTaskId != null && bookId != null;
+    final firstQuestionInWork = history
+        .takeWhile((message) => message.id != question.id)
+        .every(
+          (message) =>
+              !message.isUser ||
+              message.isDeletedMarker ||
+              message.workId != workId,
+        );
+    final readingContext = firstQuestionInWork && !resumesBookTask
+        ? await loadReadingTaskContext(_bookLibrary, bookId)
+        : '';
+    if (!isCurrent()) return null;
+    final materials = <Map<String, Object?>>[
+      if (!resumesBookTask)
+        ...await _agentTaskMaterials(
+          history,
+          workId: workId,
+          referenceQuestionId: question.workReferenceQuestionId,
+        ),
+    ];
+    var readingMaterialGuide = '';
+    var readingStatus = '';
+    if (bookId != null && resumeTaskId == null && isCurrent()) {
+      _agentStreamPresentation.value = const _AgentStreamPresentation(
+        currentStep: '正在同步书籍资料',
+        phase: 'reading_material',
+        expanded: true,
+      );
+      final ReadingTaskMaterialResult prepared;
+      try {
+        prepared = await _readingTaskMaterials.prepare(
+          library: _bookLibrary,
+          bookId: bookId,
+          isCancelled: () => !isCurrent(),
+        );
+      } on FormatException catch (error) {
+        throw AiException(error.message);
+      }
+      if (!isCurrent()) return null;
+      materials.addAll(prepared.materials);
+      if (prepared.materials.isNotEmpty) {
+        readingMaterialGuide =
+            '关联书籍的可读正文已登记为 Markdown 资料。'
+            '请在 read_task_material 中按确切主题、章名或“PDF 第 N 页”检索原文。'
+            '引用时使用 Markdown 中的章名或原 PDF 页码，资料工具的分段编号仅用于翻阅。';
+      }
+      if (prepared.issues.isNotEmpty) {
+        readingStatus = [
+          '## 关联书籍资料同步状态',
+          '以下是本轮未能登记全文的资料，请按实际可读取范围回答。',
+          ...prepared.issues.take(8).map((issue) {
+            final label = issue.sourceName
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+            return '- $label：${issue.message}';
+          }),
+        ].join('\n');
+        _showReplyError(
+          prepared.materials.isEmpty
+              ? '这本书的正文暂未同步，可继续使用书籍信息和选段'
+              : '部分书籍正文暂未同步，已就绪的资料仍可读取',
+        );
+      }
+    }
+    if (!isCurrent()) return null;
     final taskMessages = _agentTaskMessages(aiMessages, materials);
     final capability = await _agentTaskCapability(question);
     final isImageGeneration =
@@ -3785,6 +3894,11 @@ $materialIndex
     final userMessage = _messageForAgent(
       latestLegacyMessage,
       metadata: {'xiaoqi_agent_turn': turnMetadata},
+      readingContext: [
+        if (readingContext.isNotEmpty) readingContext,
+        if (readingMaterialGuide.isNotEmpty) readingMaterialGuide,
+        if (readingStatus.isNotEmpty) readingStatus,
+      ].join('\n\n'),
     );
     final agent = CapabilityCloudSync.instance.createRemoteAgent();
     final chat = agent.chat(
@@ -3868,7 +3982,9 @@ $materialIndex
               role: genkit.Role.user,
               content: const [],
               metadata: {
-                ...?userMessage.metadata,
+                // The server inherits the original turn from the snapshot
+                // for book tasks, including its exact bound material IDs.
+                if (!resumesBookTask) ...?userMessage.metadata,
                 'xiaoqi_agent_resume': const <String, dynamic>{},
               },
             ),
@@ -4437,6 +4553,7 @@ $materialIndex
   genkit.Message _messageForAgent(
     Map<String, Object?> message, {
     Map<String, dynamic>? metadata,
+    String readingContext = '',
   }) {
     final role = switch (message['role']?.toString()) {
       'system' => genkit.Role.system,
@@ -4469,6 +4586,9 @@ $materialIndex
           }
         }
       }
+    }
+    if (readingContext.isNotEmpty) {
+      content.add(genkit.TextPart(text: readingContext));
     }
     return genkit.Message(role: role, content: content, metadata: metadata);
   }
@@ -8415,6 +8535,203 @@ $text''';
     unawaited(_startNewConversation());
   }
 
+  void _companionPreferenceChanged() {
+    if (!mounted) return;
+    if (!_companionPreferences.enabled.value && _readingCompanionOpen) {
+      _closeReadingCompanion();
+    } else {
+      setState(() {});
+    }
+  }
+
+  void _toggleReadingCompanion() {
+    if (_readingCompanionOpen) {
+      _closeReadingCompanion();
+      return;
+    }
+    if (_space != _HomeSpace.reading || !_companionPreferences.enabled.value) {
+      return;
+    }
+    _dismissComposerFocus();
+    if (_voicePanelVisible) unawaited(_cancelVoiceInput());
+    setState(() {
+      _attachmentPanelOpen = false;
+      _attachmentPanelPending = false;
+      _spaceMenuOpen = false;
+      _readingCompanionOpen = true;
+    });
+  }
+
+  void _openReadingPassage(ReadingCompanionPassage passage) {
+    if (!_readingCompanionOpen) return;
+    final previous = _readingPassage;
+    if (_conversation?.id == _passageConversationId &&
+        previous?.sameLocationAs(passage) == true) {
+      return;
+    }
+    _cacheCurrentDraft();
+    _conversationBeforeCompanion ??= _conversation;
+    final bookName = _selectedReadingTaskBookName.trim().isNotEmpty
+        ? _selectedReadingTaskBookName
+        : _conversation?.bookName ?? '';
+    final conversation = AiConversationRecord.empty(
+      bookId: passage.bookId,
+      bookName: bookName,
+      enableAutoTitle: true,
+    );
+    _readingPassage = passage;
+    _passageConversationId = conversation.id;
+    _openConversationFromSidebar(conversation);
+  }
+
+  void _closeReadingCompanion() {
+    if (!_readingCompanionOpen) return;
+    _dismissComposerFocus();
+    if (_voicePanelVisible) unawaited(_cancelVoiceInput());
+    _cacheCurrentDraft();
+    final previous = _conversationBeforeCompanion;
+    setState(() {
+      _readingCompanionOpen = false;
+      _companionMenuOpen = false;
+      _readingPassage = null;
+      _passageConversationId = null;
+      _conversationBeforeCompanion = null;
+    });
+    if (previous != null && _conversation?.id != previous.id) {
+      _openConversationFromSidebar(previous);
+    }
+  }
+
+  Future<void> _openCompanionMarket(
+    ExtensionKind kind, {
+    bool mcpCatalogOnly = false,
+  }) async {
+    _dismissComposerFocus();
+    final conversationId = _passageConversationId;
+    final request = await Navigator.of(context).push<ExtensionChatRequest>(
+      MaterialPageRoute(
+        builder: (_) => ExtensionMarketPage(
+          initialKind: kind,
+          mcpCatalogOnly: mcpCatalogOnly,
+        ),
+      ),
+    );
+    if (!mounted ||
+        !_readingCompanionOpen ||
+        _passageConversationId != conversationId ||
+        request == null) {
+      return;
+    }
+    _activeSkillWorkflow = null;
+    if (_composerController.messageText.isEmpty && request.prompt.isNotEmpty) {
+      _composerController.setMessage(request.prompt, request.selection);
+    } else {
+      _composerController.insertCapability(request.selection);
+    }
+  }
+
+  Widget _buildReadingCompanion() {
+    final activePassage =
+        _passageConversationId != null &&
+        _conversation?.id == _passageConversationId;
+    return Positioned.fill(
+      top: 44,
+      child: ReadingCompanion(
+        key: _readingCompanionKey,
+        bookId: _selectedReadingTaskBookId ?? _conversation?.bookId,
+        library: _bookLibrary,
+        messages: activePassage ? _messages : const [],
+        streamingReply: _streamingReply,
+        onPassageOpened: _openReadingPassage,
+        onChooseBook: _chooseCompanionBook,
+        onChatVisibilityChanged: (visible) {
+          if (!visible && _companionMenuOpen) {
+            setState(() => _companionMenuOpen = false);
+          }
+        },
+        onOpenLibrary: _openCompanionBookSources,
+        composerBuilder: (history) => ReadingCompanionComposer(
+          content: history,
+          controller: _composerController,
+          focusNode: _composerFocusNode,
+          modelSelection: _selectedModel,
+          onModelSelectionChanged: _setSelectedModel,
+          onSend: () => unawaited(_sendMessage()),
+          onStop: _stopReply,
+          sendingEnabled: !_isPreparingToSend && !_preparingAttachments,
+          generating: _isGenerating,
+          signedIn: _emailSignedIn,
+          requestLogin: _ensureEmailSessionForChat,
+          onAddAttachment: (action) => unawaited(_addAttachments(action)),
+          onDrawingSelected: () => unawaited(_openDrawingBoard()),
+          onCapabilitySelected: (selection) {
+            _activeSkillWorkflow = null;
+            _composerController.insertCapability(selection);
+            _dismissComposerFocus();
+          },
+          onInstallSkills: () => _openCompanionMarket(ExtensionKind.skill),
+          onInstallPlugins: () => _openCompanionMarket(ExtensionKind.plugin),
+          onInstallMcp: () =>
+              _openCompanionMarket(ExtensionKind.plugin, mcpCatalogOnly: true),
+          onManageMcp: () => _openCompanionMarket(ExtensionKind.mcp),
+          attachments: _attachments,
+          attachmentPreparationStates: _attachmentPreparer.states,
+          onRemoveAttachment: _removeAttachment,
+          onRetryAttachment: _retryAttachment,
+          onEditDrawing: (attachment) =>
+              unawaited(_openDrawingBoard(editing: attachment)),
+          onPreviewAttachment: (attachment) =>
+              unawaited(_openPendingImage(attachment)),
+          voiceRecording: _voicePanelVisible,
+          voiceCancelArmed: _voiceCancelArmed,
+          voiceStarting: _voiceStarting,
+          voiceTranscribing: _voiceTranscribing,
+          voiceSoundLevel: _voiceSoundLevel,
+          onVoiceLongPressStart: _startVoiceInput,
+          onVoiceLongPressMove: _updateVoiceCancelGesture,
+          onVoiceLongPressEnd: _finishVoiceInput,
+          onVoiceLongPressCancel: () => unawaited(_cancelVoiceInput()),
+          onMenuOpenChanged: (open) {
+            if (open != _companionMenuOpen &&
+                mounted &&
+                _readingCompanionOpen) {
+              setState(() => _companionMenuOpen = open);
+            }
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _chooseCompanionBook() async {
+    final item = await showNewReadingTaskDialog(
+      context,
+      library: _bookLibrary,
+      selectedBookId: _selectedReadingTaskBookId,
+      onSearchFocusChanged: _onReadingTaskSearchFocusChanged,
+      onAddBook: _createReadingTaskBook,
+    );
+    if (!mounted || !_readingCompanionOpen || item == null) return;
+    await _activateReadingBook(item);
+  }
+
+  Future<void> _openCompanionBookSources() async {
+    final bookId = _selectedReadingTaskBookId ?? _conversation?.bookId;
+    if (bookId == null) {
+      await _openBookLibraryFromSidebar();
+      return;
+    }
+    _dismissComposerFocus();
+    if (_voicePanelVisible) await _cancelVoiceInput();
+    if (!mounted || !_readingCompanionOpen) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) =>
+            BookSourcesPage(bookId: bookId, bookLibraryService: _bookLibrary),
+      ),
+    );
+  }
+
   Future<void> _openExtensionMarket({
     ExtensionKind kind = ExtensionKind.plugin,
   }) async {
@@ -8523,16 +8840,17 @@ $text''';
     }
   }
 
-  Future<void> _createReadingTaskBook() async {
+  Future<BookLibraryItem?> _createReadingTaskBook(
+    BuildContext dialogContext,
+  ) async {
     try {
-      final item = await createBookForReadingTask(
-        context,
+      return await createBookForReadingTask(
+        dialogContext,
         library: _bookLibrary,
       );
-      if (!mounted || item == null) return;
-      await _activateReadingBook(item);
     } catch (_) {
       if (mounted) _showReplyError('添加新书失败，请稍后重试');
+      return null;
     }
   }
 
@@ -8547,6 +8865,7 @@ $text''';
       setState(() => _spaceMenuOpen = false);
       return;
     }
+    _closeReadingCompanion();
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _dismissComposerFocus();
     _setComposerExpanded(false);
@@ -8606,6 +8925,7 @@ $text''';
   }
 
   Future<void> _openReadingSidebar() async {
+    _closeReadingCompanion();
     if (_space != _HomeSpace.reading) return;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _dismissComposerFocus();
@@ -8864,6 +9184,7 @@ $text''';
 
   @override
   Widget build(BuildContext context) {
+    final companionMenuWasOpen = _companionMenuOpen;
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -8877,6 +9198,7 @@ $text''';
             _allowAgentQuestionPop ||
             (!_voicePanelVisible &&
                 !_composerExpanded &&
+                !_readingCompanionOpen &&
                 !_spaceMenuOpen &&
                 _agentClarification.value?.questionPanel != true),
         onPopInvokedWithResult: (didPop, _) {
@@ -8898,6 +9220,14 @@ $text''';
           }
           if (_composerExpanded) {
             _setComposerExpanded(false);
+            return;
+          }
+          if (_readingCompanionOpen && !_spaceMenuOpen) {
+            if (companionMenuWasOpen ||
+                _readingCompanionKey.currentState?.closeChatForBack() == true) {
+              return;
+            }
+            _closeReadingCompanion();
             return;
           }
           if (!_spaceMenuOpen) return;
@@ -9071,6 +9401,9 @@ $text''';
                                 ValueListenableBuilder<bool>(
                                   valueListenable: _keyboardInsetsChanging,
                                   builder: (context, keyboardInsetsChanging, _) {
+                                    if (_readingCompanionOpen) {
+                                      return const SizedBox.shrink();
+                                    }
                                     final keyboardVisible =
                                         MediaQuery.viewInsetsOf(
                                           context,
@@ -9252,6 +9585,7 @@ $text''';
                           },
                         ),
                       ),
+                      if (_readingCompanionOpen) _buildReadingCompanion(),
                       // Keep the menu above the conversation canvas and composer.
                       if (_spaceMenuOpen) ...[
                         Positioned(
@@ -9278,7 +9612,10 @@ $text''';
                         ),
                       ],
                       if (!_composerExpanded)
-                        _buildTopBar(showNewConversation: _messages.isNotEmpty),
+                        _buildTopBar(
+                          showNewConversation:
+                              !_readingCompanionOpen && _messages.isNotEmpty,
+                        ),
                       _buildAgentQuestionOverlay(constraints),
                     ],
                   ),
@@ -9368,6 +9705,16 @@ $text''';
       );
 
   Widget _buildTopBar({required bool showNewConversation}) {
+    final showCompanion =
+        _space == _HomeSpace.reading && _companionPreferences.enabled.value;
+    final showNewOnLeft =
+        showNewConversation &&
+        showCompanion &&
+        MediaQuery.sizeOf(context).width < 412;
+    final rightControls =
+        44.0 +
+        (showCompanion ? 44 : 0) +
+        (showNewConversation && !showNewOnLeft ? 44 : 0);
     return Positioned(
       top: 0,
       left: 14,
@@ -9401,11 +9748,41 @@ $text''';
               ),
             ),
           ),
+          if (showNewOnLeft)
+            Positioned(left: 44, child: _newConversationTopButton()),
           Align(
             alignment: Alignment.centerRight,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (showCompanion)
+                  IconButton(
+                    tooltip: _readingCompanionOpen ? '退出伴读' : '沉浸伴读',
+                    isSelected: _readingCompanionOpen,
+                    onPressed: _toggleReadingCompanion,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 44,
+                      height: 44,
+                    ),
+                    style: _readingCompanionOpen
+                        ? IconButton.styleFrom(
+                            backgroundColor: const Color(0xFFF1F1F1),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          )
+                        : null,
+                    icon: SvgPicture.asset(
+                      'assets/icons/chat_note_editor/book-open-text.svg',
+                      width: 22,
+                      height: 22,
+                      colorFilter: const ColorFilter.mode(
+                        Colors.black87,
+                        BlendMode.srcIn,
+                      ),
+                    ),
+                  ),
                 Semantics(
                   button: true,
                   enabled: _space == _HomeSpace.reading,
@@ -9428,38 +9805,39 @@ $text''';
                     ),
                   ),
                 ),
-                if (showNewConversation)
-                  Semantics(
-                    button: true,
-                    label: '新建会话',
-                    child: InkResponse(
-                      onTap: _startNewConversationForCurrentBookContext,
-                      radius: 22,
-                      child: SizedBox(
-                        width: 44,
-                        height: 44,
-                        child: Center(
-                          child: SvgPicture.asset(
-                            'assets/images/home_new_conversation_icon.svg',
-                            width: 25.5,
-                            height: 25.5,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                if (showNewConversation && !showNewOnLeft)
+                  _newConversationTopButton(),
               ],
             ),
           ),
-          _SpaceSwitcher(
-            title: _spaceTitle,
-            expanded: _spaceMenuOpen,
-            onToggle: _toggleSpaceMenu,
+          Positioned.fill(
+            left: rightControls,
+            right: rightControls,
+            child: Align(
+              alignment: Alignment.center,
+              child: _SpaceSwitcher(
+                title: _spaceTitle,
+                expanded: _spaceMenuOpen,
+                onToggle: _toggleSpaceMenu,
+              ),
+            ),
           ),
         ],
       ),
     );
   }
+
+  Widget _newConversationTopButton() => IconButton(
+    tooltip: '新建会话',
+    onPressed: _startNewConversationForCurrentBookContext,
+    padding: EdgeInsets.zero,
+    constraints: const BoxConstraints.tightFor(width: 44, height: 44),
+    icon: SvgPicture.asset(
+      'assets/images/home_new_conversation_icon.svg',
+      width: 25.5,
+      height: 25.5,
+    ),
+  );
 }
 
 class _WelcomeCopy extends StatelessWidget {
@@ -9524,15 +9902,19 @@ class _SpaceSwitcher extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                title,
-                style: TextStyle(
-                  color: expanded
-                      ? const Color(0xFF9B9DA0)
-                      : const Color(0xFF343639),
-                  fontSize: 19,
-                  height: 1,
-                  fontWeight: FontWeight.w700,
+              Flexible(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: expanded
+                        ? const Color(0xFF9B9DA0)
+                        : const Color(0xFF343639),
+                    fontSize: 19,
+                    height: 1,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -9770,7 +10152,7 @@ class _HomeComposer extends StatefulWidget {
   final ValueChanged<BookLibraryItem> onSelectReadingBook;
   final ValueChanged<bool> onReadingTaskSearchFocusChanged;
   final VoidCallback onStartIndependent;
-  final VoidCallback onAddReadingBook;
+  final Future<BookLibraryItem?> Function(BuildContext) onAddReadingBook;
   final bool isGenerating;
   final bool canSteerActiveTask;
   final bool isEditingMessage;

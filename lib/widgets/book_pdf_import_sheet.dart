@@ -1,23 +1,100 @@
+import 'dart:math' as math;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../config/book_flow_theme.dart';
 import '../models/book_library_item.dart';
 import '../models/book_recognition.dart';
 import '../models/book_source.dart';
+import 'app_toast.dart';
 import 'book_cover.dart';
 import 'book_metadata_form_sheet.dart';
 
 enum BookAddAction { scan, importPdf }
 
-Future<BookAddAction?> showBookAddSourceSheet(BuildContext context) {
-  return showModalBottomSheet<BookAddAction>(
+Future<BookAddAction?> showBookAddSourceSheet(
+  BuildContext context, {
+  BuildContext? anchorContext,
+}) {
+  FocusManager.instance.primaryFocus?.unfocus();
+  final overlay = Navigator.of(context, rootNavigator: true).overlay;
+  final fromLibrary = anchorContext != null;
+  return showGeneralDialog<BookAddAction>(
     context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.transparent,
-    barrierColor: const Color(0x99000000),
-    constraints: const BoxConstraints(maxWidth: double.infinity),
-    builder: (_) => const _BookAddSourceSheet(),
+    barrierDismissible: true,
+    barrierLabel: fromLibrary ? '关闭导入书籍' : '关闭添加图书',
+    barrierColor: fromLibrary
+        ? const Color(0x55000000)
+        : const Color(0x40000000),
+    transitionDuration: const Duration(milliseconds: 160),
+    pageBuilder: (_, _, _) => LayoutBuilder(
+      builder: (context, constraints) {
+        final padding = MediaQuery.viewPaddingOf(context);
+        const margin = 16.0;
+        final minLeft = padding.left + margin;
+        final maxRight = constraints.maxWidth - padding.right - margin;
+        final maxBottom = constraints.maxHeight - padding.bottom - margin;
+        final minTop = padding.top + margin;
+        final width = math.min(
+          fromLibrary ? 304.0 : 320.0,
+          math.max(0.0, maxRight - minLeft),
+        );
+        final overlayBox = overlay?.context.findRenderObject();
+        final anchorBox = anchorContext?.mounted == true
+            ? anchorContext!.findRenderObject()
+            : null;
+        if (overlayBox is RenderBox &&
+            anchorBox is RenderBox &&
+            anchorBox.attached &&
+            anchorBox.hasSize) {
+          final anchor =
+              anchorBox.localToGlobal(Offset.zero, ancestor: overlayBox) &
+              anchorBox.size;
+          final top = math.max(minTop, anchor.bottom + 14);
+          if (maxBottom - top >= 96) {
+            final left = (anchor.right - width)
+                .clamp(minLeft, maxRight - width)
+                .toDouble();
+            return Stack(
+              children: [
+                Positioned(
+                  left: left,
+                  top: top,
+                  width: width,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxHeight: maxBottom - top),
+                    child: _BookAddSourceCard(
+                      fromLibrary: true,
+                      pointerCenter: (anchor.center.dx - left)
+                          .clamp(16.0, math.max(16.0, width - 16))
+                          .toDouble(),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
+        }
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(margin),
+            child: Center(
+              child: SizedBox(
+                width: width,
+                child: _BookAddSourceCard(fromLibrary: fromLibrary),
+              ),
+            ),
+          ),
+        );
+      },
+    ),
+    transitionBuilder: (_, animation, _, child) => FadeTransition(
+      opacity: animation.drive(CurveTween(curve: Curves.easeOut)),
+      child: child,
+    ),
   );
 }
 
@@ -55,116 +132,185 @@ class BookPdfImportSelection {
   final bool shouldReselect;
 }
 
-class _BookAddSourceSheet extends StatelessWidget {
-  const _BookAddSourceSheet();
+class _BookAddSourceCard extends StatefulWidget {
+  const _BookAddSourceCard({required this.fromLibrary, this.pointerCenter});
+
+  final bool fromLibrary;
+  final double? pointerCenter;
 
   @override
-  Widget build(BuildContext context) => Material(
+  State<_BookAddSourceCard> createState() => _BookAddSourceCardState();
+}
+
+class _BookAddSourceCardState extends State<_BookAddSourceCard> {
+  bool _launchingCatalog = false;
+
+  void _finish([BookAddAction? action]) {
+    if (ModalRoute.of(context)?.isCurrent == true) {
+      Navigator.of(context).pop(action);
+    }
+  }
+
+  Future<void> _openOnlineCatalog() async {
+    if (_launchingCatalog) return;
+    setState(() => _launchingCatalog = true);
+    var launched = false;
+    try {
+      launched = await launchUrl(
+        Uri.https('www.gutenberg.org', '/ebooks/index.html'),
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (_) {
+      // Some devices have no external handler for HTTPS links.
+    }
+    if (!mounted) return;
+    setState(() => _launchingCatalog = false);
+    if (!launched) AppToast.show(context, '无法打开开放书库，请稍后重试');
+  }
+
+  Widget _card(BuildContext context) => Material(
     color: BookFlowTheme.surface,
-    borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+    surfaceTintColor: Colors.transparent,
+    shadowColor: const Color(0x50000000),
+    elevation: 12,
+    borderRadius: BorderRadius.circular(16),
     clipBehavior: Clip.antiAlias,
-    child: SafeArea(
-      top: false,
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Center(
-              child: Container(
-                width: 42,
-                height: 5,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFD5D8DE),
-                  borderRadius: BorderRadius.circular(8),
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                    vertical: widget.fromLibrary ? 9 : 0,
+                  ),
+                  child: Text(
+                    widget.fromLibrary ? '导入书籍' : '添加图书',
+                    style: const TextStyle(
+                      color: BookFlowTheme.ink,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                const Expanded(
-                  child: Text('添加到阅读空间', style: BookFlowTheme.heading),
-                ),
+              if (widget.pointerCenter == null)
                 IconButton(
                   tooltip: '关闭',
-                  onPressed: () => Navigator.of(context).pop(),
-                  constraints: const BoxConstraints.tightFor(
-                    width: 48,
-                    height: 48,
+                  onPressed: _finish,
+                  icon: SvgPicture.asset(
+                    'assets/icons/extension_market/detail/close.svg',
+                    width: 18,
+                    height: 18,
+                    colorFilter: const ColorFilter.mode(
+                      BookFlowTheme.inkSecondary,
+                      BlendMode.srcIn,
+                    ),
                   ),
-                  style: IconButton.styleFrom(
-                    foregroundColor: BookFlowTheme.ink,
-                  ),
-                  icon: const Icon(Icons.close_rounded),
                 ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            _SourceActionCard(
-              icon: Icons.drive_folder_upload_outlined,
-              title: '导入资料',
-              subtitle: '支持 PDF、EPUB',
-              onTap: () => Navigator.of(context).pop(BookAddAction.importPdf),
-            ),
-            const Divider(height: 1, color: Color(0xFFD5D8DE)),
-            _SourceActionCard(
-              icon: Icons.qr_code_scanner_rounded,
-              title: '扫描 / 输入 ISBN',
-              subtitle: '从实体书条码确认书籍资料',
-              onTap: () => Navigator.of(context).pop(BookAddAction.scan),
-            ),
-          ],
-        ),
+            ],
+          ),
+          const Text('支持 PDF、EPUB', style: BookFlowTheme.caption),
+          const SizedBox(height: 16),
+          const Divider(height: 1, color: Color(0xFFEBEBEB)),
+          const SizedBox(height: 7),
+          _SourceActionCard(
+            iconAsset: 'assets/images/book_import_scan.svg',
+            title: '扫描/输入 ISBN',
+            onTap: () => _finish(BookAddAction.scan),
+          ),
+          _SourceActionCard(
+            iconAsset: 'assets/icons/extension_market/detail/folder.svg',
+            title: '本机导入',
+            onTap: () => _finish(BookAddAction.importPdf),
+          ),
+          _SourceActionCard(
+            iconAsset: 'assets/images/home_attachment_wechat.svg',
+            title: '微信导入',
+            onTap: () => AppToast.show(context, '微信书籍导入暂未开放'),
+          ),
+          _SourceActionCard(
+            iconAsset: 'assets/images/book_import_web_search.svg',
+            title: '网上找书',
+            onTap: _launchingCatalog ? null : _openOnlineCatalog,
+          ),
+        ],
       ),
     ),
   );
+
+  @override
+  Widget build(BuildContext context) {
+    final pointerCenter = widget.pointerCenter;
+    final card = _card(context);
+    if (pointerCenter == null) return card;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        card,
+        Positioned(
+          left: pointerCenter - 13,
+          top: -14,
+          child: IgnorePointer(
+            child: SvgPicture.asset(
+              'assets/images/book_import_menu_pointer.svg',
+              width: 26,
+              height: 15,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _SourceActionCard extends StatelessWidget {
   const _SourceActionCard({
-    required this.icon,
+    required this.iconAsset,
     required this.title,
-    required this.subtitle,
     required this.onTap,
   });
 
-  final IconData icon;
+  final String iconAsset;
   final String title;
-  final String subtitle;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.transparent,
-    child: InkWell(
-      onTap: onTap,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 80),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 48,
-                height: 48,
-                child: Icon(icon, color: BookFlowTheme.ink, size: 24),
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(8),
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 50),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+        child: Row(
+          children: [
+            SvgPicture.asset(
+              iconAsset,
+              width: 24,
+              height: 24,
+              colorFilter: const ColorFilter.mode(
+                BookFlowTheme.ink,
+                BlendMode.srcIn,
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(title, style: _bookCardTitle),
-                    const SizedBox(height: 3),
-                    Text(subtitle, style: BookFlowTheme.caption),
-                  ],
+            ),
+            const SizedBox(width: 22),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 17,
+                  height: 1.35,
+                  fontWeight: FontWeight.w600,
+                  color: BookFlowTheme.ink,
                 ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     ),

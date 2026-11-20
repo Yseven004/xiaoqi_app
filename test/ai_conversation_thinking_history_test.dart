@@ -1,7 +1,39 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xiaoqi_app/features/ai_study_annotation/data/ai_conversation_history.dart';
+import 'package:xiaoqi_app/services/reading_task_context.dart';
 
 void main() {
+  test('selected book passage survives reload and question edits', () {
+    final reference = readingPassageMarkdown(
+      source: '测试资料.epub',
+      locator: '第一章',
+      text: '第一行\r\n第二行',
+    );
+    final question = AiConversationMessage(
+      id: 'reading-question',
+      text: '解释这段',
+      displayText: '解释这段',
+      readingPassage: reference,
+      isUser: true,
+      createdAt: DateTime(2026, 11, 20),
+    );
+    final record = AiConversationRecord.empty(
+      bookId: 7,
+    ).copyWith(nodes: [question]);
+    final restored = AiConversationRecord.fromJson(record.toJson());
+    final edited = AiConversationMessage(
+      text: '举个例子',
+      displayText: '举个例子',
+      isUser: true,
+      createdAt: question.createdAt.add(const Duration(seconds: 1)),
+    );
+    final branch = restored.appendQuestionVersion(question.id, edited);
+    expect(restored.bookId, 7);
+    expect(branch.messages.single.readingPassage, reference);
+    expect(branch.messages.single.readingPassage, contains('> 第一行\n> 第二行'));
+    expect(branch.messages.single.displayText, '举个例子');
+  });
+
   test(
     'a stopped process-only answer survives the visible path and JSON round trip',
     () {

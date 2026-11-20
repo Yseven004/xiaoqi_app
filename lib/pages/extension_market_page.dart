@@ -16,6 +16,7 @@ import '../features/capabilities/presentation/market_ui.dart';
 import '../features/capabilities/presentation/market_search.dart';
 import '../features/capabilities/presentation/market_skill_editor.dart';
 import '../features/capabilities/presentation/skill_presentation.dart';
+import '../services/reading_companion_preferences.dart';
 import '../widgets/app_toast.dart';
 
 part 'extension_market_details.dart';
@@ -427,10 +428,12 @@ class _MarketEntry {
 class ExtensionMarketPage extends StatefulWidget {
   const ExtensionMarketPage({
     this.initialKind = ExtensionKind.plugin,
+    this.mcpCatalogOnly = false,
     this.cloud,
     super.key,
   });
   final ExtensionKind initialKind;
+  final bool mcpCatalogOnly;
   final CapabilityCloudSync? cloud;
   @override
   State<ExtensionMarketPage> createState() => _ExtensionMarketPageState();
@@ -439,6 +442,8 @@ class ExtensionMarketPage extends StatefulWidget {
 class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   final _search = TextEditingController();
   final _searchFocus = FocusNode(debugLabel: 'extension market search');
+  final _companionPreferences = ReadingCompanionPreferences.instance;
+  bool _savingCompanionPreference = false;
   late final _cloud = widget.cloud ?? CapabilityCloudSync.instance;
   List<CapabilityRecord> _records = [];
   List<McpConnectionRecord> _connections = [];
@@ -470,10 +475,13 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   @override
   void initState() {
     super.initState();
-    _kind = widget.initialKind == ExtensionKind.skill
+    unawaited(_companionPreferences.load());
+    _kind = !widget.mcpCatalogOnly && widget.initialKind == ExtensionKind.skill
         ? ExtensionKind.skill
         : ExtensionKind.plugin;
-    if (widget.initialKind == ExtensionKind.mcp) _listTitle = '连接管理';
+    if (!widget.mcpCatalogOnly && widget.initialKind == ExtensionKind.mcp) {
+      _listTitle = '连接管理';
+    }
     _search.addListener(_searchChanged);
     _draftChanges = CapabilityStore.instance.draftChanges.listen((_) {
       unawaited(_reloadDrafts());
@@ -483,7 +491,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       unawaited(_reloadMcp());
       unawaited(_reloadCatalog());
     }
-    unawaited(_reloadSkills());
+    if (!widget.mcpCatalogOnly) unawaited(_reloadSkills());
     _links = AppLinks().uriLinkStream.listen((uri) {
       if (uri.toString().contains('mcp') && uri.toString().contains('oauth')) {
         _cloud.invalidateMarketCache('connections');
@@ -655,10 +663,16 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             .map((p) => _MarketEntry.fromPublication(p, _records))
             .toList()
       : [
-          ..._publishedSkills
-              .where((p) => p['kind'] == 'plugin')
-              .map((p) => _MarketEntry.fromPublication(p, _records)),
+          if (!widget.mcpCatalogOnly)
+            ..._publishedSkills
+                .where((p) => p['kind'] == 'plugin')
+                .map((p) => _MarketEntry.fromPublication(p, _records)),
           ..._catalog
+              .where(
+                (entry) =>
+                    !widget.mcpCatalogOnly ||
+                    entry.status != McpInstallationState.unsupported,
+              )
               .map(
                 (entry) => _MarketEntry.fromMcp(
                   entry,
@@ -667,8 +681,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                       .firstOrNull,
                   publicListing: true,
                 ),
-              )
-              .toList(),
+              ),
         ];
 
   Future<void> _reloadSkills() async {
@@ -1412,10 +1425,25 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Widget _installedContent() {
+    final showCompanion =
+        _kind == ExtensionKind.plugin &&
+        ('沉浸伴读 读书 阅读 AI 选段问答 内置插件'.contains(_searchQuery.toLowerCase()));
+    final entries = _matching(_installed);
+    if (showCompanion) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _builtInCompanionSetting(),
+          if (_loading || _loadingMcp)
+            marketSkeleton()
+          else if (entries.isNotEmpty)
+            _list(entries),
+        ],
+      );
+    }
     if (_loading || _kind == ExtensionKind.plugin && _loadingMcp) {
       return marketSkeleton();
     }
-    final entries = _matching(_installed);
     if (entries.isEmpty) {
       if (_searchQuery.isNotEmpty) return _noMatch();
       return marketEmptyState(
@@ -1426,6 +1454,49 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     }
     return _list(entries);
   }
+
+  Widget _builtInCompanionSetting() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const Padding(
+        padding: EdgeInsets.fromLTRB(0, 12, 0, 4),
+        child: Text(
+          '内置插件',
+          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+        ),
+      ),
+      ValueListenableBuilder<bool>(
+        valueListenable: _companionPreferences.enabled,
+        builder: (_, enabled, _) => SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          secondary: SvgPicture.asset(
+            'assets/icons/chat_note_editor/book-open-text.svg',
+            width: 24,
+            height: 24,
+            colorFilter: const ColorFilter.mode(marketInk, BlendMode.srcIn),
+          ),
+          title: const Text('沉浸伴读'),
+          subtitle: const Text('在阅读空间看原文、做注释和选段问答'),
+          value: enabled,
+          onChanged: _savingCompanionPreference
+              ? null
+              : (value) async {
+                  setState(() => _savingCompanionPreference = true);
+                  try {
+                    await _companionPreferences.setEnabled(value);
+                  } catch (_) {
+                    if (mounted) AppToast.show(context, '伴读设置保存失败，请重试');
+                  } finally {
+                    if (mounted) {
+                      setState(() => _savingCompanionPreference = false);
+                    }
+                  }
+                },
+        ),
+      ),
+      const Divider(height: 16, color: marketLine),
+    ],
+  );
 
   Widget _personalContent() {
     if (_loading || _kind == ExtensionKind.plugin && _loadingMcp) {
@@ -1451,9 +1522,12 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Widget _publicContent() {
-    if (_loadingSkills) return marketSkeleton();
-    if (_skillsError != null && _publishedSkills.isEmpty)
+    if (!widget.mcpCatalogOnly && _loadingSkills) return marketSkeleton();
+    if (!widget.mcpCatalogOnly &&
+        _skillsError != null &&
+        _publishedSkills.isEmpty) {
       return marketError(_skillsError!, _reloadSkills);
+    }
     if (_kind == ExtensionKind.plugin && _loadingCatalog) {
       return marketSkeleton();
     }
@@ -1470,7 +1544,8 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     if (entries.isNotEmpty)
       return Column(
         children: [
-          if (_skillsError != null) marketError(_skillsError!, _reloadSkills),
+          if (!widget.mcpCatalogOnly && _skillsError != null)
+            marketError(_skillsError!, _reloadSkills),
           if (_kind == ExtensionKind.plugin && _catalogError != null)
             marketError(_catalogError!, _reloadCatalog),
           _list(entries),
@@ -1478,8 +1553,8 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       );
     return marketEmptyState(
       leading: _emptyTile(),
-      title: '市场里还没有$_label',
-      message: '有新的公开作品时会出现在这里。',
+      title: widget.mcpCatalogOnly ? '暂无可安装的 MCP 连接器' : '市场里还没有$_label',
+      message: widget.mcpCatalogOnly ? '可安装的连接器发布后会出现在这里。' : '有新的公开作品时会出现在这里。',
     );
   }
 
@@ -1904,7 +1979,17 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
       },
       child: MarketFrame(
         children: [
-          if (_listTitle == '连接管理')
+          if (widget.mcpCatalogOnly) ...[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: IconButton(
+                tooltip: '返回',
+                onPressed: () => Navigator.of(context).maybePop(),
+                icon: const Icon(Icons.arrow_back),
+              ),
+            ),
+            marketHeading('MCP 连接器'),
+          ] else if (_listTitle == '连接管理')
             Stack(
               alignment: Alignment.center,
               children: [
@@ -1933,11 +2018,14 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                 ),
               ),
             )
-          else
+          else if (!widget.mcpCatalogOnly)
             marketHeading(_label, subtitle: _tabSubtitle),
-          if (_listTitle == null) ...[_scopeTabs(), const SizedBox(height: 18)],
+          if (_listTitle == null && !widget.mcpCatalogOnly) ...[
+            _scopeTabs(),
+            const SizedBox(height: 18),
+          ],
           _searchField(),
-          if (_listTitle == null && _tab == 0) ...[
+          if (_listTitle == null && _tab == 0 && !widget.mcpCatalogOnly) ...[
             const SizedBox(height: 12),
             _categoryStrip(),
           ],

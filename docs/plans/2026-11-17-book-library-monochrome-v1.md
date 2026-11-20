@@ -33,7 +33,7 @@
 | 参考文件 | 用途 | 文字要求优先覆盖的部分 |
 | --- | --- | --- |
 | `reference-49.png` | 书库主界面 | 真实书籍和计数；顶栏只有一处展示切换；底部笔记复用 `home_reply_note.svg` |
-| `reference-50.png` | 共用添加面板 | 贴底滑出、顶部圆角、两行入口、无行尾箭头、无标题下泛说明；覆盖底部导航 |
+| `reference-50.png` | 旧版共用添加面板 | 历史参考。现行两处导入卡见第 11 节 |
 | `reference-51.png` | ISBN 扫描页 | 实际相机画面；白色取景角标；保留返回、闪光灯、对焦和手动输入 |
 | `reference-52.png` | 手动输入面板与键盘 | **图中背景仍清晰，实施必须暂停扫描，并将整个取景画面和扫描框模糊压暗**；保留系统键盘 |
 | `reference-53.png` | 详情页与三项下拉菜单 | 图中空态提示由第 55 张替代；不照搬示例计数；无底部导航 |
@@ -59,7 +59,7 @@
 | --- | --- | --- |
 | 书库搜索、分类、排序、展示、多选 | `lib/pages/book_learning_space_page.dart`，`BookLibraryQuery`、现有偏好与服务 | 复用查询与持久化；本页维护临时选择；外层退出详情不能销毁所需浏览状态 |
 | 详情切换和底部导航 | `lib/pages/book_learning_shell_page.dart` 的 `_openBookId` 与 `bottomNavigationBar` | 外层隐藏完整底栏；检查库页当前条件替换造成的 state 销毁，保留浏览状态，避免另造路由系统 |
-| 共用新建／导入 | `showBookAddSourceSheet`、`showBookPdfImportSheet` 在 `lib/widgets/book_pdf_import_sheet.dart` | 原组件内改样式；不复制第二套；取消返回 null，调用方不写入 |
+| 共用新建／导入 | `showBookAddSourceSheet`、`showBookPdfImportSheet` 在 `lib/widgets/book_pdf_import_sheet.dart` | 共用一张来源卡片，由入口决定居中或锚定呈现。取消返回 null，调用方不写入 |
 | 两种创建入口 | Shell 的 `_scanBook`／`_importBookSource`；`lib/widgets/reading_task_book_creation.dart` 的 `createBookForReadingTask` | 保留各自返回值和保存／任务绑定责任，只统一 UI 与必要的调用参数 |
 | 扫描与手动输入 | `lib/pages/book_isbn_scanner_page.dart` 已有 controller `stop/start`；`lib/utils/isbn.dart` | 复用识别链与校验；本页拥有相机运行状态、手动面板可见性与查询互斥，键盘状态不拥有扫描恢复权 |
 | 详情和菜单 | `lib/pages/book_study_page.dart` 的 `_showBookActions`、`_editMetadata`、`_editCategories` | 菜单换官方锚定控件；复用已有业务动作；删除仍需确认，不改变级联语义 |
@@ -211,3 +211,15 @@ P0、P1 已完成。P2–P4 的代码实现已完成；未实际走通的路径�
 | 同一操作组图标不成系列 | 筛选图标用 `inkSecondary`，排序与多选是 `ink`；大小 22／24／24 不一致。统一为 `ink` 与 22dp，保留 48dp 触控盒和筛选激活圆点。 |
 
 本次只改 `lib/pages/book_learning_space_page.dart` 的布局约束与图标令牌，未改数据、查询、接口或服务端。未运行 flutter analyze／test／构建、未截取实际渲染，状态为**未执行验证，待用户真机验证**。
+
+## 11. 首页与书库导入弹窗（2026-11-20）
+
+用户确认以新的居中卡和锚定卡取代 P2 的贴底两行面板。[确认设计及四个入口](../design/book-library-monochrome-v1.md#首页与书库导入弹窗2026-11-20-定稿)
+
+| 检查项 | 本轮接入 |
+| --- | --- |
+| 首页「添加新书」 | 在原「新建阅读任务」选书卡上叠加居中「添加图书」。取消保留原搜索词和列表位置。保存新书后复用现有任务选择回调。 |
+| 书库「＋ 新建」 | 从按钮下方展开「导入书籍」卡。按系统返回或点背景可关闭。在矮屏、高字号时卡片内容可滚动。 |
+| 行为 | ISBN 和本机导入复用现有扫码、本机文件和确认流程。微信导入提示暂未开放。网上找书打开系统浏览器中的 [Project Gutenberg 目录](https://www.gutenberg.org/ebooks/index.html)，下载文件可通过本机导入。应用内搜索和自动抓取待单独接入。 |
+| 验收 | 独立 SVG 已看图核对。Dart 格式化与差异检查通过。Flutter 静态分析、自动化、同状态对照和真机验证待完成。 |
+| 发布 | 服务器部署不需要。本项仅改 Flutter 界面与既有入口调度。 |

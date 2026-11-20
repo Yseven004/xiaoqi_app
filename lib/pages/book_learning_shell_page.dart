@@ -82,9 +82,7 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
     });
   }
 
-  Future<void> _createBook() async {
-    final action = await showBookAddSourceSheet(context);
-    if (!mounted || action == null) return;
+  Future<void> _createBook(BookAddAction action) async {
     if (action == BookAddAction.importPdf) {
       await _importBookSource();
       return;

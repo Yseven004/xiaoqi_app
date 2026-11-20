@@ -32,6 +32,7 @@ class AiConversationMessage {
     this.isIncomplete = false,
     this.capabilityMetadata,
     this.displayText,
+    this.readingPassage,
     List<ChatAnnotation> annotations = const [],
     this.capabilityTagOrigin,
     this.capabilityScopeOperation = 'inherit',
@@ -69,6 +70,7 @@ class AiConversationMessage {
 
   /// Local presentation only. [text] remains the runtime/model input.
   final String? displayText;
+  final String? readingPassage;
   final List<ChatAnnotation> annotations;
 
   /// null identifies older records; never sent as capability metadata.
@@ -110,6 +112,7 @@ class AiConversationMessage {
     bool? isIncomplete,
     Map<String, Object?>? capabilityMetadata,
     String? displayText,
+    String? readingPassage,
     List<ChatAnnotation>? annotations,
     String? capabilityTagOrigin,
     bool clearCapabilityMetadata = false,
@@ -142,6 +145,7 @@ class AiConversationMessage {
         workReferenceQuestionId ?? this.workReferenceQuestionId,
     text: text ?? this.text,
     displayText: displayText ?? this.displayText,
+    readingPassage: readingPassage ?? this.readingPassage,
     annotations: annotations ?? this.annotations,
     capabilityTagOrigin: capabilityTagOrigin ?? this.capabilityTagOrigin,
     isUser: isUser ?? this.isUser,
@@ -188,6 +192,7 @@ class AiConversationMessage {
       'work_reference_question_id': workReferenceQuestionId,
     'text': text,
     if (displayText != null) 'display_text': displayText,
+    if (readingPassage != null) 'reading_passage': readingPassage,
     if (annotations.isNotEmpty)
       'annotations': annotations.map((a) => a.toJson()).toList(),
     if (capabilityTagOrigin != null)
@@ -246,6 +251,7 @@ class AiConversationMessage {
       workReferenceQuestionId: raw['work_reference_question_id']?.toString(),
       text: raw['text']?.toString() ?? '',
       displayText: raw['display_text'] as String?,
+      readingPassage: raw['reading_passage'] as String?,
       annotations: raw['annotations'] is List
           ? (raw['annotations'] as List)
                 .whereType<Map>()
@@ -708,6 +714,7 @@ class AiConversationRecord {
     final newQuestion = question.copyWith(
       parentMessageId: source.parentMessageId,
       clearParentMessageId: source.parentMessageId == null,
+      readingPassage: source.readingPassage,
     );
     return copyWith(
       nodes: [...nodes, newQuestion],

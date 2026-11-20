@@ -203,6 +203,13 @@ class AttachmentCloudException extends FormatException {
   final int? statusCode;
 }
 
+const readingBookMarkItDownAttachmentProfile = 'reading-book-markitdown-v1';
+
+int attachmentUploadLimitBytes(String? profile) =>
+    (profile == readingBookMarkItDownAttachmentProfile ? 256 : 50) *
+    1024 *
+    1024;
+
 class CapabilityCloudSync {
   CapabilityCloudSync._()
     : _client = http.Client(),
@@ -316,13 +323,16 @@ class CapabilityCloudSync {
     String? contentHash,
     void Function(int sent, int total)? onProgress,
     Future<void>? abortTrigger,
+    String? expectedAuthorization,
+    String? attachmentProfile,
   }) async {
-    final headers = await authenticatedHeaders();
+    final headers = await _attachmentHeaders(expectedAuthorization);
     final file = File(path);
     final size = await file.length();
-    if (size <= 0 || size > 50 * 1024 * 1024) {
-      throw const AttachmentCloudException(
-        '附件为空或超过 50 MB 限制',
+    final limit = attachmentUploadLimitBytes(attachmentProfile);
+    if (size <= 0 || size > limit) {
+      throw AttachmentCloudException(
+        '附件为空或超过 ${limit ~/ (1024 * 1024)} MB 限制',
         code: 'invalid_size',
       );
     }
@@ -337,6 +347,9 @@ class CapabilityCloudSync {
           ..headers['X-Xiaoqi-Filename'] = Uri.encodeComponent(name)
           ..contentLength = size;
     if (contentHash != null) request.headers['X-Xiaoqi-Sha256'] = contentHash;
+    if (attachmentProfile != null) {
+      request.headers['X-Xiaoqi-Attachment-Profile'] = attachmentProfile;
+    }
     var sent = 0;
     onProgress?.call(sent, size);
     final response = _client.send(request).then(http.Response.fromStream);
@@ -358,17 +371,25 @@ class CapabilityCloudSync {
   Future<Map<String, dynamic>> getAttachment(
     String id, {
     Future<void>? abortTrigger,
-  }) => _attachmentRequest('GET', id, abortTrigger: abortTrigger);
+    String? expectedAuthorization,
+  }) => _attachmentRequest(
+    'GET',
+    id,
+    abortTrigger: abortTrigger,
+    expectedAuthorization: expectedAuthorization,
+  );
 
   Future<Map<String, dynamic>> submitAttachmentSegments(
     String id,
     List<Map<String, Object?>> segments, {
     Future<void>? abortTrigger,
+    String? expectedAuthorization,
   }) => _attachmentRequest(
     'PUT',
     '$id/segments',
     body: {'segments': segments, 'full': true},
     abortTrigger: abortTrigger,
+    expectedAuthorization: expectedAuthorization,
   );
 
   Future<Map<String, dynamic>> readAttachment(
@@ -377,17 +398,26 @@ class CapabilityCloudSync {
     String? query,
     List<int>? pages,
     Future<void>? abortTrigger,
+    String? expectedAuthorization,
   }) => _attachmentRequest(
     'POST',
     '$id/read',
     body: {'mode': mode, 'query': ?query, 'pages': ?pages},
     abortTrigger: abortTrigger,
+    expectedAuthorization: expectedAuthorization,
   );
 
   /// Cancellation stops active work; completed pages remain in the server's
   /// 24-hour resource cache. Never call this on success or a polling failure.
-  Future<void> cancelAttachment(String id) async {
-    await _attachmentRequest('DELETE', id);
+  Future<void> cancelAttachment(
+    String id, {
+    String? expectedAuthorization,
+  }) async {
+    await _attachmentRequest(
+      'DELETE',
+      id,
+      expectedAuthorization: expectedAuthorization,
+    );
   }
 
   Future<Map<String, dynamic>> waitForAttachment(
@@ -398,6 +428,7 @@ class CapabilityCloudSync {
     void Function(Map<String, dynamic>)? onSnapshot,
     Duration pollInterval = const Duration(seconds: 1),
     Duration retryInterval = const Duration(seconds: 1),
+    String? expectedAuthorization,
   }) async {
     var snapshot = initial;
     var consecutiveFailures = 0;
@@ -433,7 +464,11 @@ class CapabilityCloudSync {
         await _attachmentDelay(pollInterval, abortTrigger);
       }
       try {
-        snapshot = await getAttachment(id, abortTrigger: abortTrigger);
+        snapshot = await getAttachment(
+          id,
+          abortTrigger: abortTrigger,
+          expectedAuthorization: expectedAuthorization,
+        );
         consecutiveFailures = 0;
       } on Object catch (error) {
         if (!_transientAttachmentError(error) || ++consecutiveFailures > 5)
@@ -480,8 +515,9 @@ class CapabilityCloudSync {
     String suffix, {
     Map<String, Object?>? body,
     Future<void>? abortTrigger,
+    String? expectedAuthorization,
   }) async {
-    final headers = await authenticatedHeaders();
+    final headers = await _attachmentHeaders(expectedAuthorization);
     // IDs are server-generated; encode only the ID, retain the endpoint suffix.
     final parts = suffix.split('/');
     parts[0] = Uri.encodeComponent(parts[0]);
@@ -497,6 +533,20 @@ class CapabilityCloudSync {
           .then(http.Response.fromStream)
           .timeout(const Duration(seconds: 30)),
     );
+  }
+
+  Future<Map<String, String>> _attachmentHeaders(
+    String? expectedAuthorization,
+  ) async {
+    final headers = await authenticatedHeaders();
+    if (expectedAuthorization != null &&
+        headers['Authorization'] != expectedAuthorization) {
+      throw const AttachmentCloudException(
+        '账号已变更，请重新发送问题',
+        code: 'account_changed',
+      );
+    }
+    return headers;
   }
 
   Map<String, dynamic> _checkedAttachment(http.Response response) {
