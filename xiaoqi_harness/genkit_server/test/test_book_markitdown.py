@@ -84,6 +84,26 @@ def write_epub(path, chapter_bodies):
 
 
 class BookMarkItDownTests(unittest.TestCase):
+    def test_native_diagnostics_are_excluded_from_worker_protocol(self):
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os, runpy, sys\n"
+                "worker = runpy.run_path(sys.argv[1])\n"
+                "with worker['silence_parser_output']():\n"
+                "    os.write(1, b'raw stdout')\n"
+                "    os.write(2, b'raw stderr')\n"
+                "print('result')\n",
+                str(WORKER_PATH),
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(probe.stdout.strip(), "result")
+        self.assertEqual(probe.stderr, "")
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import io
 import json
 import os
@@ -260,6 +260,25 @@ def limit_worker_memory():
         resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
 
 
+@contextmanager
+def silence_parser_output():
+    # Native dependencies can write directly to stdout and stderr. Keep
+    # those diagnostics out of the worker protocol as well as Python logs.
+    with open(os.devnull, "w") as quiet:
+        original_stdout = os.dup(1)
+        original_stderr = os.dup(2)
+        try:
+            os.dup2(quiet.fileno(), 1)
+            os.dup2(quiet.fileno(), 2)
+            with redirect_stdout(quiet), redirect_stderr(quiet):
+                yield
+        finally:
+            os.dup2(original_stdout, 1)
+            os.dup2(original_stderr, 2)
+            os.close(original_stdout)
+            os.close(original_stderr)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_path", type=Path)
@@ -273,7 +292,7 @@ def main():
         limit_worker_memory()
         # PDF/HTML diagnostics may include book strings. Only publish our
         # fixed error categories outside the worker process.
-        with open(os.devnull, "w") as quiet, redirect_stdout(quiet), redirect_stderr(quiet):
+        with silence_parser_output():
             status = convert_book(args.input_path, args.format, args.output_path)
     except InvalidBook:
         print("invalid_book", file=sys.stderr)
