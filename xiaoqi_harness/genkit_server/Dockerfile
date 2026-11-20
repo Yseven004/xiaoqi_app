@@ -32,6 +32,7 @@ RUN dart build cli --target bin/server.dart --output /out \
  && dart build cli --target bin/verify_stdio_runtime.dart --output /stdio-probe
 
 FROM debian:bookworm-slim AS book-markitdown-deps
+COPY --from=dart-deps /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv \
  && rm -rf /var/lib/apt/lists/*
