@@ -20,7 +20,7 @@ RUN python3 -m venv /opt/book-markitdown \
  && /opt/book-markitdown/bin/pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements-book-markitdown.txt
 COPY genkit_server/ ./
 ENV XIAOQI_BOOK_MARKITDOWN_PYTHON=/opt/book-markitdown/bin/python XIAOQI_BOOK_MARKITDOWN_PATH=/app/bin/book_markitdown.py
-RUN /opt/book-markitdown/bin/python bin/tests/test_book_markitdown.py \
+RUN /opt/book-markitdown/bin/python test/test_book_markitdown.py \
  && dart analyze && dart test ${DART_TEST_ARGS}
 
 FROM dart-deps AS build

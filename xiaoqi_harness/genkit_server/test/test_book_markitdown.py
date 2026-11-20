@@ -11,7 +11,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 
-WORKER_PATH = Path(__file__).resolve().parents[1] / "book_markitdown.py"
+WORKER_PATH = Path(__file__).resolve().parents[1] / "bin" / "book_markitdown.py"
 spec = importlib.util.spec_from_file_location("book_markitdown", WORKER_PATH)
 worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
