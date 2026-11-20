@@ -76,7 +76,6 @@ class _SkillsPluginsComposerControlsState
       if (widget.isReadingSpace) {
         unawaited(_refresh());
       } else {
-        _menuPortal.hide();
         _open = false;
         _manage = false;
         _records = const [];
@@ -318,12 +317,6 @@ class _SkillsPluginsComposerControlsState
 
   void _showStatus(String message) {
     AppToast.show(context, message);
-  }
-
-  @override
-  void dispose() {
-    _menuPortal.hide();
-    super.dispose();
   }
 
   Future<void> _delete(CapabilityRecord record) async {
@@ -914,6 +907,12 @@ class _SkillsPluginsComposerControlsState
 
   @override
   Widget build(BuildContext context) {
+    final skillsPill = _pill(
+      label: '技能 / 插件',
+      icon: 'skill_plugin_capsule',
+      expanded: _open,
+      onTap: widget.isReadingSpace ? _toggleMenu : null,
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -928,22 +927,20 @@ class _SkillsPluginsComposerControlsState
                 widget.leadingControl!,
                 const SizedBox(width: 8),
               ],
-              OverlayPortal.overlayChildLayoutBuilder(
-                controller: _menuPortal,
-                overlayChildBuilder: (context, info) => _showingMcpMenu
-                    ? _buildMcpMenuOverlay(context, info)
-                    : _buildMenuOverlay(context, info),
-                child: TapRegion(
-                  groupId: _menuTapRegionGroup,
-                  onTapOutside: (_) => _closeMenu(),
-                  child: _pill(
-                    label: '技能 / 插件',
-                    icon: 'skill_plugin_capsule',
-                    expanded: _open,
-                    onTap: widget.isReadingSpace ? _toggleMenu : null,
+              if (widget.isReadingSpace)
+                OverlayPortal.overlayChildLayoutBuilder(
+                  controller: _menuPortal,
+                  overlayChildBuilder: (context, info) => _showingMcpMenu
+                      ? _buildMcpMenuOverlay(context, info)
+                      : _buildMenuOverlay(context, info),
+                  child: TapRegion(
+                    groupId: _menuTapRegionGroup,
+                    onTapOutside: (_) => _closeMenu(),
+                    child: skillsPill,
                   ),
-                ),
-              ),
+                )
+              else
+                skillsPill,
               const SizedBox(width: 8),
               _pill(
                 label: 'MCP 连接器',

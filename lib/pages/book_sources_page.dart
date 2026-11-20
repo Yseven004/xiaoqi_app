@@ -1,11 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import '../config/book_flow_theme.dart';
@@ -13,12 +10,12 @@ import '../models/book_source.dart';
 import '../models/xiaoqi_document.dart';
 import '../services/book_library_service.dart';
 import '../services/epub_document_service.dart';
-import '../services/pdf_catalog_service.dart';
 import '../services/source_document_loader.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/book_editor_dialog.dart';
+import '../widgets/book_source_import.dart';
 
-enum _SourceAction { move, share, remove, deleteFile }
+enum _SourceAction { setPrimary, move, share, remove, deleteFile }
 
 class BookSourcesPage extends StatefulWidget {
   const BookSourcesPage({
@@ -38,6 +35,8 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
   List<BookSourceRecord> _sources = const [];
   bool _loading = true;
   bool _importing = false;
+  bool _choosingSource = false;
+  int? _editingSourceId;
   String? _error;
 
   @override
@@ -103,61 +102,26 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
     }
   }
 
-  Future<void> _importBookSource() async {
-    if (_importing) return;
-    setState(() => _importing = true);
+  Future<void> _importBookSource(BuildContext anchorContext) async {
+    if (_choosingSource) return;
+    _choosingSource = true;
     try {
-      final file = await FilePicker.pickFile(
-        type: FileType.custom,
-        allowedExtensions: supportedBookSourceFileExtensions,
-      );
-      if (!mounted || file == null) return;
-      final format = inferBookSourceFormat(file.name);
-      if (!supportedBookSourceFormats.contains(format)) {
-        _showMessage('目前支持导入 PDF 或 EPUB 文件');
-        return;
-      }
-      final sourcePath = await _ensurePickedFilePath(file);
-      final outcome = await widget.bookLibraryService.importBookSourceForBook(
+      final outcome = await showExistingBookSourceImport(
+        context,
         bookId: widget.bookId,
-        sourcePath: sourcePath,
-        displayName: file.name,
-        format: format,
+        library: widget.bookLibraryService,
+        anchorContext: anchorContext,
+        onImporting: () => setState(() => _importing = true),
       );
-      if (format == 'pdf' &&
-          outcome.source.catalogStatus != 'processing' &&
-          outcome.source.catalogStatus != 'confirmed' &&
-          (outcome.source.catalogParserVersion <
-                  PdfCatalogService.parserVersion ||
-              outcome.source.catalogStatus == 'not_started' ||
-              outcome.source.catalogStatus == 'failed')) {
-        unawaited(
-          widget.bookLibraryService.parsePdfCatalogForSource(outcome.source),
-        );
-      }
+      if (!mounted || outcome == null) return;
       await _loadSources();
       if (outcome.reusedExisting && mounted) {
         _showDuplicateNotice();
       }
-    } catch (error) {
-      if (mounted) _showMessage('资料导入失败：$error');
     } finally {
-      if (mounted) setState(() => _importing = false);
+      _choosingSource = false;
+      if (mounted && _importing) setState(() => _importing = false);
     }
-  }
-
-  Future<String> _ensurePickedFilePath(PlatformFile file) async {
-    final existingPath = file.path;
-    if (existingPath != null &&
-        existingPath.trim().isNotEmpty &&
-        await File(existingPath).exists()) {
-      return existingPath;
-    }
-    final bytes = await file.readAsBytes();
-    final temporary = await getTemporaryDirectory();
-    final fallback = File(p.join(temporary.path, file.name));
-    await fallback.writeAsBytes(bytes, flush: true);
-    return fallback.path;
   }
 
   Future<void> _openSource(BookSourceRecord source) async {
@@ -188,6 +152,8 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
     _SourceAction action,
   ) async {
     switch (action) {
+      case _SourceAction.setPrimary:
+        await _setPrimarySource(source);
       case _SourceAction.move:
         await _moveOrShareSource(source, move: true);
       case _SourceAction.share:
@@ -197,6 +163,18 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
       case _SourceAction.deleteFile:
         await _deleteSourceFile(source);
     }
+  }
+
+  Future<void> _renameSource(
+    BookSourceRecord source,
+    String displayName,
+  ) async {
+    await widget.bookLibraryService.renameBookSource(
+      bookId: widget.bookId,
+      sourceId: source.id,
+      displayName: displayName,
+    );
+    if (mounted) await _loadSources();
   }
 
   Future<void> _moveOrShareSource(
@@ -428,13 +406,26 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
       itemCount: _sources.length,
+      findChildIndexCallback: (key) {
+        final index = _sources.indexWhere(
+          (source) => ValueKey(source.id) == key,
+        );
+        return index < 0 ? null : index;
+      },
       itemBuilder: (context, index) {
         final source = _sources[index];
         return _SourceRow(
           key: ValueKey(source.id),
           source: source,
+          editing: _editingSourceId == source.id,
           onTap: () => _openSource(source),
-          onSelectSource: () => _setPrimarySource(source),
+          onEdit: () => setState(() => _editingSourceId = source.id),
+          onRename: (name) => _renameSource(source, name),
+          onFinishEditing: () {
+            if (_editingSourceId == source.id) {
+              setState(() => _editingSourceId = null);
+            }
+          },
           onAction: (action) => _handleSourceAction(source, action),
         );
       },
@@ -442,112 +433,260 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
   }
 }
 
-class _SourceRow extends StatelessWidget {
+class _SourceRow extends StatefulWidget {
   const _SourceRow({
     super.key,
     required this.source,
+    required this.editing,
     required this.onTap,
-    required this.onSelectSource,
+    required this.onEdit,
+    required this.onRename,
+    required this.onFinishEditing,
     required this.onAction,
   });
 
   final BookSourceRecord source;
+  final bool editing;
   final VoidCallback onTap;
-  final VoidCallback onSelectSource;
+  final VoidCallback onEdit;
+  final Future<void> Function(String) onRename;
+  final VoidCallback onFinishEditing;
   final ValueChanged<_SourceAction> onAction;
 
   @override
-  Widget build(BuildContext context) {
-    final metadata = [
-      if (source.isPrimary) '主资料',
-      _formatBytes(source.fileSize),
-      if (source.status != 'ready') _statusLabel(source.status),
-    ].join(' · ');
-    final selectPrimary = source.isPrimary
-        ? null
-        : TextButton(
-            onPressed: onSelectSource,
-            style: TextButton.styleFrom(
-              foregroundColor: BookFlowTheme.inkSecondary,
-              padding: EdgeInsets.zero,
-              minimumSize: const Size(0, 48),
-              tapTargetSize: MaterialTapTargetSize.padded,
+  State<_SourceRow> createState() => _SourceRowState();
+}
+
+class _SourceRowState extends State<_SourceRow>
+    with
+        AutomaticKeepAliveClientMixin<_SourceRow>,
+        WidgetsBindingObserver,
+        BookEditorInputFocus<_SourceRow> {
+  late final _name = TextEditingController(text: widget.source.displayName);
+  final _nameFocus = FocusNode();
+  bool _saving = false;
+  String? _nameError;
+
+  @override
+  bool get wantKeepAlive =>
+      widget.editing || _saving || _name.text != widget.source.displayName;
+
+  @override
+  Iterable<(FocusNode, TextEditingController)> get editorInputs => [
+    (_nameFocus, _name),
+  ];
+
+  @override
+  void didUpdateWidget(covariant _SourceRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.source.displayName != widget.source.displayName &&
+        _name.text == oldWidget.source.displayName) {
+      _name.text = widget.source.displayName;
+    }
+    if (widget.editing && !oldWidget.editing) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            widget.editing &&
+            !_saving &&
+            ModalRoute.of(context)?.isCurrent == true) {
+          _nameFocus.requestFocus();
+        }
+      });
+    } else if (oldWidget.editing && !widget.editing) {
+      _nameError = null;
+    }
+    updateKeepAlive();
+  }
+
+  @override
+  void dispose() {
+    _nameFocus.dispose();
+    _name.dispose();
+    super.dispose();
+  }
+
+  @override
+  void onEditorKeyboardDismissed(
+    FocusNode focus,
+    TextEditingController controller,
+  ) => _leaveEditing();
+
+  void _leaveEditing() {
+    if (_saving || !widget.editing) return;
+    _nameFocus.unfocus();
+    if (_name.text.trim().isEmpty) _name.text = widget.source.displayName;
+    widget.onFinishEditing();
+  }
+
+  Future<void> _saveName() async {
+    if (_saving) return;
+    final name = _name.text.trim();
+    if (name.isEmpty) {
+      setState(() => _nameError = '请输入资料名称');
+      return;
+    }
+
+    _nameFocus.unfocus();
+    if (name == widget.source.displayName) {
+      _name.text = name;
+      widget.onFinishEditing();
+      return;
+    }
+
+    setState(() {
+      _saving = true;
+      _nameError = null;
+    });
+    try {
+      await widget.onRename(name);
+      if (!mounted) return;
+      _name.text = name;
+      widget.onFinishEditing();
+    } catch (_) {
+      if (mounted) setState(() => _nameError = '保存失败，请重试');
+    } finally {
+      if (mounted) {
+        setState(() => _saving = false);
+        updateKeepAlive();
+      }
+    }
+  }
+
+  Widget _buildTitle(BookSourceRecord source) {
+    if (widget.editing) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: TextField(
+          controller: _name,
+          focusNode: _nameFocus,
+          readOnly: _saving,
+          textInputAction: TextInputAction.done,
+          maxLines: 1,
+          style: _sourceTitle,
+          decoration: InputDecoration(
+            hintText: '资料名称',
+            errorText: _nameError,
+            errorMaxLines: 2,
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(vertical: 8),
+            enabledBorder: const UnderlineInputBorder(
+              borderSide: BorderSide(color: Color(0xFFDDE0E4)),
             ),
-            child: const Text('设为主资料'),
-          );
-    final textScale = MediaQuery.textScalerOf(context);
+            focusedBorder: const UnderlineInputBorder(
+              borderSide: BorderSide(color: BookFlowTheme.ink),
+            ),
+          ),
+          onTapOutside: (_) => _leaveEditing(),
+          onEditingComplete: _name.clearComposing,
+          onSubmitted: (_) => unawaited(_saveName()),
+          onChanged: (_) {
+            if (_nameError != null) setState(() => _nameError = null);
+          },
+        ),
+      );
+    }
+    return Row(
+      children: [
+        Flexible(
+          child: Text(
+            source.displayName,
+            style: _sourceTitle,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        IconButton(
+          tooltip: '编辑资料名称',
+          onPressed: widget.onEdit,
+          constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+          icon: bookEditorIcon('pencil', size: 15),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final source = widget.source;
+    final metadata = [
+      _formatBytes(source.fileSize),
+      ?_formatSourceDate(source.createdAt),
+      if (source.isPrimary) '主资料',
+      if (source.status != 'ready') _statusLabel(source.status),
+    ];
 
     return Column(
       children: [
         InkWell(
-          onTap: onTap,
+          onTap: widget.onTap,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 104),
+            constraints: const BoxConstraints(minHeight: 76),
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final compact =
-                      constraints.maxWidth < 360 || textScale.scale(14) > 21;
-                  return Row(
-                    children: [
-                      _SourceFormatBadge(format: source.format),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Row(
+                children: [
+                  _SourceListFormatBadge(format: source.format),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildTitle(source),
+                        Wrap(
+                          spacing: 6,
                           children: [
-                            Text(
-                              source.displayName,
-                              style: _sourceTitle.copyWith(fontSize: 20),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              metadata,
-                              style: BookFlowTheme.body.copyWith(fontSize: 15),
-                            ),
-                            if (source.originUri.trim().isNotEmpty)
+                            for (final (index, value) in metadata.indexed)
                               Text(
-                                source.originUri,
-                                style: BookFlowTheme.body,
+                                index == 0 ? value : '· $value',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
+                                style: BookFlowTheme.body,
                               ),
-                            if (compact) ?selectPrimary,
                           ],
                         ),
+                        if (source.originUri.trim().isNotEmpty)
+                          Text(
+                            source.originUri,
+                            style: BookFlowTheme.body,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                      ],
+                    ),
+                  ),
+                  PopupMenuButton<_SourceAction>(
+                    tooltip: '资料操作',
+                    onSelected: widget.onAction,
+                    color: BookFlowTheme.surface,
+                    surfaceTintColor: Colors.transparent,
+                    icon: bookEditorIcon('dots', size: 22),
+                    itemBuilder: (_) => [
+                      if (!source.isPrimary)
+                        const PopupMenuItem(
+                          value: _SourceAction.setPrimary,
+                          child: Text('设为主资料'),
+                        ),
+                      const PopupMenuItem(
+                        value: _SourceAction.move,
+                        child: Text('移动到其他书籍'),
                       ),
-                      if (!compact) ?selectPrimary,
-                      PopupMenuButton<_SourceAction>(
-                        tooltip: '资料操作',
-                        onSelected: onAction,
-                        color: BookFlowTheme.surface,
-                        surfaceTintColor: Colors.transparent,
-                        icon: bookEditorIcon('dots', size: 22),
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(
-                            value: _SourceAction.move,
-                            child: Text('移动到其他书籍'),
-                          ),
-                          PopupMenuItem(
-                            value: _SourceAction.share,
-                            child: Text('共享到其他书籍'),
-                          ),
-                          PopupMenuItem(
-                            value: _SourceAction.remove,
-                            child: Text('从本书移除'),
-                          ),
-                          PopupMenuItem(
-                            value: _SourceAction.deleteFile,
-                            child: Text('彻底删除文件'),
-                          ),
-                        ],
+                      const PopupMenuItem(
+                        value: _SourceAction.share,
+                        child: Text('共享到其他书籍'),
+                      ),
+                      const PopupMenuItem(
+                        value: _SourceAction.remove,
+                        child: Text('从本书移除'),
+                      ),
+                      const PopupMenuItem(
+                        value: _SourceAction.deleteFile,
+                        child: Text('彻底删除文件'),
                       ),
                     ],
-                  );
-                },
+                  ),
+                ],
               ),
             ),
           ),
@@ -558,11 +697,36 @@ class _SourceRow extends StatelessWidget {
   }
 }
 
+class _SourceListFormatBadge extends StatelessWidget {
+  const _SourceListFormatBadge({required this.format});
+
+  final String format;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    constraints: const BoxConstraints(minWidth: 48),
+    alignment: Alignment.center,
+    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+    decoration: BoxDecoration(
+      color: const Color(0xFFF4F4F4),
+      border: Border.all(color: const Color(0xFFE1E1E1)),
+      borderRadius: BorderRadius.circular(5),
+    ),
+    child: Text(
+      _sourceFormatLabel(format),
+      style: BookFlowTheme.caption.copyWith(
+        color: BookFlowTheme.ink,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
+}
+
 class _EmptySources extends StatelessWidget {
   const _EmptySources({required this.importing, required this.onImport});
 
   final bool importing;
-  final VoidCallback onImport;
+  final ValueChanged<BuildContext> onImport;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -610,12 +774,12 @@ class _ImportSourceButton extends StatelessWidget {
   });
 
   final bool importing;
-  final VoidCallback onImport;
+  final ValueChanged<BuildContext> onImport;
   final bool prominent;
 
   @override
   Widget build(BuildContext context) => FilledButton.icon(
-    onPressed: importing ? null : onImport,
+    onPressed: importing ? null : () => onImport(context),
     icon: SvgPicture.asset(
       'assets/icons/extension_market/detail/plus-light.svg',
       width: 18,
@@ -1014,6 +1178,14 @@ String _statusLabel(String status) {
 String _formatBytes(int bytes) {
   if (bytes < 1024 * 1024) return '${(bytes / 1024).ceil()} KB';
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+String? _formatSourceDate(String value) {
+  final date = DateTime.tryParse(value)?.toLocal();
+  if (date == null) return null;
+  String twoDigits(int part) => part.toString().padLeft(2, '0');
+  return '${date.year}-${twoDigits(date.month)}-${twoDigits(date.day)} '
+      '${twoDigits(date.hour)}:${twoDigits(date.minute)}';
 }
 
 class TextSourceReaderPage extends StatefulWidget {

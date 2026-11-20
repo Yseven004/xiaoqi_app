@@ -66,6 +66,7 @@ class ReadingTaskSwitcher extends StatefulWidget {
     required this.selectedBookId,
     required this.selectedBookName,
     required this.onSelectBook,
+    required this.onOpenBookMaterials,
     required this.onSearchFocusChanged,
     required this.onStartIndependent,
     required this.onAddBook,
@@ -76,6 +77,7 @@ class ReadingTaskSwitcher extends StatefulWidget {
   final int? selectedBookId;
   final String selectedBookName;
   final ValueChanged<BookLibraryItem> onSelectBook;
+  final ValueChanged<BookLibraryItem> onOpenBookMaterials;
   final ValueChanged<bool> onSearchFocusChanged;
   final VoidCallback onStartIndependent;
   final Future<BookLibraryItem?> Function(BuildContext) onAddBook;
@@ -449,12 +451,17 @@ class _ReadingTaskSwitcherState extends State<ReadingTaskSwitcher>
       separatorBuilder: (_, _) => const SizedBox(height: _taskBookRowGap),
       itemBuilder: (context, index) {
         final item = books[index];
+        final selected = _isSelected(item);
         return _TaskBookRow(
           item: item,
-          selected: _isSelected(item),
+          selected: selected,
           onTap: () {
             _closeTaskMenu();
-            widget.onSelectBook(item);
+            if (selected) {
+              widget.onOpenBookMaterials(item);
+            } else {
+              widget.onSelectBook(item);
+            }
           },
         );
       },
@@ -966,7 +973,9 @@ class _TaskBookRow extends StatelessWidget {
     return Semantics(
       button: true,
       selected: selected,
-      label: '切换到《${item.book.title}》',
+      label: selected
+          ? '查看《${item.book.title}》的关联资料'
+          : '切换到《${item.book.title}》',
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(

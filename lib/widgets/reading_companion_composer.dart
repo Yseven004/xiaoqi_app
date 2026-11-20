@@ -369,9 +369,14 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
                         ValueListenableBuilder<TextEditingValue>(
                           valueListenable: widget.controller,
                           builder: (context, _, _) {
+                            final controller = widget.controller;
+                            final hasExplicitCapability =
+                                controller is CapabilityTagTextController &&
+                                controller.hasExplicitCapability;
                             final canSend =
                                 widget.sendingEnabled &&
                                 (_draftText.trim().isNotEmpty ||
+                                    hasExplicitCapability ||
                                     widget.attachments.isNotEmpty);
                             return _toolbarButton(
                               widget.generating ? '停止生成' : '发送',

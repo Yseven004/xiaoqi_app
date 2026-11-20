@@ -315,6 +315,14 @@ mixin BookEditorInputFocus<T extends StatefulWidget> on State<T>
 
   Iterable<(FocusNode, TextEditingController)> get editorInputs;
 
+  @protected
+  void onEditorKeyboardDismissed(
+    FocusNode focus,
+    TextEditingController controller,
+  ) {
+    if (controller.text.isEmpty) focus.unfocus();
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -331,7 +339,7 @@ mixin BookEditorInputFocus<T extends StatefulWidget> on State<T>
     final visible = View.of(context).viewInsets.bottom > 0;
     if (_keyboardVisible && !visible) {
       for (final (focus, controller) in editorInputs) {
-        if (focus.hasFocus && controller.text.isEmpty) focus.unfocus();
+        if (focus.hasFocus) onEditorKeyboardDismissed(focus, controller);
       }
     }
     _keyboardVisible = visible;

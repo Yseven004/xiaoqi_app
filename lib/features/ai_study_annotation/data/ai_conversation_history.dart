@@ -1011,6 +1011,8 @@ class AiConversationHistoryService {
   static const _storageKey = 'ai_study_annotation.conversations.v1';
   static const _versionSelectionStorageKey =
       'ai_study_annotation.version_selections.v1';
+  static const _readingSourceKeyPrefix =
+      'ai_study_annotation.reading_source.v1.';
 
   final Map<String, AiConversationRecord> _records = {};
   final Map<String, _VersionSelectionSnapshot> _versionSelections = {};
@@ -1054,6 +1056,41 @@ class AiConversationHistoryService {
     if (pendingWrite != null) await pendingWrite;
     final record = _records[id];
     return record == null ? null : _applyVersionSelection(record);
+  }
+
+  /// Material selection is local conversation metadata. Keeping it out of
+  /// the chat tree prevents in-flight replies from overwriting a newer choice.
+  Future<int?> readingSourceId(String conversationId, int bookId) async {
+    final prefs = _preferences ??= await SharedPreferences.getInstance();
+    return prefs.getInt('$_readingSourceKeyPrefix$conversationId.$bookId');
+  }
+
+  Future<void> selectReadingSource(
+    String conversationId, {
+    required int bookId,
+    required int sourceId,
+  }) async {
+    final prefs = _preferences ??= await SharedPreferences.getInstance();
+    final key = '$_readingSourceKeyPrefix$conversationId.$bookId';
+    final previous = prefs.getInt(key);
+    if (previous == sourceId) return;
+    try {
+      if (await prefs.setInt(key, sourceId)) return;
+    } catch (_) {
+      // SharedPreferences can fail after updating its in-memory cache.
+    }
+    if (prefs.getInt(key) == sourceId) {
+      try {
+        if (previous == null) {
+          await prefs.remove(key);
+        } else {
+          await prefs.setInt(key, previous);
+        }
+      } catch (_) {
+        // The cache is restored even when the platform rejects the rollback.
+      }
+    }
+    throw StateError('无法保存关联资料');
   }
 
   Future<AiConversationRecord?> latestForBook({

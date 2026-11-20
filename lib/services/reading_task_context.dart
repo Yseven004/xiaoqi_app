@@ -6,8 +6,9 @@ import 'book_library_service.dart';
 /// identifiers, and annotations do not travel with the bibliography.
 Future<String> loadReadingTaskContext(
   BookLibraryService library,
-  int? bookId,
-) async {
+  int? bookId, {
+  int? sourceId,
+}) async {
   if (bookId == null) return '';
   try {
     final book = await library.getBook(bookId);
@@ -34,7 +35,11 @@ Future<String> loadReadingTaskContext(
         if (title.isNotEmpty) out.writeln('- $title');
       }
     }
-    final readySources = sources.where((source) => source.status == 'ready');
+    final readySources = sources.where(
+      (source) =>
+          source.status == 'ready' &&
+          (sourceId == null || source.id == sourceId),
+    );
     if (readySources.isNotEmpty) {
       out.writeln('\n### 已导入资料');
       for (final source in readySources.take(6)) {

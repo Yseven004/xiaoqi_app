@@ -89,6 +89,84 @@ void main() {
     },
   );
 
+  testWidgets('companion is a searchable built-in setting under My plugins', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(834, 1194));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const MaterialApp(home: ExtensionMarketPage()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('已安装'));
+    await tester.pumpAndSettle();
+    expect(find.text('沉浸伴读'), findsNothing);
+    expect(find.text('内置插件'), findsNothing);
+
+    await tester.tap(find.text('我的'));
+    await tester.pumpAndSettle();
+    expect(find.text('内置插件'), findsOneWidget);
+    expect(find.text('我的插件'), findsOneWidget);
+    expect(find.text('登录后查看个人插件'), findsOneWidget);
+    expect(find.text('还没有个人插件'), findsNothing);
+    expect(find.textContaining('Bad state:'), findsNothing);
+    final companionSwitch = find.byType(Switch);
+    expect(companionSwitch, findsOneWidget);
+    final wasEnabled = tester.widget<Switch>(companionSwitch).value;
+    await tester.tap(companionSwitch);
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(companionSwitch).value, !wasEnabled);
+    expect(
+      (await SharedPreferences.getInstance()).getBool(
+        'reading-companion.enabled',
+      ),
+      !wasEnabled,
+    );
+
+    final search = find.byType(TextField);
+    await tester.enterText(search, 'AI 伴读');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('沉浸伴读'), findsOneWidget);
+    expect(find.text('我的插件'), findsNothing);
+    await tester.enterText(search, '找不到的插件');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('沉浸伴读'), findsNothing);
+    expect(find.text('没有找到相关内容'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('清除搜索'));
+    await tester.pumpAndSettle();
+    expect(find.text('我的插件'), findsOneWidget);
+    await tester.tap(companionSwitch);
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(companionSwitch).value, wasEnabled);
+  });
+
+  testWidgets('My plugins remains usable with large text in a narrow window', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(320, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(textScaler: const TextScaler.linear(2)),
+          child: child!,
+        ),
+        home: const ExtensionMarketPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('我的'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('沉浸伴读'));
+    await tester.pumpAndSettle();
+    final switchTile = find.byType(SwitchListTile);
+    await tester.ensureVisible(switchTile);
+    expect(tester.getSize(switchTile).height, greaterThanOrEqualTo(48));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'chat creation returns an ordinary new-chat request without sending',
     (tester) async {

@@ -9,16 +9,24 @@ class ReadingCompanionPreferences {
 
   final _enabled = ValueNotifier<bool>(true);
   Future<void>? _loading;
+  bool _loaded = false;
 
   ValueListenable<bool> get enabled => _enabled;
 
-  Future<void> load() => _loading ??= _load();
+  Future<void> load() async {
+    if (_loaded) return;
+    await (_loading ??= _load());
+  }
 
   Future<void> _load() async {
     try {
       final preferences = await SharedPreferences.getInstance();
-      _enabled.value = preferences.getBool(_key) ?? true;
+      final enabled = preferences.getBool(_key) ?? true;
+      _loaded = true;
+      _enabled.value = enabled;
     } catch (_) {
+      // A later call can retry loading the preference.
+    } finally {
       _loading = null;
     }
   }

@@ -953,6 +953,23 @@ class BookLibraryService {
     }
   }
 
+  Future<void> renameBookSource({
+    required int bookId,
+    required int sourceId,
+    required String displayName,
+  }) async {
+    final name = displayName.trim();
+    if (name.isEmpty) throw ArgumentError('资料名称不能为空');
+    final db = await _databaseService.database;
+    final updated = await db.update(
+      'book_sources',
+      {'display_name': name},
+      where: 'id = ? AND book_id = ?',
+      whereArgs: [sourceId, bookId],
+    );
+    if (updated == 0) throw StateError('找不到这份资料');
+  }
+
   Future<XiaoqiDocument?> loadBookSourceRevision(
     BookSourceRecord source,
   ) async {

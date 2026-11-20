@@ -31,6 +31,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../config/book_flow_theme.dart';
 import '../features/ai_study_annotation/data/ai_conversation_history.dart';
 import '../features/ai_study_annotation/domain/ai_chat_web_source.dart';
 import '../features/ai_study_annotation/domain/ai_chat_process.dart';
@@ -62,7 +63,9 @@ import '../widgets/chat_image_gallery.dart';
 import '../services/home_chat_model_preferences.dart';
 import '../services/speech_recognition_service.dart';
 import '../widgets/reading_task_book_creation.dart';
+import '../widgets/book_source_import.dart';
 import '../widgets/reading_space_sidebar.dart';
+import '../widgets/reading_task_material_dialog.dart';
 import '../widgets/reading_task_switcher.dart';
 import '../widgets/reading_companion.dart';
 import '../widgets/reading_companion_composer.dart';
@@ -906,8 +909,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _startConversationForSharedMedia(
     List<SharedMediaFile> sharedFiles,
   ) async {
+    final remainingFiles = routeExistingBookSharedMedia(sharedFiles);
+    if (sharedFiles.isNotEmpty && remainingFiles.isEmpty) {
+      await ReceiveSharingIntent.instance.reset();
+      return;
+    }
     final picked = <XFile>[];
-    for (final shared in sharedFiles) {
+    for (final shared in remainingFiles) {
       if (shared.type == SharedMediaType.text ||
           shared.type == SharedMediaType.url) {
         continue;
@@ -3678,6 +3686,15 @@ $materialIndex
             ? _selectedReadingTaskBookId
             : null);
     final resumesBookTask = resumeTaskId != null && bookId != null;
+    final passage = conversationId == _passageConversationId
+        ? _readingPassage
+        : null;
+    final sourceId = bookId == null || resumesBookTask
+        ? null
+        : passage != null && passage.bookId == bookId
+        ? passage.sourceId
+        : await _historyService.readingSourceId(conversationId, bookId);
+    if (!isCurrent()) return null;
     final firstQuestionInWork = history
         .takeWhile((message) => message.id != question.id)
         .every(
@@ -3687,7 +3704,7 @@ $materialIndex
               message.workId != workId,
         );
     final readingContext = firstQuestionInWork && !resumesBookTask
-        ? await loadReadingTaskContext(_bookLibrary, bookId)
+        ? await loadReadingTaskContext(_bookLibrary, bookId, sourceId: sourceId)
         : '';
     if (!isCurrent()) return null;
     final materials = <Map<String, Object?>>[
@@ -3711,6 +3728,7 @@ $materialIndex
         prepared = await _readingTaskMaterials.prepare(
           library: _bookLibrary,
           bookId: bookId,
+          sourceId: sourceId,
           isCancelled: () => !isCurrent(),
         );
       } on FormatException catch (error) {
@@ -8639,6 +8657,7 @@ $text''';
       child: ReadingCompanion(
         key: _readingCompanionKey,
         bookId: _selectedReadingTaskBookId ?? _conversation?.bookId,
+        loadPreferredSourceId: _loadCompanionTaskSourceId,
         library: _bookLibrary,
         messages: activePassage ? _messages : const [],
         streamingReply: _streamingReply,
@@ -8732,6 +8751,12 @@ $text''';
     );
   }
 
+  Future<int?> _loadCompanionTaskSourceId(int bookId) async {
+    final conversation = _conversationBeforeCompanion ?? _conversation;
+    if (conversation == null) return null;
+    return _historyService.readingSourceId(conversation.id, bookId);
+  }
+
   Future<void> _openExtensionMarket({
     ExtensionKind kind = ExtensionKind.plugin,
   }) async {
@@ -8761,6 +8786,52 @@ $text''';
         .toList();
     matches.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     return matches.isEmpty ? null : matches.first;
+  }
+
+  Future<void> _openReadingTaskBookMaterials(BookLibraryItem item) async {
+    final conversationId = _conversation?.id;
+    final bookId = item.book.id;
+    if (conversationId == null || bookId == null) return;
+
+    bool taskIsCurrent() =>
+        mounted &&
+        _space == _HomeSpace.reading &&
+        _conversation?.id == conversationId &&
+        (_selectedReadingTaskBookId == bookId ||
+            (_selectedReadingTaskBookId == null &&
+                _selectedReadingTaskBookName.trim() == item.book.title.trim()));
+
+    _dismissComposerFocus();
+    if (_voicePanelVisible) await _cancelVoiceInput();
+    if (!taskIsCurrent()) return;
+
+    try {
+      final sourceId = await _historyService.readingSourceId(
+        conversationId,
+        bookId,
+      );
+      if (!mounted || !taskIsCurrent()) return;
+      await showReadingTaskMaterialsDialog(
+        context,
+        book: item,
+        library: _bookLibrary,
+        bookId: bookId,
+        sourceId: sourceId,
+        onSelect: (sourceId) async {
+          if (!taskIsCurrent()) throw StateError('当前阅读任务已切换');
+          await _historyService.selectReadingSource(
+            conversationId,
+            bookId: bookId,
+            sourceId: sourceId,
+          );
+          if (taskIsCurrent() && _selectedReadingTaskBookId == null) {
+            setState(() => _selectedReadingTaskBookId = bookId);
+          }
+        },
+      );
+    } catch (_) {
+      if (taskIsCurrent()) _showReplyError('无法打开关联资料，请重试');
+    }
   }
 
   Future<void> _activateReadingBook(BookLibraryItem item) async {
@@ -9500,6 +9571,8 @@ $text''';
                                                   _selectedReadingTaskBookName,
                                               onSelectReadingBook:
                                                   _activateReadingBook,
+                                              onOpenReadingBookMaterials:
+                                                  _openReadingTaskBookMaterials,
                                               onReadingTaskSearchFocusChanged:
                                                   _onReadingTaskSearchFocusChanged,
                                               onStartIndependent:
@@ -9704,6 +9777,8 @@ $text''';
         },
       );
 
+  static const _topBarIconSize = 25.5;
+
   Widget _buildTopBar({required bool showNewConversation}) {
     final showCompanion =
         _space == _HomeSpace.reading && _companionPreferences.enabled.value;
@@ -9741,8 +9816,8 @@ $text''';
                 splashRadius: 24,
                 icon: SvgPicture.asset(
                   'assets/images/home_sidebar_icon.svg',
-                  width: 25.5,
-                  height: 25.5,
+                  width: _topBarIconSize,
+                  height: _topBarIconSize,
                   fit: BoxFit.contain,
                 ),
               ),
@@ -9774,13 +9849,10 @@ $text''';
                           )
                         : null,
                     icon: SvgPicture.asset(
-                      'assets/icons/chat_note_editor/book-open-text.svg',
-                      width: 22,
-                      height: 22,
-                      colorFilter: const ColorFilter.mode(
-                        Colors.black87,
-                        BlendMode.srcIn,
-                      ),
+                      BookFlowTheme.companionIconAsset,
+                      width: _topBarIconSize,
+                      height: _topBarIconSize,
+                      excludeFromSemantics: true,
                     ),
                   ),
                 Semantics(
@@ -9798,8 +9870,8 @@ $text''';
                       child: Center(
                         child: SvgPicture.asset(
                           'assets/images/home_reply_note.svg',
-                          width: 25.5,
-                          height: 25.5,
+                          width: _topBarIconSize,
+                          height: _topBarIconSize,
                         ),
                       ),
                     ),
@@ -9834,8 +9906,8 @@ $text''';
     constraints: const BoxConstraints.tightFor(width: 44, height: 44),
     icon: SvgPicture.asset(
       'assets/images/home_new_conversation_icon.svg',
-      width: 25.5,
-      height: 25.5,
+      width: _topBarIconSize,
+      height: _topBarIconSize,
     ),
   );
 }
@@ -10089,6 +10161,7 @@ class _HomeComposer extends StatefulWidget {
     required this.selectedBookId,
     required this.selectedBookName,
     required this.onSelectReadingBook,
+    required this.onOpenReadingBookMaterials,
     required this.onReadingTaskSearchFocusChanged,
     required this.onStartIndependent,
     required this.onAddReadingBook,
@@ -10150,6 +10223,7 @@ class _HomeComposer extends StatefulWidget {
   final int? selectedBookId;
   final String selectedBookName;
   final ValueChanged<BookLibraryItem> onSelectReadingBook;
+  final ValueChanged<BookLibraryItem> onOpenReadingBookMaterials;
   final ValueChanged<bool> onReadingTaskSearchFocusChanged;
   final VoidCallback onStartIndependent;
   final Future<BookLibraryItem?> Function(BuildContext) onAddReadingBook;
@@ -10805,6 +10879,7 @@ class _HomeComposerState extends State<_HomeComposer> {
                     selectedBookId: widget.selectedBookId,
                     selectedBookName: widget.selectedBookName,
                     onSelectBook: widget.onSelectReadingBook,
+                    onOpenBookMaterials: widget.onOpenReadingBookMaterials,
                     onSearchFocusChanged:
                         widget.onReadingTaskSearchFocusChanged,
                     onStartIndependent: widget.onStartIndependent,

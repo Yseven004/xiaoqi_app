@@ -9,6 +9,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:yaml/yaml.dart';
 
+import '../config/book_flow_theme.dart';
 import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../features/capabilities/data/capability_models.dart';
 import '../features/capabilities/data/capability_store.dart';
@@ -461,7 +462,8 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   late ExtensionKind _kind;
   int _tab = 0;
   bool _loading = true, _loadingMcp = true;
-  String? _error, _mcpError, _listTitle;
+  Object? _recordsError, _mcpError;
+  String? _listTitle;
   int _recordsRequest = 0,
       _mcpRequest = 0,
       _catalogRequest = 0,
@@ -550,7 +552,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     if (mounted)
       setState(() {
         _loading = !_recordsLoaded && _records.isEmpty;
-        _error = null;
+        _recordsError = null;
       });
     try {
       final store = CapabilityStore.instance;
@@ -579,7 +581,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
         });
     } catch (error) {
       if (mounted && request == _recordsRequest)
-        setState(() => _error = '安装列表暂未更新：$error');
+        setState(() => _recordsError = error);
     } finally {
       if (mounted && request == _recordsRequest)
         setState(() {
@@ -603,8 +605,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           _connections = connections;
         });
     } catch (error) {
-      if (mounted && request == _mcpRequest)
-        setState(() => _mcpError = '连接列表暂未更新：$error');
+      if (mounted && request == _mcpRequest) setState(() => _mcpError = error);
     } finally {
       if (mounted && request == _mcpRequest)
         setState(() {
@@ -1408,8 +1409,19 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   List<_MarketEntry> get _mcpEntries =>
       _matching(_entries.where((e) => e.kind == ExtensionKind.mcp));
 
+  bool get _showMyPlugins =>
+      _kind == ExtensionKind.plugin && _tab == 2 && _listTitle == null;
+
+  static const _companionSearchDocument = MarketSearchDocument(
+    name: '沉浸伴读',
+    description: '在阅读空间看原文、做注释和选段问答',
+    author: '',
+    keywords: ['内置插件', '读书', 'AI'],
+  );
+
   String get _tabSubtitle => switch (_tab) {
     1 => '管理从市场安装的$_label',
+    2 when _showMyPlugins => '管理内置插件和个人插件',
     2 => '你自己导入或创建的$_label',
     _ =>
       _kind == ExtensionKind.plugin ? '连接你的工具，让小七与你协同工作' : '用于扩展小七能力的说明与工作方法',
@@ -1419,31 +1431,17 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     if (_searchPending) return marketSkeleton();
     return switch (_tab) {
       1 => _installedContent(),
+      2 when _showMyPlugins => _myPluginsContent(),
       2 => _personalContent(),
       _ => _publicContent(),
     };
   }
 
   Widget _installedContent() {
-    final showCompanion =
-        _kind == ExtensionKind.plugin &&
-        ('沉浸伴读 读书 阅读 AI 选段问答 内置插件'.contains(_searchQuery.toLowerCase()));
-    final entries = _matching(_installed);
-    if (showCompanion) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _builtInCompanionSetting(),
-          if (_loading || _loadingMcp)
-            marketSkeleton()
-          else if (entries.isNotEmpty)
-            _list(entries),
-        ],
-      );
-    }
     if (_loading || _kind == ExtensionKind.plugin && _loadingMcp) {
       return marketSkeleton();
     }
+    final entries = _matching(_installed);
     if (entries.isEmpty) {
       if (_searchQuery.isNotEmpty) return _noMatch();
       return marketEmptyState(
@@ -1455,48 +1453,132 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     return _list(entries);
   }
 
-  Widget _builtInCompanionSetting() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      const Padding(
-        padding: EdgeInsets.fromLTRB(0, 12, 0, 4),
-        child: Text(
-          '内置插件',
-          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+  Future<void> _setCompanionEnabled(bool enabled) async {
+    if (_savingCompanionPreference) return;
+    _searchFocus.unfocus();
+    setState(() => _savingCompanionPreference = true);
+    try {
+      await _companionPreferences.setEnabled(enabled);
+    } catch (_) {
+      if (mounted) AppToast.show(context, '伴读设置保存失败，请重试');
+    } finally {
+      if (mounted) setState(() => _savingCompanionPreference = false);
+    }
+  }
+
+  Widget _builtInCompanionSetting() => ValueListenableBuilder<bool>(
+    valueListenable: _companionPreferences.enabled,
+    builder: (_, enabled, _) => SwitchTheme(
+      data: SwitchThemeData(
+        thumbColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.disabled)
+              ? const Color(0xFFF4F4F4)
+              : Colors.white,
         ),
+        trackColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.disabled)
+              ? const Color(0xFFDCDCDC)
+              : states.contains(WidgetState.selected)
+              ? marketInk
+              : const Color(0xFFD2D4D9),
+        ),
+        trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
       ),
-      ValueListenableBuilder<bool>(
-        valueListenable: _companionPreferences.enabled,
-        builder: (_, enabled, _) => SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          secondary: SvgPicture.asset(
-            'assets/icons/chat_note_editor/book-open-text.svg',
-            width: 24,
-            height: 24,
-            colorFilter: const ColorFilter.mode(marketInk, BlendMode.srcIn),
+      child: SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        minTileHeight: 64,
+        materialTapTargetSize: MaterialTapTargetSize.padded,
+        secondary: Container(
+          width: 40,
+          height: 40,
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border.all(color: marketLine),
+            borderRadius: BorderRadius.circular(10),
           ),
-          title: const Text('沉浸伴读'),
-          subtitle: const Text('在阅读空间看原文、做注释和选段问答'),
-          value: enabled,
-          onChanged: _savingCompanionPreference
-              ? null
-              : (value) async {
-                  setState(() => _savingCompanionPreference = true);
-                  try {
-                    await _companionPreferences.setEnabled(value);
-                  } catch (_) {
-                    if (mounted) AppToast.show(context, '伴读设置保存失败，请重试');
-                  } finally {
-                    if (mounted) {
-                      setState(() => _savingCompanionPreference = false);
-                    }
-                  }
-                },
+          child: SvgPicture.asset(
+            BookFlowTheme.companionIconAsset,
+            excludeFromSemantics: true,
+          ),
         ),
+        title: Text(
+          _companionSearchDocument.name,
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w500),
+        ),
+        subtitle: Text(
+          _companionSearchDocument.description,
+          style: const TextStyle(fontSize: 14, color: marketMuted),
+        ),
+        value: enabled,
+        onChanged: _savingCompanionPreference ? null : _setCompanionEnabled,
       ),
-      const Divider(height: 16, color: marketLine),
-    ],
+    ),
   );
+
+  Widget _myPluginHeading(String label) => Semantics(
+    header: true,
+    child: Padding(
+      padding: const EdgeInsets.only(top: 14, bottom: 6),
+      child: Text(
+        label,
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      ),
+    ),
+  );
+
+  Widget _myPluginsContent() {
+    final searching = _searchQuery.isNotEmpty;
+    final showCompanion = _companionSearchDocument.score(_searchQuery) != null;
+    final entries = _matching(_personalEntries);
+    final drafts = _matchingDrafts;
+    final loading = _loading || _loadingMcp;
+    final hasPersonalResults = entries.isNotEmpty || drafts.isNotEmpty;
+    final showPersonal = !searching || hasPersonalResults || loading;
+    if (!showCompanion && !showPersonal) return _noMatch();
+
+    bool requiresLogin(Object? error) =>
+        error is StateError && error.message == '请先登录个人账号';
+    final needsLogin = requiresLogin(_recordsError) || requiresLogin(_mcpError);
+    final refreshFailed =
+        _recordsError != null && !requiresLogin(_recordsError) ||
+        _mcpError != null && !requiresLogin(_mcpError);
+    final personalStatus = refreshFailed
+        ? marketError('个人插件暂未更新，请重试。', () {
+            unawaited(_reload());
+            unawaited(_reloadMcp());
+          })
+        : null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (showCompanion) ...[
+          _myPluginHeading('内置插件'),
+          _builtInCompanionSetting(),
+          if (showPersonal) const Divider(height: 18, color: marketLine),
+        ],
+        if (showPersonal) ...[
+          _myPluginHeading('我的插件'),
+          ?personalStatus,
+          if (hasPersonalResults) ...[
+            if (entries.isNotEmpty) _list(entries),
+            if (drafts.isNotEmpty) _draftList(),
+          ] else if (loading)
+            marketSkeleton()
+          else if (!refreshFailed)
+            marketEmptyState(
+              leading: _emptyTile(),
+              title: needsLogin ? '登录后查看个人插件' : '还没有个人插件',
+              message: needsLogin
+                  ? '登录个人账号后，可同步你导入或创建的插件。'
+                  : '点击右上角「添加」，导入或创建插件。',
+              padding: const EdgeInsets.only(top: 16, bottom: 24),
+            ),
+        ],
+      ],
+    );
+  }
 
   Widget _personalContent() {
     if (_loading || _kind == ExtensionKind.plugin && _loadingMcp) {
@@ -1652,6 +1734,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
           ? '搜索$_label'
           : switch (_tab) {
               1 => '搜索已安装$_label',
+              2 when _showMyPlugins => '搜索插件',
               2 => '搜索我的$_label',
               _ => '搜索名称或用途',
             },
@@ -1735,6 +1818,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                           ),
                           textStyle: TextStyle(
                             fontSize: 17,
+                            fontFamilyFallback: const ['NotoSansCJKSC'],
                             fontWeight: selectedIndex == index
                                 ? FontWeight.w500
                                 : FontWeight.w400,
@@ -2029,9 +2113,12 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
             const SizedBox(height: 12),
             _categoryStrip(),
           ],
-          if (_error != null) marketError(_error!, _reload),
-          if (_kind == ExtensionKind.plugin && _mcpError != null)
-            marketError(_mcpError!, _reloadMcp),
+          if (!_showMyPlugins && _recordsError != null)
+            marketError('安装列表暂未更新：$_recordsError', _reload),
+          if (!_showMyPlugins &&
+              _kind == ExtensionKind.plugin &&
+              _mcpError != null)
+            marketError('连接列表暂未更新：$_mcpError', _reloadMcp),
           if (_listTitle != null) ...[
             const SizedBox(height: 24),
             marketButton('添加连接', () => _edit(), icon: 'plus'),

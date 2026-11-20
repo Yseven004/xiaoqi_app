@@ -44,12 +44,14 @@ class ReadingTaskMaterials {
   Future<ReadingTaskMaterialResult> prepare({
     required BookLibraryService library,
     required int bookId,
+    int? sourceId,
     bool Function()? isCancelled,
   }) {
     final operation = _pending.then(
       (_) => _prepare(
         library: library,
         bookId: bookId,
+        sourceId: sourceId,
         isCancelled: () => _disposed || isCancelled?.call() == true,
       ),
     );
@@ -63,11 +65,21 @@ class ReadingTaskMaterials {
   Future<ReadingTaskMaterialResult> _prepare({
     required BookLibraryService library,
     required int bookId,
+    required int? sourceId,
     required bool Function() isCancelled,
   }) async {
     if (isCancelled()) return const ReadingTaskMaterialResult();
-    final sources = await library.listSourcesForBook(bookId);
-    if (sources.isEmpty || isCancelled()) {
+    final allSources = await library.listSourcesForBook(bookId);
+    if (isCancelled()) return const ReadingTaskMaterialResult();
+    final sources = sourceId == null
+        ? allSources
+        : allSources.where((source) => source.id == sourceId);
+    if (sources.isEmpty) {
+      if (sourceId != null) {
+        return const ReadingTaskMaterialResult(
+          issues: [ReadingTaskMaterialIssue('关联资料', '资料已移除，请重新选择')],
+        );
+      }
       return const ReadingTaskMaterialResult();
     }
 

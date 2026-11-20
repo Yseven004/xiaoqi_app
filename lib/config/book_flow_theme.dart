@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 abstract final class BookFlowTheme {
   // Shared book-flow tokens.
+  static const companionIconAsset =
+      'assets/icons/extension_market/detail/reading-companion-book.svg';
   static const canvas = Color(0xFFFFFFFF);
   static const surface = Color(0xFFFFFFFF);
   static const surfaceElevated = Color(0xFFFFFEFA);

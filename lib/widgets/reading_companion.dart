@@ -59,6 +59,11 @@ class ReadingCompanionPassage {
 }
 
 typedef _ReaderSelection = ({ReadingCompanionPassage passage, Offset position});
+typedef _CompanionBook = ({
+  String title,
+  List<BookSourceRecord> sources,
+  int? preferredSourceId,
+});
 
 /// Book source reader embedded beneath the reading-space toolbar.
 ///
@@ -77,6 +82,7 @@ class ReadingCompanion extends StatefulWidget {
     this.onChatVisibilityChanged,
     this.onChooseBook,
     this.onOpenLibrary,
+    this.loadPreferredSourceId,
   });
 
   final int? bookId;
@@ -89,6 +95,7 @@ class ReadingCompanion extends StatefulWidget {
   final ValueChanged<bool>? onChatVisibilityChanged;
   final AsyncCallback? onChooseBook;
   final AsyncCallback? onOpenLibrary;
+  final Future<int?> Function(int bookId)? loadPreferredSourceId;
 
   @override
   ReadingCompanionState createState() => ReadingCompanionState();
@@ -97,7 +104,7 @@ class ReadingCompanion extends StatefulWidget {
 class ReadingCompanionState extends State<ReadingCompanion> {
   final _surface = GlobalKey();
   final _chatScroll = ScrollController();
-  late Future<({String title, List<BookSourceRecord> sources})> _book;
+  late Future<_CompanionBook> _book;
   _ReaderSelection? _selection;
   int? _sourceId;
   bool _minimized = false;
@@ -126,13 +133,19 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     super.dispose();
   }
 
-  Future<({String title, List<BookSourceRecord> sources})> _loadBook() async {
+  Future<_CompanionBook> _loadBook() async {
     final bookId = widget.bookId;
     if (bookId == null) {
-      return (title: '', sources: const <BookSourceRecord>[]);
+      return (
+        title: '',
+        sources: const <BookSourceRecord>[],
+        preferredSourceId: null,
+      );
     }
-    final item = await widget.library.getBookLibraryItem(bookId);
-    final records = await widget.library.listSourcesForBook(bookId);
+    final library = widget.library;
+    final loadPreferredSourceId = widget.loadPreferredSourceId;
+    final item = await library.getBookLibraryItem(bookId);
+    final records = await library.listSourcesForBook(bookId);
     final sources = records
         .where(
           (source) =>
@@ -140,7 +153,11 @@ class ReadingCompanionState extends State<ReadingCompanion> {
               SourceDocumentLoader.isStructuredFormat(source.format),
         )
         .toList(growable: false);
-    return (title: item?.book.title ?? '', sources: sources);
+    return (
+      title: item?.book.title ?? '',
+      sources: sources,
+      preferredSourceId: await loadPreferredSourceId?.call(bookId),
+    );
   }
 
   bool closeChatForBack() {
@@ -178,8 +195,14 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     final bookId = widget.bookId;
     await widget.onOpenLibrary?.call();
     if (mounted && widget.bookId == bookId) {
-      setState(() => _book = _loadBook());
+      _reloadBook();
     }
+  }
+
+  void _reloadBook() {
+    setState(() {
+      _book = _loadBook();
+    });
   }
 
   Future<void> _chooseSource(
@@ -192,7 +215,12 @@ class ReadingCompanionState extends State<ReadingCompanion> {
       labels: sources.map((source) => source.displayName).toList(),
       activeIndex: sources.indexOf(current),
     );
-    if (!mounted || next == null || sources[next].id == current.id) return;
+    if (!mounted ||
+        widget.bookId != current.bookId ||
+        next == null ||
+        sources[next].id == current.id) {
+      return;
+    }
     if (_selection != null) _closeChat();
     setState(() => _sourceId = sources[next].id);
   }
@@ -227,7 +255,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                   return _ReaderStatus(
                     '阅读资料暂时无法打开',
                     action: '重试',
-                    onAction: () => setState(() => _book = _loadBook()),
+                    onAction: _reloadBook,
                   );
                 }
                 final book = snapshot.requireData;
@@ -248,10 +276,14 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                         (widget.onOpenLibrary == null ? null : _openLibrary),
                   );
                 }
-                final current = sources.firstWhere(
-                  (source) => source.id == _sourceId,
-                  orElse: () => sources.first,
-                );
+                final current =
+                    sources
+                        .where((source) => source.id == _sourceId)
+                        .firstOrNull ??
+                    sources
+                        .where((source) => source.id == book.preferredSourceId)
+                        .firstOrNull ??
+                    sources.first;
                 return _CompanionDocument(
                   key: ValueKey((current.bookId, current.id)),
                   source: current,
@@ -636,9 +668,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 action: widget.onChooseSource != null ? '选择其他资料' : '打开本书资料',
                 onAction: widget.onChooseSource ?? widget.onOpenLibrary,
               ),
-              onViewerReady: (document, _) {
+              onViewerReady: (document, controller) {
                 if (!mounted) return;
-                setState(() => _pdfPageCount = document.pages.length);
+                setState(() {
+                  _pdfPageCount = document.pages.length;
+                  _pdfPage = controller.pageNumber ?? 1;
+                });
               },
               onPageChanged: (next) {
                 if (!mounted || next == null) return;
@@ -1081,7 +1116,11 @@ class _CompanionImageArtifactState extends State<_CompanionImageArtifact> {
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return TextButton(
-            onPressed: () => setState(() => _preview = _download()),
+            onPressed: () {
+              setState(() {
+                _preview = _download();
+              });
+            },
             child: const Text('图片预览不可用，点击重试'),
           );
         }

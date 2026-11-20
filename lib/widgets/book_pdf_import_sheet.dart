@@ -13,22 +13,26 @@ import 'app_toast.dart';
 import 'book_cover.dart';
 import 'book_metadata_form_sheet.dart';
 
-enum BookAddAction { scan, importPdf }
+enum BookAddAction { scan, importPdf, importFromWechat, findOnline }
 
 Future<BookAddAction?> showBookAddSourceSheet(
   BuildContext context, {
   BuildContext? anchorContext,
+  bool forExistingBook = false,
 }) {
   FocusManager.instance.primaryFocus?.unfocus();
   final overlay = Navigator.of(context, rootNavigator: true).overlay;
-  final fromLibrary = anchorContext != null;
+  final anchored = anchorContext != null;
+  final fromLibrary = !forExistingBook && anchored;
   return showGeneralDialog<BookAddAction>(
     context: context,
     barrierDismissible: true,
-    barrierLabel: fromLibrary ? '关闭导入书籍' : '关闭添加图书',
-    barrierColor: fromLibrary
-        ? const Color(0x55000000)
-        : const Color(0x40000000),
+    barrierLabel: forExistingBook
+        ? '关闭导入资料'
+        : fromLibrary
+        ? '关闭导入书籍'
+        : '关闭添加图书',
+    barrierColor: anchored ? const Color(0x55000000) : const Color(0x40000000),
     transitionDuration: const Duration(milliseconds: 160),
     pageBuilder: (_, _, _) => LayoutBuilder(
       builder: (context, constraints) {
@@ -39,14 +43,15 @@ Future<BookAddAction?> showBookAddSourceSheet(
         final maxBottom = constraints.maxHeight - padding.bottom - margin;
         final minTop = padding.top + margin;
         final width = math.min(
-          fromLibrary ? 304.0 : 320.0,
+          anchored ? 304.0 : 320.0,
           math.max(0.0, maxRight - minLeft),
         );
         final overlayBox = overlay?.context.findRenderObject();
         final anchorBox = anchorContext?.mounted == true
             ? anchorContext!.findRenderObject()
             : null;
-        if (overlayBox is RenderBox &&
+        if (anchored &&
+            overlayBox is RenderBox &&
             anchorBox is RenderBox &&
             anchorBox.attached &&
             anchorBox.hasSize) {
@@ -67,7 +72,8 @@ Future<BookAddAction?> showBookAddSourceSheet(
                   child: ConstrainedBox(
                     constraints: BoxConstraints(maxHeight: maxBottom - top),
                     child: _BookAddSourceCard(
-                      fromLibrary: true,
+                      fromLibrary: fromLibrary,
+                      forExistingBook: forExistingBook,
                       pointerCenter: (anchor.center.dx - left)
                           .clamp(16.0, math.max(16.0, width - 16))
                           .toDouble(),
@@ -84,7 +90,10 @@ Future<BookAddAction?> showBookAddSourceSheet(
             child: Center(
               child: SizedBox(
                 width: width,
-                child: _BookAddSourceCard(fromLibrary: fromLibrary),
+                child: _BookAddSourceCard(
+                  fromLibrary: fromLibrary,
+                  forExistingBook: forExistingBook,
+                ),
               ),
             ),
           ),
@@ -133,9 +142,14 @@ class BookPdfImportSelection {
 }
 
 class _BookAddSourceCard extends StatefulWidget {
-  const _BookAddSourceCard({required this.fromLibrary, this.pointerCenter});
+  const _BookAddSourceCard({
+    required this.fromLibrary,
+    this.forExistingBook = false,
+    this.pointerCenter,
+  });
 
   final bool fromLibrary;
+  final bool forExistingBook;
   final double? pointerCenter;
 
   @override
@@ -186,10 +200,16 @@ class _BookAddSourceCardState extends State<_BookAddSourceCard> {
               Expanded(
                 child: Padding(
                   padding: EdgeInsets.symmetric(
-                    vertical: widget.fromLibrary ? 9 : 0,
+                    vertical: widget.fromLibrary || widget.pointerCenter != null
+                        ? 9
+                        : 0,
                   ),
                   child: Text(
-                    widget.fromLibrary ? '导入书籍' : '添加图书',
+                    widget.forExistingBook
+                        ? '导入资料'
+                        : widget.fromLibrary
+                        ? '导入书籍'
+                        : '添加图书',
                     style: const TextStyle(
                       color: BookFlowTheme.ink,
                       fontSize: 18,
@@ -218,11 +238,12 @@ class _BookAddSourceCardState extends State<_BookAddSourceCard> {
           const SizedBox(height: 16),
           const Divider(height: 1, color: Color(0xFFEBEBEB)),
           const SizedBox(height: 7),
-          _SourceActionCard(
-            iconAsset: 'assets/images/book_import_scan.svg',
-            title: '扫描/输入 ISBN',
-            onTap: () => _finish(BookAddAction.scan),
-          ),
+          if (!widget.forExistingBook)
+            _SourceActionCard(
+              iconAsset: 'assets/images/book_import_scan.svg',
+              title: '扫描/输入 ISBN',
+              onTap: () => _finish(BookAddAction.scan),
+            ),
           _SourceActionCard(
             iconAsset: 'assets/icons/extension_market/detail/folder.svg',
             title: '本机导入',
@@ -231,12 +252,18 @@ class _BookAddSourceCardState extends State<_BookAddSourceCard> {
           _SourceActionCard(
             iconAsset: 'assets/images/home_attachment_wechat.svg',
             title: '微信导入',
-            onTap: () => AppToast.show(context, '微信书籍导入暂未开放'),
+            onTap: widget.forExistingBook
+                ? () => _finish(BookAddAction.importFromWechat)
+                : () => AppToast.show(context, '微信书籍导入暂未开放'),
           ),
           _SourceActionCard(
             iconAsset: 'assets/images/book_import_web_search.svg',
             title: '网上找书',
-            onTap: _launchingCatalog ? null : _openOnlineCatalog,
+            onTap: widget.forExistingBook
+                ? () => _finish(BookAddAction.findOnline)
+                : _launchingCatalog
+                ? null
+                : _openOnlineCatalog,
           ),
         ],
       ),

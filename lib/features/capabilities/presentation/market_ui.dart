@@ -535,8 +535,9 @@ Widget marketEmptyState({
   required String title,
   required String message,
   Widget? leading,
+  EdgeInsetsGeometry padding = const EdgeInsets.only(top: 84, bottom: 24),
 }) => Padding(
-  padding: const EdgeInsets.only(top: 84, bottom: 24),
+  padding: padding,
   child: Column(
     children: [
       if (leading != null) ...[leading, const SizedBox(height: 18)],

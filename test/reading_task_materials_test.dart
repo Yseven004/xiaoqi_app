@@ -85,6 +85,40 @@ void main() {
   });
 
   test(
+    'only prepares the selected source and never falls back if it disappears',
+    () async {
+      final selectedBytes = [...epubBytes, 0x32];
+      final selectedFile = await File(
+        '${scratch.path}/chosen.epub',
+      ).writeAsBytes(selectedBytes);
+      final library = _Library(_source(sourceFile), [
+        _source(selectedFile, id: 2, name: '选中的原书'),
+      ]);
+      final cloud = _AttachmentCloud();
+      final service = ReadingTaskMaterials(cloud: cloud.client);
+      addTearDown(service.dispose);
+
+      final selected = await service.prepare(
+        library: library,
+        bookId: 1,
+        sourceId: 2,
+      );
+      expect(selected.issues, isEmpty);
+      expect(selected.materials.single['name'], '选中的原书.md');
+      expect(cloud.uploaded, [selectedBytes]);
+
+      final missing = await service.prepare(
+        library: library,
+        bookId: 1,
+        sourceId: 99,
+      );
+      expect(missing.materials, isEmpty);
+      expect(missing.issues.single.message, contains('资料已移除'));
+      expect(cloud.uploaded, [selectedBytes]);
+    },
+  );
+
+  test(
     'retryable conversion requeues its existing uploaded resource',
     () async {
       final cloud = _AttachmentCloud(failConversion: true);
@@ -166,13 +200,15 @@ void _useAccount(String id) {
 
 BookSourceRecord _source(
   File file, {
+  int id = 1,
+  String name = '测试资料',
   String format = 'epub',
   String revision = 'initial',
 }) => BookSourceRecord(
-  id: 1,
+  id: id,
   bookId: 1,
   kind: 'book_file',
-  displayName: '测试资料.$format',
+  displayName: '$name.$format',
   filePath: file.path,
   fileSize: file.lengthSync(),
   contentHash: 'fixture-$revision',
@@ -183,13 +219,15 @@ BookSourceRecord _source(
 );
 
 class _Library implements BookLibraryService {
-  _Library(this.source);
+  _Library(this.source, [this.additionalSources = const []]);
 
   BookSourceRecord source;
+  final List<BookSourceRecord> additionalSources;
 
   @override
   Future<List<BookSourceRecord>> listSourcesForBook(int bookId) async => [
-    if (source.bookId == bookId) source,
+    for (final candidate in [source, ...additionalSources])
+      if (candidate.bookId == bookId) candidate,
   ];
 
   @override
