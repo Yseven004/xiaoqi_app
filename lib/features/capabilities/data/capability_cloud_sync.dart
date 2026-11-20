@@ -204,11 +204,27 @@ class AttachmentCloudException extends FormatException {
 }
 
 const readingBookMarkItDownAttachmentProfile = 'reading-book-markitdown-v1';
+const documentMarkItDownAttachmentProfile = 'document-markitdown-v1';
 
 int attachmentUploadLimitBytes(String? profile) =>
     (profile == readingBookMarkItDownAttachmentProfile ? 256 : 50) *
     1024 *
     1024;
+
+void verifyAttachmentConversionProfile(
+  Map<String, dynamic>? snapshot, {
+  required String profile,
+  required String sourceFormat,
+}) {
+  if (snapshot?['parser_profile'] == profile &&
+      snapshot?['source_format'] == sourceFormat) {
+    return;
+  }
+  throw const AttachmentCloudException(
+    '服务端没有返回预期的文档转换结果',
+    code: 'unexpected_attachment_profile',
+  );
+}
 
 class CapabilityCloudSync {
   CapabilityCloudSync._()
@@ -375,19 +391,6 @@ class CapabilityCloudSync {
   }) => _attachmentRequest(
     'GET',
     id,
-    abortTrigger: abortTrigger,
-    expectedAuthorization: expectedAuthorization,
-  );
-
-  Future<Map<String, dynamic>> submitAttachmentSegments(
-    String id,
-    List<Map<String, Object?>> segments, {
-    Future<void>? abortTrigger,
-    String? expectedAuthorization,
-  }) => _attachmentRequest(
-    'PUT',
-    '$id/segments',
-    body: {'segments': segments, 'full': true},
     abortTrigger: abortTrigger,
     expectedAuthorization: expectedAuthorization,
   );
@@ -583,9 +586,15 @@ class CapabilityCloudSync {
       path: path,
       name: path.split(RegExp(r'[/\\]')).last,
       mimeType: 'application/pdf',
+      attachmentProfile: documentMarkItDownAttachmentProfile,
     );
     final id = started['id']?.toString() ?? '';
     if (id.isEmpty) throw const FormatException('服务端没有创建附件任务');
+    verifyAttachmentConversionProfile(
+      started,
+      profile: documentMarkItDownAttachmentProfile,
+      sourceFormat: 'pdf',
+    );
     if (isCancelled?.call() == true) {
       await cancelAttachment(id);
       throw const FormatException('已停止识别附件');
@@ -595,6 +604,11 @@ class CapabilityCloudSync {
       id,
       initial: job,
       isCancelled: isCancelled,
+    );
+    verifyAttachmentConversionProfile(
+      result,
+      profile: documentMarkItDownAttachmentProfile,
+      sourceFormat: 'pdf',
     );
     final count = (result['page_count'] as num?)?.toInt() ?? 0;
     final pages = List<String>.filled(count, '');

@@ -39,11 +39,22 @@ void main() {
     'page_count': 3,
     'coverage': 'full',
     'completed_pages': [1, 2, 3],
+    'parser_profile': documentMarkItDownAttachmentProfile,
+    'source_format': 'pdf',
     'segments': [
       {'index': 0, 'page': 1, 'text': 'page 1'},
       {'index': 2, 'page': 3, 'text': 'page 3'},
     ],
   };
+  http.Response uploaded() => http.Response(
+    jsonEncode({
+      'id': 'resource-1',
+      'status': 'uploaded',
+      'parser_profile': documentMarkItDownAttachmentProfile,
+      'source_format': 'pdf',
+    }),
+    202,
+  );
   test('PDF uses resource contract and retains results on success', () async {
     final requests = <String>[];
     final cloud = CapabilityCloudSync.forTesting(
@@ -56,10 +67,14 @@ void main() {
           expect(request.body, '%PDF-1.4');
           expect(request.headers['content-type'], 'application/pdf');
           expect(
+            request.headers['X-Xiaoqi-Attachment-Profile'],
+            documentMarkItDownAttachmentProfile,
+          );
+          expect(
             Uri.decodeComponent(request.headers['X-Xiaoqi-Filename']!),
             '任意文件.pdf',
           );
-          return http.Response('{"id":"resource-1","status":"uploaded"}', 202);
+          return uploaded();
         }
         expect(jsonDecode(request.body)['mode'], 'full');
         return http.Response(jsonEncode(ready()), 200);
@@ -172,7 +187,7 @@ void main() {
         if (request.url.path == '/health') return health();
         if (request.method == 'POST') {
           cancelled = true;
-          return http.Response('{"id":"resource-1","status":"uploaded"}', 202);
+          return uploaded();
         }
         expect(request.method, 'DELETE');
         return http.Response('{"id":"resource-1","status":"cancelled"}', 200);

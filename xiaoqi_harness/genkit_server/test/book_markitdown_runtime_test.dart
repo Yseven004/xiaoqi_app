@@ -57,83 +57,97 @@ Future<Map<String, dynamic>> _json(Response response) async =>
     (jsonDecode(await response.readAsString()) as Map).cast<String, dynamic>();
 
 void main() {
-  test(
-    'real MarkItDown book upload is searchable by the existing Agent tool',
-    () async {
-      final temporaryDirectory = await Directory.systemTemp.createTemp(
-        'xiaoqi-markitdown-runtime-',
-      );
-      final store = CloudStore(root: temporaryDirectory.path);
-      final attachments = AttachmentService(store);
-      addTearDown(() async {
-        await attachments.close();
-        store.close();
-        await temporaryDirectory.delete(recursive: true);
-      });
+  for (final readingBook in [true, false]) {
+    final profile = readingBook
+        ? AttachmentService.readingBookMarkItDownProfile
+        : AttachmentService.documentMarkItDownProfile;
+    test(
+      'real MarkItDown $profile upload is searchable by Agent',
+      () async {
+        final temporaryDirectory = await Directory.systemTemp.createTemp(
+          'xiaoqi-markitdown-runtime-',
+        );
+        final store = CloudStore(root: temporaryDirectory.path);
+        final attachments = AttachmentService(store);
+        addTearDown(() async {
+          await attachments.close();
+          store.close();
+          await temporaryDirectory.delete(recursive: true);
+        });
 
-      final uploaded = await attachments.upload(
-        Request(
-          'POST',
-          Uri.parse('http://localhost/v1/attachments'),
-          headers: const {
-            'content-type': 'application/epub+zip',
-            'x-xiaoqi-filename': 'fixture.epub',
-            'x-xiaoqi-attachment-profile': 'reading-book-markitdown-v1',
-          },
-          body: _sampleEpub(),
-        ),
-        'owner',
-      );
-      final first = await _json(uploaded);
-      expect(uploaded.statusCode, 202, reason: first.toString());
-      final id = first['id'] as String;
-      final deadline = DateTime.now().add(const Duration(seconds: 25));
-      var status = first;
-      while (!const {
-            'ready',
-            'failed',
-            'cancelled',
-          }.contains(status['status']) &&
-          DateTime.now().isBefore(deadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        status = await _json(await attachments.status('owner', id));
-      }
-      expect(status['ready'], isTrue, reason: status.toString());
-      expect(status['coverage'], 'full');
-      expect(status['parser_profile'], 'reading-book-markitdown-v1');
-      expect((await attachments.status('other', id)).statusCode, 404);
+        final uploaded = await attachments.upload(
+          Request(
+            'POST',
+            Uri.parse('http://localhost/v1/attachments'),
+            headers: {
+              'content-type': readingBook
+                  ? 'application/epub+zip'
+                  : 'text/html',
+              'x-xiaoqi-filename': readingBook
+                  ? 'fixture.epub'
+                  : 'fixture.html',
+              'x-xiaoqi-attachment-profile': profile,
+            },
+            body: readingBook
+                ? _sampleEpub()
+                : utf8.encode('<h1>The final chapter</h1><p>$_answer</p>'),
+          ),
+          'owner',
+        );
+        final first = await _json(uploaded);
+        expect(uploaded.statusCode, 202, reason: first.toString());
+        final id = first['id'] as String;
+        final deadline = DateTime.now().add(const Duration(seconds: 25));
+        var status = first;
+        while (!const {
+              'ready',
+              'failed',
+              'cancelled',
+            }.contains(status['status']) &&
+            DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          status = await _json(await attachments.status('owner', id));
+        }
+        expect(status['ready'], isTrue, reason: status.toString());
+        expect(status['coverage'], 'full');
+        expect(status['parser_profile'], profile);
+        expect((await attachments.status('other', id)).statusCode, 404);
 
-      final runtime = GenkitXiaoqiAgentRuntime(
-        store,
-        ImageService(store),
-        attachments: attachments,
-      );
-      final result = await runtime.readTaskMaterial(
-        tenantId: 'owner',
-        materials: [
-          {
-            'id': 'fictional-book',
-            'name': 'fixture.md',
-            'kind': 'document',
-            'attachment_id': id,
-          },
-        ],
-        materialId: 'fictional-book',
-        mode: 'query',
-        query: _anchor,
-      );
-      expect(result['text'], contains(_answer));
-      expect(result['text'], contains('The final chapter'));
-      final firstPage = await attachments.material(
-        'owner',
-        id,
-        mode: 'pages',
-        pages: [1],
-      );
-      expect(firstPage['text'], contains('The first chapter'));
-    },
-    skip: Platform.environment['XIAOQI_BOOK_MARKITDOWN_PYTHON'] == null
-        ? 'Requires the pinned MarkItDown Python environment'
-        : false,
-  );
+        final runtime = GenkitXiaoqiAgentRuntime(
+          store,
+          ImageService(store),
+          attachments: attachments,
+        );
+        final result = await runtime.readTaskMaterial(
+          tenantId: 'owner',
+          materials: [
+            {
+              'id': 'fictional-book',
+              'name': 'fixture.md',
+              'kind': 'document',
+              'attachment_id': id,
+            },
+          ],
+          materialId: 'fictional-book',
+          mode: 'query',
+          query: _anchor,
+        );
+        expect(result['text'], contains(_answer));
+        expect(result['text'], contains('The final chapter'));
+        expect(result['text'], isNot(contains('<h1>')));
+        if (readingBook) {
+          final firstPage = await attachments.material(
+            'owner',
+            id,
+            mode: 'pages',
+            pages: [1],
+          );
+          expect(firstPage['text'], contains('The first chapter'));
+        }
+      },
+      skip: Platform.environment['XIAOQI_BOOK_MARKITDOWN_PYTHON'] == null
+          ? 'Requires the pinned MarkItDown Python environment'
+          : false,
+    );
+  }
 }

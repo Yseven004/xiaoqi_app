@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:archive/archive.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -11,7 +10,6 @@ import 'package:xiaoqi_app/config/release.dart';
 import 'package:xiaoqi_app/features/capabilities/data/capability_cloud_sync.dart';
 import 'package:xiaoqi_app/models/home_chat_attachment.dart';
 import 'package:xiaoqi_app/services/home_chat_attachment_preparer.dart';
-import 'package:xiaoqi_app/services/home_chat_attachment_reader.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -45,7 +43,7 @@ void main() {
     }),
     200,
   );
-  Map<String, Object?> ready() => {
+  Map<String, Object?> ready([String? format]) => {
     'id': 'remote-1',
     'status': 'ready',
     'phase': 'ready',
@@ -54,6 +52,10 @@ void main() {
     'page_count': 1,
     'completed_pages': [1],
     'selected_pages': [1],
+    if (format != null) ...{
+      'parser_profile': documentMarkItDownAttachmentProfile,
+      'source_format': format,
+    },
   };
   test('eager preparation shares send and survives restart', () async {
     final file = await File('${directory.path}/中文.txt').writeAsString('通用附件内容');
@@ -66,17 +68,23 @@ void main() {
         if (request.url.path == '/v1/attachments') {
           uploads++;
           expect(request.headers['X-Xiaoqi-Sha256']?.length, 64);
+          expect(
+            request.headers['X-Xiaoqi-Attachment-Profile'],
+            documentMarkItDownAttachmentProfile,
+          );
+          expect(request.bodyBytes, utf8.encode('通用附件内容'));
           return http.Response(
-            '{"id":"remote-1","status":"uploaded","ready":false}',
+            jsonEncode({
+              ...ready('txt'),
+              'status': 'queued',
+              'phase': 'queued',
+              'ready': false,
+            }),
             202,
           );
         }
-        if (request.method == 'PUT') {
-          final segments = jsonDecode(request.body)['segments'] as List;
-          expect(segments.first['index'], 0);
-          expect(segments.first['text'], contains('通用附件内容'));
-        }
-        return http.Response(jsonEncode(ready()), 200);
+        expect(request.method, 'GET');
+        return http.Response(jsonEncode(ready('txt')), 200);
       }),
     );
     final preparer = HomeChatAttachmentPreparer(cloud: cloud);
@@ -92,16 +100,7 @@ void main() {
     expect(results.first.remoteAttachmentId, 'remote-1');
     expect(results.first.preparationCoverage, 'full');
     expect(results.first.contentHash?.length, 64);
-    expect(
-      phases,
-      containsAll([
-        'validating',
-        'uploading',
-        'extracting',
-        'reading',
-        'ready',
-      ]),
-    );
+    expect(phases, containsAll(['validating', 'uploading', 'queued', 'ready']));
     preparer.cancel(source.id);
     expect((await preparer.prepare(source)).remoteAttachmentId, 'remote-1');
     preparer.dispose();
@@ -123,6 +122,7 @@ void main() {
           MockClient((request) async {
             if (request.url.path == '/health') return health();
             if (request.url.path == '/v1/attachments') {
+              expect(request.headers['X-Xiaoqi-Attachment-Profile'], isNull);
               return failUpload
                   ? http.Response('upload failed', 500)
                   : http.Response(jsonEncode(ready()), 200);
@@ -180,8 +180,12 @@ void main() {
       MockClient((request) async {
         if (request.url.path == '/health') return health();
         if (request.url.path == '/v1/attachments') {
+          expect(
+            request.headers['X-Xiaoqi-Attachment-Profile'],
+            documentMarkItDownAttachmentProfile,
+          );
           return http.Response(
-            '{"id":"remote-1","status":"uploaded","ready":false}',
+            jsonEncode({...ready('pdf'), 'status': 'uploaded', 'ready': false}),
             202,
           );
         }
@@ -189,7 +193,7 @@ void main() {
           expect(jsonDecode(request.body)['mode'], 'overview');
           return http.Response(
             jsonEncode({
-              'id': 'remote-1',
+              ...ready('pdf'),
               'status': 'processing',
               'phase': 'ocr',
               'ready': false,
@@ -200,7 +204,10 @@ void main() {
             200,
           );
         }
-        return http.Response(jsonEncode(ready()), 200);
+        return http.Response(
+          jsonEncode({...ready('pdf'), 'coverage': 'partial'}),
+          200,
+        );
       }),
     );
     final preparer = HomeChatAttachmentPreparer(cloud: cloud);
@@ -211,22 +218,40 @@ void main() {
         labels.add(state!.label);
       }
     });
-    await preparer.prepare(attachment(file));
+    final prepared = await preparer.prepare(attachment(file));
+    expect(prepared.preparationCoverage, 'partial');
     expect(progress, [1.0]);
     expect(labels, ['正在识别 2/2 页']);
     preparer.dispose();
   });
   test('retry resumes uploaded resource after parse failure', () async {
-    final file = await File('${directory.path}/empty.txt').writeAsString('   ');
+    final file = await File('${directory.path}/retry.txt').writeAsString('正文');
     var uploads = 0;
-    var gets = 0;
+    var retries = 0;
     final cloud = CapabilityCloudSync.forTesting(
       MockClient((request) async {
         if (request.url.path == '/health') return health();
-        if (request.url.path == '/v1/attachments') uploads++;
-        if (request.method == 'GET') gets++;
+        if (request.url.path == '/v1/attachments') {
+          uploads++;
+          return http.Response(
+            jsonEncode({...ready('txt'), 'status': 'queued', 'ready': false}),
+            202,
+          );
+        }
+        if (request.method == 'POST') {
+          expect(request.url.path, endsWith('/read'));
+          retries++;
+          return http.Response(jsonEncode(ready('txt')), 200);
+        }
+        expect(request.method, 'GET');
         return http.Response(
-          '{"id":"remote-1","status":"uploaded","ready":false}',
+          jsonEncode({
+            ...ready('txt'),
+            'status': 'failed',
+            'ready': false,
+            'error_code': 'extract_failed',
+            'retryable': true,
+          }),
           200,
         );
       }),
@@ -238,9 +263,9 @@ void main() {
       preparer.states.value[source.id]!.attachment!.remoteAttachmentId,
       'remote-1',
     );
-    await expectLater(preparer.prepare(source), throwsFormatException);
+    expect((await preparer.prepare(source)).preparationCoverage, 'full');
     expect(uploads, 1);
-    expect(gets, 1);
+    expect(retries, 1);
     preparer.dispose();
   });
   test('same ID different path invalidates prepared content', () async {
@@ -255,7 +280,7 @@ void main() {
       MockClient((request) async {
         if (request.url.path == '/health') return health();
         if (request.url.path == '/v1/attachments') uploads++;
-        return http.Response(jsonEncode(ready()), 200);
+        return http.Response(jsonEncode(ready('txt')), 200);
       }),
     );
     final preparer = HomeChatAttachmentPreparer(cloud: cloud);
@@ -265,57 +290,71 @@ void main() {
     expect(one.contentHash, isNot(two.contentHash));
     preparer.dispose();
   });
-  test('PPTX XLSX preserve Chinese text on worker isolate', () async {
-    for (final ext in ['pptx', 'xlsx']) {
-      final archive = Archive();
-      final parts = ext == 'pptx'
-          ? {'ppt/slides/slide1.xml': '<slide><t>中文幻灯片</t></slide>'}
-          : {
-              'xl/sharedStrings.xml': '<sst><si><t>中文单元格</t></si></sst>',
-              'xl/worksheets/sheet1.xml':
-                  '<worksheet><row><c r="A1" t="s"><v>0</v></c></row></worksheet>',
-            };
-      for (final entry in parts.entries) {
-        final bytes = utf8.encode(entry.value);
-        archive.addFile(ArchiveFile(entry.key, bytes.length, bytes));
+  test(
+    'ordinary documents upload original bytes and accept normalized formats',
+    () async {
+      final text = utf8.encode('中文内容');
+      const archiveHeader = [0x50, 0x4b, 3, 4, 0x2b, 0x5a];
+      for (final (extension, format, bytes) in [
+        ('pptx', 'pptx', archiveHeader),
+        ('xlsx', 'xlsx', archiveHeader),
+        ('docx', 'docx', archiveHeader),
+        ('epub', 'epub', archiveHeader),
+        ('markdown', 'md', text),
+        ('htm', 'html', text),
+      ]) {
+        final file = await File(
+          '${directory.path}/样本.$extension',
+        ).writeAsBytes(bytes);
+        final preparer = HomeChatAttachmentPreparer(
+          cloud: CapabilityCloudSync.forTesting(
+            MockClient((request) async {
+              if (request.url.path == '/health') return health();
+              expect(request.method, 'POST');
+              expect(request.url.path, '/v1/attachments');
+              expect(request.bodyBytes, bytes);
+              expect(
+                request.headers['X-Xiaoqi-Attachment-Profile'],
+                documentMarkItDownAttachmentProfile,
+              );
+              return http.Response(jsonEncode(ready(format)), 200);
+            }),
+          ),
+        );
+        addTearDown(preparer.dispose);
+        final result = await preparer.prepare(
+          attachment(file, mimeType: 'application/octet-stream'),
+        );
+        expect(result.preparationCoverage, 'full');
       }
-      final file = await File(
-        '${directory.path}/中文.$ext',
-      ).writeAsBytes(ZipEncoder().encode(archive));
-      final chunks = await HomeChatAttachmentReader().read(attachment(file));
-      expect(chunks.join(), contains(ext == 'pptx' ? '中文幻灯片' : '中文单元格'));
-    }
-  });
-  test('DOCX EPUB preserve Chinese body text on worker isolate', () async {
-    final fixtures = <String, Map<String, String>>{
-      'docx': {
-        'word/document.xml':
-            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>中文 Word 正文</w:t></w:r></w:p></w:body></w:document>',
-      },
-      'epub': {
-        'META-INF/container.xml':
-            '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
-        'OEBPS/content.opf':
-            '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="book-id">synthetic-book</dc:identifier><dc:title>通用 EPUB 样本</dc:title><dc:language>zh</dc:language></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>',
-        'OEBPS/chapter.xhtml':
-            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>第一章</title></head><body><h1>第一章</h1><p>中文 EPUB 正文</p></body></html>',
-      },
-    };
-    for (final fixture in fixtures.entries) {
-      final archive = Archive();
-      for (final entry in fixture.value.entries) {
-        final bytes = utf8.encode(entry.value);
-        archive.addFile(ArchiveFile(entry.key, bytes.length, bytes));
-      }
-      final file = await File(
-        '${directory.path}/通用样本.${fixture.key}',
-      ).writeAsBytes(ZipEncoder().encode(archive));
-      final chunks = await HomeChatAttachmentReader().read(attachment(file));
-      expect(
-        chunks.join(),
-        contains(fixture.key == 'docx' ? '中文 Word 正文' : '中文 EPUB 正文'),
-      );
-    }
+    },
+  );
+  test('does not advertise a partial ordinary document', () async {
+    final file = await File(
+      '${directory.path}/partial.txt',
+    ).writeAsString('正文');
+    final preparer = HomeChatAttachmentPreparer(
+      cloud: CapabilityCloudSync.forTesting(
+        MockClient((request) async {
+          if (request.url.path == '/health') return health();
+          return http.Response(
+            jsonEncode({...ready('txt'), 'coverage': 'partial'}),
+            200,
+          );
+        }),
+      ),
+    );
+    addTearDown(preparer.dispose);
+    await expectLater(
+      preparer.prepare(attachment(file)),
+      throwsA(
+        isA<AttachmentCloudException>().having(
+          (error) => error.code,
+          'code',
+          'attachment_not_ready',
+        ),
+      ),
+    );
   });
   test('old JSON loads and preparation metadata round trips', () {
     final old = HomeChatAttachment.fromJson({

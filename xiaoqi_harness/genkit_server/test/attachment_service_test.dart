@@ -140,6 +140,7 @@ void main() {
     String mime = 'application/pdf',
     List<int>? bytes,
     bool book = false,
+    String? profile,
   }) async {
     final response = await service.upload(
       Request(
@@ -148,9 +149,9 @@ void main() {
         headers: {
           'content-type': mime,
           'x-xiaoqi-filename': Uri.encodeComponent(name),
-          if (book)
+          if (profile != null || book)
             'x-xiaoqi-attachment-profile':
-                AttachmentService.readingBookMarkItDownProfile,
+                profile ?? AttachmentService.readingBookMarkItDownProfile,
         },
         body: bytes ?? ascii.encode('%PDF-1.4\nfixture'),
       ),
@@ -181,6 +182,108 @@ void main() {
 
   String unit(String locator, String markdown) =>
       jsonEncode({'locator': locator, 'markdown': markdown});
+
+  test(
+    'ordinary MarkItDown PDF uses existing OCR only for pages without text',
+    () async {
+      commands.pages = 4;
+      commands.bookSourcePages = 4;
+      commands.skippedBookPages = 1;
+      commands.bookUnits = [
+        for (final page in [1, 3, 4])
+          unit('PDF 第 $page 页', '## PDF 第 $page 页\n\n第 $page 页的正文'),
+      ];
+      final uploaded = await upload(
+        profile: AttachmentService.documentMarkItDownProfile,
+      );
+      final id = uploaded['id'] as String;
+      expect(uploaded['kind'], 'pdf');
+      expect(uploaded['source_format'], 'pdf');
+      expect(
+        uploaded['parser_profile'],
+        AttachmentService.documentMarkItDownProfile,
+      );
+      final overview = await waitStatus(id);
+      expect(overview['completed_pages'], [1, 3, 4]);
+      expect(overview['coverage'], 'partial');
+      expect(commands.ocrPages, isEmpty);
+
+      final selected = await service.material(
+        'owner',
+        id,
+        mode: 'pages',
+        pages: [1, 2],
+      );
+      expect(selected['read_pages'], [1, 2]);
+      expect(selected['text'], contains('## PDF 第 1 页'));
+      expect(selected['text'], contains('OCR page 2'));
+      expect((await waitStatus(id))['coverage'], 'full');
+      expect(commands.ocrPages, [2]);
+      expect(commands.bookFormats, ['pdf']);
+      expect(commands.commands, isNot(contains('pdftotext')));
+    },
+  );
+
+  test(
+    'ordinary accepted document formats prepare Markdown and retain their raw file for scripts',
+    () async {
+      const examples = {
+        'epub': ('epub', 'application/epub+zip', true),
+        'docx': (
+          'docx',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          true,
+        ),
+        'pptx': (
+          'pptx',
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          true,
+        ),
+        'xlsx': (
+          'xlsx',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          true,
+        ),
+        'txt': ('txt', 'text/plain', false),
+        'markdown': ('md', 'text/markdown', false),
+        'htm': ('html', 'text/html', false),
+      };
+      for (final MapEntry(key: suffix, value: (format, mime, archive))
+          in examples.entries) {
+        const marker = '马克文档片段';
+        commands.bookUnits = [unit('资料位置', '## 小节\n\n$marker $format')];
+        final bytes = archive ? [80, 75, 3, 4, 42] : utf8.encode('raw $format');
+        final name = 'sample.$suffix';
+        final uploaded = await upload(
+          name: name,
+          mime: mime,
+          bytes: bytes,
+          profile: AttachmentService.documentMarkItDownProfile,
+        );
+        final id = uploaded['id'] as String;
+        expect(uploaded['kind'], 'document');
+        expect(uploaded['source_format'], format);
+        final ready = await waitStatus(id);
+        expect(ready['ready'], true);
+        expect(ready['coverage'], 'full');
+        final material = await service.material('owner', id);
+        expect(material['text'], contains('$marker $format'));
+        final script = await service.scriptMaterial('owner', id);
+        expect(script['name'], name);
+        expect(base64Decode(script['base64'] as String), bytes);
+        expect(
+          (await service.submitSegments(
+            Request('PUT', Uri.parse('http://localhost/'), body: '{}'),
+            'owner',
+            id,
+          )).statusCode,
+          400,
+        );
+      }
+      expect(commands.bookFormats, examples.values.map((format) => format.$1));
+      expect(commands.commands, isEmpty);
+    },
+  );
 
   test(
     'MarkItDown book publishes complete text and keeps original PDF locators',
@@ -868,6 +971,50 @@ void main() {
       expect(result['coverage'], 'full');
       expect(commands.commands.where((c) => c == 'pdftotext'), hasLength(1));
       expect(staging.existsSync(), false);
+    },
+  );
+
+  test(
+    'restart requeues interrupted Markdown documents after cleaning staging',
+    () async {
+      commands.bookUnits = [unit('旧段落', '# 恢复前的内容')];
+      final id =
+          (await upload(
+                name: 'recover.txt',
+                mime: 'text/plain',
+                bytes: utf8.encode('some document text'),
+                profile: AttachmentService.documentMarkItDownProfile,
+              ))['id']
+              as String;
+      expect((await waitStatus(id))['ready'], true);
+      await service.close();
+      final (key, current) = store.list('attachment/').single;
+      store.put(key, {
+        ...current.value,
+        'status': 'processing',
+        'phase': 'extracting',
+        'ready': false,
+        'coverage': 'partial',
+        'page_count': 0,
+        'completed_pages': <int>[],
+      }, current.revision);
+      final interrupted = Directory(
+        p.join(directory.path, 'attachments', '.parse-interrupted'),
+      )..createSync();
+      File(
+        p.join(interrupted.path, 'book.jsonl'),
+      ).writeAsStringSync('incomplete');
+      commands.bookUnits = [unit('已恢复', '# 恢复后的完整内容')];
+
+      service = AttachmentService(store, commandRunner: commands.call);
+      final recovered = await waitStatus(id);
+      expect(recovered['ready'], true);
+      expect(recovered['coverage'], 'full');
+      expect(commands.bookFormats, ['txt', 'txt']);
+      expect(interrupted.existsSync(), false);
+      final material = await service.material('owner', id);
+      expect(material['text'], contains('恢复后的完整内容'));
+      expect(material['text'], isNot(contains('恢复前的内容')));
     },
   );
 

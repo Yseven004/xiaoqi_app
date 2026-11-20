@@ -10,7 +10,6 @@ import 'package:image/image.dart' as img;
 
 import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/home_chat_attachment.dart';
-import 'home_chat_attachment_reader.dart';
 
 List<int> _encodeAttachmentJpeg(
   ({int width, int height, Uint8List pixels}) input,
@@ -64,15 +63,12 @@ class _PreparationOperation {
 class HomeChatAttachmentPreparer {
   HomeChatAttachmentPreparer({
     CapabilityCloudSync? cloud,
-    HomeChatAttachmentReader? reader,
     String? attachmentProfile,
   }) : _cloud = cloud ?? CapabilityCloudSync.instance,
-       _reader = reader ?? HomeChatAttachmentReader(),
        _attachmentProfile = attachmentProfile;
 
   static const _parserVersion = 'attachment-local-2';
   final CapabilityCloudSync _cloud;
-  final HomeChatAttachmentReader _reader;
   final String? _attachmentProfile;
   final states = ValueNotifier<Map<String, AttachmentPreparationState>>(
     const {},
@@ -287,13 +283,17 @@ class HomeChatAttachmentPreparer {
           .toString();
       _check(attachment, operation);
       attachment = attachment.copyWith(contentHash: hash);
-      final extension = attachment.name.split('.').last.toLowerCase();
+      final format = switch (attachment.name.split('.').last.toLowerCase()) {
+        'markdown' => 'md',
+        'htm' => 'html',
+        final extension => extension,
+      };
       final account = (await _cloud.signedInEmail)?.trim().toLowerCase() ?? '';
       operation.account = account;
-      final profile = _attachmentProfile;
+      final profile = _profileFor(attachment);
       final cacheIdentity = profile == null
           ? '$account|$hash|$_parserVersion|chi_sim+eng'
-          : '$account|$hash|$profile|$extension';
+          : '$account|$hash|$profile|$format';
       final cacheKey = sha256.convert(utf8.encode(cacheIdentity)).toString();
       Map<String, dynamic>? snapshot;
       String? id;
@@ -363,7 +363,13 @@ class HomeChatAttachmentPreparer {
         }
       }
       _check(attachment, operation);
-      if (profile != null) _checkProfileSnapshot(snapshot, profile, extension);
+      if (profile != null) {
+        verifyAttachmentConversionProfile(
+          snapshot,
+          profile: profile,
+          sourceFormat: format,
+        );
+      }
       attachment = attachment.copyWith(remoteAttachmentId: id);
       final expires =
           _resourceExpiry(snapshot?['expires_at']) ??
@@ -374,41 +380,17 @@ class HomeChatAttachmentPreparer {
         await _saveCache(attachment, cacheKey, id, expires);
       }
       _check(attachment, operation);
-      if (profile == null &&
-          !attachment.isImage &&
-          extension != 'pdf' &&
-          snapshot?['ready'] != true) {
-        _publish(attachment, operation, phase: 'extracting', label: '正在解析');
-        final chunks = await Future.any<List<String>>([
-          _reader.read(attachment, isCancelled: () => operation.cancelled),
-          operation.abort.future.then<List<String>>((_) => throw _cancelled),
-        ]);
-        _check(attachment, operation);
-        snapshot = await _cloud.submitAttachmentSegments(
-          id,
-          [
-            for (var index = 0; index < chunks.length; index++)
-              {
-                'index': index,
-                'locator':
-                    RegExp(
-                      r'^\[([^\]]+)\]',
-                    ).firstMatch(chunks[index])?.group(1) ??
-                    '片段 ${index + 1}',
-                'text': chunks[index],
-              },
-          ],
-          abortTrigger: operation.abort.future,
-          expectedAuthorization: operation.expectedAuthorization,
-        );
-      }
-      _check(attachment, operation);
+      final ordinaryPdf =
+          profile == documentMarkItDownAttachmentProfile && format == 'pdf';
       final needsProfileRetry =
           profile != null &&
           (snapshot?['status'] == 'cancelled' ||
               (snapshot?['status'] == 'failed' &&
                   snapshot?['retryable'] == true));
-      if ((profile == null && !attachment.isImage) || needsProfileRetry) {
+      final mayReadPdf =
+          ordinaryPdf &&
+          (snapshot?['status'] != 'failed' || snapshot?['retryable'] == true);
+      if (mayReadPdf || needsProfileRetry) {
         _publish(attachment, operation, phase: 'reading', label: '正在阅读');
         snapshot = await _cloud.readAttachment(
           id,
@@ -449,7 +431,20 @@ class HomeChatAttachmentPreparer {
         },
       );
       _check(attachment, operation);
-      if (profile != null) _checkProfileSnapshot(snapshot, profile, extension);
+      if (profile != null) {
+        verifyAttachmentConversionProfile(
+          snapshot,
+          profile: profile,
+          sourceFormat: format,
+        );
+        if (!ordinaryPdf && snapshot['coverage'] != 'full') {
+          throw const AttachmentCloudException(
+            '文档转换未完成，请重试',
+            code: 'attachment_not_ready',
+            retryable: true,
+          );
+        }
+      }
       attachment = _withSnapshot(
         attachment,
         snapshot,
@@ -492,20 +487,9 @@ class HomeChatAttachmentPreparer {
     }
   }
 
-  void _checkProfileSnapshot(
-    Map<String, dynamic>? snapshot,
-    String profile,
-    String extension,
-  ) {
-    if (snapshot?['parser_profile'] == profile &&
-        snapshot?['source_format'] == extension) {
-      return;
-    }
-    throw const AttachmentCloudException(
-      '服务端没有返回预期的文档转换结果',
-      code: 'unexpected_attachment_profile',
-    );
-  }
+  String? _profileFor(HomeChatAttachment attachment) => attachment.isImage
+      ? null
+      : _attachmentProfile ?? documentMarkItDownAttachmentProfile;
 
   String _fingerprint(HomeChatAttachment attachment) {
     try {
@@ -568,7 +552,7 @@ class HomeChatAttachmentPreparer {
     final file = File(attachment.path);
     if (!await file.exists()) throw FormatException('找不到文件：${attachment.name}');
     final length = await file.length();
-    final limit = attachmentUploadLimitBytes(_attachmentProfile);
+    final limit = attachmentUploadLimitBytes(_profileFor(attachment));
     if (length == 0 || length > limit) {
       throw AttachmentCloudException(
         '附件为空或超过 ${limit ~/ (1024 * 1024)} MB 限制',
@@ -700,7 +684,7 @@ class HomeChatAttachmentPreparer {
   }
 
   File _cacheFile(HomeChatAttachment attachment) => File(
-    '${attachment.path}.${_attachmentProfile ?? 'attachment-preparation'}.json',
+    '${attachment.path}.${_profileFor(attachment) ?? 'attachment-preparation'}.json',
   );
 
   Future<Map<String, dynamic>?> _loadCache(

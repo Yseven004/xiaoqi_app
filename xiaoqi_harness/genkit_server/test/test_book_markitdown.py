@@ -83,6 +83,31 @@ def write_epub(path, chapter_bodies):
             )
 
 
+def write_docx(path):
+    with ZipFile(path, "w") as docx:
+        docx.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Override PartName="/word/document.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            "</Types>",
+        )
+        docx.writestr(
+            "_rels/.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="word/document.xml"/></Relationships>',
+        )
+        docx.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p><w:r><w:t>Word 正文</w:t></w:r>"
+            "<w:r><w:rPr><w:b/></w:rPr><w:t>加粗片段</w:t></w:r>"
+            "</w:p></w:body></w:document>",
+        )
+
+
 class BookMarkItDownTests(unittest.TestCase):
     def test_native_diagnostics_are_excluded_from_worker_protocol(self):
         probe = subprocess.run(
@@ -194,6 +219,113 @@ class BookMarkItDownTests(unittest.TestCase):
         conversion = self.invoke(source, "epub")
         self.assertEqual(conversion.returncode, 2)
         self.assertEqual(conversion.stderr.strip(), "invalid_book")
+        self.assertFalse(self.output.exists())
+
+
+    def test_docx_uses_official_markdown_formatting(self):
+        source = self.root / "sample.docx"
+        write_docx(source)
+        conversion = self.invoke(source, "docx")
+        self.assertEqual(conversion.returncode, 0, conversion.stderr)
+        self.assertEqual(
+            json.loads(conversion.stdout),
+            {"page_count": None, "skipped_pages": 0, "has_text": True},
+        )
+        markdown = self.units()[0]["markdown"]
+        self.assertIn("Word 正文", markdown)
+        self.assertIn("**加粗片段**", markdown)
+
+    def test_pptx_preserves_slide_markers_and_titles(self):
+        from pptx import Presentation
+
+        source = self.root / "sample.pptx"
+        deck = Presentation()
+        for title, body in [("起始幻灯片", "早期正文"), ("后段幻灯片", "后段答案")]:
+            slide = deck.slides.add_slide(deck.slide_layouts[1])
+            slide.shapes.title.text = title
+            slide.placeholders[1].text = body
+        deck.save(source)
+        conversion = self.invoke(source, "pptx")
+        self.assertEqual(conversion.returncode, 0, conversion.stderr)
+        markdown = self.units()[0]["markdown"]
+        self.assertIn("<!-- Slide number: 1 -->", markdown)
+        self.assertIn("# 起始幻灯片", markdown)
+        self.assertIn("<!-- Slide number: 2 -->", markdown)
+        self.assertIn("# 后段幻灯片", markdown)
+        self.assertIn("后段答案", markdown)
+
+    def test_empty_pptx_markers_do_not_count_as_body(self):
+        from pptx import Presentation
+
+        source = self.root / "no-body.pptx"
+        deck = Presentation()
+        deck.slides.add_slide(deck.slide_layouts[6])
+        deck.save(source)
+        conversion = self.invoke(source, "pptx")
+        self.assertEqual(conversion.returncode, 0, conversion.stderr)
+        self.assertFalse(json.loads(conversion.stdout)["has_text"])
+        self.assertEqual(self.units(), [])
+
+    def test_xlsx_preserves_named_sheets_and_table_cells(self):
+        from openpyxl import Workbook
+
+        source = self.root / "sample.xlsx"
+        workbook = Workbook()
+        workbook.active.title = "首表"
+        workbook.active.append(["首字段", "数值"])
+        workbook.active.append(["样本", 22])
+        last = workbook.create_sheet("后表")
+        last.append(["后字段", "数值"])
+        last.append(["末尾样本", 42])
+        workbook.save(source)
+        conversion = self.invoke(source, "xlsx")
+        self.assertEqual(conversion.returncode, 0, conversion.stderr)
+        markdown = self.units()[0]["markdown"]
+        self.assertLess(markdown.index("## 首表"), markdown.index("## 后表"))
+        self.assertIn("| 末尾样本 | 42 |", markdown)
+
+    def test_plain_text_and_markdown_keep_unicode_and_source_text(self):
+        for format, original, encoding in [
+            ("txt", "普通文本\n下一行中文", "utf-8"),
+            ("txt", "带 BOM 的中文", "utf-16"),
+            ("md", "# 原有标题\n\n保留**加粗**和 [链接](https://example.invalid)", "utf-8"),
+        ]:
+            with self.subTest(format=format, encoding=encoding):
+                source = self.root / f"sample.{format}"
+                source.write_text(original, encoding=encoding, newline="\n")
+                conversion = self.invoke(source, format)
+                self.assertEqual(conversion.returncode, 0, conversion.stderr)
+                self.assertEqual(self.units()[0]["markdown"], original + "\n\n")
+
+    def test_html_preserves_links_and_strips_script_and_external_images(self):
+        source = self.root / "sample.html"
+        source.write_text(
+            "<html><body><h1>HTML 正文</h1>"
+            '<p><a href="https://example.invalid/article">示例</a>'
+            '<img src="https://example.invalid/remote.png" alt="图片"/></p>'
+            "<script>Do not keep this script.</script></body></html>",
+            encoding="utf-8",
+        )
+        conversion = self.invoke(source, "html")
+        self.assertEqual(conversion.returncode, 0, conversion.stderr)
+        markdown = self.units()[0]["markdown"]
+        self.assertIn("# HTML 正文", markdown)
+        self.assertIn("[示例](https://example.invalid/article)", markdown)
+        self.assertNotIn("remote.png", markdown)
+        self.assertNotIn("Do not keep this script", markdown)
+
+    def test_office_rejects_missing_package_markers_and_archive_over_limit(self):
+        not_office = self.root / "other.docx"
+        with ZipFile(not_office, "w") as archive:
+            archive.writestr("unrelated.xml", "<other/>")
+        conversion = self.invoke(not_office, "docx")
+        self.assertEqual(conversion.returncode, 2)
+        self.assertFalse(self.output.exists())
+        source = self.root / "sample.docx"
+        write_docx(source)
+        with patch.object(worker, "MAX_OFFICE_EXPANDED_BYTES", 25):
+            with self.assertRaises(worker.BookLimit):
+                worker.convert_book(source, "docx", self.output)
         self.assertFalse(self.output.exists())
 
 

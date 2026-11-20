@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Convert uploaded book text using Microsoft MarkItDown's local converters."""
+"""Convert uploaded books and attachments using MarkItDown's local converters."""
 from __future__ import annotations
 
 import argparse
+import codecs
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import io
 import json
@@ -18,15 +19,26 @@ from zipfile import BadZipFile, ZipFile
 
 MIB = 1024 * 1024
 MAX_INPUT_BYTES = 256 * MIB
+MAX_DOCUMENT_BYTES = 50 * MIB
 MAX_MARKDOWN_BYTES = 50 * MIB
 MAX_OUTPUT_BYTES = 64 * MIB
+MAX_ARCHIVE_ENTRIES = 10_000
+MAX_OFFICE_EXPANDED_BYTES = 250 * MIB
 MAX_EPUB_EXPANDED_BYTES = 512 * MIB
-MAX_EPUB_ENTRIES = 10_000
 MAX_EPUB_ENTRY_BYTES = 32 * MIB
 MAX_PDF_PAGES = 2000
 MAX_UNIT_CHARS = 60_000
 EPUB_TEXT_TYPES = {"application/xhtml+xml", "text/html", "image/svg+xml"}
 EPUB_TEXT_EXTENSIONS = {".xhtml", ".html", ".htm", ".svg"}
+DOCUMENT_MIME_TYPES = {
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "html": "text/html",
+}
+OFFICE_FORMATS = {"docx", "pptx", "xlsx"}
 
 
 class InvalidBook(Exception):
@@ -120,6 +132,20 @@ def open_epub_member(archive, name):
     return archive.open(member)
 
 
+def check_archive(archive, max_expanded_bytes, max_entry_bytes):
+    entries = archive.infolist()
+    if (
+        len(entries) > MAX_ARCHIVE_ENTRIES
+        or sum(item.file_size for item in entries) > max_expanded_bytes
+        or any(item.file_size > max_entry_bytes for item in entries)
+    ):
+        raise BookLimit()
+    names = {entry.filename for entry in entries}
+    if len(names) != len(entries):
+        raise InvalidBook()
+    return names
+
+
 def resolve_epub_member(archive, package_dir, href):
     try:
         reference = urlsplit(href)
@@ -166,15 +192,7 @@ def convert_epub(input_path, output):
     converter = HtmlConverter()
     try:
         with ZipFile(input_path) as archive:
-            entries = archive.infolist()
-            if (
-                len(entries) > MAX_EPUB_ENTRIES
-                or sum(item.file_size for item in entries) > MAX_EPUB_EXPANDED_BYTES
-                or any(item.file_size > MAX_EPUB_ENTRY_BYTES for item in entries)
-            ):
-                raise BookLimit()
-            if len({entry.filename for entry in entries}) != len(entries):
-                raise InvalidBook()
+            check_archive(archive, MAX_EPUB_EXPANDED_BYTES, MAX_EPUB_ENTRY_BYTES)
             with open_epub_member(archive, "META-INF/container.xml") as container:
                 rootfile = parse(container).find(".//{*}rootfile")
             if rootfile is None:
@@ -219,13 +237,92 @@ def convert_epub(input_path, output):
     return None, 0
 
 
+def convert_document(input_path, format, output):
+    from markitdown import StreamInfo
+    from markitdown.converters import (
+        DocxConverter,
+        HtmlConverter,
+        PlainTextConverter,
+        PptxConverter,
+        XlsxConverter,
+    )
+
+    converter_type = {
+        "docx": DocxConverter,
+        "pptx": PptxConverter,
+        "xlsx": XlsxConverter,
+        "txt": PlainTextConverter,
+        "md": PlainTextConverter,
+        "html": HtmlConverter,
+    }[format]
+    with input_path.open("rb") as source:
+        try:
+            if format in OFFICE_FORMATS:
+                with ZipFile(source) as archive:
+                    names = check_archive(
+                        archive, MAX_OFFICE_EXPANDED_BYTES, MAX_OFFICE_EXPANDED_BYTES
+                    )
+                    if not {"[Content_Types].xml", "_rels/.rels"} <= names:
+                        raise InvalidBook()
+                source.seek(0)
+            converter = converter_type()
+            stream_info = StreamInfo(
+                extension=f".{format}", mimetype=DOCUMENT_MIME_TYPES[format]
+            )
+            if format in ("txt", "md"):
+                result = convert_plain_text(converter, source, stream_info)
+            else:
+                result = converter.convert(
+                    source, stream_info, strip=["img", "head", "style", "script"]
+                )
+        except BadZipFile as error:
+            raise InvalidBook() from error
+    markdown = result.markdown.replace("\x00", "")
+    if format == "pptx":
+        # Official slide markers are kept for references; a deck with only
+        # those markers does not have any body text.
+        body = re.sub(r"^<!-- Slide number: [0-9]+ -->$", "", markdown, flags=re.M)
+        if not body.strip():
+            return None, 0
+    if markdown.strip():
+        output.add(f"{format.upper()} 正文", markdown)
+    return None, 0
+
+
+def convert_plain_text(converter, source, stream_info):
+    from markitdown import StreamInfo
+
+    # Short valid Chinese UTF-8 samples can look like a different encoding
+    # to a statistical detector. Prefer verified UTF-8 or an explicit BOM.
+    prefix = source.read(4)
+    source.seek(0)
+    if prefix.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        encoding = "utf-32"
+    elif prefix.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encoding = "utf-16"
+    elif prefix.startswith(codecs.BOM_UTF8):
+        encoding = "utf-8-sig"
+    else:
+        encoding = "utf-8"
+    try:
+        return converter.convert(
+            source, stream_info.copy_and_update(StreamInfo(charset=encoding))
+        )
+    except UnicodeDecodeError:
+        if encoding != "utf-8":
+            raise InvalidBook()
+        source.seek(0)
+        return converter.convert(source, stream_info)
+
+
 def convert_book(input_path, format, output_path):
     if not input_path.is_file() or input_path.resolve() == output_path.resolve():
         raise InvalidBook()
     size = input_path.stat().st_size
     if not size:
         raise InvalidBook()
-    if size > MAX_INPUT_BYTES:
+    max_input = MAX_INPUT_BYTES if format in ("pdf", "epub") else MAX_DOCUMENT_BYTES
+    if size > max_input:
         raise BookLimit()
     # Publish the result only after all readable chapters or pages converted.
     descriptor, path = tempfile.mkstemp(prefix=".book-markitdown-", dir=output_path.parent)
@@ -237,6 +334,8 @@ def convert_book(input_path, format, output_path):
                 page_count, skipped = convert_pdf(input_path, output)
             elif format == "epub":
                 page_count, skipped = convert_epub(input_path, output)
+            elif format in DOCUMENT_MIME_TYPES:
+                page_count, skipped = convert_document(input_path, format, output)
             else:
                 raise InvalidBook()
         temporary.replace(output_path)
@@ -282,7 +381,7 @@ def silence_parser_output():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_path", type=Path)
-    parser.add_argument("format", choices=("pdf", "epub"))
+    parser.add_argument("format", choices=("pdf", "epub", *DOCUMENT_MIME_TYPES))
     parser.add_argument("output_path", type=Path)
     args = parser.parse_args()
     # Word wrapping imports NumPy through optional upstream dependencies.

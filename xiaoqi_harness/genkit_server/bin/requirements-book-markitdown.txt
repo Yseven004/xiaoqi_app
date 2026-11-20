@@ -1,30 +1,40 @@
 # Locked worker dependencies. The runtime uses Debian Bookworm Python 3.11;
 # the Dart test image may have a newer Python than the runtime image.
-markitdown[pdf]==0.1.9
+markitdown[docx,pdf,pptx,xlsx]==0.1.9
 pypdf==7.1.1
 beautifulsoup4==4.15.0
 certifi==2026.10.23
 cffi==2.1.1
 charset-normalizer==3.5.2
 click==8.5.1
+cobble==0.1.4
 cryptography==50.0.2
 defusedxml==0.7.1
+et-xmlfile==2.0.0
 flatbuffers==25.12.19
 idna==3.20
+lxml==6.1.3
 magika==1.0.3
+mammoth==1.13.0
 markdownify==1.2.4
 numpy==2.4.6 ; python_version < "3.12"
 numpy==2.5.5 ; python_version >= "3.12"
 onnxruntime==1.32.0
+openpyxl==3.1.5
 packaging==26.3
+pandas==3.1.1
 pdfminer-six==20260107
 pdfplumber==0.11.10
 pillow==13.0.0
 protobuf==7.36.2
 pycparser==3.12
 pypdfium2==5.15.2
+python-dateutil==4.0.0
+python-pptx==1.0.2
 requests==2.34.2
 soupsieve==2.10 ; python_version < "3.12"
 soupsieve==4.1.2 ; python_version >= "3.12"
 typing-extensions==4.16.0
+tzdata==2026.6
 urllib3==2.8.0
+xlsxwriter==3.3.3
