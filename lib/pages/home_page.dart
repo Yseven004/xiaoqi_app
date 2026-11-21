@@ -610,6 +610,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _notePanelOpen = false;
   bool _composerSizeTransitioning = false;
   bool _taskSearchKeepsComposerFixed = false;
+  bool _bookSearchKeepsComposerFixed = false;
   bool _keyboardOverlayLayoutLocked = false;
   bool _agentQuestionOwnsLayoutLock = false;
   bool _allowAgentQuestionPop = false;
@@ -709,6 +710,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     _companionPreferences.enabled.addListener(_companionPreferenceChanged);
+    _bookSearchKeepsComposerFixed = openOnlineBookSearchDialogs.value > 0;
+    openOnlineBookSearchDialogs.addListener(_onOnlineBookSearchDialogChanged);
     unawaited(_companionPreferences.load());
     _attachmentPreparer.states.addListener(_onAttachmentPreparationChanged);
     WidgetsBinding.instance.addObserver(this);
@@ -801,6 +804,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     _companionPreferences.enabled.removeListener(_companionPreferenceChanged);
+    openOnlineBookSearchDialogs.removeListener(
+      _onOnlineBookSearchDialogChanged,
+    );
     _dismissAnnotationComment?.call();
     WidgetsBinding.instance.removeObserver(this);
     _modelPreferences.defaultSelection.removeListener(_onDefaultModelChanged);
@@ -2259,6 +2265,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  bool get _keyboardOverlayKeepsComposerFixed =>
+      _keyboardOverlayLayoutLocked || _bookSearchKeepsComposerFixed;
+
+  void _onOnlineBookSearchDialogChanged() {
+    if (!mounted) return;
+    // Route exit can finish before the keyboard has fully moved off screen.
+    final keepFixed =
+        openOnlineBookSearchDialogs.value > 0 ||
+        (_bookSearchKeepsComposerFixed &&
+            _currentKeyboardInset > 0 &&
+            !_composerFocusNode.hasFocus);
+    if (keepFixed != _bookSearchKeepsComposerFixed) {
+      setState(() => _bookSearchKeepsComposerFixed = keepFixed);
+    }
+  }
+
   void _handleKeyboardInsetChanged(double keyboardInset) {
     if (keyboardInset == _lastKeyboardInset) return;
     var releasedKeyboardOverlayLock = false;
@@ -2269,20 +2291,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _dismissComposerFocus();
     }
     _keyboardInsetSettleTimer?.cancel();
-    if (_keyboardOverlayLayoutLocked) {
+    if (_keyboardOverlayKeepsComposerFixed) {
       _keyboardInsetSettleTimer = null;
       _keyboardInsetsChanging.value = false;
     } else if (keyboardInset == 0) {
       _keyboardInsetSettleTimer = null;
       _keyboardInsetsChanging.value = false;
-      if (!_keyboardOverlayLayoutLocked &&
+      if (!_keyboardOverlayKeepsComposerFixed &&
           _attachmentPanelPending &&
           !_composerFocusNode.hasFocus) {
         _setAttachmentPanel(open: true);
       }
     } else {
       _keyboardInsetsChanging.value = true;
-      if (!_keyboardOverlayLayoutLocked && _attachmentPanelOpen) {
+      if (!_keyboardOverlayKeepsComposerFixed && _attachmentPanelOpen) {
         _setAttachmentPanel(open: false);
       }
       _keyboardInsetSettleTimer = Timer(const Duration(milliseconds: 90), () {
@@ -2306,8 +2328,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     }
 
+    if (keyboardInset == 0 && _bookSearchKeepsComposerFixed) {
+      _onOnlineBookSearchDialogChanged();
+      releasedKeyboardOverlayLock =
+          releasedKeyboardOverlayLock || !_bookSearchKeepsComposerFixed;
+    }
+
     if (!releasedKeyboardOverlayLock &&
-        !_keyboardOverlayLayoutLocked &&
+        !_keyboardOverlayKeepsComposerFixed &&
         !_taskSearchKeepsComposerFixed &&
         !_isGenerating &&
         _followLatestMessage &&
@@ -2336,6 +2364,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _onComposerFocusChanged() {
+    if (_composerFocusNode.hasFocus && _bookSearchKeepsComposerFixed) {
+      _onOnlineBookSearchDialogChanged();
+    }
     if (_composerFocusNode.hasFocus &&
         (_attachmentPanelOpen || _attachmentPanelPending)) {
       _setAttachmentPanel(open: false);
@@ -9299,6 +9330,8 @@ $text''';
   @override
   Widget build(BuildContext context) {
     final companionMenuWasOpen = _companionMenuOpen;
+    final keepComposerFixed =
+        _keyboardOverlayKeepsComposerFixed || _taskSearchKeepsComposerFixed;
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -9349,11 +9382,9 @@ $text''';
         },
         child: Scaffold(
           backgroundColor: const Color(0xFFFDFDFD),
-          resizeToAvoidBottomInset:
-              !_keyboardOverlayLayoutLocked && !_taskSearchKeepsComposerFixed,
+          resizeToAvoidBottomInset: !keepComposerFixed,
           body: SafeArea(
-            maintainBottomViewPadding:
-                _keyboardOverlayLayoutLocked || _taskSearchKeepsComposerFixed,
+            maintainBottomViewPadding: keepComposerFixed,
             child: LayoutBuilder(
               builder: (context, constraints) {
                 return SizedBox.expand(
@@ -9371,10 +9402,7 @@ $text''';
                               child: AnimatedOpacity(
                                 duration: const Duration(milliseconds: 240),
                                 curve: Curves.easeInOut,
-                                opacity:
-                                    keyboardVisible &&
-                                        !_taskSearchKeepsComposerFixed &&
-                                        !_keyboardOverlayLayoutLocked
+                                opacity: keyboardVisible && !keepComposerFixed
                                     ? 0
                                     : 1,
                                 child: const _WelcomeCopy(),
@@ -9665,8 +9693,7 @@ $text''';
                                               attachmentPanelPending:
                                                   _attachmentPanelPending,
                                               resizeToAvoidBottomInset:
-                                                  !_keyboardOverlayLayoutLocked &&
-                                                  !_taskSearchKeepsComposerFixed,
+                                                  !keepComposerFixed,
                                               onToggleAttachmentPanel:
                                                   _toggleAttachmentPanel,
                                               onAddAttachment: _addAttachments,

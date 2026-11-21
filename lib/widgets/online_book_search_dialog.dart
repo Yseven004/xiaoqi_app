@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:a2ui_core/a2ui_core.dart' as a2ui;
 import 'package:a2ui_flutter/a2ui_flutter.dart' as ui;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:genkit/client.dart' as genkit;
@@ -25,6 +26,9 @@ import 'app_toast.dart';
 import 'book_import_progress.dart';
 
 final _search = OnlineBookSearch.instance;
+final _openBookSearchDialogs = ValueNotifier<int>(0);
+
+ValueListenable<int> get openOnlineBookSearchDialogs => _openBookSearchDialogs;
 
 Future<void> _openBookSource(BuildContext context, Uri uri) async {
   if (uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) {
@@ -45,17 +49,25 @@ Future<BookSourceImportResult?> showOnlineBookSearch(
   int? bookId,
   String title = '',
   VoidCallback? onImporting,
-}) => showDialog<BookSourceImportResult>(
-  context: context,
-  barrierColor: const Color(0x70000000),
-  requestFocus: false,
-  builder: (_) => _OnlineBookSearchDialog(
-    library: library,
-    bookId: bookId,
-    title: title,
-    onImporting: onImporting,
-  ),
-);
+}) async {
+  FocusManager.instance.primaryFocus?.unfocus();
+  _openBookSearchDialogs.value++;
+  try {
+    return await showDialog<BookSourceImportResult>(
+      context: context,
+      barrierColor: const Color(0x70000000),
+      requestFocus: false,
+      builder: (_) => _OnlineBookSearchDialog(
+        library: library,
+        bookId: bookId,
+        title: title,
+        onImporting: onImporting,
+      ),
+    );
+  } finally {
+    _openBookSearchDialogs.value--;
+  }
+}
 
 class _OnlineBookSearchDialog extends StatefulWidget {
   const _OnlineBookSearchDialog({
@@ -335,7 +347,7 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
           ),
           child: SizedBox(
             width: math.min(680.0, viewport.width * .91),
-            height: viewport.height * .685,
+            height: viewport.height * .605,
             child: Padding(
               padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
               child: Column(
