@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect x="5.5" y="5.8" width="17.4" height="52.4" rx="3" fill="#203158"/>
+  <rect x="23.9" y="17.55" width="12.6" height="40.65" rx="2.5" fill="#203158"/>
+  <g fill="#FDF1D4">
+    <rect x="5.5" y="12.08" width="17.4" height="1.2"/>
+    <rect x="5.5" y="14.85" width="17.4" height="1.2"/>
+    <rect x="9.35" y="20.85" width="9.55" height="7.15" rx="1.55"/>
+    <rect x="5.5" y="48.42" width="17.4" height="1.2"/>
+    <rect x="5.5" y="51.2" width="17.4" height="1.2"/>
+    <rect x="23.9" y="24.5" width="12.6" height="1.2"/>
+    <rect x="26.28" y="28.62" width="7.6" height="6.15" rx="1.36"/>
+    <rect x="23.9" y="49.66" width="12.6" height="1.15"/>
+    <rect x="23.9" y="52.44" width="12.6" height="1.15"/>
+  </g>
+  <g transform="translate(34.425 14.35) rotate(-15)">
+    <rect width="14.1" height="44.2" rx="2.42" fill="#C78E25"/>
+    <g fill="#FDF1D4">
+      <rect y="5.9" width="14.1" height="1.15"/>
+      <rect y="8.65" width="14.1" height="1.15"/>
+      <rect x="2.95" y="13.45" width="8.3" height="7.7" rx="1.42"/>
+      <rect y="35.5" width="14.1" height="1.15"/>
+      <rect y="38.24" width="14.1" height="1.15"/>
+    </g>
+  </g>
+</svg>

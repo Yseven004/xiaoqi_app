@@ -330,6 +330,8 @@ class CapabilityCloudSync {
     return _headers(token);
   }
 
+  Uri capabilityEndpoint(String path) => Uri.parse('$_baseUrl/$path');
+
   /// Uploads a content-addressed resource once. Progress is actual bytes read
   /// into the HTTP request; parsing progress comes from server snapshots.
   Future<Map<String, dynamic>> createAttachment({

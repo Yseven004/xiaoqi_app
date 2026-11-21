@@ -3,7 +3,6 @@ import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../config/book_flow_theme.dart';
 import '../models/book_library_item.dart';
@@ -157,29 +156,10 @@ class _BookAddSourceCard extends StatefulWidget {
 }
 
 class _BookAddSourceCardState extends State<_BookAddSourceCard> {
-  bool _launchingCatalog = false;
-
   void _finish([BookAddAction? action]) {
     if (ModalRoute.of(context)?.isCurrent == true) {
       Navigator.of(context).pop(action);
     }
-  }
-
-  Future<void> _openOnlineCatalog() async {
-    if (_launchingCatalog) return;
-    setState(() => _launchingCatalog = true);
-    var launched = false;
-    try {
-      launched = await launchUrl(
-        Uri.https('www.gutenberg.org', '/ebooks/index.html'),
-        mode: LaunchMode.externalApplication,
-      );
-    } catch (_) {
-      // Some devices have no external handler for HTTPS links.
-    }
-    if (!mounted) return;
-    setState(() => _launchingCatalog = false);
-    if (!launched) AppToast.show(context, '无法打开开放书库，请稍后重试');
   }
 
   Widget _card(BuildContext context) => Material(
@@ -257,13 +237,9 @@ class _BookAddSourceCardState extends State<_BookAddSourceCard> {
                 : () => AppToast.show(context, '微信书籍导入暂未开放'),
           ),
           _SourceActionCard(
-            iconAsset: 'assets/images/book_import_web_search.svg',
+            iconAsset: 'assets/images/online_book_search.svg',
             title: '网上找书',
-            onTap: widget.forExistingBook
-                ? () => _finish(BookAddAction.findOnline)
-                : _launchingCatalog
-                ? null
-                : _openOnlineCatalog,
+            onTap: () => _finish(BookAddAction.findOnline),
           ),
         ],
       ),

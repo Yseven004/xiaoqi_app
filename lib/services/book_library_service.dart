@@ -783,6 +783,96 @@ class BookLibraryService {
     required String displayName,
     required String format,
   }) async {
+    final db = await _databaseService.database;
+    return db.transaction(
+      (txn) => _importBookSource(
+        txn,
+        bookId: bookId,
+        sourcePath: sourcePath,
+        displayName: displayName,
+        format: format,
+      ),
+    );
+  }
+
+  /// Associates a verified network file and its book in one database write.
+  Future<BookSourceImportResult> importVerifiedOnlineBook({
+    required BookRecord book,
+    required String sourcePath,
+    required String displayName,
+    required String format,
+    required Uri sourcePage,
+    int? bookId,
+  }) async {
+    final db = await _databaseService.database;
+    return db.transaction((txn) async {
+      final now = DateTime.now().toUtc().toIso8601String();
+      if (bookId == null) {
+        final isbn = book.isbn13;
+        final editionId = book.sourceId;
+        final match = [
+          'canonical_key = ?',
+          if (isbn.isNotEmpty) 'isbn_13 = ?',
+          if (editionId.isNotEmpty) '(source = ? AND source_id = ?)',
+        ].join(' OR ');
+        var rows = await txn.query(
+          'books',
+          columns: ['id'],
+          where: 'is_deleted = 0 AND ($match)',
+          whereArgs: [
+            book.canonicalKey,
+            if (isbn.isNotEmpty) isbn,
+            if (editionId.isNotEmpty) ...[book.source, editionId],
+          ],
+          orderBy: 'id',
+          limit: 1,
+        );
+        if (rows.isEmpty) {
+          await txn.insert(
+            'books',
+            book.copyWith(createdAt: now, updatedAt: now).toMap(),
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+          rows = await txn.query(
+            'books',
+            columns: ['id'],
+            where: 'is_deleted = 0 AND canonical_key = ?',
+            whereArgs: [book.canonicalKey],
+            limit: 1,
+          );
+          if (rows.isEmpty) throw StateError('这本书已移至回收站，请先恢复');
+        }
+        bookId = rows.single['id'] as int;
+      }
+      final target = await txn.query(
+        'books',
+        columns: ['id'],
+        where: 'id = ? AND is_deleted = 0',
+        whereArgs: [bookId],
+        limit: 1,
+      );
+      if (target.isEmpty) throw StateError('要导入资料的书籍已不存在');
+      return _importBookSource(
+        txn,
+        bookId: target.single['id'] as int,
+        sourcePath: sourcePath,
+        displayName: displayName,
+        format: format,
+        sourcePage: sourcePage.toString(),
+        capturedAt: now,
+      );
+    });
+  }
+
+  Future<BookSourceImportResult> _importBookSource(
+    Transaction db, {
+    required int bookId,
+    required String sourcePath,
+    required String displayName,
+    required String format,
+    String sourcePage = '',
+    String capturedAt = '',
+  }) async {
     final normalizedFormat = normalizeBookSourceFormat(format);
     if (!supportedBookSourceFormats.contains(normalizedFormat)) {
       throw UnsupportedError('暂不支持导入 .$normalizedFormat 文件');
@@ -800,7 +890,6 @@ class BookLibraryService {
     }
     final contentHash = (await sha256.bind(sourceFile.openRead()).first)
         .toString();
-    final db = await _databaseService.database;
     final existing = await db.query(
       'book_sources',
       where: 'book_id = ? AND content_hash = ?',
@@ -810,48 +899,44 @@ class BookLibraryService {
     if (existing.isNotEmpty) {
       final existingRecord = BookSourceRecord.fromMap(existing.first);
       final existingFile = File(existingRecord.filePath);
-      if (await _isStoredSourceValid(
+      final valid = await _isStoredSourceValid(
         file: existingFile,
         expectedSize: fileSize,
         expectedHash: contentHash,
         format: normalizedFormat,
-      )) {
-        return BookSourceImportResult(
-          source: existingRecord,
-          reusedExisting: true,
+      );
+      if (!valid) {
+        // Restore a damaged local copy while retaining the source and annotations.
+        await existingFile.parent.create(recursive: true);
+        await sourceFile.copy(existingFile.path);
+        final repaired = await _isStoredSourceValid(
+          file: existingFile,
+          expectedSize: fileSize,
+          expectedHash: contentHash,
+          format: normalizedFormat,
+        );
+        if (!repaired) throw StateError('已有资料副本损坏，修复后仍无法打开');
+      }
+      final updates = <String, Object>{
+        if (!valid) ...{'file_size': fileSize, 'status': 'ready'},
+        if (sourcePage.isNotEmpty && existingRecord.originUri.isEmpty)
+          'origin_uri': sourcePage,
+        if (sourcePage.isNotEmpty && existingRecord.canonicalUri.isEmpty)
+          'canonical_uri': sourcePage,
+        if (capturedAt.isNotEmpty && existingRecord.capturedAt.isEmpty)
+          'captured_at': capturedAt,
+      };
+      if (updates.isNotEmpty) {
+        updates['updated_at'] = DateTime.now().toIso8601String();
+        await db.update(
+          'book_sources',
+          updates,
+          where: 'id = ?',
+          whereArgs: [existingRecord.id],
         );
       }
-
-      // A hash-matched row with a missing or damaged private copy can be
-      // repaired from the user-selected source without changing its identity.
-      await existingFile.parent.create(recursive: true);
-      await sourceFile.copy(existingFile.path);
-      final repaired = await _isStoredSourceValid(
-        file: existingFile,
-        expectedSize: fileSize,
-        expectedHash: contentHash,
-        format: normalizedFormat,
-      );
-      if (!repaired) {
-        throw StateError('已有资料副本损坏，修复后仍无法打开');
-      }
-      final now = DateTime.now().toIso8601String();
-      await db.update(
-        'book_sources',
-        {'file_size': fileSize, 'status': 'ready', 'updated_at': now},
-        where: 'id = ?',
-        whereArgs: [existingRecord.id],
-      );
-      final refreshed = await db.query(
-        'book_sources',
-        where: 'id = ?',
-        whereArgs: [existingRecord.id],
-        limit: 1,
-      );
       return BookSourceImportResult(
-        source: refreshed.isEmpty
-            ? existingRecord
-            : BookSourceRecord.fromMap(refreshed.first),
+        source: BookSourceRecord.fromMap({...existing.first, ...updates}),
         reusedExisting: true,
       );
     }
@@ -909,6 +994,11 @@ class BookLibraryService {
       'file_path': targetPath,
       'file_size': fileSize,
       'content_hash': contentHash,
+      if (sourcePage.isNotEmpty) ...{
+        'origin_uri': sourcePage,
+        'canonical_uri': sourcePage,
+        'captured_at': capturedAt,
+      },
       'status': 'ready',
       'created_at': now,
       'updated_at': now,
@@ -925,6 +1015,9 @@ class BookLibraryService {
         fileSize: fileSize,
         contentHash: contentHash,
         status: 'ready',
+        originUri: sourcePage,
+        canonicalUri: sourcePage,
+        capturedAt: capturedAt,
         createdAt: now,
         updatedAt: now,
       ),

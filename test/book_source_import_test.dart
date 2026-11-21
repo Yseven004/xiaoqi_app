@@ -1,10 +1,14 @@
 import 'dart:io';
 
+import 'package:a2ui_flutter/a2ui_flutter.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart'
+    show FlutterSecureStorage;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xiaoqi_app/models/book_recognition.dart';
 import 'package:xiaoqi_app/models/book_source.dart';
 import 'package:xiaoqi_app/pages/book_sources_page.dart';
@@ -178,9 +182,11 @@ void main() {
     expect(library.importedPath, file.path);
   });
 
-  testWidgets('online import guide validates HTTPS with narrow accessible UI', (
+  testWidgets('online search switches modes and closes on a narrow display', (
     tester,
   ) async {
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
     await tester.binding.setSurfaceSize(const Size(320, 630));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final library = _Library();
@@ -201,20 +207,40 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('网上找书'));
     await tester.pumpAndSettle();
-    expect(find.text('打开开放书库'), findsOneWidget);
-    expect(find.text('选择已下载文件'), findsOneWidget);
+    final dialog = find.byType(Dialog);
+    final dialogBounds = tester.getRect(dialog);
+    expect(find.text('想找哪本书？'), findsOneWidget);
+    expect(find.text('帮我找《Hello 算法》中文版 ↗'), findsOneWidget);
+    expect(find.text('查找《测试读本》'), findsOneWidget);
+    expect(find.text('AI 对话'), findsOneWidget);
+    expect(find.text('直接搜索'), findsOneWidget);
     expect(tester.testTextInput.isVisible, isFalse);
-    await tester.enterText(
-      find.byType(TextField),
-      'http://example.com/book.pdf',
-    );
-    await tester.tap(find.text('导入链接'));
+    await tester.enterText(find.byType(TextField), '找中文电子书');
+    await tester.tap(find.text('直接搜索'));
     await tester.pumpAndSettle();
-    expect(find.text('请输入可下载的 HTTPS 文件链接'), findsOneWidget);
+    expect(tester.getRect(dialog), dialogBounds);
+    expect(find.byTooltip('搜索'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '测试读本',
+    );
+    expect(find.text('想找哪本书？'), findsNothing);
+    expect(tester.testTextInput.isVisible, isFalse);
+    await tester.tap(find.text('AI 对话'));
+    await tester.pumpAndSettle();
+    expect(find.text('找中文电子书'), findsOneWidget);
     expect(library.sources, isEmpty);
-    await tester.tap(find.text('取消'));
+
+    await tester.tap(find.text('直接搜索'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('搜索'));
+    await tester.pumpAndSettle();
+    expect(find.text('请先登录个人账号'), findsOneWidget);
+    expect(find.byType(A2uiSurface), findsOneWidget);
+    await tester.tap(find.byTooltip('关闭'));
     await tester.pumpAndSettle();
     expect(find.text('还没有导入资料'), findsOneWidget);
+    await _openChooser(tester);
     expect(tester.takeException(), isNull);
   });
 

@@ -18,6 +18,7 @@ import '../pages/book_isbn_scanner_page.dart';
 import 'book_metadata_form_sheet.dart';
 import 'book_pdf_import_sheet.dart';
 import 'app_toast.dart';
+import 'online_book_search_dialog.dart';
 
 Future<BookLibraryItem?> createBookForReadingTask(
   BuildContext context, {
@@ -29,6 +30,11 @@ Future<BookLibraryItem?> createBookForReadingTask(
   final int? bookId;
   if (action == BookAddAction.scan) {
     bookId = await _scanAndSaveBook(context, library);
+  } else if (action == BookAddAction.findOnline) {
+    bookId = (await showOnlineBookSearch(
+      context,
+      library: library,
+    ))?.source.bookId;
   } else {
     if (!context.mounted) return null;
     bookId = await _importBook(context, library);

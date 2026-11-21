@@ -8,15 +8,13 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../models/book_source.dart';
 import '../services/book_library_service.dart';
-import '../services/epub_document_service.dart';
 import '../services/pdf_catalog_service.dart';
 import 'app_toast.dart';
-import 'book_editor_dialog.dart';
 import 'book_pdf_import_sheet.dart';
+import 'online_book_search_dialog.dart';
 
 typedef _BookSourceFile = ({XFile file, String name});
 
@@ -35,6 +33,19 @@ Future<BookSourceImportResult?> showExistingBookSourceImport(
     forExistingBook: true,
   );
   if (!context.mounted || action == null) return null;
+  if (action == BookAddAction.findOnline) {
+    final title = bookTitle.trim().isNotEmpty
+        ? bookTitle
+        : (await library.getBook(bookId))?.title ?? '';
+    if (!context.mounted) return null;
+    return showOnlineBookSearch(
+      context,
+      library: library,
+      bookId: bookId,
+      title: title,
+      onImporting: onImporting,
+    );
+  }
   Directory? staging;
   var started = false;
   void startImport() {
@@ -47,20 +58,7 @@ Future<BookSourceImportResult?> showExistingBookSourceImport(
     final file = await switch (action) {
       BookAddAction.importPdf => _pickBookSource(),
       BookAddAction.importFromWechat => _pickWechatSource(context),
-      BookAddAction.findOnline => _pickOnlineSource(
-        context,
-        bookTitle: bookTitle,
-        library: library,
-        bookId: bookId,
-        download: (uri) async {
-          startImport();
-          final directory = await (await getTemporaryDirectory()).createTemp(
-            'book-source-download-',
-          );
-          staging = directory;
-          return _downloadBookSource(uri, directory);
-        },
-      ),
+      BookAddAction.findOnline ||
       BookAddAction.scan => Future<_BookSourceFile?>.value(),
     };
     if (!context.mounted || file == null) return null;
@@ -214,215 +212,4 @@ Future<_BookSourceFile?> _pickWechatSource(BuildContext context) async {
   }
   if (!context.mounted || picked != true) return null;
   return sharedFile ?? await _pickBookSource();
-}
-
-Future<_BookSourceFile?> _pickOnlineSource(
-  BuildContext context, {
-  required String bookTitle,
-  required BookLibraryService library,
-  required int bookId,
-  required Future<_BookSourceFile> Function(Uri uri) download,
-}) async {
-  final search =
-      (bookTitle.trim().isEmpty
-              ? (await library.getBook(bookId))?.title ?? ''
-              : bookTitle)
-          .trim();
-  if (!context.mounted) return null;
-  final catalog = Uri.https(
-    'www.gutenberg.org',
-    search.isEmpty ? '/ebooks/index.html' : '/ebooks/search/',
-    search.isEmpty ? null : {'query': search},
-  );
-  final selected = await showDialog<({Uri? link})>(
-    context: context,
-    builder: (_) => _OnlineBookSourceDialog(catalog: catalog),
-  );
-  if (!context.mounted || selected == null) return null;
-  final link = selected.link;
-  return link == null ? _pickBookSource() : download(link);
-}
-
-bool _isHttpsDownload(Uri? uri) =>
-    uri != null &&
-    uri.scheme == 'https' &&
-    uri.host.isNotEmpty &&
-    uri.userInfo.isEmpty;
-
-Future<_BookSourceFile> _downloadBookSource(
-  Uri link,
-  Directory directory,
-) async {
-  final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
-  final deadline = Timer(
-    const Duration(minutes: 2),
-    () => client.close(force: true),
-  );
-  try {
-    var uri = link;
-    for (var hop = 0; hop <= 5; hop++) {
-      final request = await client.getUrl(uri);
-      request.followRedirects = false;
-      final response = await request.close().timeout(
-        const Duration(seconds: 20),
-      );
-      if (response.isRedirect) {
-        final location = response.headers.value(HttpHeaders.locationHeader);
-        final redirect = location == null ? null : uri.resolve(location);
-        if (!_isHttpsDownload(redirect) || hop == 5) {
-          throw const FormatException('下载地址的跳转无效');
-        }
-        await response.listen((_) {}).cancel();
-        uri = redirect!;
-        continue;
-      }
-      if (response.statusCode != HttpStatus.ok) {
-        throw StateError('下载失败（HTTP ${response.statusCode}）');
-      }
-      final pathName = uri.pathSegments.lastOrNull ?? '';
-      final format = switch (response.headers.contentType?.mimeType) {
-        'application/pdf' => 'pdf',
-        'application/epub+zip' => 'epub',
-        null ||
-        'application/octet-stream' ||
-        'application/zip' => _bookFileFormat(pathName),
-        _ => null,
-      };
-      if (format == null) throw const FormatException('链接未返回 PDF 或 EPUB');
-      final limit = format == 'pdf'
-          ? PdfCatalogService.maxPdfBytes
-          : EpubDocumentService.maxInputBytes;
-      if (response.contentLength > limit) {
-        throw const FormatException('下载资料超出允许的大小');
-      }
-      final target = File(p.join(directory.path, 'download.$format'));
-      final writer = await target.open(mode: FileMode.write);
-      var size = 0;
-      try {
-        await for (final chunk in response.timeout(
-          const Duration(seconds: 20),
-        )) {
-          size += chunk.length;
-          if (size > limit) {
-            throw const FormatException('下载资料超出允许的大小');
-          }
-          await writer.writeFrom(chunk);
-        }
-      } finally {
-        await writer.close();
-      }
-      return (
-        file: XFile(target.path),
-        name: _bookFileFormat(pathName) == format ? pathName : '下载资料.$format',
-      );
-    }
-    throw const FormatException('下载地址跳转过多');
-  } on TimeoutException {
-    throw StateError('下载超时，请稍后重试');
-  } finally {
-    deadline.cancel();
-    client.close(force: true);
-  }
-}
-
-class _OnlineBookSourceDialog extends StatefulWidget {
-  const _OnlineBookSourceDialog({required this.catalog});
-
-  final Uri catalog;
-
-  @override
-  State<_OnlineBookSourceDialog> createState() =>
-      _OnlineBookSourceDialogState();
-}
-
-class _OnlineBookSourceDialogState extends State<_OnlineBookSourceDialog>
-    with WidgetsBindingObserver, BookEditorInputFocus<_OnlineBookSourceDialog> {
-  final _link = TextEditingController();
-  final _linkFocus = FocusNode();
-  String? _error;
-  bool _openingCatalog = false;
-
-  @override
-  Iterable<(FocusNode, TextEditingController)> get editorInputs => [
-    (_linkFocus, _link),
-  ];
-
-  @override
-  void dispose() {
-    _linkFocus.dispose();
-    _link.dispose();
-    super.dispose();
-  }
-
-  void _submitLink() {
-    final link = Uri.tryParse(_link.text.trim());
-    if (!_isHttpsDownload(link)) {
-      setState(() => _error = '请输入可下载的 HTTPS 文件链接');
-      return;
-    }
-    Navigator.pop(context, (link: link));
-  }
-
-  Future<void> _openCatalog() async {
-    if (_openingCatalog) return;
-    setState(() => _openingCatalog = true);
-    var launched = false;
-    try {
-      launched = await launchUrl(
-        widget.catalog,
-        mode: LaunchMode.externalApplication,
-      );
-    } catch (_) {
-      // The app may not have an external HTTPS handler.
-    }
-    if (!mounted) return;
-    setState(() => _openingCatalog = false);
-    if (!launched) AppToast.show(context, '无法打开开放书库，请稍后重试');
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('网上找书'),
-    content: SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text('在 Project Gutenberg 查找可下载的电子书，或粘贴 PDF、EPUB 的下载链接。'),
-          Align(
-            alignment: AlignmentDirectional.centerStart,
-            child: TextButton(
-              onPressed: _openingCatalog ? null : _openCatalog,
-              child: const Text('打开开放书库'),
-            ),
-          ),
-          TextField(
-            controller: _link,
-            focusNode: _linkFocus,
-            keyboardType: TextInputType.url,
-            textInputAction: TextInputAction.done,
-            autocorrect: false,
-            enableSuggestions: false,
-            decoration: bookEditorInput(hint: 'HTTPS 下载链接', error: _error),
-            onTapOutside: (_) => _linkFocus.unfocus(),
-            onEditingComplete: () {},
-            onSubmitted: (_) => _submitLink(),
-            onChanged: (_) {
-              if (_error != null) setState(() => _error = null);
-            },
-          ),
-        ],
-      ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('取消'),
-      ),
-      TextButton(
-        onPressed: () => Navigator.pop(context, (link: null)),
-        child: const Text('选择已下载文件'),
-      ),
-      FilledButton(onPressed: _submitLink, child: const Text('导入链接')),
-    ],
-  );
 }

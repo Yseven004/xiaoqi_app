@@ -47,6 +47,7 @@ class AiConversationMessage {
     this.agentProcessStatus,
     this.agentProcessExpanded = false,
     this.agentWebSources = const [],
+    this.bookSearchId,
     Map<String, Object?>? agentClarification,
   }) : id = id ?? _newMessageId(),
        annotations = List<ChatAnnotation>.unmodifiable(annotations),
@@ -87,6 +88,7 @@ class AiConversationMessage {
   final String? agentProcessStatus;
   final bool agentProcessExpanded;
   final List<AiChatWebSource> agentWebSources;
+  final String? bookSearchId;
   final Map<String, Object?>? agentClarification;
 
   bool get hasAgentProcess =>
@@ -94,7 +96,8 @@ class AiConversationMessage {
       agentProcessSummary?.trim().isNotEmpty == true ||
       agentProcessStatus != null;
 
-  bool get hasAssistantContent => text.trim().isNotEmpty || hasAgentProcess;
+  bool get hasAssistantContent =>
+      text.trim().isNotEmpty || hasAgentProcess || bookSearchId != null;
 
   AiConversationMessage copyWith({
     String? id,
@@ -132,6 +135,7 @@ class AiConversationMessage {
     String? agentProcessStatus,
     bool? agentProcessExpanded,
     List<AiChatWebSource>? agentWebSources,
+    String? bookSearchId,
     Map<String, Object?>? agentClarification,
     bool clearAgentClarification = false,
   }) => AiConversationMessage(
@@ -177,6 +181,7 @@ class AiConversationMessage {
     agentProcessStatus: agentProcessStatus ?? this.agentProcessStatus,
     agentProcessExpanded: agentProcessExpanded ?? this.agentProcessExpanded,
     agentWebSources: agentWebSources ?? this.agentWebSources,
+    bookSearchId: bookSearchId ?? this.bookSearchId,
     agentClarification: clearAgentClarification
         ? null
         : agentClarification ?? this.agentClarification,
@@ -231,6 +236,7 @@ class AiConversationMessage {
       'agent_web_sources': agentWebSources
           .map((source) => source.toJson())
           .toList(),
+    if (bookSearchId != null) 'book_search_id': bookSearchId,
     if (agentClarification != null) 'agent_clarification': agentClarification,
   };
 
@@ -307,6 +313,9 @@ class AiConversationMessage {
                 .map(AiChatWebSource.fromJson)
                 .toList(growable: false)
           : const [],
+      bookSearchId: raw['book_search_id'] is String
+          ? raw['book_search_id'] as String
+          : null,
       agentClarification: raw['agent_clarification'] is Map
           ? Map<String, Object?>.from(raw['agent_clarification'] as Map)
           : null,

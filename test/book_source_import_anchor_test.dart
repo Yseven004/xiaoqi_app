@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:xiaoqi_app/models/book_recognition.dart';
 import 'package:xiaoqi_app/models/book_source.dart';
 import 'package:xiaoqi_app/pages/book_sources_page.dart';
 import 'package:xiaoqi_app/services/book_library_service.dart';
@@ -14,6 +16,7 @@ void main() {
     testWidgets('book source menu opens below the $name import button', (
       tester,
     ) async {
+      SharedPreferences.setMockInitialValues({});
       await tester.binding.setSurfaceSize(size);
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(
@@ -72,6 +75,16 @@ void main() {
         await tester.pumpAndSettle();
         expect(online, findsOneWidget);
         expect(tester.getRect(card), menu);
+        await tester.tap(online);
+        await tester.pumpAndSettle();
+        expect(find.text('AI 对话'), findsOneWidget);
+        expect(find.text('直接搜索'), findsOneWidget);
+        expect(pointer, findsNothing);
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(find.text('AI 对话'), findsNothing);
+        expect(tester.takeException(), isNull);
+        return;
       }
 
       await tester.tapAt(Offset(size.width / 2, 12));
@@ -86,6 +99,10 @@ class _Library extends BookLibraryService {
   _Library(this.populated);
 
   final bool populated;
+
+  @override
+  Future<BookRecord?> getBook(int id) async =>
+      BookRecord(id: id, title: '测试读本');
 
   @override
   Future<List<BookSourceRecord>> listSourcesForBook(int bookId) async => [

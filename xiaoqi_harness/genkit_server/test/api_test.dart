@@ -122,13 +122,14 @@ void main() {
     String path, {
     Object? body,
     bool auth = true,
+    String? deviceToken,
   }) => api.router.call(
     Request(
       method,
       Uri.parse('http://localhost$path'),
       headers: {
         'x-xiaoqi-contract': apiContractVersion,
-        if (auth) 'authorization': 'Bearer $token',
+        if (auth) 'authorization': 'Bearer ${deviceToken ?? token}',
         if (body != null) 'content-type': 'application/json',
       },
       body: body == null ? null : jsonEncode(body),
@@ -139,6 +140,75 @@ void main() {
     final response = await call('GET', '/v1/capabilities', auth: false);
     expect(response.statusCode, 401);
   });
+
+  test(
+    'book search HTTP routes authenticate, stop early and honor the switch',
+    () async {
+      const id = 'book-search-early-stop';
+      const settings = '/v1/book-search-settings';
+      const searches = '/v1/book-searches';
+      const search = '$searches/$id';
+      const resolve = '$search/candidates/hello-python/resolve';
+      const startBody = {'id': id, 'query': 'Hello 算法'};
+      const otherToken = 'test-other-device-token';
+      store.put('device/${sha256.convert(utf8.encode(otherToken))}', {
+        'tenant_id': 'personal',
+        'device_id': 'other-device',
+        'auth_method': 'email',
+        'account_email': 'owner@example.com',
+        'revoked_at': null,
+      }, null);
+
+      expect((await call('GET', settings, auth: false)).statusCode, 401);
+      expect(
+        (await call('POST', searches, auth: false, body: startBody)).statusCode,
+        401,
+      );
+      expect((await call('POST', '$search/stop', auth: false)).statusCode, 401);
+      expect((await call('POST', resolve, auth: false)).statusCode, 401);
+      final initial = await call('GET', settings);
+      expect(initial.statusCode, 200);
+      expect(jsonDecode(await initial.readAsString()), {'enabled': true});
+
+      // Closing the window may reach the server before its start request.
+      final stopped = await call('POST', '$search/stop');
+      expect(stopped.statusCode, 200);
+      final snapshot = jsonDecode(await stopped.readAsString());
+      expect(snapshot, {
+        'id': id,
+        'query': '',
+        'status': 'stopped',
+        'revision': 1,
+        'candidates': [],
+      });
+      final delayed = await call('POST', searches, body: startBody);
+      expect(delayed.statusCode, 200);
+      expect(jsonDecode(await delayed.readAsString()), snapshot);
+      final read = await call('GET', search);
+      expect(read.statusCode, 200);
+      expect(jsonDecode(await read.readAsString()), snapshot);
+      expect(
+        (await call('GET', search, deviceToken: otherToken)).statusCode,
+        404,
+      );
+      expect((await call('POST', resolve)).statusCode, 404);
+
+      final disabled = await call('PUT', settings, body: {'enabled': false});
+      expect(disabled.statusCode, 200);
+      expect(jsonDecode(await disabled.readAsString()), {'enabled': false});
+      for (final response in [
+        await call('POST', searches, body: startBody),
+        await call('GET', search),
+        await call('POST', resolve),
+      ]) {
+        expect(response.statusCode, 403);
+        expect(jsonDecode(await response.readAsString()), {
+          'error': {'message': '网上找书已关闭'},
+        });
+      }
+      expect((await call('POST', '$search/stop')).statusCode, 200);
+    },
+  );
 
   test(
     'MCP catalog is authenticated and returns only configured entries',

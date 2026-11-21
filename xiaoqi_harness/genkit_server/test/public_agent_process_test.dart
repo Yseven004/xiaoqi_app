@@ -8,6 +8,23 @@ import 'package:xiaoqi_genkit_server/src/public_agent_process.dart';
 import 'package:xiaoqi_genkit_server/src/public_reasoning_buffer.dart';
 
 void main() {
+  test('book search keeps its public tool identity and status', () {
+    final process = PublicAgentProcess('book-turn');
+    final started = process.add({
+      'type': 'tool_started',
+      'tool': 'tools/find_book_material',
+    });
+    expect(started?['tool'], 'find_book_material');
+    expect(started?['text'], '正在网上找书');
+    final stopped = process.add({
+      'type': 'tool_cancelled',
+      'tool': 'find_book_material',
+    });
+    expect(stopped?['step_id'], started?['step_id']);
+    expect(stopped?['status'], 'stopped');
+    expect(stopped?['text'], '网上找书已停止');
+  });
+
   test(
     'cancellation is recorded as stopped instead of a tool failure',
     () async {

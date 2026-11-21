@@ -49,6 +49,8 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:uuid/uuid.dart';
 
 import 'agent_runtime.dart';
+import 'book_search_plugin.dart';
+import 'book_search_service.dart';
 import 'public_agent_process.dart';
 import 'public_agent_transport.dart';
 import 'attachment_service.dart';
@@ -402,6 +404,10 @@ class XiaoqiApi {
 
   final CloudStore store;
   final XiaoqiAgentRuntime runtime;
+  late final BookSearchPlugin _bookSearch = switch (runtime) {
+    final GenkitXiaoqiAgentRuntime native => native.bookSearch,
+    _ => BookSearchPlugin(store),
+  };
   final ChatCompletionService chatCompletions;
   final WebService webFetch;
   AttachmentService? _attachments;
@@ -838,6 +844,81 @@ class XiaoqiApi {
         (request) => _authenticated(request, (_) => _fetchWebPage(request)),
       )
       ..get(
+        '/v1/book-search-settings',
+        (Request request) => _authenticated(
+          request,
+          (device) async => _json({'enabled': _bookSearch.enabled(device.key)}),
+        ),
+      )
+      ..put(
+        '/v1/book-search-settings',
+        (Request request) => _authenticated(
+          request,
+          (device) => _bookSearchCall(device, () async {
+            final body = await _body(request, 1024);
+            final enabled = body['enabled'];
+            if (enabled is! bool) throw const FormatException('缺少插件状态');
+            _bookSearch.setEnabled(device.key, enabled);
+            return {'enabled': enabled};
+          }, requireEnabled: false),
+        ),
+      )
+      ..post(
+        '/v1/book-searches',
+        (Request request) => _authenticated(
+          request,
+          (device) => _bookSearchCall(device, () async {
+            final body = await _body(request, 4096);
+            if (!_bookSearch.enabled(device.key)) {
+              throw const BookSearchException(403, '网上找书已关闭');
+            }
+            return _bookSearch.searches.start(
+              owner: device.key,
+              id: body['id']?.toString() ?? '',
+              query: body['query']?.toString() ?? '',
+            );
+          }),
+        ),
+      )
+      ..get(
+        '/v1/book-searches/<id>',
+        (Request request, String id) => _authenticated(
+          request,
+          (device) => _bookSearchCall(
+            device,
+            () async => _bookSearch.searches.read(owner: device.key, id: id),
+          ),
+        ),
+      )
+      ..post(
+        '/v1/book-searches/<id>/stop',
+        (Request request, String id) => _authenticated(
+          request,
+          (device) => _bookSearchCall(
+            device,
+            () async => _bookSearch.searches.stop(owner: device.key, id: id),
+            requireEnabled: false,
+          ),
+        ),
+      )
+      ..post(
+        '/v1/book-searches/<id>/candidates/<candidateId>/resolve',
+        (Request request, String id, String candidateId) => _authenticated(
+          request,
+          (device) => _bookSearchCall(device, () async {
+            final resolved = await _bookSearch.searches.resolve(
+              owner: device.key,
+              id: id,
+              candidateId: candidateId,
+            );
+            if (!_bookSearch.enabled(device.key)) {
+              throw const BookSearchException(403, '网上找书已关闭');
+            }
+            return resolved;
+          }),
+        ),
+      )
+      ..get(
         '/v1/agent/message-task/<workflow>/<message>',
         (request, workflow, message) => _authenticated(request, (device) async {
           try {
@@ -1012,7 +1093,11 @@ class XiaoqiApi {
       );
     }
     final device = _Device(key, record.value);
-    return {'tenant_id': device.tenant, 'device_id': device.value['device_id']};
+    return {
+      'tenant_id': device.tenant,
+      'device_id': device.value['device_id'],
+      '_authenticated_device_key': key,
+    };
   }
 
   Future<AgentResult> _runRemoteAgent(
@@ -1356,6 +1441,23 @@ class XiaoqiApi {
 
         final publicProcess = PublicAgentProcess(_uuid.v4());
         void addProcessEvent(Map<String, Object?> rawEvent) {
+          if (rawEvent['type'] == 'book_search_reference') {
+            _mutateTask(
+              taskKey,
+              (value) => {...value, 'book_search_reference': rawEvent['id']},
+            );
+            session.updateCustom(
+              (current) => {
+                ...?current,
+                'book_search_reference': rawEvent['id'],
+              },
+            );
+            _appendEvent(taskKey, {
+              'type': 'book_search_reference',
+              'id': rawEvent['id'],
+            });
+            return;
+          }
           final firstTokenMs = rawEvent['model_first_token_ms'];
           if (rawEvent['type'] == 'answer_started' && firstTokenMs is num) {
             _logTaskEvent('model_first_token', taskId, {
@@ -1416,6 +1518,8 @@ class XiaoqiApi {
                   taskId: taskId,
                   request: {
                     ...request,
+                    '_authenticated_device_key':
+                        context['_authenticated_device_key'],
                     'messages': [
                       for (final message in modelMessages)
                         _legacyMessageFor(message),
@@ -3242,6 +3346,8 @@ class XiaoqiApi {
         'remote_agent_turn': value['remote_agent_turn'] == true,
         'attempt': value['attempt'] ?? 1,
         'agent_snapshot_id': value['agent_snapshot_id'],
+        if (value['device_id'] == device.value['device_id'])
+          'book_search_reference': value['book_search_reference'],
         'error': value['error'],
         'error_code': value['error_code'],
         'error_details': value['error_details'],
@@ -3661,6 +3767,23 @@ class XiaoqiApi {
     if (record == null || record.value['revoked_at'] != null)
       return _error('登录状态已失效，请重新登录', 401);
     return action(_Device(key, record.value));
+  }
+
+  Future<Response> _bookSearchCall(
+    _Device device,
+    Future<Map<String, dynamic>> Function() action, {
+    bool requireEnabled = true,
+  }) async {
+    if (requireEnabled && !_bookSearch.enabled(device.key)) {
+      return _error('网上找书已关闭', 403);
+    }
+    try {
+      return _json(await action());
+    } on BookSearchException catch (error) {
+      return _error(error.message, error.statusCode);
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    }
   }
 
   Future<Response> _createChatShare(Request request, _Device device) async {

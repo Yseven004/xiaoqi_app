@@ -19,6 +19,7 @@ import '../widgets/app_toast.dart';
 import '../widgets/book_learning_bottom_bar.dart';
 import '../widgets/book_metadata_form_sheet.dart';
 import '../widgets/book_pdf_import_sheet.dart';
+import '../widgets/online_book_search_dialog.dart';
 import 'book_isbn_scanner_page.dart';
 import '../widgets/book_keyboard_layout.dart';
 import 'book_learning_space_page.dart';
@@ -83,6 +84,16 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
   }
 
   Future<void> _createBook(BookAddAction action) async {
+    if (action == BookAddAction.findOnline) {
+      final result = await showOnlineBookSearch(context, library: _library);
+      if (!mounted || result == null) return;
+      setState(() {
+        _destination = BookLearningDestination.books;
+        _openBookId = result.source.bookId;
+        _bookDetailVersion++;
+      });
+      return;
+    }
     if (action == BookAddAction.importPdf) {
       await _importBookSource();
       return;

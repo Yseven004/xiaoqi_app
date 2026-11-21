@@ -64,6 +64,7 @@ import '../services/home_chat_model_preferences.dart';
 import '../services/speech_recognition_service.dart';
 import '../widgets/reading_task_book_creation.dart';
 import '../widgets/book_source_import.dart';
+import '../widgets/online_book_search_dialog.dart';
 import '../widgets/reading_space_sidebar.dart';
 import '../widgets/reading_task_material_dialog.dart';
 import '../widgets/reading_task_switcher.dart';
@@ -111,6 +112,7 @@ class _AgentStreamPresentation {
     this.expanded = false,
     this.completed = false,
     this.answerStarted = false,
+    this.bookSearchId,
   });
 
   final String currentStep;
@@ -124,6 +126,7 @@ class _AgentStreamPresentation {
   final bool expanded;
   final bool completed;
   final bool answerStarted;
+  final String? bookSearchId;
 
   _AgentStreamPresentation copyWith({
     String? currentStep,
@@ -137,6 +140,7 @@ class _AgentStreamPresentation {
     bool? expanded,
     bool? completed,
     bool? answerStarted,
+    String? bookSearchId,
   }) => _AgentStreamPresentation(
     currentStep: currentStep ?? this.currentStep,
     reasoning: reasoning ?? this.reasoning,
@@ -149,6 +153,7 @@ class _AgentStreamPresentation {
     expanded: expanded ?? this.expanded,
     completed: completed ?? this.completed,
     answerStarted: answerStarted ?? this.answerStarted,
+    bookSearchId: bookSearchId ?? this.bookSearchId,
   );
 }
 
@@ -333,6 +338,7 @@ String _agentTaskFailureMessage(
 
 String _agentToolLabel(String name) => switch (name) {
   'web_search' => '联网搜索',
+  'find_book_material' => '网上找书',
   'web_fetch' => '阅读网页',
   'execute_python' => 'Python',
   'execute_shell' => 'Shell',
@@ -2707,6 +2713,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           agentProcessSummary: taskReply.processSummary,
           agentProcessStatus: taskReply.processStatus,
           agentWebSources: taskReply.webSources,
+          bookSearchId: taskReply.bookSearchId,
         );
       } on TimeoutException {
         if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -3121,6 +3128,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         agentProcessSummary: taskReply.processSummary,
         agentProcessStatus: taskReply.processStatus,
         agentWebSources: taskReply.webSources,
+        bookSearchId: taskReply.bookSearchId,
       );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -3662,6 +3670,7 @@ $materialIndex
       String processSummary,
       String processStatus,
       List<AiChatWebSource> webSources,
+      String? bookSearchId,
     })?
   >
   _runAgentTaskReply({
@@ -4010,6 +4019,7 @@ $materialIndex
         : chat.sendStream();
     final backgroundProcessDetails = <Map<String, Object?>>[];
     var backgroundSources = <AiChatWebSource>[];
+    var bookSearchId = recovery?['book_search_reference'] as String?;
     final backgroundStartedAt = DateTime.now();
     try {
       late genkit_client.AgentResponse<Map<String, dynamic>> response;
@@ -4019,6 +4029,14 @@ $materialIndex
         }
         try {
           await for (final chunk in turn.stream) {
+            final reference = chunk.custom?['book_search_reference'];
+            if (reference is String && reference != bookSearchId) {
+              bookSearchId = reference;
+              if (isCurrent()) {
+                _agentStreamPresentation.value = _agentStreamPresentation.value
+                    .copyWith(bookSearchId: reference);
+              }
+            }
             if (!_isCurrentRequest(generation, conversationId)) {
               final custom = chunk.custom ?? chunk.raw.modelChunk?.custom;
               final events = custom?['agent_process'];
@@ -4112,13 +4130,15 @@ $materialIndex
           }
           response = await turn.response;
           await markQuestionSubmissionAccepted();
+          final reference = response.state?['book_search_reference'];
+          if (reference is String) bookSearchId = reference;
           final responseSources = response.state?['web_sources'];
           if (!_isCurrentRequest(generation, conversationId)) {
             final backgroundText = response.text.trimRight();
             final backgroundTask = await CapabilityCloudSync.instance
                 .getTask(taskId)
                 .catchError((Object _) => <String, dynamic>{});
-            if (backgroundText.isNotEmpty &&
+            if ((backgroundText.isNotEmpty || bookSearchId != null) &&
                 response.interrupts.isEmpty &&
                 const {
                   'succeeded',
@@ -4132,6 +4152,7 @@ $materialIndex
                       !node.isUser &&
                       node.parentMessageId == question.id &&
                       !node.isIncomplete &&
+                      node.bookSearchId == bookSearchId &&
                       node.text.trim() == backgroundText,
                 );
                 final finalBackgroundSources = responseSources is List
@@ -4157,6 +4178,7 @@ $materialIndex
                       .inMilliseconds,
                   agentProcessStatus: 'completed',
                   agentWebSources: finalBackgroundSources,
+                  bookSearchId: bookSearchId,
                 );
                 final completed = answerAlreadySaved
                     ? stored
@@ -4472,7 +4494,7 @@ $materialIndex
         // the completed surface has a stable parent in the conversation.
         reply = '已生成交互界面。';
       }
-      if (reply.trim().isEmpty) {
+      if (reply.trim().isEmpty && bookSearchId == null) {
         throw const AiException('AI没有返回可用内容，请重试');
       }
       final artifacts = <Map<String, Object?>>[];
@@ -4514,6 +4536,7 @@ $materialIndex
         processSummary: processSummary,
         processStatus: processStatus,
         webSources: List<AiChatWebSource>.unmodifiable(_agentWebSources),
+        bookSearchId: bookSearchId,
       );
     } catch (error) {
       final failedQuestionSubmission = pendingQuestionSubmission;
@@ -5510,7 +5533,9 @@ $text''';
   }) async {
     if (_conversation?.id != conversationId) return false;
     final partial = _streamingReplyBuffer.toString().trimRight();
-    final hasDetails = _agentProcessDetails.isNotEmpty;
+    final hasDetails =
+        _agentProcessDetails.isNotEmpty ||
+        _agentStreamPresentation.value.bookSearchId != null;
     if ((partial.trim().isEmpty && !hasDetails) || parentMessageId == null) {
       return false;
     }
@@ -6212,9 +6237,10 @@ $text''';
     _startAgentReasoningClock();
     setState(() {
       _isGenerating = true;
-      _agentStreamPresentation.value = const _AgentStreamPresentation(
+      _agentStreamPresentation.value = _AgentStreamPresentation(
         currentStep: '正在思考',
         expanded: true,
+        bookSearchId: task['book_search_reference'] as String?,
       );
     });
     unawaited(
@@ -6299,6 +6325,12 @@ $text''';
                 .where((source) => source.url.startsWith('http'))
                 .toList(growable: false);
             break;
+          case 'book_search_reference':
+            if (event['id'] case final String id) {
+              _agentStreamPresentation.value = _agentStreamPresentation.value
+                  .copyWith(bookSearchId: id);
+            }
+            break;
           case 'status':
             final status = event['status']?.toString();
             cancelled = status == 'cancelled';
@@ -6361,7 +6393,8 @@ $text''';
         messageId: messageId,
         expectedScope: await LearningNotesService.instance.accountScope(),
       );
-      if (result.trim().isEmpty) {
+      if (result.trim().isEmpty &&
+          _agentStreamPresentation.value.bookSearchId == null) {
         throw const AiException('任务已结束，但没有返回可恢复的结果');
       }
       _streamingReplyBuffer
@@ -6497,11 +6530,13 @@ $text''';
     String? agentProcessSummary,
     String? agentProcessStatus,
     List<AiChatWebSource> agentWebSources = const [],
+    String? bookSearchId,
   }) async {
     if (!mounted) return false;
     final content = reply.trimRight();
     final durationMs = _finishAgentReasoningClock();
     final activeProcess = _agentStreamPresentation.value;
+    final searchId = bookSearchId ?? activeProcess.bookSearchId;
     final processDetails = settleChatProcessDetails(
       _agentProcessDetails,
       status: agentProcessStatus ?? (isIncomplete ? 'stopped' : 'completed'),
@@ -6513,7 +6548,8 @@ $text''';
         activeProcess.currentStep.isNotEmpty ||
         durationMs > 0;
     final current = _conversation;
-    if ((content.isEmpty && !hasProcess) || current == null) {
+    if ((content.isEmpty && !hasProcess && searchId == null) ||
+        current == null) {
       _clearStreamingReply();
       return false;
     }
@@ -6570,6 +6606,7 @@ $text''';
                 : null,
             agentProcessExpanded: content.isNotEmpty && activeProcess.expanded,
             agentWebSources: agentWebSources,
+            bookSearchId: searchId,
             capabilityMetadata: skillDraft == null
                 ? null
                 : {
@@ -6647,6 +6684,7 @@ $text''';
     String? agentProcessSummary,
     String? agentProcessStatus,
     List<AiChatWebSource>? agentWebSources,
+    String? bookSearchId,
   }) async {
     if (!mounted) return false;
     final current = _conversation;
@@ -6654,6 +6692,7 @@ $text''';
     final content = text.trimRight();
     final durationMs = _finishAgentReasoningClock();
     final activeProcess = _agentStreamPresentation.value;
+    final searchId = bookSearchId ?? activeProcess.bookSearchId;
     final hasActiveProcess =
         agentProcessSummary != null ||
         activeProcess.details.isNotEmpty ||
@@ -6667,7 +6706,9 @@ $text''';
         answer == null ||
         answer.isUser ||
         !answer.isIncomplete ||
-        (content.trim().isEmpty && processDetails.isEmpty)) {
+        (content.trim().isEmpty &&
+            processDetails.isEmpty &&
+            searchId == null)) {
       return false;
     }
     final replyTaskId = clearAgentTaskId
@@ -6721,6 +6762,7 @@ $text''';
                     agentProcessExpanded:
                         content.isNotEmpty && activeProcess.expanded,
                     agentWebSources: agentWebSources ?? answer.agentWebSources,
+                    bookSearchId: searchId,
                     outputArtifacts: outputArtifacts ?? answer.outputArtifacts,
                     capabilityMetadata: skillDraft == null
                         ? answer.capabilityMetadata
@@ -6998,10 +7040,12 @@ $text''';
     required int stoppedGeneration,
   }) async {
     var answerWasSaved = false;
+    final hasProgress =
+        _agentProcessDetails.isNotEmpty ||
+        _agentStreamPresentation.value.bookSearchId != null;
     if (continuationMessageId != null) {
       final answer = _conversation?.nodeById(continuationMessageId);
-      if (answer != null &&
-          (partialReply.trim().isNotEmpty || _agentProcessDetails.isNotEmpty)) {
+      if (answer != null && (partialReply.trim().isNotEmpty || hasProgress)) {
         answerWasSaved = await _updateIncompleteReply(
           continuationMessageId,
           _mergeAssistantContinuation(answer.text, partialReply),
@@ -7012,8 +7056,7 @@ $text''';
           agentWebSources: _agentWebSources,
         );
       }
-    } else if ((partialReply.trim().isNotEmpty ||
-            _agentProcessDetails.isNotEmpty) &&
+    } else if ((partialReply.trim().isNotEmpty || hasProgress) &&
         parentMessageId != null) {
       answerWasSaved = await _appendAssistantReply(
         partialReply,
@@ -8095,6 +8138,7 @@ $text''';
         agentProcessSummary: taskReply.processSummary,
         agentProcessStatus: taskReply.processStatus,
         agentWebSources: taskReply.webSources,
+        bookSearchId: taskReply.bookSearchId,
       );
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
@@ -8201,7 +8245,8 @@ $text''';
     Future<bool> retainPartialAfterFailure() async {
       final addedText = _streamingReplyBuffer.toString().trimRight();
       if (addedText.trim().isEmpty &&
-          _agentStreamPresentation.value.details.isEmpty) {
+          _agentStreamPresentation.value.details.isEmpty &&
+          _agentStreamPresentation.value.bookSearchId == null) {
         return false;
       }
       if (answer != null) {
@@ -8279,6 +8324,7 @@ $text''';
           agentProcessSummary: taskReply.processSummary,
           agentProcessStatus: taskReply.processStatus,
           agentWebSources: taskReply.webSources,
+          bookSearchId: taskReply.bookSearchId,
         );
       } else {
         final saved = await _appendAssistantReply(
@@ -8293,6 +8339,7 @@ $text''';
           agentProcessSummary: taskReply.processSummary,
           agentProcessStatus: taskReply.processStatus,
           agentWebSources: taskReply.webSources,
+          bookSearchId: taskReply.bookSearchId,
         );
         if (!saved) restoreEmptyStoppedHint();
       }
@@ -13351,6 +13398,8 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                                                 if (reply.isNotEmpty ||
                                                     imageInProgress ||
                                                     hasProcess ||
+                                                    process.bookSearchId !=
+                                                        null ||
                                                     clarification != null) {
                                                   return Column(
                                                     crossAxisAlignment:
@@ -13372,6 +13421,9 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                                                             reply,
                                                           ),
                                                         ),
+                                                      if (process.bookSearchId
+                                                          case final id?)
+                                                        _bookSearchResults(id),
                                                       if (clarification != null)
                                                         _AgentClarificationCard(
                                                           clarification:
@@ -13542,6 +13594,24 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                                             ? _measureLatestReplyBody(replyBody)
                                             : replyBody,
                                       ),
+                                      if (isContinuing)
+                                        ValueListenableBuilder<
+                                          _AgentStreamPresentation
+                                        >(
+                                          valueListenable:
+                                              widget.agentStreamPresentation,
+                                          builder: (context, process, _) {
+                                            final id =
+                                                process.bookSearchId ??
+                                                row.message.bookSearchId;
+                                            return id == null
+                                                ? const SizedBox.shrink()
+                                                : _bookSearchResults(id);
+                                          },
+                                        )
+                                      else if (row.message.bookSearchId
+                                          case final id?)
+                                        _bookSearchResults(id),
                                       if (row
                                           .message
                                           .agentWebSources
@@ -13884,6 +13954,11 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       ).showSnackBar(const SnackBar(content: Text('网页暂时无法打开')));
     }
   }
+
+  Widget _bookSearchResults(String id) => Padding(
+    padding: const EdgeInsets.only(top: 12),
+    child: OnlineBookSearchResults(key: ValueKey(id), searchId: id),
+  );
 
   void _showAgentSourcesSheet(
     List<AiChatWebSource> sources, {

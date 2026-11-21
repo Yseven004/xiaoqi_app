@@ -19,6 +19,7 @@ import '../features/capabilities/presentation/market_skill_editor.dart';
 import '../features/capabilities/presentation/skill_presentation.dart';
 import '../services/reading_companion_preferences.dart';
 import '../widgets/app_toast.dart';
+import '../widgets/online_book_search_setting.dart';
 
 part 'extension_market_details.dart';
 part 'extension_market_forms.dart';
@@ -1530,12 +1531,18 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   Widget _myPluginsContent() {
     final searching = _searchQuery.isNotEmpty;
     final showCompanion = _companionSearchDocument.score(_searchQuery) != null;
+    final showBookSearch = const MarketSearchDocument(
+      name: '网上找书',
+      description: '查找并导入电子书',
+      author: '',
+      keywords: ['搜索', '内置插件', '电子书'],
+    ).score(_searchQuery) != null;
     final entries = _matching(_personalEntries);
     final drafts = _matchingDrafts;
     final loading = _loading || _loadingMcp;
     final hasPersonalResults = entries.isNotEmpty || drafts.isNotEmpty;
     final showPersonal = !searching || hasPersonalResults || loading;
-    if (!showCompanion && !showPersonal) return _noMatch();
+    if (!showCompanion && !showBookSearch && !showPersonal) return _noMatch();
 
     bool requiresLogin(Object? error) =>
         error is StateError && error.message == '请先登录个人账号';
@@ -1553,9 +1560,10 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (showCompanion) ...[
+        if (showCompanion || showBookSearch) ...[
           _myPluginHeading('内置插件'),
-          _builtInCompanionSetting(),
+          if (showCompanion) _builtInCompanionSetting(),
+          if (showBookSearch) const OnlineBookSearchSetting(),
           if (showPersonal) const Divider(height: 18, color: marketLine),
         ],
         if (showPersonal) ...[
