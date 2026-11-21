@@ -11,6 +11,7 @@ class XiaoqiDocument {
     required this.author,
     required this.language,
     required this.chapters,
+    this.outline = const [],
     this.assets = const [],
     this.originalPageCount,
     this.annotations = const {},
@@ -21,6 +22,7 @@ class XiaoqiDocument {
   final String author;
   final String language;
   final List<XiaoqiDocumentChapter> chapters;
+  final List<XiaoqiDocumentOutlineEntry> outline;
   final List<XiaoqiDocumentAsset> assets;
   final Map<String, Object?> annotations;
 
@@ -36,6 +38,8 @@ class XiaoqiDocument {
     'author': author,
     'language': language,
     'chapters': chapters.map((chapter) => chapter.toMap()).toList(),
+    if (outline.isNotEmpty)
+      'outline': outline.map((entry) => entry.toMap()).toList(),
     'assets': assets.map((asset) => asset.toMap()).toList(),
     if (originalPageCount != null) 'originalPageCount': originalPageCount,
     if (includeAnnotations && annotations.isNotEmpty)
@@ -56,6 +60,14 @@ class XiaoqiDocument {
           (item) => XiaoqiDocumentChapter.fromMap(item.cast<String, dynamic>()),
         )
         .toList(growable: false),
+    outline: (map['outline'] as List? ?? const [])
+        .whereType<Map>()
+        .map(
+          (item) =>
+              XiaoqiDocumentOutlineEntry.fromMap(item.cast<String, dynamic>()),
+        )
+        .where((entry) => entry.title.isNotEmpty)
+        .toList(growable: false),
     assets: (map['assets'] as List? ?? const [])
         .whereType<Map>()
         .map(
@@ -71,6 +83,36 @@ class XiaoqiDocument {
   factory XiaoqiDocument.fromJson(String value) => XiaoqiDocument.fromMap(
     (jsonDecode(value) as Map).cast<String, dynamic>(),
   );
+}
+
+/// A source-authored outline node. A node without a chapter is a group label.
+class XiaoqiDocumentOutlineEntry {
+  const XiaoqiDocumentOutlineEntry({
+    required this.title,
+    this.chapterId,
+    this.blockId,
+    this.level = 0,
+  });
+
+  final String title;
+  final String? chapterId;
+  final String? blockId;
+  final int level;
+
+  Map<String, dynamic> toMap() => {
+    'title': title,
+    if (chapterId != null) 'chapterId': chapterId,
+    if (blockId != null) 'blockId': blockId,
+    'level': level,
+  };
+
+  factory XiaoqiDocumentOutlineEntry.fromMap(Map<String, dynamic> map) =>
+      XiaoqiDocumentOutlineEntry(
+        title: map['title'] as String? ?? '',
+        chapterId: map['chapterId'] as String?,
+        blockId: map['blockId'] as String?,
+        level: _optionalInt(map['level']) ?? 0,
+      );
 }
 
 int? _optionalInt(Object? value) {

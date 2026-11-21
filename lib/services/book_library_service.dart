@@ -172,6 +172,7 @@ class BookLibraryService {
     required int expectedSize,
     required String expectedHash,
     required String format,
+    Future<void> Function(String)? onPdfFirstPage,
   }) async {
     if (!await file.exists() || await file.length() != expectedSize) {
       return false;
@@ -186,7 +187,9 @@ class BookLibraryService {
         file.path,
         1,
       );
-      return renderedPath.trim().isNotEmpty;
+      if (renderedPath.trim().isEmpty) return false;
+      await onPdfFirstPage?.call(renderedPath);
+      return true;
     } catch (_) {
       return false;
     } finally {
@@ -803,65 +806,102 @@ class BookLibraryService {
     required String format,
     required Uri sourcePage,
     int? bookId,
+    String? embeddedCoverPath,
   }) async {
     final db = await _databaseService.database;
-    return db.transaction((txn) async {
-      final now = DateTime.now().toUtc().toIso8601String();
-      if (bookId == null) {
-        final isbn = book.isbn13;
-        final editionId = book.sourceId;
-        final match = [
-          'canonical_key = ?',
-          if (isbn.isNotEmpty) 'isbn_13 = ?',
-          if (editionId.isNotEmpty) '(source = ? AND source_id = ?)',
-        ].join(' OR ');
-        var rows = await txn.query(
-          'books',
-          columns: ['id'],
-          where: 'is_deleted = 0 AND ($match)',
-          whereArgs: [
-            book.canonicalKey,
-            if (isbn.isNotEmpty) isbn,
-            if (editionId.isNotEmpty) ...[book.source, editionId],
-          ],
-          orderBy: 'id',
-          limit: 1,
+    _PreparedBookCover? preparedCover;
+    Future<void> prepareCover(String path) async {
+      try {
+        preparedCover = await _prepareUploadedCover(
+          book.copyWith(coverType: 'uploaded', coverPath: path),
         );
-        if (rows.isEmpty) {
-          await txn.insert(
-            'books',
-            book.copyWith(createdAt: now, updatedAt: now).toMap(),
-            conflictAlgorithm: ConflictAlgorithm.ignore,
-          );
-          rows = await txn.query(
+      } catch (_) {
+        // The validated source remains usable if its preview cannot be copied.
+      }
+    }
+
+    try {
+      return await db.transaction((txn) async {
+        final now = DateTime.now().toUtc().toIso8601String();
+        if (bookId == null) {
+          final isbn = book.isbn13;
+          final editionId = book.sourceId;
+          final match = [
+            'canonical_key = ?',
+            if (isbn.isNotEmpty) 'isbn_13 = ?',
+            if (editionId.isNotEmpty) '(source = ? AND source_id = ?)',
+          ].join(' OR ');
+          var rows = await txn.query(
             'books',
             columns: ['id'],
-            where: 'is_deleted = 0 AND canonical_key = ?',
-            whereArgs: [book.canonicalKey],
+            where: 'is_deleted = 0 AND ($match)',
+            whereArgs: [
+              book.canonicalKey,
+              if (isbn.isNotEmpty) isbn,
+              if (editionId.isNotEmpty) ...[book.source, editionId],
+            ],
+            orderBy: 'id',
             limit: 1,
           );
-          if (rows.isEmpty) throw StateError('这本书已移至回收站，请先恢复');
+          if (rows.isEmpty) {
+            await txn.insert(
+              'books',
+              book.copyWith(createdAt: now, updatedAt: now).toMap(),
+              conflictAlgorithm: ConflictAlgorithm.ignore,
+            );
+            rows = await txn.query(
+              'books',
+              columns: ['id'],
+              where: 'is_deleted = 0 AND canonical_key = ?',
+              whereArgs: [book.canonicalKey],
+              limit: 1,
+            );
+            if (rows.isEmpty) throw StateError('这本书已移至回收站，请先恢复');
+          }
+          bookId = rows.single['id'] as int;
         }
-        bookId = rows.single['id'] as int;
-      }
-      final target = await txn.query(
-        'books',
-        columns: ['id'],
-        where: 'id = ? AND is_deleted = 0',
-        whereArgs: [bookId],
-        limit: 1,
-      );
-      if (target.isEmpty) throw StateError('要导入资料的书籍已不存在');
-      return _importBookSource(
-        txn,
-        bookId: target.single['id'] as int,
-        sourcePath: sourcePath,
-        displayName: displayName,
-        format: format,
-        sourcePage: sourcePage.toString(),
-        capturedAt: now,
-      );
-    });
+        final target = await txn.query(
+          'books',
+          columns: ['id', 'cover_type', 'cover_path', 'cover_url'],
+          where: 'id = ? AND is_deleted = 0',
+          whereArgs: [bookId],
+          limit: 1,
+        );
+        if (target.isEmpty) throw StateError('要导入资料的书籍已不存在');
+        final targetBook = target.single;
+        final targetId = targetBook['id'] as int;
+        final canAddCover =
+            (targetBook['cover_type'] ?? 'auto') == 'auto' &&
+            (targetBook['cover_path'] as String? ?? '').isEmpty &&
+            (targetBook['cover_url'] as String? ?? '').isEmpty;
+        final result = await _importBookSource(
+          txn,
+          bookId: targetId,
+          sourcePath: sourcePath,
+          displayName: displayName,
+          format: format,
+          sourcePage: sourcePage.toString(),
+          capturedAt: now,
+          onPdfFirstPage: canAddCover ? prepareCover : null,
+        );
+        if (canAddCover && embeddedCoverPath != null) {
+          await prepareCover(embeddedCoverPath);
+        }
+        final cover = preparedCover?.book;
+        if (cover != null) {
+          await txn.update(
+            'books',
+            {'cover_type': cover.coverType, 'cover_path': cover.coverPath},
+            where: 'id = ?',
+            whereArgs: [targetId],
+          );
+        }
+        return result;
+      });
+    } catch (_) {
+      await discardUnreferencedBookCover(preparedCover?.createdPath);
+      rethrow;
+    }
   }
 
   Future<BookSourceImportResult> _importBookSource(
@@ -872,6 +912,7 @@ class BookLibraryService {
     required String format,
     String sourcePage = '',
     String capturedAt = '',
+    Future<void> Function(String)? onPdfFirstPage,
   }) async {
     final normalizedFormat = normalizeBookSourceFormat(format);
     if (!supportedBookSourceFormats.contains(normalizedFormat)) {
@@ -904,6 +945,7 @@ class BookLibraryService {
         expectedSize: fileSize,
         expectedHash: contentHash,
         format: normalizedFormat,
+        onPdfFirstPage: onPdfFirstPage,
       );
       if (!valid) {
         // Restore a damaged local copy while retaining the source and annotations.
@@ -914,6 +956,7 @@ class BookLibraryService {
           expectedSize: fileSize,
           expectedHash: contentHash,
           format: normalizedFormat,
+          onPdfFirstPage: onPdfFirstPage,
         );
         if (!repaired) throw StateError('已有资料副本损坏，修复后仍无法打开');
       }
@@ -964,6 +1007,7 @@ class BookLibraryService {
       expectedSize: fileSize,
       expectedHash: contentHash,
       format: normalizedFormat,
+      onPdfFirstPage: onPdfFirstPage,
     );
     if (!targetValid && targetExisted) {
       await sourceFile.copy(targetPath);
@@ -972,6 +1016,7 @@ class BookLibraryService {
         expectedSize: fileSize,
         expectedHash: contentHash,
         format: normalizedFormat,
+        onPdfFirstPage: onPdfFirstPage,
       );
     }
     if (!targetValid) {
@@ -1128,6 +1173,7 @@ class BookLibraryService {
       author: document.author,
       language: document.language,
       chapters: document.chapters,
+      outline: document.outline,
       assets: document.assets,
       originalPageCount: document.originalPageCount,
       annotations: annotations,

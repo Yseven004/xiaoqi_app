@@ -23,6 +23,15 @@ class BookSearchSources {
   static final _isbnPattern = RegExp(
     r'(?:^|\D)((?:97[89][\s-]*)?\d(?:[\s-]*\d){8}[\s-]*[\dXx])(?:$|\D)',
   );
+  static final _metadataLanguageSuffix = RegExp(r'([》〉」』])?\s*(?:简体|繁体)?中文版$');
+  static final _metadataAuthorQuery = RegExp(
+    r'^(?:作者|author)\s*[:：]\s*(.*)$',
+    caseSensitive: false,
+  );
+  static final _metadataAuthorPrefix = RegExp(
+    r'^[（(【\[]\s*(?:[美英法德日俄中意澳加](?:国)?)\s*[）)】\]]\s*',
+  );
+  static final _authorSeparators = RegExp(r'[\s\p{P}]', unicode: true);
   static final _wordPattern = RegExp(r'[^a-z0-9\u3400-\u9fff]+');
 
   static const _helloRelease = '1.3.0';
@@ -157,10 +166,21 @@ class BookSearchSources {
     BookSearchCancellation cancellation,
   ) async* {
     _checkActive(cancellation);
-    final isbn = _isbnPattern
-        .firstMatch(query)
-        ?.group(1)
-        ?.replaceAll(RegExp(r'[\s-]'), '');
+    final authorQuery = _metadataAuthorQuery.firstMatch(query.trim());
+    final author = _metadataText(
+      authorQuery?.group(1)?.replaceFirst(_metadataAuthorPrefix, ''),
+    );
+    if (authorQuery != null &&
+        (author == null || _normalizedAuthor(author).isEmpty)) {
+      return;
+    }
+
+    final isbn = author == null
+        ? _isbnPattern
+              .firstMatch(query)
+              ?.group(1)
+              ?.replaceAll(RegExp(r'[\s-]'), '')
+        : null;
     if (isbn != null) {
       // These publisher files have no ebook ISBN. Never borrow a print ISBN.
       yield* Stream.fromIterable(
@@ -169,8 +189,14 @@ class BookSearchSources {
       return;
     }
 
-    final term = _normalized(query);
+    final term = _normalized(author ?? query);
     var matches = _catalog.where((source) => source.recognizes(term)).toList();
+    if (matches.isEmpty && author != null) {
+      yield* Stream.fromIterable(
+        await _metadata(query, cancellation, authorQuery: author),
+      );
+      return;
+    }
     if (matches.isEmpty && term.length >= 2 && webService != null) {
       try {
         matches = await _discover(query, cancellation);
@@ -209,10 +235,23 @@ class BookSearchSources {
     String query,
     BookSearchCancellation cancellation, {
     String? isbn,
+    String? authorQuery,
   }) async {
-    final title = query.trim().replaceAll(RegExp(r'^[《〈「『]|[》〉」』]$'), '');
+    final title = query
+        .trim()
+        .replaceFirstMapped(
+          _metadataLanguageSuffix,
+          (match) => match.group(1) ?? '',
+        )
+        .replaceAll(RegExp(r'^[《〈「『]|[》〉」』]$'), '')
+        .trim();
     final uri = Uri.https('openlibrary.org', '/search.json', {
-      if (isbn != null) 'q': 'isbn:$isbn' else 'title': title,
+      if (isbn != null)
+        'q': 'isbn:$isbn'
+      else if (authorQuery != null)
+        'author': authorQuery
+      else
+        'title': title,
       'limit': '5',
       'lang': 'zh',
       'fields':
@@ -231,11 +270,12 @@ class BookSearchSources {
     }
     _lastMetadataRequest = now;
 
-    final client = _client(cancellation);
+    final client = _client(cancellation)..autoUncompress = true;
     try {
       final docs = await (() async {
         final request = await client.getUrl(uri);
         request.followRedirects = false;
+        request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
         final response = await request.close();
         if (response.statusCode != HttpStatus.ok) {
           throw const FormatException('书目目录不可用。');
@@ -260,13 +300,12 @@ class BookSearchSources {
         final authorNames = work['author_name'];
         final editionsBlock = work['editions'];
         if (authorNames is! List ||
-            authorNames.length != 1 ||
             editionsBlock is! Map ||
             editionsBlock['docs'] is! List) {
-          // Work-level contributors can contain translators from other editions.
           continue;
         }
-        final author = _metadataText(authorNames.single);
+        final author = _matchMetadataAuthor(authorNames, authorQuery);
+        if (author == null) continue;
         for (final edition
             in (editionsBlock['docs'] as List).take(2).whereType<Map>()) {
           final key = _metadataText(edition['key']);
@@ -276,8 +315,10 @@ class BookSearchSources {
           final publisher = _firstMetadataText(edition['publisher']);
           if (key == null ||
               !RegExp(r'^/books/OL[0-9]+M$').hasMatch(key) ||
-              editionTitle == null ||
-              author == null ||
+              editionTitle == null) {
+            continue;
+          }
+          if (authorQuery == null &&
               (isbn == null
                   ? _normalized(editionTitle) != _normalized(title)
                   : editionIsbns is! List || !editionIsbns.contains(isbn))) {
@@ -329,6 +370,25 @@ class BookSearchSources {
 
   static String? _firstMetadataText(Object? value) =>
       value is List && value.isNotEmpty ? _metadataText(value.first) : null;
+
+  static String _normalizedAuthor(String author) => author
+      .replaceFirst(_metadataAuthorPrefix, '')
+      .toLowerCase()
+      .replaceAll(_authorSeparators, '');
+
+  static String? _matchMetadataAuthor(List names, String? requested) {
+    // Work-level contributors can contain translators from other editions.
+    if (requested == null) {
+      return names.length == 1 ? _metadataText(names.single) : null;
+    }
+    final distinct = <String, String>{};
+    for (final candidate in names) {
+      if (_metadataText(candidate) case final name?) {
+        distinct.putIfAbsent(_normalizedAuthor(name), () => name);
+      }
+    }
+    return distinct.length == 1 ? distinct[_normalizedAuthor(requested)] : null;
+  }
 
   Future<List<_BookSource>> _discover(
     String query,

@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
+import 'package:image/image.dart' as image;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -52,7 +54,10 @@ Future<BookSourceImportResult> importOnlineBook(
   try {
     final filePath = p.join(directory.path, 'book.$format');
     await _downloadBook(download!, filePath, format);
-    await _validateBook(filePath, format);
+    final embeddedCoverPath = await _validateBookAndStageCover(
+      filePath,
+      format,
+    );
     final result = await targetLibrary.importVerifiedOnlineBook(
       book: BookRecord(
         title: title,
@@ -91,6 +96,7 @@ Future<BookSourceImportResult> importOnlineBook(
           : '$title · $edition.$format',
       format: format,
       sourcePage: sourcePage,
+      embeddedCoverPath: embeddedCoverPath,
     );
     if (format == 'pdf' && !result.reusedExisting) {
       unawaited(
@@ -272,16 +278,30 @@ bool _isPublicAddress(InternetAddress address) {
           bytes[3] == 0xb8);
 }
 
-Future<void> _validateBook(String filePath, String format) async {
+Future<String?> _validateBookAndStageCover(
+  String filePath,
+  String format,
+) async {
   if (format == 'epub') {
-    await Isolate.run(() async {
-      try {
-        await const EpubDocumentService().parseFile(filePath);
-      } catch (_) {
-        throw const FormatException('下载文件不是可打开的 EPUB');
-      }
+    final cover = await Isolate.run(() async {
+      final document = await const EpubDocumentService()
+          .parseFile(filePath, includeCover: true)
+          .onError((Object _, StackTrace _) {
+            throw const FormatException('下载文件不是可打开的 EPUB');
+          });
+      final asset = document.assets.singleOrNull;
+      if (asset == null) return null;
+      return _validateEpubCover(asset.bytes, asset.mimeType);
     });
-    return;
+    if (cover == null) return null;
+    try {
+      final path = p.join(p.dirname(filePath), 'cover.${cover.extension}');
+      await File(path).writeAsBytes(cover.bytes);
+      return path;
+    } catch (_) {
+      // An optional image must not block an otherwise valid import.
+      return null;
+    }
   }
   final file = await File(filePath).open();
   try {
@@ -290,5 +310,32 @@ Future<void> _validateBook(String filePath, String format) async {
     }
   } finally {
     await file.close();
+  }
+  return null;
+}
+
+({Uint8List bytes, String extension})? _validateEpubCover(
+  List<int> asset,
+  String mimeType,
+) {
+  final bytes = asset is Uint8List ? asset : Uint8List.fromList(asset);
+  final (decoder, extension) = switch (mimeType) {
+    'image/jpeg' => (image.JpegDecoder(), 'jpg'),
+    'image/png' => (image.PngDecoder(), 'png'),
+    'image/webp' => (image.WebPDecoder(), 'webp'),
+    _ => (null, ''),
+  };
+  try {
+    final info = decoder?.startDecode(bytes);
+    if (info == null ||
+        info.width <= 0 ||
+        info.height <= 0 ||
+        info.width * info.height > 16 * 1024 * 1024) {
+      return null;
+    }
+    return (bytes: bytes, extension: extension);
+  } catch (_) {
+    // An invalid raster does not make the main EPUB unreadable.
+    return null;
   }
 }

@@ -482,25 +482,78 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   Future<void> _showOutline(
     List<String> titles,
     int current,
-    ValueChanged<int> onSelected,
-  ) async {
+    ValueChanged<int> onSelected, {
+    List<int> levels = const [],
+    Set<int> groupLabels = const {},
+  }) async {
     final selected = await _chooseReaderItem(
       context,
       title: '目录',
       labels: titles,
       activeIndex: current,
+      levels: levels,
+      groupLabels: groupLabels,
     );
     if (mounted && selected != null) onSelected(selected);
   }
 
-  void _chapter(XiaoqiDocumentChapter chapter) {
+  void _chapter(XiaoqiDocumentChapter chapter, {String? blockId}) {
     FocusManager.instance.primaryFocus?.unfocus();
-    final next = FlowReaderAnchor(sourceId: _sourceKey, chapterId: chapter.id);
+    final next = FlowReaderAnchor(
+      sourceId: _sourceKey,
+      chapterId: chapter.id,
+      blockId: blockId,
+    );
     setState(() {
       _chapterNavigation = next;
       _navigationRevision++;
     });
     unawaited(_preferences.saveAnchor(bookId: _source.bookId, anchor: next));
+  }
+
+  Future<void> _showFlowOutline(
+    XiaoqiDocument document,
+    int chapterIndex,
+    String? blockId,
+  ) {
+    final chapters = document.chapters;
+    final chaptersById = {for (final chapter in chapters) chapter.id: chapter};
+    final entries = document.outline
+        .where(
+          (entry) =>
+              entry.chapterId == null ||
+              chaptersById.containsKey(entry.chapterId),
+        )
+        .toList(growable: false);
+    if (!entries.any((entry) => entry.chapterId != null)) {
+      return _showOutline(
+        chapters.map((chapter) => chapter.title).toList(growable: false),
+        chapterIndex,
+        (index) => _chapter(chapters[index]),
+      );
+    }
+
+    final currentChapterId = chapters[chapterIndex].id;
+    final currentEntry = entries.indexWhere(
+      (entry) =>
+          entry.chapterId == currentChapterId && entry.blockId == blockId,
+    );
+    return _showOutline(
+      entries.map((entry) => entry.title).toList(growable: false),
+      currentEntry >= 0
+          ? currentEntry
+          : entries.indexWhere((entry) => entry.chapterId == currentChapterId),
+      (index) {
+        final entry = entries[index];
+        final chapter = chaptersById[entry.chapterId];
+        if (chapter != null) _chapter(chapter, blockId: entry.blockId);
+      },
+      levels: entries.map((entry) => entry.level).toList(growable: false),
+      groupLabels: {
+        for (var index = 0; index < entries.length; index++)
+          if (entries[index].chapterId == null) index,
+      },
+    );
   }
 
   Widget _flow(XiaoqiDocument document, ReaderAnchor? anchor) {
@@ -572,11 +625,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           page: chapterIndex + 1,
           pageCount: chapters.length,
           onPageSelected: (page) => _chapter(chapters[page - 1]),
-          onOutline: () => _showOutline(
-            chapters.map((chapter) => chapter.title).toList(growable: false),
-            chapterIndex,
-            (index) => _chapter(chapters[index]),
-          ),
+          onOutline: () =>
+              _showFlowOutline(document, chapterIndex, current?.blockId),
           onTextSize: _changeTextSize,
         ),
       ],
@@ -1288,6 +1338,8 @@ Future<int?> _chooseReaderItem(
   required String title,
   required List<String> labels,
   required int activeIndex,
+  List<int> levels = const [],
+  Set<int> groupLabels = const {},
 }) => showDialog<int>(
   context: context,
   builder: (context) => AlertDialog(
@@ -1301,6 +1353,13 @@ Future<int?> _chooseReaderItem(
         itemCount: labels.length,
         itemBuilder: (context, index) => ListTile(
           title: Text(labels[index]),
+          contentPadding: levels.isEmpty
+              ? null
+              : EdgeInsetsDirectional.only(
+                  start: 16 + 12.0 * levels[index].clamp(0, 6),
+                  end: 16,
+                ),
+          enabled: !groupLabels.contains(index),
           selected: index == activeIndex,
           selectedColor: const Color(0xFF262626),
           selectedTileColor: const Color(0xFFF1F1F1),

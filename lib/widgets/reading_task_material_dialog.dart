@@ -9,6 +9,7 @@ import '../models/book_source.dart';
 import '../services/book_library_service.dart';
 import 'book_cover.dart';
 import 'book_editor_dialog.dart';
+import 'book_import_progress.dart';
 import 'book_source_import.dart';
 
 Future<void> showReadingTaskMaterialsDialog(
@@ -309,15 +310,9 @@ class _ReadingTaskMaterialsDialogState
                 ),
               ),
               icon: _importing
-                  ? const SizedBox.square(
-                      dimension: 16,
-                      child: CircularProgressIndicator(
-                        color: BookFlowTheme.inkSecondary,
-                        strokeWidth: 2,
-                      ),
-                    )
+                  ? const BookImportProgress()
                   : const Icon(Icons.add, size: 18),
-              label: Text(_importing ? '正在导入' : '导入资料'),
+              label: Text(_importing ? bookImportInProgressLabel : '导入资料'),
             ),
           ],
         ),

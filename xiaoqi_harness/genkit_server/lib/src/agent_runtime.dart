@@ -5286,7 +5286,7 @@ class GenkitXiaoqiAgentRuntime
               'type': 'string',
               'minLength': 1,
               'maxLength': 240,
-              'description': '书名优先，也可附作者、ISBN 和明确指定的版本。',
+              'description': '书名优先，也可附 ISBN 和明确指定的版本。只按作者查时用「作者: 作者姓名」。',
             },
           },
           required: const ['query'],
@@ -5303,6 +5303,17 @@ class GenkitXiaoqiAgentRuntime
                 sha256
                     .convert(utf8.encode(jsonEncode([taskId, query])))
                     .toString();
+            if (modalBookSearchId != null &&
+                bookSearch.searches.hasSearch(owner: bookSearchOwner, id: id)) {
+              onProcessEvent({'type': 'book_search_reference', 'id': id});
+              final existing = await bookSearch.searches.wait(
+                owner: bookSearchOwner,
+                id: id,
+                cancelled: cancellation.whenCancelled,
+              );
+              cancellation.throwIfCancelled();
+              return ToolResult.response(jsonEncode(existing));
+            }
             final result = await execution.query(
               slot: bookSearchTool,
               originalInvocation: id,
@@ -6262,9 +6273,13 @@ class GenkitXiaoqiAgentRuntime
     if (modalBookSearchId != null) {
       system.write(
         '\n当前在网上找书窗口。只处理用户的找书或版本选择。'
-        '书名明确时用 find_book_material 查找。查询词包含书名，不带会话原文。'
-        '收到候选后简短解释版本区别。候选卡片由小七展示。'
-        '如果来源尚无整书可导入，请如实说明。',
+        '用户明确要找书、重试或提供新检索条件时用 find_book_material 查一次。'
+        '搜索词优先含书名或 ISBN。只按作者找时写成「作者: 作者姓名」，用已知的完整姓名。'
+        '追问进度、结果或版本区别时，先用已有查找结果回答。'
+        '输入不明确时只问一句，请用户提供书名、作者或 ISBN 中任一项。'
+        '回答先说结论，候选由书卡展示。区分未找到书目、只有书目和书源暂时无法访问。'
+        '只有书目时说明可查看书目信息。未找到时最多建议补一项线索。'
+        '省略工具执行和报错细节，引用的作者、外文书名和版次以已核实结果为准。',
       );
       final previousSearch = request['book_search_context_id'];
       if (bookSearchAllowed && previousSearch is String) {
