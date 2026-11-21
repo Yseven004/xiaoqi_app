@@ -20,6 +20,7 @@ import '../features/capabilities/presentation/skill_presentation.dart';
 import '../services/reading_companion_preferences.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/online_book_search_setting.dart';
+import '../widgets/xiaoqi_switch_tile.dart';
 
 part 'extension_market_details.dart';
 part 'extension_market_forms.dart';
@@ -445,7 +446,11 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   final _search = TextEditingController();
   final _searchFocus = FocusNode(debugLabel: 'extension market search');
   final _companionPreferences = ReadingCompanionPreferences.instance;
-  bool _savingCompanionPreference = false;
+  final _pendingCompanionEnabled = ValueNotifier<bool?>(null);
+  late final _companionSettingChanges = Listenable.merge([
+    _companionPreferences.enabled,
+    _pendingCompanionEnabled,
+  ]);
   late final _cloud = widget.cloud ?? CapabilityCloudSync.instance;
   List<CapabilityRecord> _records = [];
   List<McpConnectionRecord> _connections = [];
@@ -536,6 +541,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     _search.removeListener(_searchChanged);
     _search.dispose();
     _searchFocus.dispose();
+    _pendingCompanionEnabled.dispose();
     super.dispose();
   }
 
@@ -1455,65 +1461,29 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   }
 
   Future<void> _setCompanionEnabled(bool enabled) async {
-    if (_savingCompanionPreference) return;
+    if (_pendingCompanionEnabled.value != null) return;
     _searchFocus.unfocus();
-    setState(() => _savingCompanionPreference = true);
+    _pendingCompanionEnabled.value = enabled;
     try {
       await _companionPreferences.setEnabled(enabled);
     } catch (_) {
       if (mounted) AppToast.show(context, '伴读设置保存失败，请重试');
     } finally {
-      if (mounted) setState(() => _savingCompanionPreference = false);
+      if (mounted) _pendingCompanionEnabled.value = null;
     }
   }
 
-  Widget _builtInCompanionSetting() => ValueListenableBuilder<bool>(
-    valueListenable: _companionPreferences.enabled,
-    builder: (_, enabled, _) => SwitchTheme(
-      data: SwitchThemeData(
-        thumbColor: WidgetStateProperty.resolveWith(
-          (states) => states.contains(WidgetState.disabled)
-              ? const Color(0xFFF4F4F4)
-              : Colors.white,
-        ),
-        trackColor: WidgetStateProperty.resolveWith(
-          (states) => states.contains(WidgetState.disabled)
-              ? const Color(0xFFDCDCDC)
-              : states.contains(WidgetState.selected)
-              ? marketInk
-              : const Color(0xFFD2D4D9),
-        ),
-        trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
-      ),
-      child: SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        minTileHeight: 64,
-        materialTapTargetSize: MaterialTapTargetSize.padded,
-        secondary: Container(
-          width: 40,
-          height: 40,
-          padding: const EdgeInsets.all(3),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            border: Border.all(color: marketLine),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: SvgPicture.asset(
-            BookFlowTheme.companionIconAsset,
-            excludeFromSemantics: true,
-          ),
-        ),
-        title: Text(
-          _companionSearchDocument.name,
-          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w500),
-        ),
-        subtitle: Text(
-          _companionSearchDocument.description,
-          style: const TextStyle(fontSize: 14, color: marketMuted),
-        ),
-        value: enabled,
-        onChanged: _savingCompanionPreference ? null : _setCompanionEnabled,
-      ),
+  Widget _builtInCompanionSetting() => ListenableBuilder(
+    listenable: _companionSettingChanges,
+    builder: (context, _) => XiaoqiSwitchTile(
+      title: _companionSearchDocument.name,
+      subtitle: _companionSearchDocument.description,
+      iconAsset: BookFlowTheme.companionIconAsset,
+      value:
+          _pendingCompanionEnabled.value ?? _companionPreferences.enabled.value,
+      onChanged: _pendingCompanionEnabled.value == null
+          ? _setCompanionEnabled
+          : null,
     ),
   );
 
@@ -1531,12 +1501,14 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   Widget _myPluginsContent() {
     final searching = _searchQuery.isNotEmpty;
     final showCompanion = _companionSearchDocument.score(_searchQuery) != null;
-    final showBookSearch = const MarketSearchDocument(
-      name: '网上找书',
-      description: '查找并导入电子书',
-      author: '',
-      keywords: ['搜索', '内置插件', '电子书'],
-    ).score(_searchQuery) != null;
+    final showBookSearch =
+        const MarketSearchDocument(
+          name: '网上找书',
+          description: '查找并导入电子书',
+          author: '',
+          keywords: ['搜索', '内置插件', '电子书'],
+        ).score(_searchQuery) !=
+        null;
     final entries = _matching(_personalEntries);
     final drafts = _matchingDrafts;
     final loading = _loading || _loadingMcp;

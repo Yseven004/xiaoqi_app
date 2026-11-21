@@ -8,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xiaoqi_app/pages/extension_market_page.dart';
 import 'package:xiaoqi_app/features/capabilities/presentation/market_skill_editor.dart';
+import 'package:xiaoqi_app/widgets/xiaoqi_switch_tile.dart';
 
 void main() {
   setUp(() {
@@ -106,15 +107,48 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('内置插件'), findsOneWidget);
     expect(find.text('我的插件'), findsOneWidget);
+    expect(find.widgetWithText(XiaoqiSwitchTile, '沉浸伴读'), findsOneWidget);
+    expect(find.widgetWithText(XiaoqiSwitchTile, '网上找书'), findsOneWidget);
     expect(find.text('登录后查看个人插件'), findsOneWidget);
     expect(find.text('还没有个人插件'), findsNothing);
     expect(find.textContaining('Bad state:'), findsNothing);
-    final companionSwitch = find.byType(Switch);
-    expect(companionSwitch, findsOneWidget);
-    final wasEnabled = tester.widget<Switch>(companionSwitch).value;
+    final companionTile = find.widgetWithText(ListTile, '沉浸伴读');
+    final companionToggle = find.ancestor(
+      of: companionTile,
+      matching: find.byWidgetPredicate(
+        (widget) => widget is Semantics && widget.properties.toggled != null,
+      ),
+    );
+    bool isEnabled() =>
+        tester.widget<Semantics>(companionToggle).properties.toggled!;
+
+    final companionSwitch = find.descendant(
+      of: companionTile,
+      matching: find.byType(TweenAnimationBuilder<double>),
+    );
+    final track = find
+        .descendant(of: companionSwitch, matching: find.byType(DecoratedBox))
+        .first;
+    final thumb = find.descendant(
+      of: companionSwitch,
+      matching: find.byType(Transform),
+    );
+    Color? trackColor() =>
+        (tester.widget<DecoratedBox>(track).decoration as BoxDecoration).color;
+
+    final wasEnabled = isEnabled();
+    final initialColor = trackColor();
     await tester.tap(companionSwitch);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 90));
+    final intermediateColor = trackColor();
+    expect(
+      tester.widget<Transform>(thumb).transform.getTranslation().x,
+      inExclusiveRange(0.0, 20.0),
+    );
     await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(companionSwitch).value, !wasEnabled);
+    expect(isEnabled(), !wasEnabled);
+    expect(intermediateColor, isNot(anyOf(initialColor, trackColor())));
     expect(
       (await SharedPreferences.getInstance()).getBool(
         'reading-companion.enabled',
@@ -135,9 +169,9 @@ void main() {
     await tester.tap(find.byTooltip('清除搜索'));
     await tester.pumpAndSettle();
     expect(find.text('我的插件'), findsOneWidget);
-    await tester.tap(companionSwitch);
+    await tester.tap(find.text('沉浸伴读'));
     await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(companionSwitch).value, wasEnabled);
+    expect(isEnabled(), wasEnabled);
   });
 
   testWidgets('My plugins remains usable with large text in a narrow window', (
@@ -161,7 +195,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('沉浸伴读'));
     await tester.pumpAndSettle();
-    final switchTile = find.byType(SwitchListTile);
+    final switchTile = find.widgetWithText(ListTile, '沉浸伴读');
     await tester.ensureVisible(switchTile);
     expect(tester.getSize(switchTile).height, greaterThanOrEqualTo(48));
     expect(tester.takeException(), isNull);

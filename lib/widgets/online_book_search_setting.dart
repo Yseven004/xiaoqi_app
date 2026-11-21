@@ -1,10 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
 import '../services/online_book_search.dart';
 import 'app_toast.dart';
+import 'xiaoqi_switch_tile.dart';
 
 class OnlineBookSearchSetting extends StatefulWidget {
   const OnlineBookSearchSetting({super.key});
@@ -53,50 +53,20 @@ class _OnlineBookSearchSettingState extends State<OnlineBookSearchSetting> {
   }
 
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder(
+  Widget build(BuildContext context) => ValueListenableBuilder<bool?>(
     valueListenable: _search.enabled,
-    builder: (context, enabled, _) {
-      final value = _pending ?? enabled ?? false;
-      return ListTile(
-        contentPadding: EdgeInsets.zero,
-        minTileHeight: 64,
-        leading: Container(
-          width: 40,
-          height: 40,
-          padding: const EdgeInsets.all(5),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            border: Border.all(color: Theme.of(context).dividerColor),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: SvgPicture.asset(
-            'assets/images/online_book_search.svg',
-            excludeFromSemantics: true,
-          ),
-        ),
-        title: const Text(
-          '网上找书',
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w500),
-        ),
-        subtitle: Text(
-          _failed ? '设置读取失败，轻触重试' : '查找并导入电子书',
-          style: TextStyle(
-            fontSize: 14,
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
-        ),
-        trailing: Switch(
-          value: value,
-          activeThumbColor: Colors.white,
-          activeTrackColor: const Color(0xFF289B4C),
-          onChanged: _loading || _failed || _pending != null ? null : _toggle,
-        ),
-        onTap: _failed
-            ? _load
-            : _loading || _pending != null
-            ? null
-            : () => _toggle(!value),
-      );
-    },
+    builder: (context, enabled, _) => XiaoqiSwitchTile(
+      title: '网上找书',
+      subtitle: _failed
+          ? '设置读取失败，轻触重试'
+          : _loading
+          ? '正在读取设置…'
+          : '查找并导入电子书',
+      iconAsset: 'assets/images/online_book_search.svg',
+      iconPadding: 5,
+      value: _loading || _failed ? null : _pending ?? enabled,
+      onChanged: _loading || _failed || _pending != null ? null : _toggle,
+      onRetry: _failed ? _load : null,
+    ),
   );
 }
