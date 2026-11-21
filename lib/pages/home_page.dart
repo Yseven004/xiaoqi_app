@@ -9072,10 +9072,6 @@ $text''';
                 actionAfterClose = () => _openBookFromSidebar(item);
                 Navigator.of(dialogContext).pop();
               },
-              onOpenChapter: (item, _) {
-                actionAfterClose = () => _openBookFromSidebar(item);
-                Navigator.of(dialogContext).pop();
-              },
               onOpenConversation: (record) {
                 _openConversationFromSidebar(record);
                 Navigator.of(dialogContext).pop();

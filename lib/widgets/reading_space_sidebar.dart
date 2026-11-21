@@ -11,8 +11,6 @@ import '../models/book_recognition.dart';
 import '../services/book_library_service.dart';
 import 'app_toast.dart';
 
-enum _ReadingSidebarBranch { toc, conversations }
-
 enum _ConversationAction {
   rename,
   select,
@@ -34,7 +32,6 @@ class ReadingSpaceSidebar extends StatefulWidget {
     super.key,
     required this.onNewConversation,
     required this.onOpenBook,
-    required this.onOpenChapter,
     required this.onOpenConversation,
     this.onOpenConversationMatch,
     required this.onOpenLibrary,
@@ -48,7 +45,6 @@ class ReadingSpaceSidebar extends StatefulWidget {
 
   final VoidCallback onNewConversation;
   final ValueChanged<BookLibraryItem> onOpenBook;
-  final void Function(BookLibraryItem item, BookTocEntry entry) onOpenChapter;
   final ValueChanged<AiConversationRecord> onOpenConversation;
   final void Function(AiConversationRecord record, String? messageId)?
   onOpenConversationMatch;
@@ -92,7 +88,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
   final Set<int> _selectedBookIds = {};
   final GlobalKey _sidebarKey = GlobalKey();
   int? _expandedBookId;
-  _ReadingSidebarBranch? _expandedBranch;
+  bool _conversationsExpanded = false;
   String? _infoTitle;
   bool _loading = true;
   String? _error;
@@ -221,22 +217,8 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     final id = item.book.id;
     if (id == null) return;
     setState(() {
-      if (_expandedBookId == id) {
-        _expandedBookId = null;
-        _expandedBranch = null;
-      } else {
-        _expandedBookId = id;
-        _expandedBranch = null;
-      }
-    });
-  }
-
-  void _toggleBranch(BookLibraryItem item, _ReadingSidebarBranch branch) {
-    final id = item.book.id;
-    if (id == null) return;
-    setState(() {
-      _expandedBookId = id;
-      _expandedBranch = _expandedBranch == branch ? null : branch;
+      _expandedBookId = _expandedBookId == id ? null : id;
+      _conversationsExpanded = false;
     });
   }
 
@@ -1185,7 +1167,6 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
   Widget _buildBookGroup(BookLibraryItem item) {
     final bookId = item.book.id;
     final expanded = bookId != null && _expandedBookId == bookId;
-    final branch = expanded ? _expandedBranch : null;
     final selecting =
         _selectionMode && _selectionKind == _SidebarSelectionKind.books;
     return Padding(
@@ -1208,27 +1189,17 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
               child: Column(
                 children: [
                   _BranchRow(
-                    label: '目录',
-                    icon: PhosphorIconsRegular.listBullets,
-                    expanded: branch == _ReadingSidebarBranch.toc,
-                    onTap: () => _toggleBranch(item, _ReadingSidebarBranch.toc),
-                  ),
-                  if (branch == _ReadingSidebarBranch.toc)
-                    _buildTocChildren(item),
-                  _BranchRow(
                     label: '对话记录',
                     icon: PhosphorIconsRegular.chatCircle,
-                    expanded: branch == _ReadingSidebarBranch.conversations,
-                    onTap: () => _toggleBranch(
-                      item,
-                      _ReadingSidebarBranch.conversations,
-                    ),
+                    expanded: _conversationsExpanded,
+                    onTap: () => setState(() {
+                      _conversationsExpanded = !_conversationsExpanded;
+                    }),
                   ),
-                  if (branch == _ReadingSidebarBranch.conversations &&
-                      _isSelectingConversationGroup(item.book.id))
+                  if (_conversationsExpanded &&
+                      _isSelectingConversationGroup(bookId))
                     _buildSelectionHeader(),
-                  if (branch == _ReadingSidebarBranch.conversations)
-                    _buildConversationChildren(item),
+                  if (_conversationsExpanded) _buildConversationChildren(item),
                 ],
               ),
             ),
@@ -1237,33 +1208,12 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     );
   }
 
-  Widget _buildTocChildren(BookLibraryItem item) {
-    final entries = item.book.tableOfContents
-        .where((entry) => entry.title.trim().isNotEmpty)
-        .toList(growable: false);
-    return _ChildList(
-      children: [
-        const _SourceRow(label: '主资料'),
-        if (entries.isEmpty)
-          const _ChildTextRow(text: '暂无目录', selected: false)
-        else
-          for (final entry in entries)
-            _ChildTextRow(
-              text: entry.title,
-              indent: entry.level > 1 ? (entry.level - 1) * 10 : 0,
-              selected: false,
-              onTap: () => widget.onOpenChapter(item, entry),
-            ),
-      ],
-    );
-  }
-
   Widget _buildConversationChildren(BookLibraryItem item) {
     final conversations = _bookConversations[item.book.id] ?? const [];
     return _ChildList(
       children: [
         if (conversations.isEmpty)
-          const _ChildTextRow(text: '暂无对话记录', selected: false)
+          const _ChildTextRow(text: '暂无对话记录')
         else
           ..._buildDatedConversationRows(
             conversations,
@@ -2361,54 +2311,17 @@ class _ChildList extends StatelessWidget {
   }
 }
 
-class _SourceRow extends StatelessWidget {
-  const _SourceRow({required this.label});
+class _ChildTextRow extends StatelessWidget {
+  const _ChildTextRow({required this.text});
 
-  final String label;
+  final String text;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 32,
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              style: const TextStyle(color: Color(0xFF7A8089), fontSize: 12),
-            ),
-          ),
-          Icon(
-            PhosphorIconsRegular.caretDown,
-            size: 13,
-            color: const Color(0xFF858B94),
-          ),
-          const SizedBox(width: 10),
-        ],
-      ),
-    );
-  }
-}
-
-class _ChildTextRow extends StatelessWidget {
-  const _ChildTextRow({
-    required this.text,
-    this.indent = 0,
-    required this.selected,
-    this.onTap,
-  });
-
-  final String text;
-  final double indent;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final content = SizedBox(
       height: 40,
       child: Padding(
-        padding: EdgeInsets.only(left: indent, right: 10),
+        padding: const EdgeInsets.only(right: 10),
         child: Align(
           alignment: Alignment.centerLeft,
           child: Text(
@@ -2424,13 +2337,6 @@ class _ChildTextRow extends StatelessWidget {
           ),
         ),
       ),
-    );
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: selected ? const Color(0xFFEEF0F2) : Colors.transparent,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: onTap == null ? content : InkWell(onTap: onTap, child: content),
     );
   }
 }
