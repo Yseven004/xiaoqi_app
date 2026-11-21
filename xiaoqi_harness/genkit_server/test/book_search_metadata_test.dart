@@ -282,16 +282,24 @@ void main() {
       final webRequests = <String>[];
       final webHttp = MockClient((request) async {
         webRequests.add(request.url.host);
+        expect(request.method, 'POST');
+        expect(request.url.path, '/v1/tools/search');
+        expect(jsonDecode(request.body), {
+          'query': '"科普实例" ISBN 出版社 图书馆 不同版本 书目',
+          'count': 8,
+          'need_content': false,
+        });
         return http.Response(
           jsonEncode({
             'results': [
               for (final (host, title, isbn) in [
                 ('not-a-library.example', '科普实例', '9787508621050'),
+                ('unreachable.example.edu.cn', '科普实例', '9787508621050'),
                 ('opac.example.edu.cn', '科普实例习题', '9787508621050'),
                 ('opac.example.edu.cn', '科普实例', '978-7-5086-3077-9'),
               ])
                 {
-                  'url': 'https://$host/opac/book/123',
+                  'url': 'https://$host/opac/book/$isbn',
                   'title': title,
                   'snippet': 'ISBN：$isbn',
                 },
@@ -308,10 +316,16 @@ void main() {
           ..findProxy = ((_) => 'DIRECT'),
         webService: (check) => WebService(
           tinyFishKey: 'test',
-          deepSeekKey: '',
+          deepSeekKey: 'test',
           client: webHttp,
           checkCancelled: check,
-          resolveHost: (_) async => [InternetAddress('8.8.8.8')],
+          resolveHost: (host) async {
+            expect(host, isNot('not-a-library.example'));
+            if (host == 'unreachable.example.edu.cn') {
+              throw const SocketException('DNS lookup failed');
+            }
+            return [InternetAddress('8.8.8.8')];
+          },
         ),
       );
       final found = await sources
@@ -320,7 +334,7 @@ void main() {
             BookSearchCancellation(),
           )
           .toList();
-      expect(webRequests, ['api.search.tinyfish.ai']);
+      expect(webRequests, ['api.deepseek.com']);
       expect(requested, ['isbn:9787508630779']);
       expect(found.map((r) => r.edition), ['第2版', '第1版']);
       expect(found.map((r) => r.id), ['OL2M', 'OL1M']);

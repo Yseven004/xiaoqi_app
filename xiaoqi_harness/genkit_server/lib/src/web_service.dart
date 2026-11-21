@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -196,6 +197,37 @@ class WebService {
       'fetched_at': DateTime.now().toUtc().toIso8601String(),
       'sources': sources.map((s) => {...s, 'source_id': s['url']}).toList(),
     };
+  }
+
+  /// Library OPAC snippets must include the bibliographic fields that identify
+  /// an edition. Query the existing structured search provider once for these.
+  Future<List<Map<String, Object?>>> searchLibraryRecords(
+    String title, {
+    required bool Function(Uri) acceptUri,
+  }) async {
+    checkCancelled?.call();
+    final query =
+        '"${String.fromCharCodes(title.runes.take(86))}" ISBN 出版社 图书馆 不同版本 书目';
+    final result = await _search.search(query, count: 8);
+    final sources = await Future.wait(
+      result.sources.map((source) async {
+        final uri = Uri.tryParse(source.url);
+        if (uri == null || !acceptUri(uri)) return null;
+        checkCancelled?.call();
+        try {
+          await validateUrl(source.url);
+          return source.toJson();
+        } on FormatException {
+          return null;
+        } on SocketException {
+          return null;
+        } on TimeoutException {
+          return null;
+        }
+      }),
+    );
+    checkCancelled?.call();
+    return sources.nonNulls.toList();
   }
 
   Future<Map<String, dynamic>> fetch(String rawUrl) async {

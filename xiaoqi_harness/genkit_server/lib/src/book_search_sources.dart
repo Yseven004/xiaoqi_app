@@ -313,27 +313,12 @@ class BookSearchSources {
     final web = webService!(() => _checkActive(cancellation));
     unawaited(cancellation.whenCancelled.then((_) => web.close()));
     try {
-      final title = String.fromCharCodes(query.title.runes.take(86));
-      final result = await web
-          .search(
-            '"$title" ISBN 出版社 图书馆 不同版本 书目',
-            purpose: '查找出版物原始题名和各版 ISBN，优先高校及公共图书馆的单本书目。',
-            limit: 8,
-          )
+      final sources = await web
+          .searchLibraryRecords(query.title, acceptUri: _isLibraryRecordUri)
           .timeout(const Duration(seconds: 9));
-      final sources = result['sources'];
-      if (sources is! List) throw const BookSearchException(503, '书目发现服务暂不可用。');
       final leads = <String, Uri>{};
-      for (final source in sources.whereType<Map>()) {
-        final uri = Uri.tryParse('${source['url'] ?? ''}');
-        if (uri == null ||
-            uri.scheme != 'https' ||
-            uri.port != 443 ||
-            !(uri.host.endsWith('.edu.cn') ||
-                uri.host.endsWith('.gov.cn') ||
-                uri.host == 'tscx.open.ha.cn') ||
-            !RegExp(r'/opac/(?:book/[^/]+|item\.php)$').hasMatch(uri.path))
-          continue;
+      for (final source in sources) {
+        final uri = Uri.parse(source['url'] as String);
         final summary =
             '${source['summary'] ?? ''}\n${source['snippet'] ?? ''}';
         final titles = <String>[
@@ -468,6 +453,14 @@ class BookSearchSources {
       web.close();
     }
   }
+
+  static bool _isLibraryRecordUri(Uri uri) =>
+      uri.scheme == 'https' &&
+      uri.port == 443 &&
+      (uri.host.endsWith('.edu.cn') ||
+          uri.host.endsWith('.gov.cn') ||
+          uri.host == 'tscx.open.ha.cn') &&
+      RegExp(r'/opac/(?:book/[^/]+|item\.php)$').hasMatch(uri.path);
 
   Future<List<BookSearchCandidate>> _openLibrary(
     BookSearchQuery query,

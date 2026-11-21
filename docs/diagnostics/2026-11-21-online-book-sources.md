@@ -6,7 +6,7 @@
 
 中文题名在 Open Library 没有匹配版次时，继续查询 Internet Archive 馆藏的原文题名，并用 ISBN 与可用的 Open Library 版次记录核对。《乔布斯的魔力演讲》命中 Carmine Gallo 的 2010 年第 1 版（9787508621050）和 2011 年第 2 版（9787508630779）。这两个结果只交付书目信息和馆藏来源。[第 1 版](https://archive.org/details/qiaobusidemoliya0001gall) · [第 2 版](https://archive.org/details/qiaobusidemoliya0000gall)
 
-生产出口访问 Internet Archive 书目端点遇到 HTTP 429。目录没有给出正匹配时，服务复用已有的网页检索发现公开图书馆条目和 ISBN，并用 Open Library 的正式版次记录核对题名、ISBN 和语言。同一作品的其他出版版本也要用独立 ISBN 和目录记录核实。网页摘要只用于发现书目，全书文件资格仍由对应的原始授权来源认定。[Open Library Search API](https://openlibrary.org/dev/docs/api/search) · [河南开放大学图书馆馆藏](https://tscx.open.ha.cn/opac/book/1a8d783d377d450bdf21abe52ee03983)
+生产出口访问 Internet Archive 书目端点遇到 HTTP 429。首轮上线还发现，TinyFish 返回的八条搜索结果都缺少可核对的 ISBN，而测试同一查询时，DeepSeek 搜索返回了高校馆藏和对应 ISBN。目录没有给出正匹配时，书目发现调用已接入的 DeepSeek 网页搜索，再用 Open Library 的正式版次记录核对题名、ISBN 和语言。同一作品的其他出版版本也要用独立 ISBN 和目录记录核实。网页摘要只用于发现书目，全书文件资格仍由对应的原始授权来源认定。[Open Library Search API](https://openlibrary.org/dev/docs/api/search) · [山东工商学院图书馆馆藏](https://opac.sdtbu.edu.cn/opac/item.php?marc_no=0000441153)
 
 ## 接口 39 基线记录
 
