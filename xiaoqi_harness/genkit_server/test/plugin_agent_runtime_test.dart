@@ -405,7 +405,8 @@ void main() {
             expect(result.exitCode, isNot(0));
             expect(result.stderr, contains('prompt blocked'));
             expect(childToolSets, isEmpty);
-            expect(providerCalls, 1);
+            // The lifecycle hook blocks before the first model request.
+            expect(providerCalls, 0);
             return;
           }
           expect(
