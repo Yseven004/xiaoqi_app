@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../config/book_flow_theme.dart';
 import '../features/ai_study_annotation/domain/ai_chat_process.dart';
 import '../features/capabilities/data/capability_cloud_sync.dart';
+import '../models/book_recognition.dart';
 import '../models/book_source.dart';
 import '../services/book_library_service.dart';
 import '../services/home_chat_model_preferences.dart';
@@ -104,6 +105,7 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
   final _messages = <_BookSearchMessage>[];
   final _importActivity = ValueNotifier<(String, String)?>(null);
   final _workflow = OnlineBookSearch.newId();
+  late final Future<BookRecord?> _linkedBook = _loadLinkedBook();
   late final _chat = CapabilityCloudSync.instance.createRemoteAgent().chat();
   late List<String> _suggestions = initialOnlineBookSearchSuggestions(
     bookTitle: widget.title,
@@ -140,12 +142,22 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
 
   Future<void> _loadSuggestions() async {
     final suggestions = await loadOnlineBookSearchSuggestions(
-      bookId: widget.bookId,
+      linkedBook: await _linkedBook,
       bookTitle: widget.title,
       library: widget.library,
     );
     if (mounted && !_closed && _messages.isEmpty) {
       setState(() => _suggestions = suggestions);
+    }
+  }
+
+  Future<BookRecord?> _loadLinkedBook() async {
+    final id = widget.bookId;
+    if (id == null) return null;
+    try {
+      return await widget.library.getBook(id);
+    } on Exception {
+      return null;
     }
   }
 
@@ -268,6 +280,7 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
   Future<void> _sendToAgent(_BookSearchMessage entry, String id) async {
     final models = HomeChatModelPreferences.instance;
     await models.load();
+    final linkedBook = await _linkedBook;
     if (!mounted || _closed) return;
     final selected = models.defaultSelection.value;
     final turn = _chat.sendStream(
@@ -282,6 +295,15 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
             'current_turn_text': entry.query,
             'book_search_id': id,
             'book_search_context_id': ?_searchId,
+            if (linkedBook != null)
+              'book_search_linked_book': {
+                'title': linkedBook.title,
+                if (linkedBook.authors.isNotEmpty)
+                  'author': linkedBook.authors.join('、'),
+                'isbn':
+                    ?(Isbn.normalize(linkedBook.isbn13) ??
+                    Isbn.normalize(linkedBook.isbn10)),
+              },
             'model_id': selected.model.id,
             'reasoning_level': selected.reasoningLevel.name,
           },
@@ -998,7 +1020,7 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
     final source = Uri.tryParse(row['sourceUrl']?.toString() ?? '');
     final format = (row['format']?.toString() ?? '').toUpperCase();
     final details = [
-      row['author'],
+      (row['author'] as String? ?? '').trim().isEmpty ? '作者待核' : row['author'],
       row['edition'],
       row['language'],
       format,

@@ -1,6 +1,10 @@
 import 'dart:io';
+import 'dart:convert';
+import 'package:archive/archive.dart';
+import 'package:xml/xml.dart';
 
 import 'package:test/test.dart';
+import 'package:xiaoqi_genkit_server/src/book_search_query.dart';
 import 'package:xiaoqi_genkit_server/src/book_search_service.dart';
 import 'package:xiaoqi_genkit_server/src/book_search_sources.dart';
 
@@ -65,6 +69,31 @@ void main() {
       );
     }, skip: !enabled);
   }
+
+  test(
+    'resolves the Chinese Wikisource complete EPUB for a work outside the publisher catalog',
+    () async {
+      final books = sources.searchByCriteria(
+        const BookSearchQuery(title: '呐喊', author: '鲁迅', format: 'epub'),
+        BookSearchCancellation(),
+      );
+      final book = await books.firstWhere((item) => item.inlineEpub);
+      expect(book.title, '吶喊');
+      expect(book.author, '魯迅');
+      expect(book.publicationYear, '1923');
+      expect(book.sourceUri.host, 'zh.wikisource.org');
+      final bytes = await sources.buildEpub(book, BookSearchCancellation());
+      final epub = ZipDecoder().decodeBytes(bytes);
+      final nav = XmlDocument.parse(
+        utf8.decode(epub.findFile('EPUB/nav.xhtml')!.content),
+      );
+      expect(nav.findAllElements('a').length, 15);
+      expect(nav.findAllElements('a').first.innerText, '自序');
+      expect(nav.findAllElements('a').last.innerText, '社戲');
+    },
+    skip: !enabled,
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
 
   test(
     'Open Library distinguishes edition metadata from a downloadable file',

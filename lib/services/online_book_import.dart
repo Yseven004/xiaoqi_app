@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:image/image.dart' as image;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -27,12 +29,22 @@ Future<BookSourceImportResult> importOnlineBook(
   final candidateId = field('id');
   final sourcePage = Uri.tryParse(field('sourceUrl'));
   final download = Uri.tryParse(field('downloadUrl'));
+  final inline = candidate['inlineEpub'] == true;
   if (candidate['importable'] != true ||
       title.isEmpty ||
       candidateId.isEmpty ||
       !supportedBookSourceFormats.contains(format) ||
       !_isHttps(sourcePage) ||
-      !_isAllowedDownload(download)) {
+      (inline
+          ? format != 'epub' ||
+                !candidateId.startsWith('wikisource-zh-') ||
+                sourcePage !=
+                    Uri.https(
+                      'zh.wikisource.org',
+                      '/wiki/${title.replaceAll(' ', '_')}',
+                    ) ||
+                field('downloadUrl').isNotEmpty
+          : !_isAllowedDownload(download))) {
     throw const FormatException('这个版本没有经过核验的下载地址');
   }
 
@@ -53,10 +65,28 @@ Future<BookSourceImportResult> importOnlineBook(
   );
   try {
     final filePath = p.join(directory.path, 'book.$format');
-    await _downloadBook(download!, filePath, format);
+    if (inline) {
+      final encoded = candidate['epubBase64'];
+      const maxBytes = 4 * 1024 * 1024;
+      if (encoded is! String ||
+          encoded.isEmpty ||
+          encoded.length > ((maxBytes + 2) ~/ 3) * 4) {
+        throw const FormatException('维基文库电子书为空或超过大小限制');
+      }
+      final bytes = base64Decode(encoded);
+      if (bytes.length > maxBytes ||
+          sha256.convert(bytes).toString() != candidate['sha256']) {
+        throw const FormatException('维基文库电子书传输校验失败');
+      }
+      await File(filePath).writeAsBytes(bytes);
+    } else {
+      await _downloadBook(download!, filePath, format);
+    }
     final embeddedCoverPath = await _validateBookAndStageCover(
       filePath,
       format,
+      compiledTitle: inline ? title : null,
+      compiledAuthor: inline ? author : null,
     );
     final result = await targetLibrary.importVerifiedOnlineBook(
       book: BookRecord(
@@ -141,6 +171,7 @@ bool _isAllowedDownload(Uri? uri) {
 
 bool _isAllowedRedirect(Uri? redirect, Uri original) {
   if (!_isHttps(redirect) || redirect!.hasFragment) return false;
+
   if (redirect.host == original.host) return redirect.path == original.path;
   if (original.host != 'github.com' ||
       redirect.host != 'release-assets.githubusercontent.com') {
@@ -280,8 +311,10 @@ bool _isPublicAddress(InternetAddress address) {
 
 Future<String?> _validateBookAndStageCover(
   String filePath,
-  String format,
-) async {
+  String format, {
+  String? compiledTitle,
+  String? compiledAuthor,
+}) async {
   if (format == 'epub') {
     final cover = await Isolate.run(() async {
       final document = await const EpubDocumentService()
@@ -289,6 +322,13 @@ Future<String?> _validateBookAndStageCover(
           .onError((Object _, StackTrace _) {
             throw const FormatException('下载文件不是可打开的 EPUB');
           });
+      if (compiledTitle != null &&
+          (document.title != compiledTitle ||
+              (compiledAuthor?.isNotEmpty == true &&
+                  document.author != compiledAuthor) ||
+              document.chapters.isEmpty)) {
+        throw const FormatException('电子书的书名、署名或正文与选中版本不符');
+      }
       final asset = document.assets.singleOrNull;
       if (asset == null) return null;
       return _validateEpubCover(asset.bytes, asset.mimeType);

@@ -63,11 +63,12 @@ Future<void> main() async {
 
   final images = ImageService(store);
   final attachments = AttachmentService(store);
-  final api = XiaoqiApi(
+  final runtime = GenkitXiaoqiAgentRuntime(
     store,
-    GenkitXiaoqiAgentRuntime(store, images, attachments: attachments),
+    images,
     attachments: attachments,
   );
+  final api = XiaoqiApi(store, runtime, attachments: attachments);
   final server = await shelf_io.serve(
     api.handler,
     InternetAddress.loopbackIPv4,
@@ -108,6 +109,21 @@ Future<void> main() async {
             'description': '仅本地调试：延迟取消当前任务，用于验证暂停和快照恢复。',
           },
           'model_id': {'type': 'string'},
+          'book_search': {
+            'type': 'boolean',
+            'description': '使用网上找书弹窗入口，返回本次实际检索的候选。',
+          },
+          'book_search_linked_book': {
+            'type': 'object',
+            'description': '本地调试找书时关联的合成书架记录。',
+            'properties': {
+              'title': {'type': 'string'},
+              'author': {'type': 'string'},
+              'isbn': {'type': 'string'},
+            },
+            'required': ['title'],
+            'additionalProperties': false,
+          },
           'reasoning_level': {
             'type': 'string',
             'enum': ['low', 'medium', 'high'],
@@ -190,6 +206,10 @@ Future<void> main() async {
           ? priorMetadata
           : <String, dynamic>{
               'task_id': taskId,
+              if (input['book_search'] == true) 'book_search_id': taskId,
+              if (input['book_search'] == true &&
+                  input['book_search_linked_book'] is Map)
+                'book_search_linked_book': input['book_search_linked_book'],
               'attempt_id': attemptId,
               'workflow_id': workflowId,
               'user_message_id': userMessageId,
@@ -303,6 +323,12 @@ Future<void> main() async {
           'session_id': response.sessionId,
           'snapshot_id': resultSnapshotId,
           'turn_metadata': turnMetadata,
+          if (input['book_search'] == true &&
+              response.state?['book_search_reference'] == taskId)
+            'book_search': runtime.bookSearch.searches.read(
+              owner: 'device/${sha256.convert(utf8.encode(token))}',
+              id: taskId,
+            ),
         };
         if ((response.finishReason.value == 'aborted' ||
                 taskStatus == 'paused') &&

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/book_search_service.dart';
@@ -150,6 +151,54 @@ void main() {
         ),
       );
       expect(dispatches, 1);
+    },
+  );
+
+  test(
+    'only an owner resolving a verified edition receives the compiled file',
+    () async {
+      final candidate = BookSearchCandidate(
+        id: 'wikisource-zh-11-12',
+        title: '吶喊',
+        author: '魯迅',
+        language: '中文',
+        format: 'epub',
+        edition: '电子版',
+        sourceUri: Uri.https('zh.wikisource.org', '/wiki/吶喊'),
+        sourceName: '中文维基文库',
+        inlineEpub: true,
+      );
+      final search = BookSearchService(
+        store: store,
+        find: (_, _) => Stream.value(candidate),
+        verify: (_, _) =>
+            throw StateError('Only direct downloads need an external file URL'),
+        buildEpub: (book, _) async {
+          expect(book.id, candidate.id);
+          return Uint8List.fromList([1, 2, 3]);
+        },
+      );
+      search.start(owner: _owner, id: _id, query: '呐喊');
+      final snapshot = await search.wait(owner: _owner, id: _id);
+      final row = (snapshot['candidates'] as List).single as Map;
+      expect(row['importable'], isTrue);
+      expect(row.containsKey('epubBase64'), isFalse);
+      expect(
+        () => search.resolve(
+          owner: 'other:device',
+          id: _id,
+          candidateId: candidate.id,
+        ),
+        throwsA(isA<BookSearchException>()),
+      );
+      final result = await search.resolve(
+        owner: _owner,
+        id: _id,
+        candidateId: candidate.id,
+      );
+      expect(result['epubBase64'], 'AQID');
+      expect(result['sha256'], hasLength(64));
+      expect(search.read(owner: _owner, id: _id), snapshot);
     },
   );
 

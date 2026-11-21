@@ -11,8 +11,9 @@ class BookSearchPlugin {
     final sources = BookSearchSources(webService: webService);
     searches = BookSearchService(
       store: store,
-      find: sources.search,
+      find: sources.searchByCriteria,
       verify: sources.verify,
+      buildEpub: sources.buildEpub,
     );
   }
 

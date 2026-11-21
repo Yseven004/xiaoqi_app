@@ -1,13 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import 'book_search_query.dart';
 import 'store.dart';
 
 typedef BookSearchProvider =
     Stream<BookSearchCandidate> Function(
-      String query,
+      BookSearchQuery query,
       BookSearchCancellation cancellation,
     );
 typedef BookSearchVerifier =
@@ -49,6 +51,7 @@ class BookSearchCandidate {
     this.license,
     this.licenseUri,
     this.downloadUri,
+    this.inlineEpub = false,
     this.availability,
     this.isbn,
     this.translator,
@@ -67,6 +70,7 @@ class BookSearchCandidate {
         sourceName: row['sourceName'] as String,
         sourceUri: Uri.parse(row['sourceUrl'] as String),
         license: row['license'] as String?,
+        inlineEpub: row['inlineEpub'] == true,
         licenseUri: row['licenseUrl'] is String
             ? Uri.parse(row['licenseUrl'] as String)
             : null,
@@ -91,6 +95,7 @@ class BookSearchCandidate {
   final String? license;
   final Uri? licenseUri;
   final Uri? downloadUri;
+  final bool inlineEpub;
   final String? availability;
   final String? isbn;
   final String? translator;
@@ -106,7 +111,8 @@ class BookSearchCandidate {
     'format': format,
     'sourceName': sourceName,
     'sourceUrl': sourceUri.toString(),
-    'importable': downloadUri != null,
+    'importable': downloadUri != null || inlineEpub,
+    if (inlineEpub) 'inlineEpub': true,
     if (downloadUri != null) 'downloadUrl': downloadUri.toString(),
     if (license != null) 'license': license,
     if (licenseUri != null) 'licenseUrl': licenseUri.toString(),
@@ -126,6 +132,7 @@ class BookSearchService {
     required CloudStore store,
     required BookSearchProvider find,
     required BookSearchVerifier verify,
+    this.buildEpub,
     Duration searchTimeout = const Duration(seconds: 25),
   }) : _store = store,
        _find = find,
@@ -142,6 +149,8 @@ class BookSearchService {
   final CloudStore _store;
   final BookSearchProvider _find;
   final BookSearchVerifier _verify;
+  final Future<Uint8List> Function(BookSearchCandidate, BookSearchCancellation)?
+  buildEpub;
   final Duration _searchTimeout;
   final _active = <String, _RunningSearch>{};
   final _resolutions =
@@ -158,18 +167,25 @@ class BookSearchService {
     required String owner,
     required String id,
     required String query,
+    BookSearchQuery? criteria,
   }) {
     _prune();
     final key = _key(owner, id);
     final normalized = query.trim();
-    if (normalized.isEmpty || normalized.length > 240) {
-      throw const BookSearchException(400, '请输入 1 至 240 字的找书条件。');
+    final filters = criteria ?? BookSearchQuery.fromText(normalized);
+    if (!filters.hasIdentity ||
+        normalized.length > (criteria == null ? 240 : 640)) {
+      throw const BookSearchException(400, '请提供有效的书名、作者、ISBN 或主题。');
     }
 
     final existing = _get(key);
     if (existing != null) {
       final previous = existing.value['query'];
-      if (previous != null && previous != normalized) {
+      if (previous != null &&
+          (previous != normalized ||
+              (existing.value.containsKey('criteria') &&
+                  jsonEncode(existing.value['criteria']) !=
+                      jsonEncode(filters.toJson())))) {
         throw const BookSearchException(409, '查找编号已用于其他查询。');
       }
       return _snapshot(_recoverInterrupted(key, existing));
@@ -182,9 +198,15 @@ class BookSearchService {
             _ownerSearchLimit) {
       throw const BookSearchException(429, '当前查找较多，请稍后再试。');
     }
-    final entry = _create(key, id, 'searching', query: normalized);
+    final entry = _create(
+      key,
+      id,
+      'searching',
+      query: normalized,
+      criteria: filters,
+    );
     final operation = _active[key] = _RunningSearch();
-    unawaited(_run(key, normalized, operation));
+    unawaited(_run(key, filters, operation));
     return _snapshot(entry);
   }
 
@@ -255,7 +277,8 @@ class BookSearchService {
     if (candidate == null) {
       throw const BookSearchException(404, '该版本已失效，请重新查找。');
     }
-    if (candidate['importable'] != true || candidate['downloadUrl'] == null) {
+    if (candidate['importable'] != true ||
+        (candidate['downloadUrl'] == null && candidate['inlineEpub'] != true)) {
       throw const BookSearchException(409, '该来源未提供可导入的完整电子书。');
     }
     final resolutionKey = (key, candidateId);
@@ -283,23 +306,18 @@ class BookSearchService {
   ) async {
     try {
       final candidate = BookSearchCandidate._fromStored(stored);
-      final download = await Future.any([
-        _verify(candidate, cancellation),
-        cancellation.whenCancelled.then<Uri>((_) {
+      final payload = await Future.any([
+        _resolveFile(candidate, cancellation),
+        cancellation.whenCancelled.then<Map<String, dynamic>>((_) {
           throw const BookSearchException(403, '网上找书已关闭。');
         }),
-      ]).timeout(const Duration(seconds: 15));
+      ]).timeout(Duration(seconds: candidate.inlineEpub ? 90 : 15));
       if (cancellation.isCancelled) {
         throw const BookSearchException(403, '网上找书已关闭。');
       }
-      if (download.scheme != 'https' ||
-          download.host.isEmpty ||
-          download.userInfo.isNotEmpty) {
-        throw const BookSearchException(502, '来源返回了无效的电子书下载链接。');
-      }
       return {
         ...stored,
-        'downloadUrl': download.toString(),
+        ...payload,
         'verifiedAt': DateTime.now().toUtc().toIso8601String(),
       };
     } on BookSearchException {
@@ -311,7 +329,40 @@ class BookSearchService {
     }
   }
 
-  Future<void> _run(String key, String query, _RunningSearch search) async {
+  Future<Map<String, dynamic>> _resolveFile(
+    BookSearchCandidate candidate,
+    BookSearchCancellation cancellation,
+  ) async {
+    if (candidate.inlineEpub) {
+      final build = buildEpub;
+      if (build == null || candidate.format != 'epub') {
+        throw const BookSearchException(409, '该来源不支持生成电子书。');
+      }
+      final bytes = await build(candidate, cancellation);
+      if (bytes.isEmpty || bytes.length > 4 * 1024 * 1024) {
+        throw const BookSearchException(422, '整书超出在线排版的大小限制。');
+      }
+      // Only the authenticated resolve response contains book bytes. The
+      // persisted candidate, search snapshots and model see metadata only.
+      return {
+        'epubBase64': base64Encode(bytes),
+        'sha256': sha256.convert(bytes).toString(),
+      };
+    }
+    final download = await _verify(candidate, cancellation);
+    if (download.scheme != 'https' ||
+        download.host.isEmpty ||
+        download.userInfo.isNotEmpty) {
+      throw const BookSearchException(502, '来源返回了无效的电子书下载链接。');
+    }
+    return {'downloadUrl': download.toString()};
+  }
+
+  Future<void> _run(
+    String key,
+    BookSearchQuery query,
+    _RunningSearch search,
+  ) async {
     final cancellation = search.cancellation;
     final deadline = Timer(_searchTimeout, () {
       _finish(key, search, 'unavailable', usePartialResults: true);
@@ -415,9 +466,11 @@ class BookSearchService {
     String id,
     String status, {
     String? query,
+    BookSearchQuery? criteria,
   }) => _store.put(key, {
     'id': id,
     if (query != null) 'query': query,
+    if (criteria != null) 'criteria': criteria.toJson(),
     'status': status,
     'createdMs': DateTime.now().millisecondsSinceEpoch,
     'candidates': [],

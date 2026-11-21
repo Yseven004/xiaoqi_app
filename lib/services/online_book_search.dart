@@ -16,9 +16,10 @@ class OnlineBookSearch {
 
   Future<Map<String, dynamic>> _request(
     String method,
-    String path, [
+    String path, {
     Map<String, dynamic>? body,
-  ]) async {
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
     final sync = CapabilityCloudSync.instance;
     final headers = await sync.authenticatedHeaders();
     final client = http.Client();
@@ -29,7 +30,7 @@ class OnlineBookSearch {
       final response = await client
           .send(request)
           .then(http.Response.fromStream)
-          .timeout(const Duration(seconds: 12));
+          .timeout(timeout);
       final payload = jsonDecode(utf8.decode(response.bodyBytes));
       if (payload is! Map) throw const FormatException('找书服务回复无效');
       if (response.statusCode >= 400) {
@@ -52,12 +53,12 @@ class OnlineBookSearch {
   }
 
   Future<void> setEnabled(bool value) async {
-    await _request('PUT', 'book-search-settings', {'enabled': value});
+    await _request('PUT', 'book-search-settings', body: {'enabled': value});
     enabled.value = value;
   }
 
   Future<Map<String, dynamic>> start(String id, String query) =>
-      _request('POST', 'book-searches', {'id': id, 'query': query});
+      _request('POST', 'book-searches', body: {'id': id, 'query': query});
 
   Future<Map<String, dynamic>> read(String id) =>
       _request('GET', 'book-searches/${Uri.encodeComponent(id)}');
@@ -65,6 +66,9 @@ class OnlineBookSearch {
   Future<Map<String, dynamic>> resolve(String id, String candidate) => _request(
     'POST',
     'book-searches/${Uri.encodeComponent(id)}/candidates/${Uri.encodeComponent(candidate)}/resolve',
+    timeout: Duration(
+      seconds: candidate.startsWith('wikisource-zh-') ? 100 : 22,
+    ),
   );
 
   Future<Map<String, dynamic>?> stop(String id) async {

@@ -114,6 +114,7 @@ void main() {
         'https://zh-v2.d2l.ai:8443/d2l-zh.pdf',
         'http://zh-v2.d2l.ai/d2l-zh.pdf',
         'https://127.0.0.1/book.pdf',
+        'https://ws-export.wmcloud.org/?format=epub-3&lang=zh&page=吶喊',
       ]) {
         await expectLater(
           importOnlineBook({
@@ -123,6 +124,25 @@ void main() {
             'importable': true,
             'sourceUrl': sourcePage.toString(),
             'downloadUrl': url,
+          }),
+          throwsFormatException,
+        );
+      }
+      final wiki = Uri.https('zh.wikisource.org', '/wiki/吶喊');
+      for (final invalid in [
+        {'sourceUrl': 'https://example.org/wiki/吶喊'},
+        {'downloadUrl': 'https://example.org/book.epub'},
+        {'epubBase64': 'AQID', 'sha256': 'wrong'},
+      ]) {
+        await expectLater(
+          importOnlineBook({
+            'id': 'wikisource-zh-11-12',
+            'title': '吶喊',
+            'format': 'epub',
+            'importable': true,
+            'inlineEpub': true,
+            'sourceUrl': wiki.toString(),
+            ...invalid,
           }),
           throwsFormatException,
         );

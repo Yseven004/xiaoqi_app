@@ -14,21 +14,17 @@ List<String> initialOnlineBookSearchSuggestions({String? bookTitle}) {
 }
 
 Future<List<String>> loadOnlineBookSearchSuggestions({
-  int? bookId,
+  BookRecord? linkedBook,
   String? bookTitle,
   BookLibraryService? library,
 }) async {
-  final linkedTitle = _normalizedTitle(bookTitle);
-  if (linkedTitle.isNotEmpty) return _forBook(linkedTitle);
+  final linkedTitle = _normalizedTitle(linkedBook?.title ?? bookTitle);
+  if (linkedTitle.isNotEmpty) {
+    return _forBook(linkedTitle, author: linkedBook?.authors.firstOrNull ?? '');
+  }
 
   final bookLibrary = library ?? BookLibraryService();
   try {
-    if (bookId != null) {
-      final book = await bookLibrary.getBook(bookId);
-      final title = _normalizedTitle(book?.title);
-      if (title.isNotEmpty) return _forBook(title);
-    }
-
     final entries = await bookLibrary.listBooks(
       query: const BookLibraryQuery(sortMode: BookLibrarySortMode.recentStudy),
     );
