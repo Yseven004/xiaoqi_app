@@ -1,5 +1,12 @@
 # Project agent instructions
 
+## 协作与交付
+
+- **表达清楚。** 先给结论，再说明依据。沿用用户和项目资料中的术语，用主动语态，保留理解问题所需的技术细节。
+- **最终回复可以独立阅读。** 写清完成了什么、验证结果和仍待确认的事项。补足读者理解结果所需的背景，避免引用只有在进度更新、工具输出或内部讨论中才看得懂的简称。
+- **在授权范围内做到交付。** 用户要求执行时，主动完成后续操作和相关检查，处理可恢复的失败。结束前对照请求和验收标准逐项核对，说明仍未完成或未验证的部分。
+- **对可撤销的小决定自行判断。** 信息不足时，可在已确认的范围内作合理且可撤销的假设，交付时说明影响结果的假设。产品和交互决策按既有流程由用户确认。遇到重大范围变化、必须由用户决定的事项、无法自行解除的阻塞，或需执行破坏性或不可逆操作时，先确认相关事项，并继续推进不依赖该决定的工作。
+
 ## Genkit Dart architecture requirements
 
 - For changes to Agent execution, tool loops, streaming, conversation state, cancellation/resumption, or branching, first read the project's `developing-genkit-dart` skill and verify both client/server lockfiles and the resolved SDK sources. Use the installed Dart version as the implementation authority; do not substitute another language's API or a newer version's documentation. If documentation redirects to another version, state that and inspect the matching published source.
