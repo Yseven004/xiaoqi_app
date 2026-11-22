@@ -145,7 +145,14 @@ class ReadingCompanionLayoutGate extends InheritedWidget {
       entering != oldWidget.entering;
 }
 
-/// Book source reader embedded beneath the reading-space toolbar.
+/// The reader toolbar shares one row with the host's reading-space navigation.
+double readingCompanionToolbarHeight(BuildContext context) =>
+    MediaQuery.sizeOf(context).width >= 600 ? 72 : 56;
+
+typedef ReadingCompanionToolbarBuilder =
+    Widget Function(BuildContext context, Widget tools);
+
+/// Book source reader embedded in the reading space.
 ///
 /// The host owns the actual Agent conversation and composer. The reader only
 /// owns navigation in the material and the selected passage's placement.
@@ -170,6 +177,7 @@ class ReadingCompanion extends StatefulWidget {
     this.onToggleImmersive,
     this.onFreeChat,
     this.onDarkChanged,
+    this.toolbarBuilder,
   });
 
   final int? bookId;
@@ -190,6 +198,7 @@ class ReadingCompanion extends StatefulWidget {
   final VoidCallback? onToggleImmersive;
   final VoidCallback? onFreeChat;
   final ValueChanged<bool>? onDarkChanged;
+  final ReadingCompanionToolbarBuilder? toolbarBuilder;
 
   @override
   ReadingCompanionState createState() => ReadingCompanionState();
@@ -208,10 +217,19 @@ class ReadingCompanionState extends State<ReadingCompanion> {
   (int, int, String)? _documentIdentity;
   GlobalKey<_CompanionDocumentState>? _documentKey;
 
-  bool finishInkForBack() {
+  bool closeReaderPanelForBack() =>
+      _documentKey?.currentState?._closeReaderPanel() ?? false;
+
+  bool finishInkForBack({VoidCallback? onSaved}) {
     final state = _documentKey?.currentState;
     if (state == null || !state._inkEditing) return false;
-    unawaited(state._finishInk());
+    if (!state._inkSaving) {
+      unawaited(
+        state._finishInk().then((_) {
+          if (state.mounted && !state._inkEditing) onSaved?.call();
+        }),
+      );
+    }
     return true;
   }
 
@@ -406,6 +424,17 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     if (saved == true && mounted) AppToast.show(context, '已保存到本书笔记');
   }
 
+  Widget _bookFallback(BuildContext context, Widget content) {
+    final toolbar = widget.toolbarBuilder;
+    if (toolbar == null || widget.immersive) return content;
+    return Column(
+      children: [
+        toolbar(context, const SizedBox.shrink()),
+        Expanded(child: content),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) => Material(
     color: Colors.white,
@@ -418,13 +447,16 @@ class ReadingCompanionState extends State<ReadingCompanion> {
               future: _book,
               builder: (context, snapshot) {
                 if (snapshot.connectionState != ConnectionState.done) {
-                  return const _ReadingPlaceholder();
+                  return _bookFallback(context, const _ReadingPlaceholder());
                 }
                 if (snapshot.hasError) {
-                  return _ReaderStatus(
-                    '阅读资料暂时无法打开',
-                    action: '重试',
-                    onAction: _reloadBook,
+                  return _bookFallback(
+                    context,
+                    _ReaderStatus(
+                      '阅读资料暂时无法打开',
+                      action: '重试',
+                      onAction: _reloadBook,
+                    ),
                   );
                 }
                 final book = snapshot.requireData;
@@ -433,16 +465,19 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                   final chooseBook = widget.bookId == null
                       ? widget.onChooseBook
                       : null;
-                  return _ReaderStatus(
-                    widget.bookId == null ? '选择一本书后开始伴读' : '这本书还没有阅读资料',
-                    action: widget.bookId != null
-                        ? '打开本书资料'
-                        : chooseBook == null
-                        ? '打开书库'
-                        : '选择书籍',
-                    onAction:
-                        chooseBook ??
-                        (widget.onOpenLibrary == null ? null : _openLibrary),
+                  return _bookFallback(
+                    context,
+                    _ReaderStatus(
+                      widget.bookId == null ? '选择一本书后开始伴读' : '这本书还没有阅读资料',
+                      action: widget.bookId != null
+                          ? '打开本书资料'
+                          : chooseBook == null
+                          ? '打开书库'
+                          : '选择书籍',
+                      onAction:
+                          chooseBook ??
+                          (widget.onOpenLibrary == null ? null : _openLibrary),
+                    ),
                   );
                 }
                 final current =
@@ -475,6 +510,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                       : widget.onToggleImmersive,
                   onFreeChat: _chatOpen ? null : widget.onFreeChat,
                   onDarkChanged: widget.onDarkChanged,
+                  toolbarBuilder: widget.toolbarBuilder,
                   onSwitchFormat: pdf.isNotEmpty && ebooks.isNotEmpty
                       ? () {
                           final alternatives = _isCompanionPdf(current)
@@ -633,6 +669,7 @@ class _CompanionDocument extends StatefulWidget {
     this.onSwitchFormat,
     this.onFreeChat,
     this.onDarkChanged,
+    this.toolbarBuilder,
   });
 
   final BookSourceRecord source;
@@ -646,6 +683,7 @@ class _CompanionDocument extends StatefulWidget {
   final VoidCallback? onSwitchFormat;
   final VoidCallback? onFreeChat;
   final ValueChanged<bool>? onDarkChanged;
+  final ReadingCompanionToolbarBuilder? toolbarBuilder;
 
   @override
   State<_CompanionDocument> createState() => _CompanionDocumentState();
@@ -653,6 +691,8 @@ class _CompanionDocument extends StatefulWidget {
 
 bool _isCompanionPdf(BookSourceRecord source) =>
     normalizeBookSourceFormat(source.format) == 'pdf';
+
+enum _ReaderPanel { outline, progress, display }
 
 class _CompanionDocumentState extends State<_CompanionDocument> {
   static const _preferences = ReaderPaginationPreferences();
@@ -665,6 +705,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   int _pdfPage = 1;
   int _pdfPageCount = 0;
   int? _pageBeforeJump;
+  _ReaderPanel? _activePanel;
+  LocalHistoryEntry? _panelHistory;
+  WidgetBuilder? _outlinePanel;
+  double? _progressPreview;
   double _fontScale = 1;
   double _marginFraction = .04;
   double _lineScale = 1;
@@ -707,7 +751,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       brightness: _dark ? Brightness.dark : Brightness.light,
       dynamicSchemeVariant: DynamicSchemeVariant.monochrome,
     );
-    return Theme.of(context).copyWith(colorScheme: scheme);
+    final base = Theme.of(context);
+    return base.copyWith(
+      brightness: scheme.brightness,
+      colorScheme: scheme,
+      scaffoldBackgroundColor: _dark ? _paperDark : Colors.white,
+      textTheme: base.textTheme.apply(bodyColor: _ink, displayColor: _ink),
+      iconTheme: base.iconTheme.copyWith(color: _ink),
+    );
   }
 
   bool _renderedChapter = false;
@@ -1189,6 +1240,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   @override
   void dispose() {
+    final panelHistory = _panelHistory;
+    _panelHistory = null;
+    panelHistory?.remove();
     _translationDelay?.cancel();
     ++_translationRevision;
     if (_hasBrightnessOverride) unawaited(_applyBrightness(null));
@@ -1250,12 +1304,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       rect,
       Paint()
         ..color = Colors.white
+        ..isAntiAlias = false
         ..blendMode = BlendMode.difference,
     );
     canvas.drawRect(
       rect,
       Paint()
         ..color = _paperDark
+        ..isAntiAlias = false
         ..blendMode = BlendMode.plus,
     );
   }
@@ -1285,7 +1341,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     return (document: document, anchor: saved);
   }
 
-  Future<void> _showOutline(
+  void _showOutline(
     List<String> titles,
     int current,
     ValueChanged<int> onSelected, {
@@ -1293,64 +1349,26 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     Set<int> groupLabels = const {},
     List<int> pages = const [],
     int? readingPage,
-  }) async {
-    final theme = _readerTheme(context);
-    final selected = await showModalBottomSheet<int>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: theme.colorScheme.surface,
-      builder: (context) => Theme(
-        data: theme,
-        child: SafeArea(
-          top: false,
-          child: SizedBox(
-            height: MediaQuery.sizeOf(context).height * .54,
-            child: Column(
-              children: [
-                ListTile(
-                  title: const Text('目录'),
-                  trailing: IconButton(
-                    tooltip: '关闭目录',
-                    icon: const Icon(Icons.close),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                ),
-                const Divider(height: 1),
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: titles.length,
-                    itemBuilder: (context, index) => ListTile(
-                      title: Text(titles[index]),
-                      contentPadding: EdgeInsetsDirectional.only(
-                        start: levels.isEmpty
-                            ? 16
-                            : 16 + 12.0 * levels[index].clamp(0, 6),
-                        end: 16,
-                      ),
-                      enabled: !groupLabels.contains(index),
-                      selected: index == current,
-                      selectedTileColor: theme.colorScheme.surfaceContainerHigh,
-                      subtitle: index == current
-                          ? Text(
-                              readingPage == null
-                                  ? '正在读'
-                                  : '正在读 · 第 $readingPage 页',
-                            )
-                          : null,
-                      trailing: pages.isEmpty ? null : Text('${pages[index]}'),
-                      onTap: groupLabels.contains(index)
-                          ? null
-                          : () => Navigator.pop(context, index),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+  }) {
+    _openReaderPanel(
+      _ReaderPanel.outline,
+      outline: (context) => _ReaderOutlineList(
+        titles: titles,
+        current: current,
+        onSelected: (index) {
+          _closeReaderPanel();
+          onSelected(index);
+        },
+        levels: levels,
+        groupLabels: groupLabels,
+        pages: pages,
+        readingPage: readingPage,
+        wide: _readerWide,
+        ink: _ink,
+        rule: _readerRule,
+        selectedColor: _readerSelected,
       ),
     );
-    if (mounted && selected != null) onSelected(selected);
   }
 
   void _chapter(
@@ -1372,7 +1390,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     unawaited(_preferences.saveAnchor(bookId: _source.bookId, anchor: next));
   }
 
-  Future<void> _showFlowOutline(
+  void _showFlowOutline(
     XiaoqiDocument document,
     int chapterIndex,
     String? blockId,
@@ -1387,19 +1405,30 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         )
         .toList(growable: false);
     if (!entries.any((entry) => entry.chapterId != null)) {
-      return _showOutline(
+      _showOutline(
         chapters.map((chapter) => chapter.title).toList(growable: false),
         chapterIndex,
         (index) => _chapter(chapters[index]),
       );
+      return;
     }
 
     final currentChapterId = chapters[chapterIndex].id;
-    final currentEntry = entries.indexWhere(
-      (entry) =>
-          entry.chapterId == currentChapterId && entry.blockId == blockId,
+    final currentBlocks = chapters[chapterIndex].blocks;
+    final currentBlock = currentBlocks.indexWhere(
+      (block) => block.id == blockId,
     );
-    return _showOutline(
+    final positions = {
+      for (var index = 0; index < currentBlocks.length; index++)
+        currentBlocks[index].id: index,
+    };
+    final currentEntry = entries.lastIndexWhere((entry) {
+      if (entry.chapterId != currentChapterId) return false;
+      if (entry.blockId == null) return true;
+      final index = positions[entry.blockId];
+      return index != null && index <= currentBlock;
+    });
+    _showOutline(
       entries.map((entry) => entry.title).toList(growable: false),
       currentEntry >= 0
           ? currentEntry
@@ -1441,230 +1470,282 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     }
     _renderedChapter = true;
     final assets = {for (final asset in document.assets) asset.id: asset};
-    return Column(
-      children: [
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, dimensions) {
-              return ReflowDocumentPager(
-                verticalPadding: EdgeInsets.fromLTRB(
-                  dimensions.maxWidth * _marginFraction,
-                  16,
-                  dimensions.maxWidth * _marginFraction,
-                  28,
-                ),
-                key: ValueKey(_navigationRevision),
-                sourceId: _sourceKey,
-                document: document,
-                initialChapterId: chapter.id,
-                initialAnchor: current,
-                mode: ReaderPaginationMode.vertical,
-                verticalBackground: _dark ? _paperDark : Colors.white,
-                onVisibleBlocksChanged: _onVisibleBlocks,
-                verticalChapterTitleStyle: TextStyle(
-                  fontFamily: 'NotoSerifCJKSC',
-                  fontSize: dimensions.maxWidth >= 600 ? 36 : 26,
-                  height: 1.4,
-                  fontWeight: FontWeight.w700,
-                  color: _ink,
-                ),
-                onAnchorChanged: (value) {
-                  _flowPosition = value;
-                  unawaited(
-                    _preferences.saveAnchor(
-                      bookId: _source.bookId,
-                      anchor: value,
-                    ),
-                  );
-                },
-                blockBuilder: (context, slice, setSelection) {
-                  final translation = _translationEnabled
-                      ? _flowTranslations[slice.block.id]
-                      : null;
-                  final block = XiaoqiDocumentBlockView(
-                    block: slice.block,
-                    asset: assets[slice.block.assetId],
-                    textOverride: translation ?? slice.text,
-                    tableRowsOverride: slice.tableRows,
-                    continuation: slice.continuation,
-                    onSelectionChanged: (selected) {
-                      setSelection(selected);
-                      _reportSelection(selected);
-                    },
-                    onTextTap: () {
-                      if (!_selectionActive && !_inkEditing) {
-                        widget.onToggleImmersive?.call();
-                      }
-                    },
-                    contextMenuBuilder: (context, editable) =>
-                        _flowSelection(editable, chapter, slice),
-                    textStyleBuilder: (style) => style.copyWith(
-                      fontFamily: slice.block.kind == 'code'
-                          ? 'monospace'
-                          : 'NotoSerifCJKSC',
-                      color: _ink,
-                      height: (style.height ?? 1.5) * _lineScale,
-                      fontSize:
-                          (_fontScale * (style.fontSize ?? 17)) +
-                          (dimensions.maxWidth >= 600 ? 3 : 0),
-                    ),
-                  );
-                  final location = FlowReaderAnchor(
-                    sourceId: _sourceKey,
-                    chapterId: chapter.id,
-                    blockId: slice.block.id,
-                    characterOffset: slice.startOffset,
-                  );
-                  return Stack(
-                    children: [
-                      block,
-                      Positioned.fill(
-                        child: _inkSurface(
-                          location,
-                          translation == null
-                              ? 'original'
-                              : 'ebook-translation',
-                          text: translation ?? slice.text,
-                        ),
-                      ),
-                    ],
-                  );
-                },
+    return _footerWithBody(
+      body: LayoutBuilder(
+        builder: (context, dimensions) {
+          return ReflowDocumentPager(
+            verticalPadding: EdgeInsets.fromLTRB(
+              dimensions.maxWidth * _marginFraction,
+              16,
+              dimensions.maxWidth * _marginFraction,
+              28,
+            ),
+            key: ValueKey(_navigationRevision),
+            sourceId: _sourceKey,
+            document: document,
+            initialChapterId: chapter.id,
+            initialAnchor: current,
+            mode: ReaderPaginationMode.vertical,
+            verticalBackground: _dark ? _paperDark : Colors.white,
+            onVisibleBlocksChanged: _onVisibleBlocks,
+            verticalChapterTitleStyle: TextStyle(
+              fontFamily: 'NotoSerifCJKSC',
+              fontSize: dimensions.maxWidth >= 600 ? 36 : 26,
+              height: 1.4,
+              fontWeight: FontWeight.w700,
+              color: _ink,
+            ),
+            onAnchorChanged: (value) {
+              _flowPosition = value;
+              unawaited(
+                _preferences.saveAnchor(bookId: _source.bookId, anchor: value),
               );
             },
-          ),
-        ),
-        _footer(
-          title: chapter.title,
-          page: chapterIndex + 1,
-          pageCount: chapters.length,
-          onPageSelected: (page) => _chapter(chapters[page - 1]),
-          onRestoreFlow: (position) {
-            final target = chapters
-                .where((chapter) => chapter.id == position.chapterId)
-                .firstOrNull;
-            if (target != null) {
-              _chapter(
-                target,
-                blockId: position.blockId,
-                characterOffset: position.characterOffset,
+            blockBuilder: (context, slice, setSelection) {
+              final translation = _translationEnabled
+                  ? _flowTranslations[slice.block.id]
+                  : null;
+              final block = XiaoqiDocumentBlockView(
+                block: slice.block,
+                asset: assets[slice.block.assetId],
+                textOverride: translation ?? slice.text,
+                tableRowsOverride: slice.tableRows,
+                continuation: slice.continuation,
+                onSelectionChanged: (selected) {
+                  setSelection(selected);
+                  _reportSelection(selected);
+                },
+                onTextTap: () {
+                  if (!_selectionActive && !_inkEditing) {
+                    widget.onToggleImmersive?.call();
+                  }
+                },
+                contextMenuBuilder: (context, editable) =>
+                    _flowSelection(editable, chapter, slice),
+                textStyleBuilder: (style) => style.copyWith(
+                  fontFamily: slice.block.kind == 'code'
+                      ? 'monospace'
+                      : 'NotoSerifCJKSC',
+                  color: _ink,
+                  height: (style.height ?? 1.5) * _lineScale,
+                  fontSize:
+                      (_fontScale * (style.fontSize ?? 17)) +
+                      (dimensions.maxWidth >= 600 ? 3 : 0),
+                ),
               );
-            }
-          },
-          onOutline: () =>
-              _showFlowOutline(document, chapterIndex, current?.blockId),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _showDisplaySettings() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (context) => StatefulBuilder(
-        builder: (context, updatePanel) {
-          final theme = _readerTheme(context);
-          void update(VoidCallback change) {
-            if (!mounted) return;
-            setState(change);
-            updatePanel(() {});
-          }
-
-          Widget slider(
-            String label,
-            double value,
-            double min,
-            double max,
-            ValueChanged<double> onChanged,
-          ) => Row(
-            children: [
-              SizedBox(width: 56, child: Text(label)),
-              Expanded(
-                child: Slider(
-                  label: label,
-                  value: value.clamp(min, max).toDouble(),
-                  min: min,
-                  max: max,
-                  onChanged: onChanged,
-                ),
-              ),
-            ],
-          );
-
-          return Theme(
-            data: theme,
-            child: Material(
-              color: theme.colorScheme.surface,
-              child: SafeArea(
-                top: false,
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('显示', style: theme.textTheme.titleMedium),
-                      if (defaultTargetPlatform == TargetPlatform.android)
-                        slider('亮度', _brightness, .05, 1, (value) {
-                          update(() {
-                            _brightness = value;
-                            _hasBrightnessOverride = true;
-                          });
-                          unawaited(_applyBrightness(value));
-                        }),
-                      Row(
-                        children: [
-                          const SizedBox(width: 56, child: Text('主题')),
-                          SegmentedButton<bool>(
-                            segments: const [
-                              ButtonSegment(value: false, label: Text('默认')),
-                              ButtonSegment(value: true, label: Text('深色')),
-                            ],
-                            selected: {_dark},
-                            onSelectionChanged: (value) {
-                              update(() => _dark = value.single);
-                              widget.onDarkChanged?.call(_dark);
-                              _classifyNearbyPages();
-                              if (_pdf.isReady) _pdf.invalidate();
-                            },
-                          ),
-                        ],
-                      ),
-                      if (!_isCompanionPdf(_source)) ...[
-                        slider(
-                          '字号',
-                          _fontScale,
-                          .8,
-                          1.5,
-                          (value) => update(() => _fontScale = value),
-                        ),
-                        slider(
-                          '边距',
-                          _marginFraction,
-                          .025,
-                          .12,
-                          (value) => update(() => _marginFraction = value),
-                        ),
-                        slider(
-                          '行距',
-                          _lineScale,
-                          .85,
-                          1.35,
-                          (value) => update(() => _lineScale = value),
-                        ),
-                      ],
-                    ],
+              final location = FlowReaderAnchor(
+                sourceId: _sourceKey,
+                chapterId: chapter.id,
+                blockId: slice.block.id,
+                characterOffset: slice.startOffset,
+              );
+              return Stack(
+                children: [
+                  block,
+                  Positioned.fill(
+                    child: _inkSurface(
+                      location,
+                      translation == null ? 'original' : 'ebook-translation',
+                      text: translation ?? slice.text,
+                    ),
                   ),
-                ),
-              ),
-            ),
+                ],
+              );
+            },
           );
         },
       ),
+      page: chapterIndex + 1,
+      pageCount: chapters.length,
+      chapterTitle: chapter.title,
+      onPageSelected: (page) => _chapter(chapters[page - 1]),
+      onRestoreFlow: (position) {
+        final target = chapters
+            .where((chapter) => chapter.id == position.chapterId)
+            .firstOrNull;
+        if (target != null) {
+          _chapter(
+            target,
+            blockId: position.blockId,
+            characterOffset: position.characterOffset,
+          );
+        }
+      },
+      onOutline: () => _showFlowOutline(
+        document,
+        chapterIndex,
+        _flowPosition?.chapterId == chapter.id
+            ? _flowPosition?.blockId
+            : current?.blockId,
+      ),
     );
-    if (!mounted) return;
+  }
+
+  Widget _displayPanel() {
+    final pdf = _isCompanionPdf(_source);
+    Widget setting(String label, Widget control, {double wideHeight = 54}) =>
+        ConstrainedBox(
+          constraints: BoxConstraints(minHeight: _readerWide ? wideHeight : 48),
+          child: Row(
+            children: [
+              Expanded(flex: _readerWide ? 28 : 22, child: Text(label)),
+              Expanded(flex: _readerWide ? 72 : 78, child: control),
+            ],
+          ),
+        );
+    Widget slider(
+      String label,
+      double value,
+      double min,
+      double max,
+      Widget start,
+      Widget end,
+      ValueChanged<double> onChanged, {
+      double wideHeight = 54,
+    }) => setting(
+      label,
+      Row(
+        children: [
+          ExcludeSemantics(child: start),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: _readerWide ? 20 : 12),
+              child: _readerSlider(
+                value: value,
+                min: min,
+                max: max,
+                onChanged: onChanged,
+                description: label,
+              ),
+            ),
+          ),
+          ExcludeSemantics(child: end),
+        ],
+      ),
+      wideHeight: wideHeight,
+    );
+    Widget themeChoice(bool dark) {
+      final selected = _dark == dark;
+      final background = selected
+          ? Colors.transparent
+          : dark
+          ? const Color(0xFF333333)
+          : const Color(0xFFE6E0D6);
+      final foreground = selected
+          ? _ink
+          : dark
+          ? const Color(0xFFF7F5F1)
+          : const Color(0xFF262626);
+      return Semantics(
+        selected: selected,
+        child: TextButton(
+          onPressed: () {
+            if (selected) return;
+            setState(() => _dark = dark);
+            widget.onDarkChanged?.call(_dark);
+            _classifyNearbyPages();
+            if (_pdf.isReady) _pdf.invalidate();
+          },
+          style: TextButton.styleFrom(
+            foregroundColor: foreground,
+            backgroundColor: background,
+            minimumSize: Size(_readerWide ? 110 : 67, 40),
+            padding: EdgeInsets.symmetric(horizontal: _readerWide ? 15 : 8),
+            side: selected ? BorderSide(color: foreground, width: 1.4) : null,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+            textStyle: Theme.of(
+              context,
+            ).textTheme.labelLarge?.copyWith(fontSize: _readerWide ? 18 : 14),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (selected) ...[
+                Icon(Icons.check, size: _readerWide ? 20 : 15),
+                const SizedBox(width: 6),
+              ],
+              Text(dark ? '深色' : '默认'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (defaultTargetPlatform == TargetPlatform.android) ...[
+            slider(
+              '亮度',
+              _brightness,
+              .05,
+              1,
+              _readerIcon('assets/icons/chat_note_editor/sun.svg', 20),
+              _readerIcon('assets/icons/chat_note_editor/sun.svg', 26),
+              (value) {
+                setState(() {
+                  _brightness = value;
+                  _hasBrightnessOverride = true;
+                });
+                unawaited(_applyBrightness(value));
+              },
+              wideHeight: pdf ? 54 : 65,
+            ),
+            Divider(height: 1, thickness: 1, color: _readerRule),
+          ],
+          setting(
+            '主题',
+            Align(
+              alignment: pdf ? Alignment.centerRight : Alignment.centerLeft,
+              child: Wrap(
+                spacing: _readerWide ? 25 : 8,
+                children: [themeChoice(false), themeChoice(true)],
+              ),
+            ),
+            wideHeight: pdf ? 54 : 64,
+          ),
+          if (!pdf) ...[
+            Divider(height: 1, thickness: 1, color: _readerRule),
+            slider(
+              '字号',
+              _fontScale,
+              .8,
+              1.5,
+              const Text('A', style: TextStyle(fontSize: 17)),
+              const Text('A', style: TextStyle(fontSize: 23)),
+              (value) => setState(() => _fontScale = value),
+            ),
+            Divider(height: 1, thickness: 1, color: _readerRule),
+            slider(
+              '边距',
+              _marginFraction,
+              .025,
+              .12,
+              const Text('小'),
+              const Text('大'),
+              (value) => setState(() => _marginFraction = value),
+            ),
+            Divider(height: 1, thickness: 1, color: _readerRule),
+            slider(
+              '行距',
+              _lineScale,
+              .85,
+              1.35,
+              const Text('紧'),
+              const Text('松'),
+              (value) => setState(() => _lineScale = value),
+              wideHeight: 65,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _persistDisplaySettings() async {
     final prefs = await SharedPreferences.getInstance();
     await Future.wait([
       prefs.setBool('reading-companion.dark', _dark),
@@ -1745,9 +1826,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   Widget _pdfDocument(ReaderAnchor? anchor) {
     final page = anchor is PdfReaderAnchor ? anchor.pageNumber : 1;
-    return Column(
-      children: [
-        Expanded(
+    final surround = _dark ? const Color(0xFF111315) : const Color(0xFFF2F3F5);
+    return _footerWithBody(
+      body: ColoredBox(
+        color: surround,
+        child: Padding(
+          padding: EdgeInsets.only(
+            top: widget.immersive ? 0 : (_readerWide ? 16 : 9),
+          ),
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -1756,9 +1842,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 controller: _pdf,
                 initialPageNumber: page,
                 params: PdfViewerParams(
-                  backgroundColor: _dark
-                      ? const Color(0xFF111315)
-                      : Colors.grey,
+                  backgroundColor: surround,
+                  margin: 17,
+                  pageDropShadow: _dark
+                      ? null
+                      : const BoxShadow(
+                          color: Color(0x0E000000),
+                          blurRadius: 7,
+                          offset: Offset(0, 2),
+                        ),
                   pagePaintCallbacks: [_paintDarkPage],
                   pageOverlaysBuilder: (context, rect, page) => [
                     Positioned.fill(
@@ -1852,16 +1944,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             ],
           ),
         ),
-        _footer(
-          title: _source.displayName,
-          page: _pdfPage,
-          pageCount: _pdfPageCount,
-          onPageSelected: (next) {
-            if (_pdf.isReady) unawaited(_pdf.goToPage(pageNumber: next));
-          },
-          onOutline: _pdfPageCount == 0 ? null : _showPdfOutline,
-        ),
-      ],
+      ),
+      page: _pdfPage,
+      pageCount: _pdfPageCount,
+      onPageSelected: (next) {
+        if (_pdf.isReady) unawaited(_pdf.goToPage(pageNumber: next));
+      },
+      onOutline: _pdfPageCount == 0 ? null : _showPdfOutline,
     );
   }
 
@@ -1980,18 +2069,17 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final titles = entries.isEmpty
         ? pages.map((page) => '第 $page 页').toList(growable: false)
         : entries.map((entry) => entry.title).toList(growable: false);
-    unawaited(
-      _showOutline(
-        titles,
-        pages.lastIndexWhere((page) => page <= _pdfPage),
-        (index) {
-          if (pages[index] != _pdfPage)
-            setState(() => _pageBeforeJump = _pdfPage);
-          if (_pdf.isReady) unawaited(_pdf.goToPage(pageNumber: pages[index]));
-        },
-        pages: pages,
-        readingPage: _pdfPage,
-      ),
+    _showOutline(
+      titles,
+      pages.lastIndexWhere((page) => page <= _pdfPage),
+      (index) {
+        if (pages[index] != _pdfPage) {
+          setState(() => _pageBeforeJump = _pdfPage);
+        }
+        if (_pdf.isReady) unawaited(_pdf.goToPage(pageNumber: pages[index]));
+      },
+      pages: pages,
+      readingPage: _pdfPage,
     );
   }
 
@@ -2063,136 +2151,727 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     AppToast.show(context, '已复制');
   }
 
-  Widget _footer({
-    required String title,
+  bool get _readerPanelOpen => _activePanel != null;
+  bool get _readerWide => MediaQuery.sizeOf(context).width >= 600;
+  double get _readerSideInset => _readerWide ? 34 : 16;
+  double get _readerProgressHeight => _readerWide ? 52 : 44;
+  double get _readerNavHeight => math.max(
+    _readerWide ? 60.0 : 44.0,
+    MediaQuery.textScalerOf(context).scale(_readerWide ? 18 : 14) + 20,
+  );
+  double get _readerFooterHeight =>
+      _readerNavHeight +
+      _readerProgressHeight +
+      MediaQuery.paddingOf(context).bottom;
+  Color get _readerChrome =>
+      _dark ? const Color(0xFF16181A) : const Color(0xFFFCFCFC);
+  Color get _readerPanelSurface =>
+      _dark ? const Color(0xFF222426) : const Color(0xFFFCFCFC);
+  Color get _readerRule =>
+      _dark ? const Color(0xFF414345) : const Color(0xFFE1E2E3);
+  Color get _readerSelected =>
+      _dark ? const Color(0xFF353739) : const Color(0xFFEBEBEC);
+  Color get _readerMuted =>
+      _dark ? const Color(0xFFB8B5AE) : const Color(0xFF595959);
+
+  void _openReaderPanel(_ReaderPanel panel, {WidgetBuilder? outline}) {
+    if (_activePanel == panel) {
+      _closeReaderPanel();
+      return;
+    }
+    if (_activePanel == _ReaderPanel.display) {
+      unawaited(_persistDisplaySettings());
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    final route = ModalRoute.of(context);
+    if (_panelHistory == null && route != null) {
+      final history = LocalHistoryEntry(
+        impliesAppBarDismissal: false,
+        onRemove: () {
+          if (_panelHistory == null) return;
+          _panelHistory = null;
+          _closeReaderPanel();
+        },
+      );
+      route.addLocalHistoryEntry(history);
+      _panelHistory = history;
+    }
+    setState(() {
+      _activePanel = panel;
+      _outlinePanel = outline;
+      _progressPreview = null;
+    });
+  }
+
+  bool _closeReaderPanel() {
+    if (!mounted || !_readerPanelOpen) return false;
+    final saveDisplay = _activePanel == _ReaderPanel.display;
+    final history = _panelHistory;
+    _panelHistory = null;
+    history?.remove();
+    setState(() {
+      _activePanel = null;
+      _outlinePanel = null;
+      _progressPreview = null;
+    });
+    if (saveDisplay) unawaited(_persistDisplaySettings());
+    return true;
+  }
+
+  Widget _readerIcon(String asset, double size, {Color? color}) =>
+      SvgPicture.asset(
+        asset,
+        width: size,
+        height: size,
+        excludeFromSemantics: true,
+        colorFilter: ColorFilter.mode(color ?? _ink, BlendMode.srcIn),
+      );
+
+  Widget _readerSlider({
+    required double value,
+    required double min,
+    required double max,
+    required String description,
+    required ValueChanged<double>? onChanged,
+    ValueChanged<double>? onChangeEnd,
+    SemanticFormatterCallback? formatValue,
+    bool compact = false,
+  }) => Semantics(
+    label: description,
+    child: SliderTheme(
+      data: SliderThemeData(
+        activeTrackColor: _dark
+            ? const Color(0xFFC0BFBB)
+            : const Color(0xFF4B4B4B),
+        inactiveTrackColor: _dark
+            ? const Color(0xFF606163)
+            : const Color(0xFFD7D8D9),
+        thumbColor: _dark ? const Color(0xFFF0ECE3) : const Color(0xFF363636),
+        overlayColor: _ink.withValues(alpha: .08),
+        trackShape: const RoundedRectSliderTrackShape(),
+        trackHeight: compact ? 3.5 : 4.5,
+        thumbShape: RoundSliderThumbShape(
+          enabledThumbRadius: compact ? 5.5 : 7,
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 7),
+        showValueIndicator: ShowValueIndicator.never,
+      ),
+      child: Slider(
+        value: value.clamp(min, max).toDouble(),
+        min: min,
+        max: max,
+        onChanged: onChanged,
+        onChangeEnd: onChangeEnd,
+        semanticFormatterCallback: formatValue,
+      ),
+    ),
+  );
+
+  Widget _footerWithBody({
+    required Widget body,
     required int page,
     required int pageCount,
+    String? chapterTitle,
     required ValueChanged<int> onPageSelected,
     required VoidCallback? onOutline,
     ValueChanged<FlowReaderAnchor>? onRestoreFlow,
   }) {
-    if (widget.immersive) {
-      return SafeArea(
-        top: false,
-        minimum: const EdgeInsets.fromLTRB(12, 2, 16, 5),
-        child: Align(
-          alignment: Alignment.centerRight,
-          child: Text(
-            pageCount > 0 ? '$page / $pageCount' : '',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ),
-      );
-    }
+    final shownPage = (_progressPreview ?? page.toDouble()).round();
+    final pdf = _isCompanionPdf(_source);
+    final section = chapterTitle?.trim() ?? '';
+    final sectionNumber = RegExp(
+      r'^第\s*[0-9零〇一二三四五六七八九十百千]+\s*[章节部卷篇回]',
+    ).stringMatch(section);
+    String locationLabel(int number) => pdf
+        ? '$number / $pageCount'
+        : number != page || section.isEmpty
+        ? '第 $number 章'
+        : sectionNumber ?? section;
+    final maxPage = math.max(1, pageCount).toDouble();
     void jumpTo(int destination) {
-      if (destination == page) return;
-      setState(() {
-        _pageBeforeJump = page;
-        _flowPositionBeforeJump = _flowPosition;
-      });
-      onPageSelected(destination);
+      final closeProgress = _activePanel == _ReaderPanel.progress;
+      if (closeProgress) _closeReaderPanel();
+      if (destination != page || !closeProgress) {
+        setState(() {
+          _progressPreview = null;
+          if (destination != page) {
+            _pageBeforeJump = page;
+            _flowPositionBeforeJump = _flowPosition;
+          }
+        });
+      }
+      if (destination != page) onPageSelected(destination);
     }
 
-    Future<void> showProgress() async {
-      var preview = page.toDouble();
-      final previous = _pageBeforeJump;
-      final destination = await showModalBottomSheet<int>(
-        context: context,
-        showDragHandle: true,
-        builder: (context) => StatefulBuilder(
-          builder: (context, update) => SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('阅读进度', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 12),
-                  Text('${preview.round()} / $pageCount'),
-                  Slider(
-                    value: preview,
-                    min: 1,
-                    max: math.max(1, pageCount).toDouble(),
-                    onChanged: pageCount > 1
-                        ? (value) => update(() => preview = value)
-                        : null,
-                    onChangeEnd: (value) =>
-                        Navigator.pop(context, value.round()),
+    void restoreJump(int previous) {
+      final position = _flowPositionBeforeJump;
+      _closeReaderPanel();
+      setState(() {
+        _pageBeforeJump = null;
+        _flowPositionBeforeJump = null;
+      });
+      if (position != null && onRestoreFlow != null) {
+        onRestoreFlow(position);
+      } else {
+        onPageSelected(previous);
+      }
+    }
+
+    Widget progressSlider({bool compact = false}) => _readerSlider(
+      value: shownPage.toDouble(),
+      min: 1,
+      max: maxPage,
+      onChanged: pageCount > 1
+          ? (value) => setState(() => _progressPreview = value)
+          : null,
+      onChangeEnd: pageCount > 1 ? (value) => jumpTo(value.round()) : null,
+      description: '阅读进度',
+      formatValue: (value) => '${value.round()} / $pageCount',
+      compact: compact,
+    );
+
+    final size = _readerWide ? 18.0 : 14.0;
+    Widget progressPanel() => SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 5, bottom: 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    pdf
+                        ? '第 $shownPage 页 / 共 $pageCount 页'
+                        : '第 $shownPage 章 / 共 $pageCount 章',
+                    style: const TextStyle(fontWeight: FontWeight.w500),
                   ),
-                  if (previous != null)
-                    TextButton.icon(
-                      onPressed: () => Navigator.pop(context, previous),
-                      icon: const Icon(Icons.undo),
-                      label: const Text('返回跳转前位置'),
+                ),
+                Text('${(shownPage * 100 / pageCount).round()}%'),
+              ],
+            ),
+          ),
+          SizedBox(height: 38, child: progressSlider()),
+          DefaultTextStyle.merge(
+            style: TextStyle(color: _readerMuted, fontSize: size - 2),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(pdf ? '第 1 页' : '第 1 章'),
+                Text('第 $pageCount ${pdf ? '页' : '章'}'),
+              ],
+            ),
+          ),
+          if (_pageBeforeJump case final previous?)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => restoreJump(previous),
+                icon: _readerIcon('assets/icons/chat_note_editor/undo.svg', 21),
+                label: Text(pdf ? '返回第 $previous 页' : '返回跳转前位置'),
+                style: TextButton.styleFrom(
+                  foregroundColor: _ink,
+                  padding: const EdgeInsets.only(right: 14),
+                  textStyle: Theme.of(
+                    context,
+                  ).textTheme.labelLarge?.copyWith(fontSize: size),
+                ),
+              ),
+            )
+          else
+            const SizedBox(height: 14),
+        ],
+      ),
+    );
+    final panel = widget.immersive ? null : _activePanel;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final panelBottom = _readerNavHeight + bottomInset;
+    final shortcutClearance =
+        !widget.immersive &&
+            chapterTitle != null &&
+            (widget.toolbarBuilder != null ||
+                widget.onFreeChat != null ||
+                _foreignSource)
+        ? 52.0
+        : 0.0;
+    return LayoutBuilder(
+      builder: (context, dimensions) => Stack(
+        fit: StackFit.expand,
+        children: [
+          Column(
+            children: [
+              Expanded(
+                child: ExcludeFocus(
+                  excluding: panel != null,
+                  child: ExcludeSemantics(
+                    excluding: panel != null,
+                    child: Padding(
+                      padding: EdgeInsets.only(bottom: shortcutClearance),
+                      child: body,
                     ),
-                ],
+                  ),
+                ),
+              ),
+              if (!widget.immersive)
+                Material(
+                  color: _readerChrome,
+                  child: Padding(
+                    padding: EdgeInsets.only(bottom: bottomInset),
+                    child: Column(
+                      children: [
+                        SizedBox(
+                          height: _readerProgressHeight,
+                          child: panel != null || pageCount == 0
+                              ? null
+                              : Padding(
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: _readerSideInset,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: progressSlider(compact: true),
+                                      ),
+                                      SizedBox(width: _readerWide ? 45 : 12),
+                                      ConstrainedBox(
+                                        constraints: BoxConstraints(
+                                          maxWidth: _readerWide ? 150 : 92,
+                                        ),
+                                        child: Text(
+                                          locationLabel(shownPage),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: _ink,
+                                            fontSize: size,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                        ),
+                        _readerBottomNavigation(
+                          onOutline: onOutline,
+                          onProgress: pageCount > 0
+                              ? () => _openReaderPanel(_ReaderPanel.progress)
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          if (widget.immersive && pageCount > 0)
+            PositionedDirectional(
+              end: _readerSideInset,
+              bottom: bottomInset + 8,
+              child: IgnorePointer(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 200),
+                  child: Text(
+                    locationLabel(page),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12, color: _readerMuted),
+                  ),
+                ),
+              ),
+            ),
+          if (panel != null) ...[
+            Positioned.fill(
+              bottom: panelBottom,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closeReaderPanel,
+                excludeFromSemantics: true,
+                child: const SizedBox.expand(),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: panelBottom,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: math.max(0, dimensions.maxHeight - panelBottom),
+                ),
+                child: _readerPanel(panel, switch (panel) {
+                  _ReaderPanel.outline => SizedBox(
+                    height: MediaQuery.sizeOf(context).height * .33,
+                    child: Builder(builder: _outlinePanel!),
+                  ),
+                  _ReaderPanel.progress => progressPanel(),
+                  _ReaderPanel.display => _displayPanel(),
+                }),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _readerBottomNavigation({
+    required VoidCallback? onOutline,
+    required VoidCallback? onProgress,
+  }) {
+    Widget action(
+      _ReaderPanel panel,
+      String icon,
+      String label,
+      VoidCallback? pressed,
+    ) {
+      final active = _activePanel == panel;
+      final foreground = pressed == null ? _readerMuted : _ink;
+      return Expanded(
+        child: Semantics(
+          selected: active,
+          button: true,
+          enabled: pressed != null,
+          child: InkWell(
+            onTap: pressed,
+            child: Center(
+              child: Ink(
+                padding: EdgeInsets.symmetric(
+                  horizontal: _readerWide ? 24 : 8,
+                  vertical: _readerWide ? 7 : 4,
+                ),
+                decoration: active
+                    ? BoxDecoration(
+                        color: _readerSelected,
+                        borderRadius: BorderRadius.circular(
+                          _readerWide ? 13 : 10,
+                        ),
+                      )
+                    : null,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _readerIcon(icon, _readerWide ? 25 : 18, color: foreground),
+                    SizedBox(width: _readerWide ? 13 : 6),
+                    Flexible(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: foreground,
+                          fontSize: _readerWide ? 18 : 14,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
         ),
       );
-      if (!mounted || destination == null) return;
-      if (destination == previous) {
-        final position = _flowPositionBeforeJump;
-        setState(() {
-          _pageBeforeJump = null;
-          _flowPositionBeforeJump = null;
-        });
-        if (position != null && onRestoreFlow != null) {
-          onRestoreFlow(position);
-        } else {
-          onPageSelected(destination);
-        }
-      } else {
-        jumpTo(destination);
-      }
     }
 
-    final colors = _readerTheme(context).colorScheme;
-    Widget action(IconData icon, String label, VoidCallback? pressed) =>
-        Expanded(
-          child: TextButton.icon(
-            onPressed: pressed,
-            icon: Icon(icon, size: 18),
-            label: Text(label),
-          ),
-        );
-    return Material(
-      color: colors.surface,
-      child: SafeArea(
-        top: false,
-        minimum: const EdgeInsets.symmetric(horizontal: 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+    Widget divider() =>
+        Container(color: _readerRule, width: 1, height: _readerWide ? 24 : 18);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: _readerRule)),
+      ),
+      child: SizedBox(
+        height: _readerNavHeight,
+        child: Row(
           children: [
-            if (pageCount > 0)
-              TextButton(
-                onPressed: showProgress,
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: LinearProgressIndicator(
-                        value: (page / pageCount).clamp(0, 1).toDouble(),
-                        minHeight: 2,
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Text('$page / $pageCount'),
-                  ],
-                ),
-              ),
-            Row(
-              children: [
-                action(Icons.format_list_bulleted, '目录', onOutline),
-                action(Icons.tune, '进度', pageCount > 0 ? showProgress : null),
-                action(Icons.text_fields, '显示', _showDisplaySettings),
-              ],
+            action(
+              _ReaderPanel.outline,
+              'assets/icons/note_format/format_list_bulleted.svg',
+              '目录',
+              onOutline,
+            ),
+            divider(),
+            action(
+              _ReaderPanel.progress,
+              'assets/images/reading_companion_progress.svg',
+              '进度',
+              onProgress,
+            ),
+            divider(),
+            action(
+              _ReaderPanel.display,
+              'assets/icons/chat_note_editor/text-aa.svg',
+              '显示',
+              () => _openReaderPanel(_ReaderPanel.display),
             ),
           ],
         ),
       ),
     );
+  }
+
+  Widget _readerPanel(_ReaderPanel panel, Widget content) {
+    final title = switch (panel) {
+      _ReaderPanel.outline => '目录',
+      _ReaderPanel.progress => '阅读进度',
+      _ReaderPanel.display => '显示',
+    };
+    final outline = panel == _ReaderPanel.outline;
+    return Material(
+      color: _readerPanelSurface,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        side: BorderSide(color: _readerRule),
+      ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: outline ? _readerSideInset - 12 : _readerSideInset,
+        ),
+        child: DefaultTextStyle.merge(
+          style: TextStyle(color: _ink, fontSize: _readerWide ? 18 : 14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: _readerWide
+                      ? switch (panel) {
+                          _ReaderPanel.outline => 72,
+                          _ReaderPanel.display =>
+                            _isCompanionPdf(_source) ? 54 : 66,
+                          _ReaderPanel.progress => 54,
+                        }
+                      : 46,
+                ),
+                child: Padding(
+                  padding: EdgeInsetsDirectional.only(start: outline ? 9 : 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Semantics(
+                          header: true,
+                          child: Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: _readerWide ? 23 : 18,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '关闭$title',
+                        onPressed: _closeReaderPanel,
+                        icon: _readerIcon(
+                          'assets/icons/extension_market/detail/close.svg',
+                          _readerWide ? 25 : 21,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (panel != _ReaderPanel.progress)
+                Divider(height: 1, thickness: 1, color: _readerRule),
+              Flexible(child: content),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _shortcut(String label, String tooltip, VoidCallback onPressed) {
+    final diameter = MediaQuery.sizeOf(context).width >= 600 ? 46.0 : 44.0;
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: _dark ? const Color(0xFF3B3C3F) : const Color(0xFF393A3C),
+        shape: const CircleBorder(),
+        elevation: _dark ? 0 : 1,
+        shadowColor: const Color(0x25000000),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          child: SizedBox.square(
+            dimension: diameter,
+            child: Center(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  color: Color(0xFFFDFDFD),
+                  fontWeight: FontWeight.w600,
+                  fontSize: 20,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _toolbar(BuildContext context, {required bool isPdf}) {
+    final wide = MediaQuery.sizeOf(context).width >= 600;
+    final showDoodleLabel = MediaQuery.sizeOf(context).width >= 380;
+    final controlColor = _dark
+        ? const Color(0xFF27292B)
+        : const Color(0xFFF0F1F2);
+    final selectedColor = _dark ? const Color(0xFF48494B) : Colors.white;
+    final library = widget.onChooseSource;
+    Widget segment(bool pdf, String label) {
+      final selected = pdf == isPdf;
+      final onTap = selected ? library : widget.onSwitchFormat;
+      return Tooltip(
+        message: selected && library != null ? '切换阅读资料' : label,
+        excludeFromSemantics: true,
+        child: Semantics(
+          button: true,
+          selected: selected,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(9),
+            onTap: onTap == null
+                ? null
+                : () {
+                    _closeReaderPanel();
+                    onTap();
+                  },
+            child: SizedBox(
+              width: wide ? 61 : (pdf ? 41 : 51),
+              height: 44,
+              child: Center(
+                child: Ink(
+                  height: wide ? 29 : 28,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: selected ? selectedColor : Colors.transparent,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Center(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.clip,
+                      style: TextStyle(
+                        color: selected || onTap != null
+                            ? _ink
+                            : _ink.withValues(alpha: .48),
+                        fontSize: wide ? 14 : 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final tools = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (!_inkEditing) ...[
+          Material(
+            color: controlColor,
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 3),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [segment(true, 'PDF'), segment(false, '电子书')],
+              ),
+            ),
+          ),
+          if (wide) ...[
+            const SizedBox(width: 16),
+            SizedBox(
+              height: 19,
+              child: VerticalDivider(
+                width: 1,
+                color: _ink.withValues(alpha: .22),
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          TextButton(
+            onPressed: !_inkLoaded && !_inkLoadFailed
+                ? null
+                : () {
+                    if (_inkLoadFailed) {
+                      unawaited(_loadInk());
+                      return;
+                    }
+                    _closeReaderPanel();
+                    setState(() {
+                      _inkEditing = true;
+                      _inkErasing = false;
+                    });
+                  },
+            style: TextButton.styleFrom(
+              foregroundColor: _ink,
+              minimumSize: const Size(44, 44),
+              padding: EdgeInsets.symmetric(horizontal: wide ? 8 : 4),
+            ),
+            child: Tooltip(
+              message: '涂鸦',
+              excludeFromSemantics: showDoodleLabel,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SvgPicture.asset(
+                    'assets/images/reading_companion_doodle.svg',
+                    width: wide ? 25 : 20,
+                    height: wide ? 25 : 20,
+                    colorFilter: ColorFilter.mode(
+                      _ink.withValues(alpha: .73),
+                      BlendMode.srcIn,
+                    ),
+                  ),
+                  if (showDoodleLabel) ...[
+                    const SizedBox(width: 6),
+                    Text('涂鸦', style: TextStyle(fontSize: wide ? 16 : 13)),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ] else ...[
+          IconButton(
+            tooltip: '画笔',
+            icon: const Icon(Icons.edit_outlined),
+            isSelected: !_inkErasing,
+            onPressed: _inkSaving
+                ? null
+                : () => setState(() => _inkErasing = false),
+          ),
+          IconButton(
+            tooltip: '橡皮',
+            icon: const Icon(Icons.auto_fix_normal_outlined),
+            isSelected: _inkErasing,
+            onPressed: _inkSaving
+                ? null
+                : () => setState(() => _inkErasing = true),
+          ),
+          IconButton(
+            tooltip: '撤销涂鸦',
+            icon: const Icon(Icons.undo),
+            onPressed: _inkSaving || _inkUndo.isEmpty ? null : _undoInk,
+          ),
+          FilledButton(
+            onPressed: _inkSaving ? null : _finishInk,
+            child: Text(_inkSaving ? '保存中' : '完成'),
+          ),
+        ],
+      ],
+    );
+    return widget.toolbarBuilder?.call(context, tools) ??
+        SizedBox(
+          height: readingCompanionToolbarHeight(context),
+          child: Align(alignment: Alignment.centerRight, child: tools),
+        );
   }
 
   @override
@@ -2208,18 +2887,22 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     child: FutureBuilder(
       future: _loading,
       builder: (context, snapshot) {
+        final data = snapshot.data;
+        final document = data?.document;
+        final Widget body;
         if (snapshot.connectionState != ConnectionState.done) {
-          return const _ReadingPlaceholder();
-        }
-        if (snapshot.hasError) {
-          return _ReaderStatus(
+          body = const _ReadingPlaceholder();
+        } else if (data == null) {
+          body = _ReaderStatus(
             '无法读取这份资料',
             action: widget.onChooseSource != null ? '选择其他资料' : '打开本书资料',
             onAction: widget.onChooseSource ?? widget.onOpenLibrary,
           );
+        } else {
+          body = document == null
+              ? _pdfDocument(data.anchor)
+              : _flow(document, data.anchor);
         }
-        final data = snapshot.requireData;
-        final document = data.document;
         return Material(
           color: _dark ? _paperDark : Colors.white,
           child: Stack(
@@ -2228,123 +2911,38 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               Column(
                 children: [
                   if (!widget.immersive)
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (!_inkEditing && widget.onSwitchFormat != null)
-                            SegmentedButton<bool>(
-                              showSelectedIcon: false,
-                              segments: const [
-                                ButtonSegment(value: true, label: Text('PDF')),
-                                ButtonSegment(value: false, label: Text('电子书')),
-                              ],
-                              selected: {document == null},
-                              onSelectionChanged: (selection) {
-                                if (selection.single != (document == null)) {
-                                  widget.onSwitchFormat?.call();
-                                }
-                              },
-                            ),
-                          if ((_inkEditing ? null : widget.onChooseSource)
-                              case final choose?)
-                            _ReaderButton(
-                              label: '切换阅读资料',
-                              icon: 'assets/images/reading_task_book.svg',
-                              onPressed: choose,
-                            ),
-                          if (!_inkEditing)
-                            TextButton.icon(
-                              icon: SvgPicture.asset(
-                                'assets/images/reading_companion_doodle.svg',
-                                width: 18,
-                                height: 18,
-                                colorFilter: ColorFilter.mode(
-                                  _ink,
-                                  BlendMode.srcIn,
-                                ),
-                              ),
-                              label: const Text('涂鸦'),
-                              onPressed: !_inkLoaded && !_inkLoadFailed
-                                  ? null
-                                  : () {
-                                      if (_inkLoadFailed) {
-                                        unawaited(_loadInk());
-                                        return;
-                                      }
-                                      setState(() {
-                                        _inkEditing = true;
-                                        _inkErasing = false;
-                                      });
-                                    },
-                            )
-                          else ...[
-                            IconButton(
-                              tooltip: '画笔',
-                              icon: const Icon(Icons.edit_outlined),
-                              isSelected: !_inkErasing,
-                              onPressed: _inkSaving
-                                  ? null
-                                  : () => setState(() => _inkErasing = false),
-                            ),
-                            IconButton(
-                              tooltip: '橡皮',
-                              icon: const Icon(Icons.auto_fix_normal_outlined),
-                              isSelected: _inkErasing,
-                              onPressed: _inkSaving
-                                  ? null
-                                  : () => setState(() => _inkErasing = true),
-                            ),
-                            IconButton(
-                              tooltip: '撤销涂鸦',
-                              icon: const Icon(Icons.undo),
-                              onPressed: _inkSaving || _inkUndo.isEmpty
-                                  ? null
-                                  : _undoInk,
-                            ),
-                            FilledButton(
-                              onPressed: _inkSaving ? null : _finishInk,
-                              child: Text(_inkSaving ? '保存中' : '完成'),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  Expanded(
-                    child: document == null
-                        ? _pdfDocument(data.anchor)
-                        : _flow(document, data.anchor),
-                  ),
+                    _toolbar(context, isPdf: _isCompanionPdf(_source)),
+                  Expanded(child: body),
                 ],
               ),
-              if (!widget.immersive && _foreignSource && !_inkEditing)
+              if (data != null &&
+                  !widget.immersive &&
+                  !_readerPanelOpen &&
+                  !_inkEditing)
                 Positioned(
-                  right: 74,
-                  bottom: 110,
-                  child: IconButton.filled(
-                    tooltip: _translationEnabled ? '还原当前正文' : '连续翻译',
-                    onPressed: _toggleTranslation,
-                    icon: Text(_translationEnabled ? '原' : '译'),
+                  right: MediaQuery.sizeOf(context).width >= 600 ? 36 : 16,
+                  bottom: _readerFooterHeight + 5,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: 12,
+                    children: [
+                      if (_foreignSource)
+                        _shortcut(
+                          _translationEnabled ? '原' : '译',
+                          _translationEnabled ? '还原当前正文' : '连续翻译',
+                          _toggleTranslation,
+                        ),
+                      if (widget.onFreeChat case final openChat?)
+                        _shortcut('AI', 'AI 问答', openChat),
+                    ],
                   ),
                 ),
               if (!widget.immersive &&
-                  !_inkEditing &&
-                  widget.onFreeChat != null)
-                Positioned(
-                  right: 20,
-                  bottom: 110,
-                  child: IconButton.filled(
-                    tooltip: 'AI 问答',
-                    onPressed: widget.onFreeChat,
-                    icon: const Text('AI'),
-                  ),
-                ),
-              if (!widget.immersive &&
+                  !_readerPanelOpen &&
                   (_translationPending || _translationError != null))
                 Positioned(
                   left: 12,
-                  bottom: 110,
+                  bottom: _readerFooterHeight + 5,
                   child: _translationError == null
                       ? const Chip(label: Text('翻译中'))
                       : ActionChip(
@@ -2817,6 +3415,169 @@ Future<int?> _chooseReaderItem(
     ),
   ),
 );
+
+class _ReaderOutlineList extends StatefulWidget {
+  const _ReaderOutlineList({
+    required this.titles,
+    required this.current,
+    required this.onSelected,
+    required this.levels,
+    required this.groupLabels,
+    required this.pages,
+    required this.readingPage,
+    required this.wide,
+    required this.ink,
+    required this.rule,
+    required this.selectedColor,
+  });
+
+  final List<String> titles;
+  final int current;
+  final ValueChanged<int> onSelected;
+  final List<int> levels;
+  final Set<int> groupLabels;
+  final List<int> pages;
+  final int? readingPage;
+  final bool wide;
+  final Color ink;
+  final Color rule;
+  final Color selectedColor;
+
+  @override
+  State<_ReaderOutlineList> createState() => _ReaderOutlineListState();
+}
+
+class _ReaderOutlineListState extends State<_ReaderOutlineList> {
+  ScrollController? _scroll;
+
+  @override
+  void dispose() {
+    _scroll?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final titleSize = widget.wide ? 18.0 : 14.0;
+    final subtitleSize = titleSize - 3;
+    final textScaler = MediaQuery.textScalerOf(context);
+    final rowHeight = math.max(
+      widget.wide ? 51.0 : 44.0,
+      textScaler.scale(titleSize) + 22,
+    );
+    final selectedExtra = textScaler.scale(subtitleSize) + 9;
+    final subtitle = switch (widget.readingPage) {
+      final page? => '正在读 · 第 $page 页',
+      null => '正在读',
+    };
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final targetOffset =
+            widget.current * rowHeight -
+            (constraints.maxHeight - rowHeight - selectedExtra) / 2;
+        final maxOffset = math.max(
+          0.0,
+          widget.titles.length * rowHeight +
+              selectedExtra -
+              constraints.maxHeight,
+        );
+        final scroll = _scroll ??= ScrollController(
+          keepScrollOffset: false,
+          initialScrollOffset: targetOffset.clamp(0.0, maxOffset).toDouble(),
+        );
+        return ListView.builder(
+          controller: scroll,
+          padding: EdgeInsets.zero,
+          itemCount: widget.titles.length,
+          itemExtentBuilder: (index, _) =>
+              rowHeight + (widget.current == index ? selectedExtra : 0),
+          itemBuilder: (context, index) {
+            final selected = widget.current == index;
+            final group = widget.groupLabels.contains(index);
+            final level = widget.levels.isEmpty ? 0 : widget.levels[index];
+            final foreground = group
+                ? widget.ink.withValues(alpha: .68)
+                : widget.ink;
+            return Semantics(
+              selected: selected,
+              header: group,
+              child: InkWell(
+                onTap: group ? null : () => widget.onSelected(index),
+                child: Ink(
+                  decoration: selected
+                      ? BoxDecoration(
+                          color: widget.selectedColor,
+                          borderRadius: BorderRadius.circular(8),
+                        )
+                      : BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(color: widget.rule),
+                          ),
+                        ),
+                  padding: EdgeInsetsDirectional.only(
+                    start: 10 + 10.0 * level.clamp(0, 4),
+                    end: 10,
+                  ),
+                  height: rowHeight + (selected ? selectedExtra : 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              widget.titles[index],
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: foreground,
+                                fontSize: titleSize,
+                                fontWeight: selected || group
+                                    ? FontWeight.w600
+                                    : FontWeight.w400,
+                              ),
+                            ),
+                            if (selected) ...[
+                              const SizedBox(height: 3),
+                              Text(
+                                subtitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: subtitleSize,
+                                  color: foreground.withValues(alpha: .8),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      if (widget.pages.isNotEmpty) ...[
+                        const SizedBox(width: 12),
+                        Text(
+                          '${widget.pages[index]}',
+                          style: TextStyle(
+                            color: foreground,
+                            fontSize: titleSize,
+                            fontWeight: selected
+                                ? FontWeight.w500
+                                : FontWeight.w400,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
 
 class _ReadingPlaceholder extends StatelessWidget {
   const _ReadingPlaceholder();

@@ -8745,6 +8745,7 @@ $text''';
   void _closeReadingCompanion() {
     if (!_readingCompanionOpen) return;
     if (_readingCompanionKey.currentState?.finishInkForBack() == true) return;
+    _readingCompanionKey.currentState?.closeReaderPanelForBack();
     _dismissComposerFocus();
     _readingCompanionKey.currentState?.closeChatForBack();
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
@@ -8817,6 +8818,7 @@ $text''';
       streamingReply: _streamingReply,
       onPassageOpened: _openReadingPassage,
       immersive: _companionImmersive,
+      toolbarBuilder: _buildCompanionTopBar,
       onDarkChanged: (dark) {
         if (_readingCompanionOpen && _companionDark != dark) {
           setState(() => _companionDark = dark);
@@ -9160,6 +9162,7 @@ $text''';
   }
 
   void _toggleSpaceMenu() {
+    _readingCompanionKey.currentState?.closeReaderPanelForBack();
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _dismissComposerFocus();
     setState(() => _spaceMenuOpen = !_spaceMenuOpen);
@@ -9167,6 +9170,16 @@ $text''';
 
   void _switchSpace(_HomeSpace nextSpace) {
     if (_space == nextSpace) {
+      setState(() => _spaceMenuOpen = false);
+      return;
+    }
+    if (_readingCompanionOpen &&
+        _readingCompanionKey.currentState?.finishInkForBack(
+              onSaved: () {
+                if (mounted && _readingCompanionOpen) _switchSpace(nextSpace);
+              },
+            ) ==
+            true) {
       setState(() => _spaceMenuOpen = false);
       return;
     }
@@ -9660,11 +9673,18 @@ $text''';
     final keepComposerFixed =
         _keyboardOverlayKeepsComposerFixed || _taskSearchKeepsComposerFixed;
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: const SystemUiOverlayStyle(
+      value: SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness: Brightness.dark,
-        systemNavigationBarColor: Color(0xFFFDFDFD),
-        systemNavigationBarIconBrightness: Brightness.dark,
+        statusBarIconBrightness: _readingCompanionOpen && _companionDark
+            ? Brightness.light
+            : Brightness.dark,
+        systemNavigationBarColor: _readingCompanionOpen && _companionDark
+            ? const Color(0xFF191B1E)
+            : const Color(0xFFFDFDFD),
+        systemNavigationBarIconBrightness:
+            _readingCompanionOpen && _companionDark
+            ? Brightness.light
+            : Brightness.dark,
         systemNavigationBarDividerColor: Colors.transparent,
       ),
       child: PopScope<void>(
@@ -9697,6 +9717,10 @@ $text''';
             return;
           }
           if (_readingCompanionOpen && !_spaceMenuOpen) {
+            if (_readingCompanionKey.currentState?.closeReaderPanelForBack() ==
+                true) {
+              return;
+            }
             if (companionMenuWasOpen ||
                 _readingCompanionKey.currentState?.closeChatForBack() == true) {
               return;
@@ -9708,7 +9732,9 @@ $text''';
           setState(() => _spaceMenuOpen = false);
         },
         child: Scaffold(
-          backgroundColor: const Color(0xFFFDFDFD),
+          backgroundColor: _readingCompanionOpen && _companionDark
+              ? const Color(0xFF191B1E)
+              : const Color(0xFFFDFDFD),
           resizeToAvoidBottomInset: !keepComposerFixed,
           body: SafeArea(
             maintainBottomViewPadding: keepComposerFixed,
@@ -10060,14 +10086,15 @@ $text''';
                     children: [
                       _ReadingModeTransition(
                         companionOpen: _readingCompanionOpen,
-                        immersive: _companionImmersive,
                         home: conversation,
                         companion: _buildReadingCompanion(),
                       ),
                       // Keep the menu above the conversation canvas and composer.
                       if (_spaceMenuOpen) ...[
                         Positioned(
-                          top: 45,
+                          top: _readingCompanionOpen
+                              ? readingCompanionToolbarHeight(context)
+                              : 45,
                           left: 0,
                           right: 0,
                           bottom: 0,
@@ -10078,34 +10105,27 @@ $text''';
                           ),
                         ),
                         Positioned(
-                          top: 45,
+                          top: _readingCompanionOpen
+                              ? readingCompanionToolbarHeight(context)
+                              : 45,
                           left: 0,
                           right: 0,
                           child: Center(
                             child: _SpaceMenu(
                               selectedSpace: _space,
                               onSelect: _switchSpace,
+                              onExitCompanion: _readingCompanionOpen
+                                  ? () {
+                                      setState(() => _spaceMenuOpen = false);
+                                      _closeReadingCompanion();
+                                    }
+                                  : null,
                             ),
                           ),
                         ),
                       ],
-                      if (!_composerExpanded &&
-                          _readingCompanionOpen &&
-                          _companionDark &&
-                          !_companionImmersive)
-                        const Positioned(
-                          top: 0,
-                          left: 0,
-                          right: 0,
-                          height: 44,
-                          child: ColoredBox(color: Color(0xFF16181A)),
-                        ),
-                      if (!_composerExpanded &&
-                          !(_readingCompanionOpen && _companionImmersive))
-                        _buildTopBar(
-                          showNewConversation:
-                              !_readingCompanionOpen && _messages.isNotEmpty,
-                        ),
+                      if (!_composerExpanded && !_readingCompanionOpen)
+                        _buildTopBar(showNewConversation: _messages.isNotEmpty),
                       _buildAgentQuestionOverlay(constraints),
                     ],
                   ),
@@ -10196,6 +10216,81 @@ $text''';
 
   static const _topBarIconSize = 25.5;
 
+  Widget _buildCompanionTopBar(BuildContext context, Widget readerTools) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final ink = dark ? const Color(0xFFE6E3DC) : const Color(0xFF262626);
+    final wide = MediaQuery.sizeOf(context).width >= 600;
+    final title = _SpaceSwitcher(
+      title: _spaceTitle,
+      expanded: _spaceMenuOpen,
+      onToggle: _toggleSpaceMenu,
+      foreground: ink,
+      compact: !wide,
+    );
+    Widget action(String label, String asset, VoidCallback onPressed) =>
+        IconButton(
+          tooltip: label,
+          onPressed: onPressed,
+          icon: SvgPicture.asset(
+            asset,
+            width: wide ? 25.5 : 22,
+            height: wide ? 25.5 : 22,
+            colorFilter: ColorFilter.mode(ink, BlendMode.srcIn),
+          ),
+        );
+
+    void openSidebar() {
+      _readingCompanionKey.currentState?.closeReaderPanelForBack();
+      unawaited(_openReadingSidebar());
+    }
+
+    final sidebar = Semantics(
+      label: '打开侧边栏',
+      button: true,
+      onTap: openSidebar,
+      excludeSemantics: true,
+      child: action(
+        '打开侧边栏',
+        'assets/images/home_sidebar_icon.svg',
+        openSidebar,
+      ),
+    );
+    final trailing = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        readerTools,
+        action('笔记', 'assets/images/home_reply_note.svg', () {
+          _readingCompanionKey.currentState?.closeReaderPanelForBack();
+          unawaited(_openNotesPanel());
+        }),
+      ],
+    );
+
+    return Material(
+      color: dark ? const Color(0xFF191B1E) : const Color(0xFFFEFEFE),
+      child: SizedBox(
+        height: readingCompanionToolbarHeight(context),
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: wide ? 20 : 4),
+          child: Row(
+            children: [
+              sidebar,
+              Expanded(
+                child: Align(
+                  alignment: wide
+                      ? const Alignment(.47, 0)
+                      : Alignment.centerLeft,
+                  child: title,
+                ),
+              ),
+              trailing,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildTopBar({required bool showNewConversation}) {
     final showCompanion =
         _space == _HomeSpace.reading && _companionPreferences.enabled.value;
@@ -10212,155 +10307,97 @@ $text''';
       left: 14,
       right: 14,
       height: 44,
-      child: ColorFiltered(
-        colorFilter: ColorFilter.matrix(
-          _readingCompanionOpen && _companionDark
-              ? const [
-                  -1,
-                  0,
-                  0,
-                  0,
-                  255,
-                  0,
-                  -1,
-                  0,
-                  0,
-                  255,
-                  0,
-                  0,
-                  -1,
-                  0,
-                  255,
-                  0,
-                  0,
-                  0,
-                  1,
-                  0,
-                ]
-              : const [
-                  1,
-                  0,
-                  0,
-                  0,
-                  0,
-                  0,
-                  1,
-                  0,
-                  0,
-                  0,
-                  0,
-                  0,
-                  1,
-                  0,
-                  0,
-                  0,
-                  0,
-                  0,
-                  1,
-                  0,
-                ],
-        ),
-        child: Stack(
-          alignment: Alignment.center,
-          clipBehavior: Clip.none,
-          children: [
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Semantics(
-                button: true,
-                label: '打开侧边栏',
-                child: IconButton(
-                  onPressed: _space == _HomeSpace.reading
-                      ? _openReadingSidebar
-                      : null,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 44,
-                    height: 44,
-                  ),
-                  splashRadius: 24,
-                  icon: SvgPicture.asset(
-                    'assets/images/home_sidebar_icon.svg',
-                    width: _topBarIconSize,
-                    height: _topBarIconSize,
-                    fit: BoxFit.contain,
-                  ),
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Semantics(
+              button: true,
+              label: '打开侧边栏',
+              child: IconButton(
+                onPressed: _space == _HomeSpace.reading
+                    ? _openReadingSidebar
+                    : null,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints.tightFor(
+                  width: 44,
+                  height: 44,
+                ),
+                splashRadius: 24,
+                icon: SvgPicture.asset(
+                  'assets/images/home_sidebar_icon.svg',
+                  width: _topBarIconSize,
+                  height: _topBarIconSize,
+                  fit: BoxFit.contain,
                 ),
               ),
             ),
-            if (showNewOnLeft)
-              Positioned(left: 44, child: _newConversationTopButton()),
-            Align(
-              alignment: Alignment.centerRight,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (showCompanion)
-                    IconButton(
-                      tooltip: _readingCompanionOpen ? '退出伴读' : '沉浸伴读',
-                      isSelected: _readingCompanionOpen,
-                      onPressed: _toggleReadingCompanion,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints.tightFor(
-                        width: 44,
-                        height: 44,
-                      ),
-                      style: _readingCompanionOpen
-                          ? IconButton.styleFrom(
-                              backgroundColor: const Color(0xFFF1F1F1),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                            )
-                          : null,
-                      icon: SvgPicture.asset(
-                        BookFlowTheme.companionIconAsset,
-                        width: _topBarIconSize,
-                        height: _topBarIconSize,
-                        excludeFromSemantics: true,
-                      ),
+          ),
+          if (showNewOnLeft)
+            Positioned(left: 44, child: _newConversationTopButton()),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (showCompanion)
+                  IconButton(
+                    tooltip: '沉浸伴读',
+                    onPressed: _toggleReadingCompanion,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 44,
+                      height: 44,
                     ),
-                  Semantics(
-                    button: true,
-                    enabled: _space == _HomeSpace.reading,
-                    label: '笔记',
-                    child: InkResponse(
-                      onTap: _space == _HomeSpace.reading
-                          ? () => unawaited(_openNotesPanel())
-                          : null,
-                      radius: 22,
-                      child: SizedBox(
-                        width: 44,
-                        height: 44,
-                        child: Center(
-                          child: SvgPicture.asset(
-                            'assets/images/home_reply_note.svg',
-                            width: _topBarIconSize,
-                            height: _topBarIconSize,
-                          ),
+                    icon: SvgPicture.asset(
+                      BookFlowTheme.companionIconAsset,
+                      width: _topBarIconSize,
+                      height: _topBarIconSize,
+                      excludeFromSemantics: true,
+                    ),
+                  ),
+                Semantics(
+                  button: true,
+                  enabled: _space == _HomeSpace.reading,
+                  label: '笔记',
+                  child: InkResponse(
+                    onTap: _space == _HomeSpace.reading
+                        ? () => unawaited(_openNotesPanel())
+                        : null,
+                    radius: 22,
+                    child: SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: Center(
+                        child: SvgPicture.asset(
+                          'assets/images/home_reply_note.svg',
+                          width: _topBarIconSize,
+                          height: _topBarIconSize,
                         ),
                       ),
                     ),
                   ),
-                  if (showNewConversation && !showNewOnLeft)
-                    _newConversationTopButton(),
-                ],
-              ),
-            ),
-            Positioned.fill(
-              left: rightControls,
-              right: rightControls,
-              child: Align(
-                alignment: Alignment.center,
-                child: _SpaceSwitcher(
-                  title: _spaceTitle,
-                  expanded: _spaceMenuOpen,
-                  onToggle: _toggleSpaceMenu,
                 ),
+                if (showNewConversation && !showNewOnLeft)
+                  _newConversationTopButton(),
+              ],
+            ),
+          ),
+          Positioned.fill(
+            left: rightControls,
+            right: rightControls,
+            child: Align(
+              alignment: Alignment.center,
+              child: _SpaceSwitcher(
+                title: _spaceTitle,
+                expanded: _spaceMenuOpen,
+                onToggle: _toggleSpaceMenu,
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -10381,13 +10418,11 @@ $text''';
 class _ReadingModeTransition extends StatelessWidget {
   const _ReadingModeTransition({
     required this.companionOpen,
-    required this.immersive,
     required this.home,
     required this.companion,
   });
 
   final bool companionOpen;
-  final bool immersive;
   final Widget home;
   final Widget companion;
 
@@ -10431,7 +10466,6 @@ class _ReadingModeTransition extends StatelessWidget {
             ),
             if (companionOpen || progress > 0)
               Positioned.fill(
-                top: immersive ? 0 : 44,
                 child: FractionalTranslation(
                   translation: Offset(1 - progress, 0),
                   child: ReadingCompanionLayoutGate(
@@ -10489,11 +10523,15 @@ class _SpaceSwitcher extends StatelessWidget {
     required this.title,
     required this.expanded,
     required this.onToggle,
+    this.foreground,
+    this.compact = false,
   });
 
   final String title;
   final bool expanded;
   final VoidCallback onToggle;
+  final Color? foreground;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -10505,7 +10543,10 @@ class _SpaceSwitcher extends StatelessWidget {
         onTap: onToggle,
         behavior: HitTestBehavior.opaque,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 2 : 10,
+            vertical: 9,
+          ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -10515,25 +10556,40 @@ class _SpaceSwitcher extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: expanded
-                        ? const Color(0xFF9B9DA0)
-                        : const Color(0xFF343639),
-                    fontSize: 19,
+                    color:
+                        foreground ??
+                        (expanded
+                            ? const Color(0xFF9B9DA0)
+                            : const Color(0xFF343639)),
+                    fontSize: compact ? 15 : 19,
                     height: 1,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
-              Icon(
-                expanded
-                    ? PhosphorIconsRegular.caretUp
-                    : PhosphorIconsRegular.caretDown,
-                color: expanded
-                    ? const Color(0xFFB0B2B5)
-                    : const Color(0xFF65676A),
-                size: 16,
-              ),
+              SizedBox(width: compact ? 3 : 8),
+              if (foreground case final tint?)
+                SvgPicture.asset(
+                  expanded
+                      ? 'assets/icons/extension_market/detail/caret-up.svg'
+                      : 'assets/icons/extension_market/detail/caret-down.svg',
+                  width: compact ? 11 : 14,
+                  height: compact ? 11 : 14,
+                  colorFilter: ColorFilter.mode(tint, BlendMode.srcIn),
+                  excludeFromSemantics: true,
+                )
+              else
+                Icon(
+                  expanded
+                      ? PhosphorIconsRegular.caretUp
+                      : PhosphorIconsRegular.caretDown,
+                  color:
+                      foreground ??
+                      (expanded
+                          ? const Color(0xFFB0B2B5)
+                          : const Color(0xFF65676A)),
+                  size: compact ? 13 : 16,
+                ),
             ],
           ),
         ),
@@ -10543,10 +10599,15 @@ class _SpaceSwitcher extends StatelessWidget {
 }
 
 class _SpaceMenu extends StatelessWidget {
-  const _SpaceMenu({required this.selectedSpace, required this.onSelect});
+  const _SpaceMenu({
+    required this.selectedSpace,
+    required this.onSelect,
+    this.onExitCompanion,
+  });
 
   final _HomeSpace selectedSpace;
   final ValueChanged<_HomeSpace> onSelect;
+  final VoidCallback? onExitCompanion;
 
   @override
   Widget build(BuildContext context) {
@@ -10582,6 +10643,15 @@ class _SpaceMenu extends StatelessWidget {
               selected: selectedSpace == _HomeSpace.reading,
               onTap: () => onSelect(_HomeSpace.reading),
             ),
+            if (onExitCompanion case final exit?)
+              Material(
+                type: MaterialType.transparency,
+                child: ListTile(
+                  leading: const Icon(Icons.exit_to_app),
+                  title: const Text('退出伴读'),
+                  onTap: exit,
+                ),
+              ),
           ],
         ),
       ),

@@ -19,6 +19,7 @@ import 'package:xiaoqi_app/services/database_service.dart';
 import 'package:xiaoqi_app/services/reading_task_context.dart';
 import 'package:xiaoqi_app/widgets/reading_companion.dart';
 import 'package:xiaoqi_app/widgets/reading_space_sidebar.dart';
+import 'package:xiaoqi_app/widgets/reflow_document_pager.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -176,9 +177,12 @@ void main() {
     final initialReader = tester.state(reader);
     final body = find.text('这是一段测试原文。');
     await _waitFor(tester, body);
+    final pager = find.byType(ReflowDocumentPager);
+    final initialPager = tester.state(pager);
     await tester.tap(body);
     await tester.pumpAndSettle();
     expect(find.text('目录'), findsNothing);
+    expect(tester.state(pager), same(initialPager));
     expect(find.byTooltip('AI 问答'), findsNothing);
     expect(find.bySemanticsLabel('打开侧边栏'), findsNothing);
     await tester.pump(const Duration(milliseconds: 350));
@@ -187,6 +191,7 @@ void main() {
     expect(find.text('目录'), findsOneWidget);
     expect(find.byTooltip('AI 问答'), findsOneWidget);
     expect(tester.state(reader), same(initialReader));
+    expect(tester.state(pager), same(initialPager));
     await tester.tap(find.text('显示'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('深色'));
@@ -236,7 +241,10 @@ void main() {
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(tester.state(reader), same(initialReader));
-    expect(find.byTooltip('退出伴读'), findsOneWidget);
+    expect(
+      find.descendant(of: reader, matching: find.text('阅读空间')),
+      findsOneWidget,
+    );
 
     await _checkModeHistory(tester, visible: '旧伴读记录', hidden: '常规读书记录');
     await tester.tap(find.text('旧伴读记录'));
@@ -248,7 +256,10 @@ void main() {
     expect(inReader('之前保存的回答'), findsOneWidget);
     expect(inReader('之前选中的一段话'), findsOneWidget);
     expect(tester.state(reader), same(initialReader));
-    expect(find.byTooltip('退出伴读'), findsOneWidget);
+    expect(
+      find.descendant(of: reader, matching: find.text('阅读空间')),
+      findsOneWidget,
+    );
     final companionInput = find.descendant(
       of: reader,
       matching: find.byType(TextField),
@@ -302,9 +313,14 @@ void main() {
       ),
     );
     await _waitFor(tester, find.text('目录'));
-    expect(find.byTooltip('退出伴读'), findsOneWidget);
+    expect(
+      find.descendant(of: reader, matching: find.text('阅读空间')),
+      findsOneWidget,
+    );
 
-    await tester.tap(find.byTooltip('退出伴读'));
+    await tester.tap(find.descendant(of: reader, matching: find.text('阅读空间')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('退出伴读'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(tester.getTopLeft(reader).dx, greaterThan(0));
