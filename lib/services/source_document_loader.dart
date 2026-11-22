@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show compute;
+
 import '../models/book_source.dart';
 import '../models/xiaoqi_document.dart';
 import 'docx_document_service.dart';
@@ -26,6 +28,18 @@ class SourceDocumentLoader {
   final DocxDocumentService docx;
   final HtmlArticleDocumentService html;
 
+  /// File I/O is asynchronous, but decompression and document parsing also
+  /// need to leave the UI isolate while the reader is sliding into view.
+  static Future<XiaoqiDocument> parseBookSourceInBackground(
+    BookSourceRecord source,
+  ) => compute(_parseBookSource, source, debugLabel: 'read book source');
+
+  static Future<XiaoqiDocument> _parseBookSource(BookSourceRecord source) =>
+      const SourceDocumentLoader().parseFile(
+        source.filePath,
+        format: source.format,
+      );
+
   Future<XiaoqiDocument> parseFile(
     String filePath, {
     required String format,
@@ -50,6 +64,13 @@ class SourceDocumentLoader {
       const {'epub', 'txt', 'markdown', 'docx', 'html'}.contains(
         normalizeBookSourceFormat(format ?? ''),
       );
+
+  /// PDF has its own reader. Existing structured sources remain readable even
+  /// when their format is no longer offered by the import picker.
+  static bool isReadableSource(BookSourceRecord source) =>
+      source.status == 'ready' &&
+      (normalizeBookSourceFormat(source.format) == 'pdf' ||
+          isStructuredFormat(source.format));
 
   Future<XiaoqiDocument> _parseHtml(String filePath) async {
     final source = await File(filePath).readAsString();

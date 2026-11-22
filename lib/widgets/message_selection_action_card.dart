@@ -10,11 +10,13 @@ class MessageSelectionActionCard extends StatelessWidget {
     this.onCopy,
     this.onAnnotate,
     this.primaryEnabled = true,
+    this.copyFirst = false,
   });
 
   final String primaryLabel;
   final String primaryAsset;
   final bool primaryEnabled;
+  final bool copyFirst;
   final VoidCallback onPrimaryAction;
   final VoidCallback? onCopy;
   final VoidCallback? onAnnotate;
@@ -70,6 +72,7 @@ class MessageSelectionActionCard extends StatelessWidget {
       padding: const EdgeInsets.all(4),
       child: Row(
         mainAxisSize: MainAxisSize.min,
+        textDirection: copyFirst ? TextDirection.rtl : null,
         children: [
           _actionButton(
             label: primaryLabel,

@@ -349,13 +349,23 @@ class AiConversationRecord {
     Map<String, String>? selectedChildren,
     this.bookId,
     this.bookName = '',
+    bool? readingCompanion,
+    this.companionSourceId,
+    this.companionOpenedAt,
     this.pageLabel = '',
     this.isPinned = false,
     this.webSources = const [],
     this.modelId,
     this.reasoningLevel,
     this.titleRevision = -1,
-  }) : nodes = nodes == null
+  }) : isReadingCompanion =
+           readingCompanion ??
+           (nodes ?? messages).any(
+             (message) =>
+                 message.isUser &&
+                 (message.readingPassage?.isNotEmpty ?? false),
+           ),
+       nodes = nodes == null
            ? List<AiConversationMessage>.unmodifiable(
                _linearizeMessages(messages),
              )
@@ -373,6 +383,66 @@ class AiConversationRecord {
   final DateTime updatedAt;
   final int? bookId;
   final String bookName;
+  final bool isReadingCompanion;
+  final int? companionSourceId;
+
+  /// Last opened from companion history. Stored independently of the chat tree.
+  final DateTime? companionOpenedAt;
+
+  late final bool hasCompanionQuestion =
+      isReadingCompanion &&
+      nodes.any((message) => message.isUser && !message.isDeletedMarker);
+
+  bool get _hasHistoryContent =>
+      isReadingCompanion ? hasCompanionQuestion : messages.isNotEmpty;
+
+  /// The original selection belongs to the conversation, including its
+  /// follow-ups and alternate answers. Free conversations have no selection.
+  late final String? companionPassage = isReadingCompanion
+      ? nodes
+            .where(
+              (message) =>
+                  message.isUser &&
+                  !message.isDeletedMarker &&
+                  message.readingPassage?.trim().isNotEmpty == true,
+            )
+            .firstOrNull
+            ?.readingPassage
+      : null;
+
+  late final String? companionPassageExcerpt = _companionQuote();
+
+  String? _companionQuote() {
+    final passage = companionPassage;
+    if (passage == null) return null;
+    final lines = const LineSplitter().convert(passage);
+    final quote = lines
+        .where((line) => line.startsWith('> '))
+        .map((line) => line.substring(2))
+        .join('\n')
+        .trim();
+    if (quote.isNotEmpty) return quote;
+    // Older plain-text excerpts have no generated Markdown source header.
+    return passage.startsWith('### 用户选中的原文') ? null : passage.trim();
+  }
+
+  late final DateTime companionLastUsedAt = _lastCompanionUse();
+
+  DateTime _lastCompanionUse() {
+    var latest = companionOpenedAt;
+    for (final message in nodes) {
+      if (message.isUser &&
+          !message.isDeletedMarker &&
+          message.createdAt.microsecondsSinceEpoch != 0 &&
+          (latest == null || message.createdAt.isAfter(latest))) {
+        latest = message.createdAt;
+      }
+    }
+    // Records without timestamps on their original turns only have the
+    // conversation-level date available until the next visit.
+    return latest ?? updatedAt;
+  }
+
   final String pageLabel;
   final bool isPinned;
   final List<AiWebSource> webSources;
@@ -748,6 +818,8 @@ class AiConversationRecord {
   factory AiConversationRecord.empty({
     int? bookId,
     String bookName = '',
+    bool readingCompanion = false,
+    int? companionSourceId,
     String pageLabel = '',
     bool enableAutoTitle = false,
   }) {
@@ -760,6 +832,8 @@ class AiConversationRecord {
       updatedAt: now,
       bookId: bookId,
       bookName: bookName,
+      readingCompanion: readingCompanion,
+      companionSourceId: companionSourceId,
       pageLabel: pageLabel,
       webSources: const [],
       titleRevision: enableAutoTitle ? 0 : -1,
@@ -806,6 +880,11 @@ class AiConversationRecord {
           ? raw['book_id'] as int
           : int.tryParse(raw['book_id']?.toString() ?? ''),
       bookName: raw['book_name']?.toString() ?? '',
+      // Older companion conversations stored their origin only on user turns.
+      readingCompanion: raw['reading_companion'] == true ? true : null,
+      companionSourceId: int.tryParse(
+        raw['companion_source_id']?.toString() ?? '',
+      ),
       pageLabel: raw['page_label']?.toString() ?? '',
       isPinned: raw['is_pinned'] == true,
       webSources: raw['web_sources'] is List
@@ -832,6 +911,7 @@ class AiConversationRecord {
     String? title,
     List<AiConversationMessage>? messages,
     DateTime? updatedAt,
+    DateTime? companionOpenedAt,
     String? pageLabel,
     bool? isPinned,
     List<AiWebSource>? webSources,
@@ -851,13 +931,17 @@ class AiConversationRecord {
     return AiConversationRecord(
       id: id,
       title: title ?? this.title,
-      messages: messages ?? _pathFor(updatedNodes, updatedSelections),
+      // The supplied tree and branch selection already define the message path.
+      messages: messages ?? const [],
       nodes: updatedNodes,
       selectedChildren: updatedSelections,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       bookId: bookId,
       bookName: bookName,
+      readingCompanion: isReadingCompanion,
+      companionSourceId: companionSourceId,
+      companionOpenedAt: companionOpenedAt ?? this.companionOpenedAt,
       pageLabel: pageLabel ?? this.pageLabel,
       isPinned: isPinned ?? this.isPinned,
       webSources: webSources ?? this.webSources,
@@ -878,6 +962,8 @@ class AiConversationRecord {
     'updated_at': updatedAt.toIso8601String(),
     'book_id': bookId,
     'book_name': bookName,
+    if (isReadingCompanion) 'reading_companion': true,
+    if (companionSourceId != null) 'companion_source_id': companionSourceId,
     'page_label': pageLabel,
     'is_pinned': isPinned,
     'web_sources': webSources.map((source) => source.toJson()).toList(),
@@ -989,22 +1075,6 @@ Map<String, String> _initialSelections(List<AiConversationMessage> nodes) {
   return result;
 }
 
-List<AiConversationMessage> _pathFor(
-  List<AiConversationMessage> nodes,
-  Map<String, String> selectedChildren,
-) {
-  final snapshot = AiConversationRecord(
-    id: '',
-    title: '',
-    messages: const [],
-    nodes: nodes,
-    selectedChildren: selectedChildren,
-    createdAt: DateTime.fromMillisecondsSinceEpoch(0),
-    updatedAt: DateTime.fromMillisecondsSinceEpoch(0),
-  );
-  return snapshot.messages;
-}
-
 /// Local-only persistence for conversation history.
 ///
 /// It deliberately stores only conversations that contain a real user
@@ -1022,6 +1092,8 @@ class AiConversationHistoryService {
       'ai_study_annotation.version_selections.v1';
   static const _readingSourceKeyPrefix =
       'ai_study_annotation.reading_source.v1.';
+  static const _companionOpenedKeyPrefix =
+      'ai_study_annotation.companion_opened.v1.';
 
   final Map<String, AiConversationRecord> _records = {};
   final Map<String, _VersionSelectionSnapshot> _versionSelections = {};
@@ -1039,19 +1111,30 @@ class AiConversationHistoryService {
     int? bookId,
     String bookName = '',
     bool allBooks = false,
+    bool? companionMode,
     String query = '',
   }) async {
     await _ensureLoaded();
+    if (companionMode == true) {
+      // A drawer reopened immediately after a visit must see its committed order.
+      await _writeQueue?.catchError((Object _) {});
+    }
     final result = _records.values
         .map(_applyVersionSelection)
         .where(
           (record) =>
+              (!record.isReadingCompanion || record.hasCompanionQuestion) &&
+              (companionMode == null ||
+                  record.isReadingCompanion == companionMode) &&
               (allBooks ||
                   _sameBook(record, bookId: bookId, bookName: bookName)) &&
               record.matches(query),
         )
         .toList();
     result.sort((a, b) {
+      if (companionMode == true) {
+        return b.companionLastUsedAt.compareTo(a.companionLastUsedAt);
+      }
       final pinOrder = (b.isPinned ? 1 : 0).compareTo(a.isPinned ? 1 : 0);
       if (pinOrder != 0) return pinOrder;
       return b.updatedAt.compareTo(a.updatedAt);
@@ -1079,16 +1162,55 @@ class AiConversationHistoryService {
     required int bookId,
     required int sourceId,
   }) async {
+    await _setHistoryInt(
+      '$_readingSourceKeyPrefix$conversationId.$bookId',
+      sourceId,
+      '无法保存关联资料',
+    );
+  }
+
+  /// Opening a stored conversation only writes its visit time. Saving a later
+  /// answer or a branch selection must not undo or reorder this visit.
+  Future<void> markCompanionOpened(String id) async {
+    final openedAt = DateTime.now();
+    await _ensureLoaded();
+    await _enqueueMutation(
+      apply: () {
+        final record = _records[id];
+        return record != null &&
+            record.hasCompanionQuestion &&
+            openedAt.isAfter(record.companionLastUsedAt);
+      },
+      persist: () async {
+        await _setHistoryInt(
+          '$_companionOpenedKeyPrefix$id',
+          openedAt.microsecondsSinceEpoch,
+          '无法保存对话访问时间',
+        );
+        final current = _records[id];
+        if (current != null) {
+          _records[id] = current.copyWith(companionOpenedAt: openedAt);
+        }
+      },
+      rollback: () {},
+      throwOnFailure: true,
+    );
+  }
+
+  Future<void> _setHistoryInt(
+    String key,
+    int value,
+    String errorMessage,
+  ) async {
     final prefs = _preferences ??= await SharedPreferences.getInstance();
-    final key = '$_readingSourceKeyPrefix$conversationId.$bookId';
     final previous = prefs.getInt(key);
-    if (previous == sourceId) return;
+    if (previous == value) return;
     try {
-      if (await prefs.setInt(key, sourceId)) return;
+      if (await prefs.setInt(key, value)) return;
     } catch (_) {
       // SharedPreferences can fail after updating its in-memory cache.
     }
-    if (prefs.getInt(key) == sourceId) {
+    if (prefs.getInt(key) == value) {
       try {
         if (previous == null) {
           await prefs.remove(key);
@@ -1099,7 +1221,7 @@ class AiConversationHistoryService {
         // The cache is restored even when the platform rejects the rollback.
       }
     }
-    throw StateError('无法保存关联资料');
+    throw StateError(errorMessage);
   }
 
   Future<AiConversationRecord?> latestForBook({
@@ -1112,7 +1234,7 @@ class AiConversationHistoryService {
   }
 
   Future<void> save(AiConversationRecord record) async {
-    if (record.messages.isEmpty) return;
+    if (!record._hasHistoryContent) return;
     await _ensureLoaded();
     await _enqueueMutation(
       apply: () {
@@ -1134,6 +1256,11 @@ class AiConversationHistoryService {
     await _enqueueMutation(
       apply: () {
         hadPrevious = _records.containsKey(record.id);
+        if (!hadPrevious &&
+            record.isReadingCompanion &&
+            !record.hasCompanionQuestion) {
+          return false;
+        }
         previous = _records[record.id];
         previousSelection = _versionSelections[record.id];
         selectionChanged =
@@ -1216,13 +1343,18 @@ class AiConversationHistoryService {
 
   void _synchronizeSelectionForStructuralWrite(AiConversationRecord record) {
     final previous = _records[record.id];
-    final next =
-        previous != null && previous.titleRevision > record.titleRevision
+    var next = previous != null && previous.titleRevision > record.titleRevision
         ? record.copyWith(
             title: previous.title,
             titleRevision: previous.titleRevision,
           )
         : record;
+    final lastOpened = previous?.companionOpenedAt;
+    if (lastOpened != null &&
+        (next.companionOpenedAt == null ||
+            lastOpened.isAfter(next.companionOpenedAt!))) {
+      next = next.copyWith(companionOpenedAt: lastOpened);
+    }
     if (previous != null &&
         !_sameSelections(previous.selectedChildren, next.selectedChildren)) {
       // Structural actions can deliberately move a branch selection, such as
@@ -1439,6 +1571,9 @@ class AiConversationHistoryService {
           updatedAt: record.updatedAt,
           bookId: bookId,
           bookName: bookName,
+          readingCompanion: record.isReadingCompanion,
+          companionSourceId: record.companionSourceId,
+          companionOpenedAt: record.companionOpenedAt,
           pageLabel: record.pageLabel,
           isPinned: record.isPinned,
           webSources: record.webSources,
@@ -1480,6 +1615,9 @@ class AiConversationHistoryService {
           selectedChildren: record.selectedChildren,
           createdAt: record.createdAt,
           updatedAt: record.updatedAt,
+          readingCompanion: record.isReadingCompanion,
+          companionSourceId: record.companionSourceId,
+          companionOpenedAt: record.companionOpenedAt,
           pageLabel: record.pageLabel,
           isPinned: record.isPinned,
           webSources: record.webSources,
@@ -1546,6 +1684,20 @@ class AiConversationHistoryService {
         return true;
       },
       rollback: () => _records.addAll(previous),
+      persist: () async {
+        await _writeRecords();
+        for (final record in previous.values) {
+          if (record.companionOpenedAt != null) {
+            // The history deletion is committed even if a visit marker cannot
+            // be removed. A marker alone can never recreate a conversation.
+            try {
+              await _preferences!.remove(
+                '$_companionOpenedKeyPrefix${record.id}',
+              );
+            } catch (_) {}
+          }
+        }
+      },
       throwOnFailure: true,
     );
   }
@@ -1553,6 +1705,7 @@ class AiConversationHistoryService {
   Future<void> _enqueueMutation({
     required bool Function() apply,
     required void Function() rollback,
+    Future<void> Function()? persist,
     bool throwOnFailure = false,
   }) async {
     final previous = _writeQueue;
@@ -1561,7 +1714,7 @@ class AiConversationHistoryService {
         .then((_) async {
           try {
             if (!apply()) return;
-            await _writeRecords();
+            await (persist ?? _writeRecords)();
           } catch (_) {
             if (throwOnFailure) {
               rollback();
@@ -1580,7 +1733,7 @@ class AiConversationHistoryService {
   Future<void> _writeRecords() async {
     _preferences ??= await SharedPreferences.getInstance();
     final currentRecords = _records.values
-        .where((record) => record.messages.isNotEmpty)
+        .where((record) => record._hasHistoryContent)
         .toList(growable: false);
     final records = currentRecords.map((record) => record.toJson()).toList();
     final saved = await _preferences!.setString(
@@ -1658,8 +1811,20 @@ class AiConversationHistoryService {
         if (decoded is List) {
           for (final item in decoded) {
             try {
-              final record = AiConversationRecord.fromJson(item);
-              if (record.id.isNotEmpty && record.messages.isNotEmpty) {
+              var record = AiConversationRecord.fromJson(item);
+              if (record.isReadingCompanion) {
+                final micros = _preferences!.getInt(
+                  '$_companionOpenedKeyPrefix${record.id}',
+                );
+                if (micros != null) {
+                  record = record.copyWith(
+                    companionOpenedAt: DateTime.fromMicrosecondsSinceEpoch(
+                      micros,
+                    ),
+                  );
+                }
+              }
+              if (record.id.isNotEmpty && record._hasHistoryContent) {
                 final snapshot = _versionSelections[record.id];
                 if (snapshot != null &&
                     !snapshot.updatedAt.isAfter(record.updatedAt)) {

@@ -7,19 +7,21 @@ import '../config/book_flow_theme.dart';
 import '../models/book_library_item.dart';
 import '../models/book_source.dart';
 import '../services/book_library_service.dart';
+import '../services/source_document_loader.dart';
 import 'book_cover.dart';
 import 'book_editor_dialog.dart';
 import 'book_import_progress.dart';
 import 'book_source_import.dart';
 
-Future<void> showReadingTaskMaterialsDialog(
+Future<int?> showReadingTaskMaterialsDialog(
   BuildContext context, {
   required BookLibraryItem book,
   required BookLibraryService library,
   required int bookId,
   required int? sourceId,
-  required Future<void> Function(int) onSelect,
-}) => showDialog<void>(
+  Future<void> Function(int)? onSelect,
+  bool closeOnSelection = false,
+}) => showDialog<int>(
   context: context,
   barrierColor: const Color(0x40000000),
   builder: (_) => _ReadingTaskMaterialsDialog(
@@ -28,6 +30,7 @@ Future<void> showReadingTaskMaterialsDialog(
     bookId: bookId,
     sourceId: sourceId,
     onSelect: onSelect,
+    closeOnSelection: closeOnSelection,
   ),
 );
 
@@ -38,13 +41,15 @@ class _ReadingTaskMaterialsDialog extends StatefulWidget {
     required this.bookId,
     required this.sourceId,
     required this.onSelect,
-  });
+    required this.closeOnSelection,
+  }) : assert(closeOnSelection || onSelect != null);
 
   final BookLibraryItem book;
   final BookLibraryService library;
   final int bookId;
   final int? sourceId;
-  final Future<void> Function(int) onSelect;
+  final Future<void> Function(int)? onSelect;
+  final bool closeOnSelection;
 
   @override
   State<_ReadingTaskMaterialsDialog> createState() =>
@@ -70,8 +75,7 @@ class _ReadingTaskMaterialsDialogState
       widget.library.listSourcesForBook(widget.bookId);
 
   bool _canSelect(BookSourceRecord source) =>
-      supportedBookSourceFormats.contains(source.format) &&
-      source.status == 'ready';
+      SourceDocumentLoader.isReadableSource(source);
 
   void _close() {
     if (ModalRoute.of(context)?.isCurrent == true) Navigator.pop(context);
@@ -86,8 +90,12 @@ class _ReadingTaskMaterialsDialogState
         !await File(current.filePath).exists()) {
       throw const FormatException('这份资料暂不可用，请重新导入');
     }
-    if (!_isCurrent) return;
-    await widget.onSelect(current.id);
+    if (!mounted || !_isCurrent) return;
+    if (widget.closeOnSelection) {
+      Navigator.pop(context, current.id);
+      return;
+    }
+    await widget.onSelect!(current.id);
     if (!_isCurrent) return;
     setState(() {
       _selectedSourceId = current.id;
@@ -161,9 +169,12 @@ class _ReadingTaskMaterialsDialogState
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (_selectedSourceId == null && usable.length > 1)
-          const Padding(
-            padding: EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Text('当前使用本书的全部可用资料', style: BookFlowTheme.body),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Text(
+              widget.closeOnSelection ? '请选择一份伴读资料' : '当前使用本书的全部可用资料',
+              style: BookFlowTheme.body,
+            ),
           ),
         if (_selectedSourceId != null &&
             !sources.any((source) => source.id == _selectedSourceId))
@@ -175,7 +186,10 @@ class _ReadingTaskMaterialsDialogState
           _sourceRow(
             source,
             selected: source.id == selectedId,
-            selectable: !_busy && source.id != selectedId && _canSelect(source),
+            selectable:
+                !_busy &&
+                (widget.closeOnSelection || source.id != selectedId) &&
+                _canSelect(source),
           ),
       ],
     );
@@ -206,9 +220,13 @@ class _ReadingTaskMaterialsDialogState
           ),
         ),
         subtitle: Text(
-          _canSelect(source)
+          !_canSelect(source)
+              ? '${source.format.toUpperCase()} · 暂不可用'
+              : supportedBookSourceFormats.contains(
+                  normalizeBookSourceFormat(source.format),
+                )
               ? source.format.toUpperCase()
-              : '${source.format.toUpperCase()} · 暂不可用',
+              : '${source.format.toUpperCase()} · 可伴读 · 暂不支持整本转换',
           style: BookFlowTheme.body,
         ),
         trailing: Icon(

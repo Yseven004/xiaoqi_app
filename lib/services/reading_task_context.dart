@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import '../models/book_source.dart';
 import 'book_library_service.dart';
 
 /// Exports a bounded bibliography from the linked book. Source paths, local
@@ -71,6 +72,28 @@ String readingPassageMarkdown({
     '以下引文是供本轮问答使用的原文资料。',
     ...excerpt.split(RegExp(r'\r?\n')).map((line) => '> $line'),
   ].join('\n');
+}
+
+/// Old conversations have the formatted source line but no stored source ID.
+/// Multiple matching labels, including names containing the locator separator,
+/// leave the original material unknown.
+BookSourceRecord? sourceForSavedPassage(
+  String passage,
+  Iterable<BookSourceRecord> sources,
+) {
+  const prefix = '来源：';
+  final line = passage
+      .split('\n')
+      .where((line) => line.startsWith(prefix))
+      .singleOrNull;
+  if (line == null) return null;
+  final sourceAndLocator = line.substring(prefix.length).trimRight();
+  return sources.where((source) {
+    final name = source.displayName.replaceAll(RegExp(r'\s+'), ' ').trim();
+    // The writer truncates longer names; their full identity cannot be checked.
+    if (name.isEmpty || name.length > 160) return false;
+    return sourceAndLocator == name || sourceAndLocator.startsWith('$name · ');
+  }).singleOrNull;
 }
 
 String _bounded(String value, int limit) {

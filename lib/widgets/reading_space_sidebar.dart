@@ -24,6 +24,19 @@ enum _SidebarSelectionKind { conversations, books }
 
 enum _ReadingBookAction { pin, select, remove }
 
+DateTime _historyDate(AiConversationRecord record) =>
+    record.isReadingCompanion ? record.companionLastUsedAt : record.updatedAt;
+
+int _compareHistory(AiConversationRecord a, AiConversationRecord b) {
+  final recent = _historyDate(b).compareTo(_historyDate(a));
+  if (recent != 0) return recent;
+  final created = b.createdAt.compareTo(a.createdAt);
+  return created != 0 ? created : a.id.compareTo(b.id);
+}
+
+String? _singleLineExcerpt(AiConversationRecord record) =>
+    record.companionPassageExcerpt?.replaceAll(RegExp(r'\s+'), ' ').trim();
+
 /// 阅读空间专用侧栏。
 ///
 /// 侧栏只在阅读空间模式下创建；学习空间入口继续由首页保持空回调。
@@ -41,6 +54,7 @@ class ReadingSpaceSidebar extends StatefulWidget {
     this.onConversationDeleted,
     this.bookLibraryService,
     this.historyService,
+    this.companionMode = false,
   });
 
   final VoidCallback onNewConversation;
@@ -56,6 +70,7 @@ class ReadingSpaceSidebar extends StatefulWidget {
   final ValueChanged<AiConversationRecord>? onConversationDeleted;
   final BookLibraryService? bookLibraryService;
   final AiConversationHistoryService? historyService;
+  final bool companionMode;
 
   @override
   State<ReadingSpaceSidebar> createState() => _ReadingSpaceSidebarState();
@@ -111,7 +126,7 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     try {
       final results = await Future.wait<Object>([
         _library.listBooks(),
-        _history.list(allBooks: true),
+        _history.list(allBooks: true, companionMode: widget.companionMode),
       ]);
       if (!mounted || generation != _loadGeneration) return;
       final allBooks = results[0] as List<BookLibraryItem>;
@@ -135,9 +150,9 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
         (byId[id] ??= <AiConversationRecord>[]).add(record);
       }
       for (final conversations in byId.values) {
-        _sortConversations(conversations);
+        conversations.sort(_compareHistory);
       }
-      _sortConversations(independent);
+      independent.sort(_compareHistory);
       setState(() {
         _books = books;
         _bookNamesById = {
@@ -156,15 +171,6 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
         _error = '侧栏内容暂时无法加载：$error';
       });
     }
-  }
-
-  static void _sortConversations(List<AiConversationRecord> records) {
-    records.sort((a, b) {
-      final updated = b.updatedAt.compareTo(a.updatedAt);
-      if (updated != 0) return updated;
-      final created = b.createdAt.compareTo(a.createdAt);
-      return created != 0 ? created : a.id.compareTo(b.id);
-    });
   }
 
   void _showInfo(String title) => setState(() => _infoTitle = title);
@@ -1233,19 +1239,17 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
     required String groupTitle,
     bool compact = false,
   }) {
-    final records = [...source];
-    _sortConversations(records);
     final children = <Widget>[];
     String? previousDate;
-    for (final record in records) {
-      final date = _conversationDateLabel(record.updatedAt);
+    for (final record in source) {
+      final date = _conversationDateLabel(_historyDate(record));
       if (date != previousDate) {
         previousDate = date;
         children.add(
           Padding(
             padding: const EdgeInsets.fromLTRB(9, 10, 8, 3),
-            child: SizedBox(
-              height: 22,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 22),
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
@@ -1287,11 +1291,11 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
   }) {
     final selecting = _isSelectingConversationGroup(bookId);
     final selected = _selectedConversationIds.contains(record.id);
+    final excerpt = _singleLineExcerpt(record);
     return Builder(
       builder: (anchorContext) => Semantics(
         button: true,
         selected: selecting ? selected : null,
-        label: record.displayTitle,
         hint: selecting ? '点击切换选择状态' : '长按打开会话管理菜单',
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
@@ -1308,15 +1312,18 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                   bookId: bookId,
                   groupTitle: groupTitle,
                 ),
-          child: SizedBox(
-            height: 48,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
             child: DecoratedBox(
               decoration: BoxDecoration(
                 color: selecting && selected ? _selected : Colors.transparent,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 10),
+                padding: EdgeInsets.symmetric(
+                  horizontal: compact ? 0 : 10,
+                  vertical: 6,
+                ),
                 child: Row(
                   children: [
                     if (selecting)
@@ -1336,20 +1343,40 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
                       const SizedBox(width: 12),
                     ],
                     Expanded(
-                      child: Text(
-                        record.displayTitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: _ink,
-                          fontFamily: 'NotoSansCJKSC',
-                          fontSize: selecting
-                              ? 14
-                              : compact
-                              ? 13
-                              : 15,
-                          height: 1.35,
-                        ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            record.displayTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: _ink,
+                              fontFamily: 'NotoSansCJKSC',
+                              fontSize: selecting
+                                  ? 14
+                                  : compact
+                                  ? 13
+                                  : 15,
+                              height: 1.35,
+                            ),
+                          ),
+                          if (excerpt != null) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              excerpt,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: _mutedInk,
+                                fontFamily: 'NotoSansCJKSC',
+                                fontSize: 13,
+                                height: 1.35,
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                   ],
@@ -1575,7 +1602,7 @@ class _ReadingSpaceSearchGroup {
   final bool isIndependent;
   final List<_ReadingSpaceSearchHit> hits;
 
-  DateTime get latestUpdated => hits.first.record.updatedAt;
+  DateTime get latestActivity => _historyDate(hits.first.record);
 }
 
 class _ReadingSpaceSearchPage extends StatefulWidget {
@@ -1631,7 +1658,12 @@ class _ReadingSpaceSearchPageState extends State<_ReadingSpaceSearchPage> {
       final bookName = widget.bookNameForRecord(record).trim();
       final matchesBookName =
           bookName.isNotEmpty && bookName.toLowerCase().contains(normalized);
-      if (!record.matches(query) && !matchesBookName) continue;
+      if (!record.matches(query) &&
+          !matchesBookName &&
+          !(_singleLineExcerpt(record)?.toLowerCase().contains(normalized) ??
+              false)) {
+        continue;
+      }
 
       AiConversationMessage? message;
       for (final candidate in record.messages) {
@@ -1658,7 +1690,7 @@ class _ReadingSpaceSearchPageState extends State<_ReadingSpaceSearchPage> {
 
     final groups = grouped.entries.map((entry) {
       final hits = [...entry.value]
-        ..sort((a, b) => b.record.updatedAt.compareTo(a.record.updatedAt));
+        ..sort((a, b) => _compareHistory(a.record, b.record));
       return _ReadingSpaceSearchGroup(
         key: entry.key,
         label: labels[entry.key] ?? entry.key,
@@ -1670,7 +1702,7 @@ class _ReadingSpaceSearchPageState extends State<_ReadingSpaceSearchPage> {
       if (a.isIndependent != b.isIndependent) {
         return a.isIndependent ? 1 : -1;
       }
-      final updated = b.latestUpdated.compareTo(a.latestUpdated);
+      final updated = b.latestActivity.compareTo(a.latestActivity);
       return updated != 0 ? updated : a.label.compareTo(b.label);
     });
     return groups;
@@ -1860,7 +1892,8 @@ class _ReadingSpaceSearchPageState extends State<_ReadingSpaceSearchPage> {
 
   Widget _buildHitRow(_ReadingSpaceSearchHit hit) {
     final title = hit.record.displayTitle;
-    final updatedAt = hit.record.updatedAt.toLocal();
+    final excerpt = _singleLineExcerpt(hit.record);
+    final updatedAt = _historyDate(hit.record).toLocal();
     final date = updatedAt.millisecondsSinceEpoch == 0
         ? '日期未知'
         : '${updatedAt.month}/${updatedAt.day}';
@@ -1885,6 +1918,19 @@ class _ReadingSpaceSearchPageState extends State<_ReadingSpaceSearchPage> {
                   height: 1.35,
                 ),
               ),
+              if (excerpt != null) ...[
+                const SizedBox(height: 4),
+                _highlightedText(
+                  excerpt,
+                  _query,
+                  maxLines: 1,
+                  style: const TextStyle(
+                    color: _mutedInk,
+                    fontSize: 13,
+                    height: 1.35,
+                  ),
+                ),
+              ],
               if (hit.snippet.isNotEmpty) ...[
                 const SizedBox(height: 4),
                 _highlightedText(

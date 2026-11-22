@@ -21,7 +21,7 @@ class DatabaseService {
 
   static Database? _database;
   static const String _dbName = 'xiaoqi.db';
-  static const int _dbVersion = 35;
+  static const int _dbVersion = 36;
   static const int homeNotebookLimit = 7;
   static const int pinnedNotebookLimit = 10;
   static const Duration deletedNotebookRetention = Duration(days: 30);
@@ -161,6 +161,7 @@ class DatabaseService {
 
     await _createBookRecognitionTables(db);
     await _createBookSourceTables(db);
+    await _createCompanionTables(db);
     await _createBookSourceRevisionTables(db);
     await _createBookLearningTables(db);
     await _createCaptureSourceLinkTables(db);
@@ -716,6 +717,35 @@ class DatabaseService {
     if (oldVersion < 35 && newVersion >= 35) {
       await _createLearningNoteTables(db);
     }
+    if (oldVersion < 36 && newVersion >= 36) {
+      await _createCompanionTables(db);
+    }
+  }
+
+  static Future<void> _createCompanionTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS companion_translations (
+        cache_key TEXT PRIMARY KEY,
+        source_id INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        saved_at INTEGER NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS companion_ink (
+        source_id INTEGER NOT NULL,
+        location TEXT NOT NULL,
+        drawing TEXT NOT NULL,
+        PRIMARY KEY(source_id, location)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS companion_note_sources (
+        note_id INTEGER PRIMARY KEY,
+        source_id INTEGER NOT NULL,
+        locator TEXT NOT NULL
+      )
+    ''');
   }
 
   static Future<void> _createLearningNoteTables(DatabaseExecutor db) async {
@@ -1391,7 +1421,10 @@ class DatabaseService {
     });
   }
 
-  Future<int> insertNote(Note note) async {
+  Future<int> insertNote(
+    Note note, {
+    ({int sourceId, Map<String, Object?> locator})? companionSource,
+  }) async {
     try {
       final db = await database;
       final id = await db.transaction((txn) async {
@@ -1402,6 +1435,13 @@ class DatabaseService {
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
         await _syncNoteRelations(txn, insertedId, map);
+        if (companionSource != null) {
+          await txn.insert('companion_note_sources', {
+            'note_id': insertedId,
+            'source_id': companionSource.sourceId,
+            'locator': jsonEncode(companionSource.locator),
+          });
+        }
         await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
         return insertedId;
       });

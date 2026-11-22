@@ -44,6 +44,7 @@ import '../features/capabilities/presentation/capability_tag_text_controller.dar
 import '../features/capabilities/presentation/skills_plugins_composer_controls.dart';
 import '../features/capabilities/presentation/mcp_app_card.dart';
 import '../models/book_library_item.dart';
+import '../models/book_source.dart';
 import '../models/chat_note_capture.dart';
 import '../models/home_chat_attachment.dart';
 import '../services/book_library_service.dart';
@@ -555,6 +556,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _composerController = CapabilityTagTextController();
   final _composerKey = GlobalKey<_HomeComposerState>();
   final _composerFocusNode = FocusNode();
+  final _companionFocusNode = FocusNode();
   late final _messagesScrollController = ScrollController(
     keepScrollOffset: false,
     onDetach: (_) {
@@ -635,8 +637,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _readingCompanionKey = GlobalKey<ReadingCompanionState>();
   final _companionPreferences = ReadingCompanionPreferences.instance;
   bool _readingCompanionOpen = false;
+  bool _companionImmersive = false;
+  bool _companionDark = false;
+  ReadingCompanionTarget? _companionTarget;
+  String? _companionHistoryNotice;
+  static const _missingCompanionTarget = '当前未在“阅读任务”选中目标资料，请先选择相应资料';
   bool _companionMenuOpen = false;
-  String? _passageConversationId;
+  String? _companionConversationId;
   ReadingCompanionPassage? _readingPassage;
   AiConversationRecord? _conversationBeforeCompanion;
   AiConversationRecord? _readingConversationForSpaceSwitch;
@@ -837,6 +844,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _composerFocusNode.removeListener(_onComposerFocusChanged);
     _composerController.dispose();
     _composerFocusNode.dispose();
+    _companionFocusNode.dispose();
     _messagesScrollController
       ..removeListener(_onMessagesScrolled)
       ..dispose();
@@ -954,6 +962,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _dismissComposerFocus() {
     _composerFocusNode.unfocus();
+    _companionFocusNode.unfocus();
   }
 
   void _cacheCurrentDraft() {
@@ -2420,7 +2429,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         (_selectedReadingTaskBookName.trim() == updated.bookName.trim()
             ? _selectedReadingTaskBookId
             : null);
-    if (bookId != null) _bookConversationFallbacks[bookId] = updated;
+    _rememberReadingTask(bookId, updated);
     if (updated.messages.isNotEmpty) {
       unawaited(
         _historyService.save(updated).catchError((_) {
@@ -2695,9 +2704,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _followLatestMessage = true;
         _userScrollingMessages = false;
       });
-      if (updated.bookId != null) {
-        _bookConversationFallbacks[updated.bookId!] = updated;
-      }
+      _rememberReadingTask(updated.bookId, updated);
       _scrollToLatest();
 
       late final List<Map<String, Object?>> aiMessages;
@@ -2893,7 +2900,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _composerController.hasExplicitCapability && selectedCapability != null;
     final current =
         _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
-    final passage = current.id == _passageConversationId
+    final passage = current.id == _companionConversationId
         ? _readingPassage
         : null;
     final continuesWork = current.hasOpenWork && !_startsSeparateWork(text);
@@ -2946,7 +2953,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => _isPreparingToSend = false);
     }
-    if (!mounted) return;
+    if (!mounted || _conversation?.id != current.id) return;
     final selectedAttachments = List<HomeChatAttachment>.of(_attachments);
     _dismissComposerFocus();
     _setComposerExpanded(false);
@@ -2957,7 +2964,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       text: text,
       displayText: rawText.trim(),
       readingPassage: passage == null
-          ? null
+          ? current.companionPassage
           : readingPassageMarkdown(
               source: passage.sourceName,
               locator: passage.locator,
@@ -3054,9 +3061,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         (_selectedReadingTaskBookName.trim() == withUserMessage.bookName.trim()
             ? _selectedReadingTaskBookId
             : null);
-    if (bookId != null) {
-      _bookConversationFallbacks[bookId] = withUserMessage;
-    }
+    _rememberReadingTask(bookId, withUserMessage);
     _attachments = const [];
     _annotations = const [];
     ++_annotationDraftEpoch;
@@ -3726,13 +3731,18 @@ $materialIndex
             ? _selectedReadingTaskBookId
             : null);
     final resumesBookTask = resumeTaskId != null && bookId != null;
-    final passage = conversationId == _passageConversationId
+    final passage = conversationId == _companionConversationId
         ? _readingPassage
         : null;
     final sourceId = bookId == null || resumesBookTask
         ? null
         : passage != null && passage.bookId == bookId
         ? passage.sourceId
+        : conversation?.isReadingCompanion == true
+        ? conversation?.companionSourceId ??
+              (_companionTarget?.source.bookId == bookId
+                  ? _companionTarget?.source.id
+                  : null)
         : await _historyService.readingSourceId(conversationId, bookId);
     if (!isCurrent()) return null;
     final firstQuestionInWork = history
@@ -6139,7 +6149,7 @@ $text''';
       });
     }
     final bookId = updated.bookId;
-    if (bookId != null) _bookConversationFallbacks[bookId] = updated;
+    _rememberReadingTask(bookId, updated);
   }
 
   Future<void> _clearCapabilityTaskId(
@@ -6176,7 +6186,7 @@ $text''';
       });
     }
     final bookId = updated.bookId;
-    if (bookId != null) _bookConversationFallbacks[bookId] = updated;
+    _rememberReadingTask(bookId, updated);
   }
 
   AiConversationMessage? _pendingCapabilityTask(AiConversationRecord record) {
@@ -6692,9 +6702,7 @@ $text''';
         (_selectedReadingTaskBookName.trim() == updated.bookName.trim()
             ? _selectedReadingTaskBookId
             : null);
-    if (bookId != null) {
-      _bookConversationFallbacks[bookId] = updated;
-    }
+    _rememberReadingTask(bookId, updated);
     if (!isIncomplete) {
       _maybeGenerateConversationTitle(updated, parentId, content);
     }
@@ -6843,7 +6851,7 @@ $text''';
       });
     }
     final bookId = updated.bookId;
-    if (bookId != null) _bookConversationFallbacks[bookId] = updated;
+    _rememberReadingTask(bookId, updated);
     if (answer.isIncomplete && !isIncomplete) {
       if (mounted && _conversation?.id == current.id && skillDraft != null) {
         setState(() {
@@ -6912,10 +6920,10 @@ $text''';
         );
         setState(() => _conversation = current);
         final bookId = current.bookId;
-        if (bookId != null) _bookConversationFallbacks[bookId] = current;
+        _rememberReadingTask(bookId, current);
       } else {
         final bookId = titled.bookId;
-        if (bookId != null) _bookConversationFallbacks[bookId] = titled;
+        _rememberReadingTask(bookId, titled);
       }
     } catch (_) {
       // Title generation is best-effort and must not affect the saved reply.
@@ -7971,9 +7979,7 @@ $text''';
           ..clear()
           ..addAll(updated.messages);
       });
-      if (updated.bookId != null) {
-        _bookConversationFallbacks[updated.bookId!] = updated;
-      }
+      _rememberReadingTask(updated.bookId, updated);
     } finally {
       _isDeletingReply = false;
     }
@@ -8612,6 +8618,13 @@ $text''';
 
   void _startNewConversationForCurrentBookContext() {
     if (_space != _HomeSpace.reading) return;
+    if (_readingCompanionOpen) {
+      final target = _companionTarget;
+      if (target == null) return;
+      _startCompanionChat(target);
+      _showCompanionChatAfterBuild();
+      return;
+    }
     final currentConversation = _conversation;
     final inReadingSpace = _space == _HomeSpace.reading;
     final bookId = inReadingSpace
@@ -8640,7 +8653,7 @@ $text''';
     }
   }
 
-  void _toggleReadingCompanion() {
+  Future<void> _toggleReadingCompanion() async {
     if (_readingCompanionOpen) {
       _closeReadingCompanion();
       return;
@@ -8649,6 +8662,40 @@ $text''';
       return;
     }
     _dismissComposerFocus();
+    final bookId = _selectedReadingTaskBookId;
+    final task = _conversation;
+    if (bookId == null || task == null) {
+      _showReplyError(_missingCompanionTarget);
+      return;
+    }
+    final generation = ++_readingTaskGeneration;
+    bool current() =>
+        mounted &&
+        generation == _readingTaskGeneration &&
+        _space == _HomeSpace.reading &&
+        _companionPreferences.enabled.value &&
+        _conversation?.id == task.id;
+    try {
+      final sourceId = await _historyService.readingSourceId(task.id, bookId);
+      if (!current()) return;
+      final target = await ReadingCompanionTarget.resolve(
+        library: _bookLibrary,
+        bookId: bookId,
+        title: _selectedReadingTaskBookName,
+        preferredSourceId: sourceId,
+      );
+      if (!current()) return;
+      if (target == null) {
+        _showReplyError(_missingCompanionTarget);
+        return;
+      }
+      _companionTarget = target;
+    } catch (_) {
+      if (current()) _showReplyError('读取资料失败，请重试');
+      return;
+    }
+    _conversationBeforeCompanion = _conversation;
+    _companionHistoryNotice = null;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     setState(() {
       _attachmentPanelOpen = false;
@@ -8659,42 +8706,69 @@ $text''';
   }
 
   void _openReadingPassage(ReadingCompanionPassage passage) {
-    if (!_readingCompanionOpen) return;
-    final previous = _readingPassage;
-    if (_conversation?.id == _passageConversationId &&
-        previous?.sameLocationAs(passage) == true) {
+    final target = _companionTarget;
+    if (!_readingCompanionOpen ||
+        target == null ||
+        target.source.id != passage.sourceId ||
+        target.source.bookId != passage.bookId) {
       return;
     }
-    _cacheCurrentDraft();
-    _conversationBeforeCompanion ??= _conversation;
-    final bookName = _selectedReadingTaskBookName.trim().isNotEmpty
-        ? _selectedReadingTaskBookName
-        : _conversation?.bookName ?? '';
+    final previous = _readingPassage;
+    if (_conversation?.id == _companionConversationId &&
+        previous?.sameLocationAs(passage) == true) {
+      final record = _conversation;
+      if (record != null && record.hasCompanionQuestion) {
+        unawaited(_markCompanionOpened(record.id));
+      }
+      return;
+    }
+    _startCompanionChat(target, passage: passage);
+  }
+
+  void _startCompanionChat(
+    ReadingCompanionTarget target, {
+    ReadingCompanionPassage? passage,
+  }) {
     final conversation = AiConversationRecord.empty(
-      bookId: passage.bookId,
-      bookName: bookName,
+      bookId: target.source.bookId,
+      bookName: target.title,
+      readingCompanion: true,
+      companionSourceId: target.source.id,
       enableAutoTitle: true,
     );
+    _companionHistoryNotice = null;
     _readingPassage = passage;
-    _passageConversationId = conversation.id;
+    _companionConversationId = conversation.id;
     _openConversationFromSidebar(conversation);
   }
 
   void _closeReadingCompanion() {
     if (!_readingCompanionOpen) return;
+    if (_readingCompanionKey.currentState?.finishInkForBack() == true) return;
     _dismissComposerFocus();
+    _readingCompanionKey.currentState?.closeChatForBack();
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _cacheCurrentDraft();
     final previous = _conversationBeforeCompanion;
+    ++_readingTaskGeneration;
     setState(() {
       _readingCompanionOpen = false;
+      _companionImmersive = false;
+      _companionDark = false;
       _companionMenuOpen = false;
       _readingPassage = null;
-      _passageConversationId = null;
+      _companionConversationId = null;
       _conversationBeforeCompanion = null;
+      _companionHistoryNotice = null;
     });
     if (previous != null && _conversation?.id != previous.id) {
       _openConversationFromSidebar(previous);
+      final target = _companionTarget;
+      if (target != null &&
+          previous.bookId == null &&
+          previous.bookName == target.title) {
+        _selectedReadingTaskBookId = target.source.bookId;
+      }
     }
   }
 
@@ -8703,7 +8777,7 @@ $text''';
     bool mcpCatalogOnly = false,
   }) async {
     _dismissComposerFocus();
-    final conversationId = _passageConversationId;
+    final conversationId = _companionConversationId;
     final request = await Navigator.of(context).push<ExtensionChatRequest>(
       MaterialPageRoute(
         builder: (_) => ExtensionMarketPage(
@@ -8714,7 +8788,7 @@ $text''';
     );
     if (!mounted ||
         !_readingCompanionOpen ||
-        _passageConversationId != conversationId ||
+        _companionConversationId != conversationId ||
         request == null) {
       return;
     }
@@ -8727,93 +8801,103 @@ $text''';
   }
 
   Widget _buildReadingCompanion() {
-    final activePassage =
-        _passageConversationId != null &&
-        _conversation?.id == _passageConversationId;
-    return Positioned.fill(
-      top: 44,
-      child: ReadingCompanion(
-        key: _readingCompanionKey,
-        bookId: _selectedReadingTaskBookId ?? _conversation?.bookId,
-        loadPreferredSourceId: _loadCompanionTaskSourceId,
-        library: _bookLibrary,
-        messages: activePassage ? _messages : const [],
-        streamingReply: _streamingReply,
-        onPassageOpened: _openReadingPassage,
-        onChooseBook: _chooseCompanionBook,
-        onChatVisibilityChanged: (visible) {
-          if (!visible && _companionMenuOpen) {
-            setState(() => _companionMenuOpen = false);
-          }
-        },
-        onOpenLibrary: _openCompanionBookSources,
-        composerBuilder: (history) => ReadingCompanionComposer(
-          content: history,
-          controller: _composerController,
-          focusNode: _composerFocusNode,
-          modelSelection: _selectedModel,
-          onModelSelectionChanged: _setSelectedModel,
-          onSend: () => unawaited(_sendMessage()),
-          onStop: _stopReply,
-          sendingEnabled: !_isPreparingToSend && !_preparingAttachments,
-          generating: _isGenerating,
-          signedIn: _emailSignedIn,
-          requestLogin: _ensureEmailSessionForChat,
-          onAddAttachment: (action) => unawaited(_addAttachments(action)),
-          onDrawingSelected: () => unawaited(_openDrawingBoard()),
-          onCapabilitySelected: (selection) {
-            _activeSkillWorkflow = null;
-            _composerController.insertCapability(selection);
-            _dismissComposerFocus();
-          },
-          onInstallSkills: () => _openCompanionMarket(ExtensionKind.skill),
-          onInstallPlugins: () => _openCompanionMarket(ExtensionKind.plugin),
-          onInstallMcp: () =>
-              _openCompanionMarket(ExtensionKind.plugin, mcpCatalogOnly: true),
-          onManageMcp: () => _openCompanionMarket(ExtensionKind.mcp),
-          attachments: _attachments,
-          attachmentPreparationStates: _attachmentPreparer.states,
-          onRemoveAttachment: _removeAttachment,
-          onRetryAttachment: _retryAttachment,
-          onEditDrawing: (attachment) =>
-              unawaited(_openDrawingBoard(editing: attachment)),
-          onPreviewAttachment: (attachment) =>
-              unawaited(_openPendingImage(attachment)),
-          voiceRecording: _voicePanelVisible,
-          voiceCancelArmed: _voiceCancelArmed,
-          voiceStarting: _voiceStarting,
-          voiceTranscribing: _voiceTranscribing,
-          voiceSoundLevel: _voiceSoundLevel,
-          onVoiceLongPressStart: _startVoiceInput,
-          onVoiceLongPressMove: _updateVoiceCancelGesture,
-          onVoiceLongPressEnd: _finishVoiceInput,
-          onVoiceLongPressCancel: () => unawaited(_cancelVoiceInput()),
-          onMenuOpenChanged: (open) {
-            if (open != _companionMenuOpen &&
-                mounted &&
-                _readingCompanionOpen) {
-              setState(() => _companionMenuOpen = open);
-            }
-          },
-        ),
-      ),
-    );
-  }
-
-  Future<void> _chooseCompanionBook() async {
-    final item = await showNewReadingTaskDialog(
-      context,
+    final target = _companionTarget;
+    if (target == null) return const SizedBox.shrink();
+    final chat = _conversation?.id == _companionConversationId
+        ? _conversation
+        : null;
+    return ReadingCompanion(
+      key: _readingCompanionKey,
+      bookId: target.source.bookId,
+      target: target,
+      onSourceChanged: _changeCompanionSource,
       library: _bookLibrary,
-      selectedBookId: _selectedReadingTaskBookId,
-      onSearchFocusChanged: _onReadingTaskSearchFocusChanged,
-      onAddBook: _createReadingTaskBook,
+      messages: chat == null ? const [] : _messages,
+      savedPassageExcerpt: chat?.companionPassageExcerpt,
+      streamingReply: _streamingReply,
+      onPassageOpened: _openReadingPassage,
+      immersive: _companionImmersive,
+      onDarkChanged: (dark) {
+        if (_readingCompanionOpen && _companionDark != dark) {
+          setState(() => _companionDark = dark);
+        }
+      },
+      onToggleImmersive: () {
+        if (_readingCompanionOpen && !_spaceMenuOpen) {
+          setState(() => _companionImmersive = !_companionImmersive);
+        }
+      },
+      onFreeChat: _startNewConversationForCurrentBookContext,
+      onChatVisibilityChanged: (visible) {
+        if (!visible && _companionMenuOpen) {
+          setState(() => _companionMenuOpen = false);
+        }
+      },
+      onOpenLibrary: _openCompanionBookSources,
+      composerBuilder: (history) => _companionHistoryNotice != null
+          ? Column(
+              children: [
+                Expanded(child: history),
+                Text(_companionHistoryNotice!),
+              ],
+            )
+          : ReadingCompanionComposer(
+              content: history,
+              controller: _composerController,
+              focusNode: _companionFocusNode,
+              modelSelection: _selectedModel,
+              onModelSelectionChanged: _setSelectedModel,
+              onSend: () => unawaited(_sendMessage()),
+              onStop: _stopReply,
+              sendingEnabled: !_isPreparingToSend && !_preparingAttachments,
+              generating: _isGenerating,
+              signedIn: _emailSignedIn,
+              requestLogin: _ensureEmailSessionForChat,
+              onAddAttachment: (action) => unawaited(_addAttachments(action)),
+              onDrawingSelected: () => unawaited(_openDrawingBoard()),
+              onCapabilitySelected: (selection) {
+                _activeSkillWorkflow = null;
+                _composerController.insertCapability(selection);
+                _dismissComposerFocus();
+              },
+              onInstallSkills: () => _openCompanionMarket(ExtensionKind.skill),
+              onInstallPlugins: () =>
+                  _openCompanionMarket(ExtensionKind.plugin),
+              onInstallMcp: () => _openCompanionMarket(
+                ExtensionKind.plugin,
+                mcpCatalogOnly: true,
+              ),
+              onManageMcp: () => _openCompanionMarket(ExtensionKind.mcp),
+              attachments: _attachments,
+              attachmentPreparationStates: _attachmentPreparer.states,
+              onRemoveAttachment: _removeAttachment,
+              onRetryAttachment: _retryAttachment,
+              onEditDrawing: (attachment) =>
+                  unawaited(_openDrawingBoard(editing: attachment)),
+              onPreviewAttachment: (attachment) =>
+                  unawaited(_openPendingImage(attachment)),
+              voiceRecording: _voicePanelVisible,
+              voiceCancelArmed: _voiceCancelArmed,
+              voiceStarting: _voiceStarting,
+              voiceTranscribing: _voiceTranscribing,
+              voiceSoundLevel: _voiceSoundLevel,
+              onVoiceLongPressStart: _startVoiceInput,
+              onVoiceLongPressMove: _updateVoiceCancelGesture,
+              onVoiceLongPressEnd: _finishVoiceInput,
+              onVoiceLongPressCancel: () => unawaited(_cancelVoiceInput()),
+              onMenuOpenChanged: (open) {
+                if (open != _companionMenuOpen &&
+                    mounted &&
+                    _readingCompanionOpen) {
+                  setState(() => _companionMenuOpen = open);
+                }
+              },
+            ),
     );
-    if (!mounted || !_readingCompanionOpen || item == null) return;
-    await _activateReadingBook(item);
   }
 
   Future<void> _openCompanionBookSources() async {
-    final bookId = _selectedReadingTaskBookId ?? _conversation?.bookId;
+    final bookId = _companionTarget?.source.bookId;
     if (bookId == null) {
       await _openBookLibraryFromSidebar();
       return;
@@ -8827,12 +8911,54 @@ $text''';
             BookSourcesPage(bookId: bookId, bookLibraryService: _bookLibrary),
       ),
     );
+    if (!mounted ||
+        !_readingCompanionOpen ||
+        _companionTarget?.source.bookId != bookId) {
+      return;
+    }
+    final item = await _bookLibrary.getBookLibraryItem(bookId);
+    if (mounted &&
+        _readingCompanionOpen &&
+        item != null &&
+        _companionTarget?.source.bookId == bookId) {
+      await _openBookFromSidebar(item, refresh: true);
+    }
   }
 
-  Future<int?> _loadCompanionTaskSourceId(int bookId) async {
-    final conversation = _conversationBeforeCompanion ?? _conversation;
-    if (conversation == null) return null;
-    return _historyService.readingSourceId(conversation.id, bookId);
+  Future<void> _changeCompanionSource(BookSourceRecord source) async {
+    final current = _companionTarget;
+    final task = _conversationBeforeCompanion;
+    if (task == null ||
+        current == null ||
+        current.source.bookId != source.bookId) {
+      return;
+    }
+    final generation = ++_readingTaskGeneration;
+    final target = await ReadingCompanionTarget.resolve(
+      library: _bookLibrary,
+      bookId: source.bookId,
+      title: current.title,
+      preferredSourceId: source.id,
+    );
+    if (!mounted ||
+        !_readingCompanionOpen ||
+        generation != _readingTaskGeneration)
+      return;
+    if (target == null || target.source.id != source.id) {
+      _showReplyError('这份资料暂不可用，请重新选择');
+      return;
+    }
+    await _historyService.selectReadingSource(
+      task.id,
+      bookId: source.bookId,
+      sourceId: source.id,
+    );
+    if (!mounted ||
+        !_readingCompanionOpen ||
+        generation != _readingTaskGeneration) {
+      return;
+    }
+    _showCompanionTask(task, target);
   }
 
   Future<void> _openExtensionMarket({
@@ -8842,19 +8968,46 @@ $text''';
       MaterialPageRoute(builder: (_) => ExtensionMarketPage(initialKind: kind)),
     );
     if (request == null || !mounted) return;
-    if (_space != _HomeSpace.reading)
+    if (_space != _HomeSpace.reading) {
       setState(() => _space = _HomeSpace.reading);
-    await _startNewConversation();
+    }
+    if (_readingCompanionOpen && _companionTarget != null) {
+      _startCompanionChat(_companionTarget!);
+      _showCompanionChatAfterBuild();
+    } else {
+      await _startNewConversation();
+    }
     if (!mounted) return;
     _composerController.setMessage(request.prompt, request.selection);
-    _composerFocusNode.requestFocus();
+    (_readingCompanionOpen ? _companionFocusNode : _composerFocusNode)
+        .requestFocus();
   }
 
-  Future<AiConversationRecord?> _latestConversationForBook(
+  void _rememberReadingTask(int? bookId, AiConversationRecord record) {
+    if (bookId == null || record.isReadingCompanion) return;
+    _bookConversationFallbacks[bookId] = record;
+    if (_conversationBeforeCompanion?.id == record.id) {
+      _conversationBeforeCompanion = record;
+    }
+  }
+
+  Future<AiConversationRecord> _readingTaskForBook(
     int bookId,
     String bookName,
   ) async {
-    final records = await _historyService.list(allBooks: true);
+    final current = _readingCompanionOpen
+        ? _conversationBeforeCompanion
+        : _conversation;
+    if (current != null &&
+        !current.isReadingCompanion &&
+        (current.bookId == bookId ||
+            (current.bookId == null && current.bookName.trim() == bookName))) {
+      return current;
+    }
+    final records = await _historyService.list(
+      allBooks: true,
+      companionMode: false,
+    );
     final matches = records
         .where(
           (record) =>
@@ -8863,7 +9016,19 @@ $text''';
         )
         .toList();
     matches.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    return matches.isEmpty ? null : matches.first;
+    final latest = matches.firstOrNull;
+    final local = _bookConversationFallbacks[bookId];
+    if (local != null &&
+        !local.isReadingCompanion &&
+        (latest == null || local.updatedAt.isAfter(latest.updatedAt))) {
+      return local;
+    }
+    return latest ??
+        AiConversationRecord.empty(
+          bookId: bookId,
+          bookName: bookName,
+          enableAutoTitle: true,
+        );
   }
 
   Future<void> _openReadingTaskBookMaterials(BookLibraryItem item) async {
@@ -8924,9 +9089,11 @@ $text''';
 
     _dismissComposerFocus();
     _setComposerExpanded(false);
+    _cacheCurrentDraft();
     _leaveReplyRunningInBackground();
     try {
       await _bookLibrary.setBookInReadingSpace(bookId, true);
+      if (!mounted || generation != _readingTaskGeneration) return;
       final currentConversation = _conversation;
       if (currentConversation != null &&
           (currentConversation.bookId == bookId ||
@@ -8943,19 +9110,8 @@ $text''';
         return;
       }
 
-      final latest = await _latestConversationForBook(bookId, item.book.title);
+      final conversation = await _readingTaskForBook(bookId, item.book.title);
       if (!mounted || generation != _readingTaskGeneration) return;
-      final local = _bookConversationFallbacks[bookId];
-      final conversation =
-          local != null &&
-              (latest == null || local.updatedAt.isAfter(latest.updatedAt))
-          ? local
-          : latest ??
-                AiConversationRecord.empty(
-                  bookId: bookId,
-                  bookName: item.book.title,
-                  enableAutoTitle: true,
-                );
       _clearEmptyStoppedReply();
       _bookConversationFallbacks[bookId] = conversation;
       setState(() {
@@ -9074,8 +9230,12 @@ $text''';
   }
 
   Future<void> _openReadingSidebar() async {
-    _closeReadingCompanion();
+    if (_readingCompanionOpen &&
+        _readingCompanionKey.currentState?.finishInkForBack() == true) {
+      return;
+    }
     if (_space != _HomeSpace.reading) return;
+    ++_readingTaskGeneration;
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _dismissComposerFocus();
     Future<void> Function()? actionAfterClose;
@@ -9095,6 +9255,7 @@ $text''';
           child: SizedBox(
             width: drawerWidth,
             child: ReadingSpaceSidebar(
+              companionMode: _readingCompanionOpen,
               onNewConversation: () {
                 _startNewConversationForCurrentBookContext();
                 Navigator.of(dialogContext).pop();
@@ -9104,19 +9265,22 @@ $text''';
                 Navigator.of(dialogContext).pop();
               },
               onOpenConversation: (record) {
-                _openConversationFromSidebar(record);
+                actionAfterClose = () => _selectSidebarConversation(record);
                 Navigator.of(dialogContext).pop();
               },
               onOpenConversationMatch: (record, messageId) {
-                _openConversationFromSidebar(record, messageId: messageId);
+                actionAfterClose = () =>
+                    _selectSidebarConversation(record, messageId: messageId);
                 Navigator.of(dialogContext).pop();
               },
               onConversationChanged: (record) {
                 if (_conversation?.id == record.id) {
                   setState(() {
                     _conversation = record;
-                    _selectedReadingTaskBookId = record.bookId;
-                    _selectedReadingTaskBookName = record.bookName;
+                    if (!_readingCompanionOpen) {
+                      _selectedReadingTaskBookId = record.bookId;
+                      _selectedReadingTaskBookName = record.bookName;
+                    }
                   });
                 }
               },
@@ -9151,6 +9315,7 @@ $text''';
     AiConversationRecord record, {
     String? messageId,
   }) {
+    _cacheCurrentDraft();
     if (_messagesScrollController.hasClients) {
       _messagesScrollController.jumpTo(_messagesScrollController.offset);
     }
@@ -9174,8 +9339,10 @@ $text''';
       _continuingReplyId = null;
       _pendingContinuationMessageId = null;
       _isContinuingReply = false;
-      _selectedReadingTaskBookId = record.bookId;
-      _selectedReadingTaskBookName = record.bookName;
+      if (!_readingCompanionOpen) {
+        _selectedReadingTaskBookId = record.bookId;
+        _selectedReadingTaskBookName = record.bookName;
+      }
       _messages
         ..clear()
         ..addAll(record.messages);
@@ -9262,6 +9429,15 @@ $text''';
       (_, cachedConversation) => cachedConversation.id == record.id,
     );
     if (_conversation?.id != record.id) return;
+    final task = _conversationBeforeCompanion;
+    final target = _companionTarget;
+    if (_readingCompanionOpen &&
+        task != null &&
+        target != null &&
+        record.isReadingCompanion) {
+      _showCompanionTask(task, target);
+      return;
+    }
     if (_voicePanelVisible) unawaited(_cancelVoiceInput());
     _readingTaskGeneration++;
     final bookId = _selectedReadingTaskBookId ?? record.bookId;
@@ -9305,20 +9481,171 @@ $text''';
     });
   }
 
-  Future<void> _openBookFromSidebar(BookLibraryItem item) async {
+  Future<void> _openBookFromSidebar(
+    BookLibraryItem item, {
+    bool refresh = false,
+  }) async {
+    if (!_readingCompanionOpen) {
+      await _activateReadingBook(item);
+      return;
+    }
     final bookId = item.book.id;
-    if (bookId == null) return;
-    if (_voicePanelVisible) unawaited(_cancelVoiceInput());
-    _dismissComposerFocus();
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute(
-        builder: (_) => BookLearningShellPage(initialBookId: bookId),
-      ),
-    );
-    if (!mounted) return;
+    if (bookId == null ||
+        (!refresh && bookId == _companionTarget?.source.bookId)) {
+      return;
+    }
+    final generation = ++_readingTaskGeneration;
+    bool current() =>
+        mounted &&
+        _readingCompanionOpen &&
+        generation == _readingTaskGeneration;
+    try {
+      final task = await _readingTaskForBook(bookId, item.book.title);
+      if (!current()) return;
+      final preferred = refresh
+          ? _companionTarget?.source.id
+          : await _historyService.readingSourceId(task.id, bookId);
+      if (!current()) return;
+      Future<ReadingCompanionTarget?> resolve(int? id) =>
+          ReadingCompanionTarget.resolve(
+            library: _bookLibrary,
+            bookId: bookId,
+            title: item.book.title,
+            preferredSourceId: id,
+          );
+      var target = await resolve(preferred);
+      if (!mounted || !current()) return;
+      if (target == null) {
+        final pickedId = await showReadingTaskMaterialsDialog(
+          context,
+          book: item,
+          library: _bookLibrary,
+          bookId: bookId,
+          sourceId: preferred,
+          closeOnSelection: true,
+        );
+        if (!current() || pickedId == null) return;
+        target = await resolve(pickedId);
+        if (!current()) return;
+        if (target == null || target.source.id != pickedId) {
+          _showReplyError('这份资料暂不可用，请重新选择');
+          return;
+        }
+        await _historyService.selectReadingSource(
+          task.id,
+          bookId: bookId,
+          sourceId: pickedId,
+        );
+        if (!current()) return;
+      }
+      if (refresh && _companionTarget?.source.id == target.source.id) {
+        setState(() => _companionTarget = target);
+      } else {
+        _showCompanionTask(task, target);
+      }
+    } catch (_) {
+      if (current()) _showReplyError('切换阅读任务失败，请重试');
+    }
+  }
+
+  void _showCompanionTask(
+    AiConversationRecord task,
+    ReadingCompanionTarget target, {
+    AiConversationRecord? history,
+  }) {
+    _readingCompanionKey.currentState?.closeChatForBack();
+    final next = history ?? task;
+    if (_conversation?.id != next.id) _openConversationFromSidebar(next);
+    _bookConversationFallbacks[target.source.bookId] = task;
     setState(() {
-      _clearEmptyStoppedReply();
-      _conversationPresentationRevision++;
+      _companionTarget = target;
+      _conversationBeforeCompanion = task;
+      _selectedReadingTaskBookId = target.source.bookId;
+      _selectedReadingTaskBookName = target.title;
+      _companionHistoryNotice = null;
+      _readingPassage = null;
+      _companionConversationId = history?.id;
+      _companionMenuOpen = false;
+    });
+  }
+
+  Future<void> _selectSidebarConversation(
+    AiConversationRecord record, {
+    String? messageId,
+  }) async {
+    if (!_readingCompanionOpen) {
+      if (!record.isReadingCompanion) {
+        _openConversationFromSidebar(record, messageId: messageId);
+      }
+      return;
+    }
+    if (!record.isReadingCompanion) return;
+    final bookId = record.bookId;
+    final generation = ++_readingTaskGeneration;
+    bool current() =>
+        mounted &&
+        _readingCompanionOpen &&
+        generation == _readingTaskGeneration;
+    try {
+      ReadingCompanionTarget? target;
+      AiConversationRecord? task;
+      if (bookId != null) {
+        task = await _readingTaskForBook(bookId, record.bookName);
+        if (!current()) return;
+        target = await ReadingCompanionTarget.resolve(
+          library: _bookLibrary,
+          bookId: bookId,
+          title: record.bookName,
+          preferredSourceId: record.companionSourceId,
+          legacyPassage: record.companionSourceId == null
+              ? record.companionPassage ?? ''
+              : null,
+        );
+        if (!current()) return;
+        if (record.companionSourceId != null &&
+            target?.source.id != record.companionSourceId) {
+          target = null;
+        }
+      }
+      if (target != null && task != null) {
+        _showCompanionTask(task, target, history: record);
+      } else {
+        if (_conversation?.id != record.id) {
+          _openConversationFromSidebar(record);
+        }
+        setState(() {
+          _companionHistoryNotice = '无法定位这段对话的原资料，可查看已保存的记录';
+          _readingPassage = null;
+          _companionConversationId = record.id;
+        });
+      }
+      _showCompanionChatAfterBuild(messageId: messageId);
+      await _markCompanionOpened(record.id);
+    } catch (_) {
+      if (current()) _showReplyError('打开伴读记录失败，请重试');
+    }
+  }
+
+  Future<void> _markCompanionOpened(String id) async {
+    try {
+      await _historyService.markCompanionOpened(id);
+    } catch (_) {
+      if (mounted && _readingCompanionOpen && _conversation?.id == id) {
+        _showReplyError('最近打开时间未能保存');
+      }
+    }
+  }
+
+  void _showCompanionChatAfterBuild({String? messageId}) {
+    final conversationId = _companionConversationId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          _readingCompanionOpen &&
+          _conversation?.id == conversationId) {
+        _readingCompanionKey.currentState?.openHistoryChat(
+          messageId: messageId,
+        );
+      }
     });
   }
 
@@ -9387,7 +9714,7 @@ $text''';
             maintainBottomViewPadding: keepComposerFixed,
             child: LayoutBuilder(
               builder: (context, constraints) {
-                return SizedBox.expand(
+                final conversation = SizedBox.expand(
                   child: Stack(
                     children: [
                       if (_messages.isEmpty)
@@ -9543,9 +9870,6 @@ $text''';
                                 ValueListenableBuilder<bool>(
                                   valueListenable: _keyboardInsetsChanging,
                                   builder: (context, keyboardInsetsChanging, _) {
-                                    if (_readingCompanionOpen) {
-                                      return const SizedBox.shrink();
-                                    }
                                     final keyboardVisible =
                                         MediaQuery.viewInsetsOf(
                                           context,
@@ -9728,7 +10052,18 @@ $text''';
                           },
                         ),
                       ),
-                      if (_readingCompanionOpen) _buildReadingCompanion(),
+                    ],
+                  ),
+                );
+                return SizedBox.expand(
+                  child: Stack(
+                    children: [
+                      _ReadingModeTransition(
+                        companionOpen: _readingCompanionOpen,
+                        immersive: _companionImmersive,
+                        home: conversation,
+                        companion: _buildReadingCompanion(),
+                      ),
                       // Keep the menu above the conversation canvas and composer.
                       if (_spaceMenuOpen) ...[
                         Positioned(
@@ -9754,7 +10089,19 @@ $text''';
                           ),
                         ),
                       ],
-                      if (!_composerExpanded)
+                      if (!_composerExpanded &&
+                          _readingCompanionOpen &&
+                          _companionDark &&
+                          !_companionImmersive)
+                        const Positioned(
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          height: 44,
+                          child: ColoredBox(color: Color(0xFF16181A)),
+                        ),
+                      if (!_composerExpanded &&
+                          !(_readingCompanionOpen && _companionImmersive))
                         _buildTopBar(
                           showNewConversation:
                               !_readingCompanionOpen && _messages.isNotEmpty,
@@ -9865,106 +10212,155 @@ $text''';
       left: 14,
       right: 14,
       height: 44,
-      child: Stack(
-        alignment: Alignment.center,
-        clipBehavior: Clip.none,
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Semantics(
-              button: true,
-              label: '打开侧边栏',
-              child: IconButton(
-                onPressed: _space == _HomeSpace.reading
-                    ? _openReadingSidebar
-                    : null,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(
-                  width: 44,
-                  height: 44,
-                ),
-                splashRadius: 24,
-                icon: SvgPicture.asset(
-                  'assets/images/home_sidebar_icon.svg',
-                  width: _topBarIconSize,
-                  height: _topBarIconSize,
-                  fit: BoxFit.contain,
+      child: ColorFiltered(
+        colorFilter: ColorFilter.matrix(
+          _readingCompanionOpen && _companionDark
+              ? const [
+                  -1,
+                  0,
+                  0,
+                  0,
+                  255,
+                  0,
+                  -1,
+                  0,
+                  0,
+                  255,
+                  0,
+                  0,
+                  -1,
+                  0,
+                  255,
+                  0,
+                  0,
+                  0,
+                  1,
+                  0,
+                ]
+              : const [
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  1,
+                  0,
+                ],
+        ),
+        child: Stack(
+          alignment: Alignment.center,
+          clipBehavior: Clip.none,
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Semantics(
+                button: true,
+                label: '打开侧边栏',
+                child: IconButton(
+                  onPressed: _space == _HomeSpace.reading
+                      ? _openReadingSidebar
+                      : null,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 44,
+                    height: 44,
+                  ),
+                  splashRadius: 24,
+                  icon: SvgPicture.asset(
+                    'assets/images/home_sidebar_icon.svg',
+                    width: _topBarIconSize,
+                    height: _topBarIconSize,
+                    fit: BoxFit.contain,
+                  ),
                 ),
               ),
             ),
-          ),
-          if (showNewOnLeft)
-            Positioned(left: 44, child: _newConversationTopButton()),
-          Align(
-            alignment: Alignment.centerRight,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (showCompanion)
-                  IconButton(
-                    tooltip: _readingCompanionOpen ? '退出伴读' : '沉浸伴读',
-                    isSelected: _readingCompanionOpen,
-                    onPressed: _toggleReadingCompanion,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints.tightFor(
-                      width: 44,
-                      height: 44,
+            if (showNewOnLeft)
+              Positioned(left: 44, child: _newConversationTopButton()),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (showCompanion)
+                    IconButton(
+                      tooltip: _readingCompanionOpen ? '退出伴读' : '沉浸伴读',
+                      isSelected: _readingCompanionOpen,
+                      onPressed: _toggleReadingCompanion,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 44,
+                        height: 44,
+                      ),
+                      style: _readingCompanionOpen
+                          ? IconButton.styleFrom(
+                              backgroundColor: const Color(0xFFF1F1F1),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            )
+                          : null,
+                      icon: SvgPicture.asset(
+                        BookFlowTheme.companionIconAsset,
+                        width: _topBarIconSize,
+                        height: _topBarIconSize,
+                        excludeFromSemantics: true,
+                      ),
                     ),
-                    style: _readingCompanionOpen
-                        ? IconButton.styleFrom(
-                            backgroundColor: const Color(0xFFF1F1F1),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                          )
-                        : null,
-                    icon: SvgPicture.asset(
-                      BookFlowTheme.companionIconAsset,
-                      width: _topBarIconSize,
-                      height: _topBarIconSize,
-                      excludeFromSemantics: true,
-                    ),
-                  ),
-                Semantics(
-                  button: true,
-                  enabled: _space == _HomeSpace.reading,
-                  label: '笔记',
-                  child: InkResponse(
-                    onTap: _space == _HomeSpace.reading
-                        ? () => unawaited(_openNotesPanel())
-                        : null,
-                    radius: 22,
-                    child: SizedBox(
-                      width: 44,
-                      height: 44,
-                      child: Center(
-                        child: SvgPicture.asset(
-                          'assets/images/home_reply_note.svg',
-                          width: _topBarIconSize,
-                          height: _topBarIconSize,
+                  Semantics(
+                    button: true,
+                    enabled: _space == _HomeSpace.reading,
+                    label: '笔记',
+                    child: InkResponse(
+                      onTap: _space == _HomeSpace.reading
+                          ? () => unawaited(_openNotesPanel())
+                          : null,
+                      radius: 22,
+                      child: SizedBox(
+                        width: 44,
+                        height: 44,
+                        child: Center(
+                          child: SvgPicture.asset(
+                            'assets/images/home_reply_note.svg',
+                            width: _topBarIconSize,
+                            height: _topBarIconSize,
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-                if (showNewConversation && !showNewOnLeft)
-                  _newConversationTopButton(),
-              ],
-            ),
-          ),
-          Positioned.fill(
-            left: rightControls,
-            right: rightControls,
-            child: Align(
-              alignment: Alignment.center,
-              child: _SpaceSwitcher(
-                title: _spaceTitle,
-                expanded: _spaceMenuOpen,
-                onToggle: _toggleSpaceMenu,
+                  if (showNewConversation && !showNewOnLeft)
+                    _newConversationTopButton(),
+                ],
               ),
             ),
-          ),
-        ],
+            Positioned.fill(
+              left: rightControls,
+              right: rightControls,
+              child: Align(
+                alignment: Alignment.center,
+                child: _SpaceSwitcher(
+                  title: _spaceTitle,
+                  expanded: _spaceMenuOpen,
+                  onToggle: _toggleSpaceMenu,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -9980,6 +10376,75 @@ $text''';
       height: _topBarIconSize,
     ),
   );
+}
+
+class _ReadingModeTransition extends StatelessWidget {
+  const _ReadingModeTransition({
+    required this.companionOpen,
+    required this.immersive,
+    required this.home,
+    required this.companion,
+  });
+
+  final bool companionOpen;
+  final bool immersive;
+  final Widget home;
+  final Widget companion;
+
+  Widget _page(Widget child, {required bool active}) => ExcludeFocus(
+    excluding: !active,
+    child: ExcludeSemantics(
+      excluding: !active,
+      child: IgnorePointer(
+        ignoring: !active,
+        child: RepaintBoundary(child: child),
+      ),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final homePage = _page(home, active: !companionOpen);
+    final companionPage = _page(companion, active: companionOpen);
+    final duration = companionOpen
+        ? const Duration(milliseconds: 420)
+        : const Duration(milliseconds: 260);
+    return ClipRect(
+      child: TweenAnimationBuilder<double>(
+        tween: Tween<double>(begin: 0, end: companionOpen ? 1 : 0),
+        duration: MediaQuery.disableAnimationsOf(context)
+            ? Duration.zero
+            : duration,
+        curve: Curves.easeInOutSine,
+        builder: (context, progress, _) => Stack(
+          fit: StackFit.expand,
+          children: [
+            Offstage(
+              offstage: progress == 1,
+              child: TickerMode(
+                enabled: progress < 1,
+                child: FractionalTranslation(
+                  translation: Offset(-progress, 0),
+                  child: homePage,
+                ),
+              ),
+            ),
+            if (companionOpen || progress > 0)
+              Positioned.fill(
+                top: immersive ? 0 : 44,
+                child: FractionalTranslation(
+                  translation: Offset(1 - progress, 0),
+                  child: ReadingCompanionLayoutGate(
+                    entering: companionOpen && progress < 1,
+                    child: companionPage,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _WelcomeCopy extends StatelessWidget {

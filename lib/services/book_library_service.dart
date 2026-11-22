@@ -1139,7 +1139,11 @@ class BookLibraryService {
     final raw = rows.first['document_json']?.toString() ?? '';
     if (raw.isEmpty) return null;
     try {
-      return XiaoqiDocument.fromJson(raw);
+      return await compute(
+        XiaoqiDocument.fromJson,
+        raw,
+        debugLabel: 'decode book source revision',
+      );
     } on Object catch (_) {
       return null;
     }
@@ -1153,10 +1157,7 @@ class BookLibraryService {
     if (path.isEmpty) return null;
     try {
       if (!await File(path).exists()) return null;
-      return await const SourceDocumentLoader().parseFile(
-        path,
-        format: source.format,
-      );
+      return await SourceDocumentLoader.parseBookSourceInBackground(source);
     } on Object catch (_) {
       return null;
     }

@@ -31,7 +31,12 @@ class AppToast {
 
     entry = OverlayEntry(
       builder: (ctx) {
-        return _ToastWidget(message: message, onDismiss: dismiss);
+        return IgnorePointer(
+          child: Semantics(
+            liveRegion: true,
+            child: _ToastWidget(message: message, onDismiss: dismiss),
+          ),
+        );
       },
     );
 
@@ -45,6 +50,7 @@ class AppToast {
       overlay.insert(entry);
       inserted = true;
     });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 }
 

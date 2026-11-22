@@ -24,6 +24,7 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
     this.tableRowsOverride,
     this.continuation = false,
     this.onSelectionChanged,
+    this.onTextTap,
     this.contextMenuBuilder,
     this.textStyleBuilder,
     this.editable = false,
@@ -37,6 +38,7 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
   final List<List<String>>? tableRowsOverride;
   final bool continuation;
   final ValueChanged<bool>? onSelectionChanged;
+  final VoidCallback? onTextTap;
   final EditableTextContextMenuBuilder? contextMenuBuilder;
   final TextStyle Function(TextStyle)? textStyleBuilder;
   final bool editable;
@@ -188,6 +190,7 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
     }
     return SelectableText(
       text,
+      onTap: onTextTap,
       style: textStyleBuilder?.call(style) ?? style,
       contextMenuBuilder: contextMenuBuilder ?? _standardDocumentContextMenu,
       onSelectionChanged: (selection, _) =>

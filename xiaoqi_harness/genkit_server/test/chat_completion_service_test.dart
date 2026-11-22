@@ -92,6 +92,41 @@ void main() {
     );
   });
 
+  test('only explicit DeepSeek requests disable thinking', () async {
+    final inputs = <ChatCompletionInput>[];
+    final service = ChatCompletionService(
+      environment: const {
+        'DEEPSEEK_API_KEY': 'test-key',
+        'MIMO_API_KEY': 'test-key',
+      },
+      generate: (input) async {
+        inputs.add(input);
+        return '译文';
+      },
+    );
+    for (final (model, effort) in [
+      ('deepseek-flash', 'none'),
+      ('deepseek-flash', null),
+      ('mimo-v2.6-flash', 'none'),
+    ]) {
+      final response = await service.handle(
+        Request(
+          'POST',
+          Uri.parse('http://localhost/v1/chat/completions'),
+          body: jsonEncode({
+            'model_id': model,
+            if (effort != null) 'reasoning_level': effort,
+            'messages': [
+              {'role': 'user', 'content': 'A test sentence.'},
+            ],
+          }),
+        ),
+      );
+      expect(response.statusCode, 200);
+    }
+    expect(inputs.map((input) => input.disableThinking), [true, false, false]);
+  });
+
   test('rejects unsupported models and malformed image URLs', () async {
     final service = ChatCompletionService(
       environment: const {'MIMO_API_KEY': 'test-server-key'},

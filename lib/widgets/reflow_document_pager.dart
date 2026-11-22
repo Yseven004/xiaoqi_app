@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import '../models/reader_pagination.dart';
 import '../models/xiaoqi_document.dart';
@@ -31,6 +32,9 @@ class ReflowDocumentPager extends StatefulWidget {
     this.onChapterChanged,
     this.onProgressChanged,
     this.verticalChapterTitleStyle,
+    this.verticalPadding = const EdgeInsets.fromLTRB(24, 18, 24, 28),
+    this.verticalBackground = Colors.white,
+    this.onVisibleBlocksChanged,
   });
 
   final XiaoqiDocument document;
@@ -43,6 +47,9 @@ class ReflowDocumentPager extends StatefulWidget {
   final ValueChanged<String>? onChapterChanged;
   final ValueChanged<ReaderPaginationProgress>? onProgressChanged;
   final TextStyle? verticalChapterTitleStyle;
+  final EdgeInsets verticalPadding;
+  final Color verticalBackground;
+  final ValueChanged<List<XiaoqiDocumentBlock>>? onVisibleBlocksChanged;
 
   @override
   State<ReflowDocumentPager> createState() => _ReflowDocumentPagerState();
@@ -366,7 +373,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         blocks.first.kind != 'heading' ||
         blocks.first.text != chapter.title;
     final result = ColoredBox(
-      color: Colors.white,
+      color: widget.verticalBackground,
       child: NotificationListener<ScrollEndNotification>(
         onNotification: (notification) {
           if (notification.depth == 0) {
@@ -377,7 +384,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         child: SingleChildScrollView(
           key: const Key('book_body_document_vertical_scroll'),
           controller: _verticalController,
-          padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
+          padding: widget.verticalPadding,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -423,6 +430,11 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     if (_verticalRestoreScheduled) {
       _verticalRestoreScheduled = false;
       _scheduleVerticalRestore(chapter.id, blocks, blockKeys);
+      if (widget.onVisibleBlocksChanged != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _emitVerticalAnchor(chapter.id, blocks, blockKeys);
+        });
+      }
     }
     return result;
   }
@@ -446,6 +458,18 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
           ?.currentContext;
       if (target == null) return;
       Scrollable.ensureVisible(target, duration: Duration.zero, alignment: .08);
+      final offset = anchor?.characterOffset ?? 0;
+      if (offset <= 0 || !_verticalController.hasClients) return;
+      final render = _textRenderOf(target.findRenderObject());
+      final textLength = render?.text?.toPlainText().length ?? 0;
+      if (render == null || offset > textLength) return;
+      final position = _verticalController.position;
+      final caret = render.getLocalRectForCaret(TextPosition(offset: offset));
+      _verticalController.jumpTo(
+        (_verticalController.offset + caret.top)
+            .clamp(position.minScrollExtent, position.maxScrollExtent)
+            .toDouble(),
+      );
     });
   }
 
@@ -461,6 +485,8 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         viewportTop + (viewportBox?.size.height ?? double.infinity);
     final targetLine = viewportTop + 80;
     XiaoqiDocumentBlock? closest;
+    RenderBox? closestRender;
+    final visible = <XiaoqiDocumentBlock>[];
     var closestDistance = double.infinity;
     for (var index = 0; index < blocks.length; index++) {
       final block = blocks[index];
@@ -471,21 +497,44 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       final top = render.localToGlobal(Offset.zero).dy;
       final bottom = top + render.size.height;
       if (bottom < viewportTop || top > viewportBottom) continue;
+      visible.add(block);
       final distance = (top - targetLine).abs();
       if (distance < closestDistance) {
         closest = block;
+        closestRender = render;
         closestDistance = distance;
       }
     }
+    widget.onVisibleBlocksChanged?.call(visible);
     if (closest == null) return;
+    final text = _textRenderOf(closestRender);
+    var characterOffset = _requestedAnchor?.blockId == closest.id
+        ? _requestedAnchor!.characterOffset
+        : 0;
+    if (text != null && text.text?.toPlainText() == closest.text) {
+      final origin = text.localToGlobal(Offset.zero);
+      characterOffset = text
+          .getPositionForPoint(
+            Offset(origin.dx + 1, math.max(origin.dy, viewportTop + 12)),
+          )
+          .offset;
+    }
     final anchor = FlowReaderAnchor(
       sourceId: widget.sourceId,
       chapterId: chapterId,
       blockId: closest.id,
+      characterOffset: characterOffset,
     );
     _requestedAnchor = anchor;
     widget.onAnchorChanged?.call(anchor);
     widget.onChapterChanged?.call(chapterId);
+  }
+
+  RenderEditable? _textRenderOf(RenderObject? object) {
+    if (object is RenderEditable) return object;
+    RenderEditable? result;
+    object?.visitChildren((child) => result ??= _textRenderOf(child));
+    return result;
   }
 
   Widget _buildPage(

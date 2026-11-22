@@ -1,2 +1,2 @@
-const releaseId = '2026-11-21-wikisource-book-search';
-const apiContractVersion = '40';
+const releaseId = '2026-11-22-reading-companion';
+const apiContractVersion = '42';

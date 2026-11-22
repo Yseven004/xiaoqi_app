@@ -19,6 +19,7 @@ class ChatCompletionInput {
     required this.messages,
     required this.temperature,
     required this.maxTokens,
+    this.disableThinking = false,
   });
 
   final String modelId;
@@ -28,6 +29,7 @@ class ChatCompletionInput {
   final List<Message> messages;
   final double temperature;
   final int maxTokens;
+  final bool disableThinking;
 }
 
 /// Preserves the app's OpenAI-compatible helper API while keeping model keys
@@ -79,6 +81,9 @@ class ChatCompletionService {
           messages: messages,
           temperature: temperature,
           maxTokens: maxTokens,
+          disableThinking:
+              selection.namespace == 'deepseek' &&
+              body['reasoning_level'] == 'none',
         ),
       ).timeout(const Duration(seconds: 120));
       return Response.ok(
@@ -237,6 +242,7 @@ class ChatCompletionService {
   }
 
   static Future<String> _generateWithGenkit(ChatCompletionInput input) async {
+    final stopwatch = Stopwatch()..start();
     final ai = Genkit(
       promptDir: null,
       isDevEnv: false,
@@ -255,8 +261,21 @@ class ChatCompletionService {
       config: OpenAIChatOptions(
         temperature: input.temperature,
         maxTokens: input.maxTokens,
+        reasoningEffort: input.disableThinking ? 'none' : null,
       ),
     );
+    if (input.disableThinking) {
+      final usage = response.usage;
+      stderr.writeln(
+        jsonEncode({
+          'event': 'deepseek_non_thinking_completion',
+          'elapsed_ms': stopwatch.elapsedMilliseconds,
+          'input_tokens': usage?.inputTokens,
+          'output_tokens': usage?.outputTokens,
+          'cached_input_tokens': usage?.cachedContentTokens,
+        }),
+      );
+    }
     return response.text;
   }
 

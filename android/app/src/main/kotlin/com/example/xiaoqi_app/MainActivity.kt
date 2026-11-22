@@ -13,6 +13,13 @@ class MainActivity : FlutterActivity() {
             "xiaoqi_app/runtime_config",
         ).setMethodCallHandler { call, result ->
             when (call.method) {
+                "setCompanionBrightness" -> {
+                    val brightness = call.argument<Double>("brightness")
+                    val attributes = window.attributes
+                    attributes.screenBrightness = brightness?.coerceIn(0.05, 1.0)?.toFloat() ?: -1f
+                    window.attributes = attributes
+                    result.success(null)
+                }
                 "getWereadApiKey" -> result.success(BuildConfig.XIAOQI_WEREAD_API_KEY)
                 "getGoogleBooksApiKey" -> result.success(BuildConfig.XIAOQI_GOOGLE_BOOKS_API_KEY)
                 "getTanshuProxyToken" -> result.success(BuildConfig.XIAOQI_TANSHU_PROXY_TOKEN)
