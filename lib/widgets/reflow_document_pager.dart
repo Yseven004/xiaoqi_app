@@ -19,6 +19,11 @@ typedef ReaderBlockSliceBuilder =
 /// The source document stays immutable. Pagination only creates references to
 /// blocks and text ranges so an anchor can be resolved again after a resize or
 /// text-scale change.
+final _chapterHeadingWhitespace = RegExp(r'[\s　]+');
+
+String _chapterHeadingText(String value) =>
+    value.replaceAll(_chapterHeadingWhitespace, ' ').trim();
+
 class ReflowDocumentPager extends StatefulWidget {
   const ReflowDocumentPager({
     super.key,
@@ -371,7 +376,8 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     final showTitle =
         blocks.isEmpty ||
         blocks.first.kind != 'heading' ||
-        blocks.first.text != chapter.title;
+        _chapterHeadingText(blocks.first.text) !=
+            _chapterHeadingText(chapter.title);
     final result = ColoredBox(
       color: widget.verticalBackground,
       child: NotificationListener<ScrollEndNotification>(
@@ -1044,7 +1050,8 @@ Future<_ChapterPaginationResult?> _paginateChapter(
   final showTitle =
       blocks.isEmpty ||
       blocks.first.kind != 'heading' ||
-      blocks.first.text != chapter.title;
+      _chapterHeadingText(blocks.first.text) !=
+          _chapterHeadingText(chapter.title);
   final pages = <ReaderPageSlice>[];
   var current = <ReaderBlockSlice>[];
   var used = showTitle
