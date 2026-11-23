@@ -87,6 +87,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     with WidgetsBindingObserver {
   static const _paper = Color(0xFFFFFFFF);
   static const _ink = Color(0xFF252525);
+  static const _inlineTextTopFraction = .31;
   late final HomeChatDrawingDraftStore _store;
   final _textFocusNode = FocusNode();
   final _inlineTextController = TextEditingController();
@@ -604,12 +605,20 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       }
     } else if (text.isNotEmpty && !canvasSize.isEmpty) {
       final fieldObject = _inlineTextKey.currentContext?.findRenderObject();
+      final canvasObject = _canvasCardKey.currentContext?.findRenderObject();
       final painterObject = _controller.painterKey.currentContext
           ?.findRenderObject();
       var position = Offset(canvasSize.width / 2, canvasSize.height * .38);
-      if (fieldObject is RenderBox && painterObject is RenderBox) {
-        final globalCenter = fieldObject.localToGlobal(
-          fieldObject.size.center(Offset.zero),
+      if (fieldObject is RenderBox &&
+          canvasObject is RenderBox &&
+          painterObject is RenderBox) {
+        // The input can move above the keyboard. Commit at its canvas position.
+        final globalCenter = canvasObject.localToGlobal(
+          Offset(
+            canvasObject.size.width / 2,
+            canvasObject.size.height * _inlineTextTopFraction +
+                fieldObject.size.height / 2,
+          ),
         );
         position = painterObject.globalToLocal(globalCenter);
       }
@@ -1498,91 +1507,118 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     _deselectObject();
   }
 
-  Widget _buildInlineTextEditor(Size canvasSize) => Positioned.fill(
-    child: Listener(
-      behavior: HitTestBehavior.opaque,
-      onPointerDown: (event) {
-        final renderObject = _inlineTextKey.currentContext?.findRenderObject();
-        if (renderObject is! RenderBox) return;
-        final topLeft = renderObject.localToGlobal(Offset.zero);
-        if (!(topLeft & renderObject.size).contains(event.position)) {
-          _commitInlineText();
-        }
-      },
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          Positioned(
-            left: 0,
-            right: 0,
-            top: canvasSize.height * .31,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final maxWidth = math.min(
-                  320.0,
-                  math.max(0.0, canvasSize.width - 40),
-                );
-                return Center(
+  Widget _buildInlineTextEditor(Size canvasSize) {
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final canvas = _canvasCardKey.currentContext?.findRenderObject();
+    final keyboardTop = MediaQuery.sizeOf(context).height - keyboardInset;
+    final keyboardBoundary =
+        widget.annotation != null &&
+            keyboardInset > 0 &&
+            canvas is RenderBox &&
+            canvas.hasSize
+        ? canvas.globalToLocal(Offset(0, keyboardTop - 8)).dy
+        : canvasSize.height;
+    final visibleHeight = keyboardBoundary
+        .clamp(0.0, canvasSize.height)
+        .toDouble();
+    final avoidsKeyboard = visibleHeight < canvasSize.height;
+    final defaultTop = canvasSize.height * _inlineTextTopFraction;
+    final top = avoidsKeyboard
+        ? math.min(defaultTop, math.max(0.0, visibleHeight - 48))
+        : defaultTop;
+    final maxWidth = math.min(320.0, math.max(0.0, canvasSize.width - 40));
+    final colors = Theme.of(context).colorScheme;
+    final isDarkAnnotation =
+        widget.annotation != null && colors.brightness == Brightness.dark;
+    final inputSurface = isDarkAnnotation ? colors.surface : Colors.white;
+    final drawableInk = _editingExistingText?.style.color ?? _selectedColor;
+    final inkLuminance = drawableInk.computeLuminance();
+    final surfaceLuminance = inputSurface.computeLuminance();
+    final contrast =
+        (math.max(inkLuminance, surfaceLuminance) + .05) /
+        (math.min(inkLuminance, surfaceLuminance) + .05);
+    final inputInk = contrast >= 4.5
+        ? drawableInk
+        : isDarkAnnotation
+        ? colors.onSurface
+        : _ink;
+    return Positioned.fill(
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (event) {
+          final renderObject = _inlineTextKey.currentContext?.findRenderObject();
+          if (renderObject is! RenderBox) return;
+          final topLeft = renderObject.localToGlobal(Offset.zero);
+          if (!(topLeft & renderObject.size).contains(event.position)) {
+            _commitInlineText();
+          }
+        },
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Positioned(
+              left: 0,
+              right: 0,
+              top: top,
+              bottom: avoidsKeyboard ? canvasSize.height - visibleHeight : null,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: IntrinsicWidth(
                   child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: maxWidth),
-                    child: IntrinsicWidth(
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(
-                          minWidth: math.min(120.0, maxWidth),
-                          maxWidth: maxWidth,
+                    constraints: BoxConstraints(
+                      minWidth: math.min(120.0, maxWidth),
+                      maxWidth: maxWidth,
+                    ),
+                    child: CustomPaint(
+                      key: _inlineTextKey,
+                      foregroundPainter: const _DashedSelectionPainter(),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: inputSurface,
+                          borderRadius: BorderRadius.circular(5),
                         ),
-                        child: CustomPaint(
-                          key: _inlineTextKey,
-                          foregroundPainter: const _DashedSelectionPainter(),
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(5),
-                            ),
-                            child: TextField(
-                              key: const ValueKey('drawing-inline-text-field'),
-                              controller: _inlineTextController,
-                              focusNode: _textFocusNode,
-                              enabled: _canEdit,
-                              autofocus: false,
-                              keyboardType: TextInputType.multiline,
-                              textInputAction: TextInputAction.newline,
-                              onTap: () {
-                                if (_canEdit && !_textFocusNode.hasFocus) {
-                                  _textFocusNode.requestFocus();
-                                }
-                              },
-                              minLines: 1,
-                              maxLines: null,
-                              style: TextStyle(
-                                color: _selectedColor,
-                                fontSize: 18,
-                                height: 1.35,
-                              ),
-                              cursorColor: _selectedColor,
-                              decoration: const InputDecoration(
-                                isDense: true,
-                                border: InputBorder.none,
-                                contentPadding: EdgeInsets.symmetric(
-                                  horizontal: 11,
-                                  vertical: 8,
-                                ),
-                              ),
-                              onChanged: (_) => setState(() {}),
+                        child: TextField(
+                          key: const ValueKey('drawing-inline-text-field'),
+                          controller: _inlineTextController,
+                          focusNode: _textFocusNode,
+                          enabled: _canEdit,
+                          autofocus: false,
+                          keyboardType: TextInputType.multiline,
+                          textInputAction: TextInputAction.newline,
+                          onTap: () {
+                            if (_canEdit && !_textFocusNode.hasFocus) {
+                              _textFocusNode.requestFocus();
+                            }
+                          },
+                          minLines: 1,
+                          maxLines: null,
+                          style: TextStyle(
+                            color: inputInk,
+                            fontSize: 18,
+                            height: 1.35,
+                          ),
+                          cursorColor: inputInk,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: InputBorder.none,
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: 11,
+                              vertical: 8,
                             ),
                           ),
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                     ),
                   ),
-                );
-              },
+                ),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 
   Widget _buildToolbar(ColorScheme colors, Size cardSize) => LayoutBuilder(
     builder: (context, constraints) {

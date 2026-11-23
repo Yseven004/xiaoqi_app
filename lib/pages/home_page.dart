@@ -637,6 +637,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _readingCompanionKey = GlobalKey<ReadingCompanionState>();
   final _companionPreferences = ReadingCompanionPreferences.instance;
   bool _readingCompanionOpen = false;
+  bool _companionInkEditing = false;
+  bool _companionInkKeyboardClosing = false;
   bool _companionImmersive = true;
   bool _companionDark = false;
   ReadingCompanionTarget? _companionTarget;
@@ -2294,6 +2296,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (keyboardInset == _lastKeyboardInset) return;
     var releasedKeyboardOverlayLock = false;
     _lastKeyboardInset = keyboardInset;
+    if (keyboardInset == 0 && _companionInkKeyboardClosing) {
+      setState(() => _companionInkKeyboardClosing = false);
+    }
     if (_readingCompanionOpen &&
         keyboardInset == 0 &&
         _composerController.messageText.isEmpty) {
@@ -8809,6 +8814,14 @@ $text''';
     }
   }
 
+  void _onCompanionInkEditingChanged(bool editing) {
+    if (!mounted || _companionInkEditing == editing) return;
+    setState(() {
+      _companionInkEditing = editing;
+      _companionInkKeyboardClosing = !editing && _currentKeyboardInset > 0;
+    });
+  }
+
   Widget _buildReadingCompanion() {
     final target = _companionTarget;
     if (target == null) return const SizedBox.shrink();
@@ -8825,6 +8838,7 @@ $text''';
       savedPassageExcerpt: chat?.companionPassageExcerpt,
       streamingReply: _streamingReply,
       onPassageOpened: _openReadingPassage,
+      onInkEditingChanged: _onCompanionInkEditingChanged,
       immersive: _companionImmersive,
       toolbarBuilder: _buildCompanionTopBar,
       onDarkChanged: (dark) {
@@ -9680,6 +9694,8 @@ $text''';
     final companionMenuWasOpen = _companionMenuOpen;
     final keepComposerFixed =
         _keyboardOverlayKeepsComposerFixed || _taskSearchKeepsComposerFixed;
+    final keepViewportFixed =
+        keepComposerFixed || _companionInkEditing || _companionInkKeyboardClosing;
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -9743,9 +9759,9 @@ $text''';
           backgroundColor: _readingCompanionOpen && _companionDark
               ? const Color(0xFF191B1E)
               : const Color(0xFFFDFDFD),
-          resizeToAvoidBottomInset: !keepComposerFixed,
+          resizeToAvoidBottomInset: !keepViewportFixed,
           body: SafeArea(
-            maintainBottomViewPadding: keepComposerFixed,
+            maintainBottomViewPadding: keepViewportFixed,
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final conversation = SizedBox.expand(

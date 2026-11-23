@@ -172,6 +172,7 @@ class ReadingCompanion extends StatefulWidget {
     required this.onPassageOpened,
     this.onPassageClosed,
     this.onChatVisibilityChanged,
+    this.onInkEditingChanged,
     this.onChooseBook,
     this.onOpenLibrary,
     this.loadPreferredSourceId,
@@ -194,6 +195,7 @@ class ReadingCompanion extends StatefulWidget {
   final ValueChanged<ReadingCompanionPassage> onPassageOpened;
   final VoidCallback? onPassageClosed;
   final ValueChanged<bool>? onChatVisibilityChanged;
+  final ValueChanged<bool>? onInkEditingChanged;
   final AsyncCallback? onChooseBook;
   final AsyncCallback? onOpenLibrary;
   final Future<int?> Function(int bookId)? loadPreferredSourceId;
@@ -514,6 +516,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                       : widget.onToggleImmersive,
                   onFreeChat: _chatOpen ? null : widget.onFreeChat,
                   onDarkChanged: widget.onDarkChanged,
+                  onInkEditingChanged: widget.onInkEditingChanged,
                   toolbarBuilder: widget.toolbarBuilder,
                   onSwitchFormat: pdf.isNotEmpty && ebooks.isNotEmpty
                       ? () {
@@ -674,6 +677,7 @@ class _CompanionDocument extends StatefulWidget {
     this.onSwitchFormat,
     this.onFreeChat,
     this.onDarkChanged,
+    this.onInkEditingChanged,
     this.toolbarBuilder,
   });
 
@@ -689,6 +693,7 @@ class _CompanionDocument extends StatefulWidget {
   final VoidCallback? onSwitchFormat;
   final VoidCallback? onFreeChat;
   final ValueChanged<bool>? onDarkChanged;
+  final ValueChanged<bool>? onInkEditingChanged;
   final ReadingCompanionToolbarBuilder? toolbarBuilder;
 
   @override
@@ -1145,6 +1150,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       }
       _inkEditing = true;
     });
+    widget.onInkEditingChanged?.call(true);
     if (!widget.immersive) widget.onToggleImmersive?.call();
   }
 
@@ -1234,6 +1240,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         _inkEditing = false;
         _inkSaving = false;
       });
+      widget.onInkEditingChanged?.call(false);
       _reportSelection(false);
       final afterSave = _afterInkSave;
       _afterInkSave = null;
@@ -1673,6 +1680,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   @override
   void dispose() {
+    final reportInkEditing = widget.onInkEditingChanged;
+    if (_inkEditing && reportInkEditing != null) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => reportInkEditing(false),
+      );
+    }
     _drawingTools.dispose();
     for (final part in _drawingLayers.values) {
       part.layer.dispose();
