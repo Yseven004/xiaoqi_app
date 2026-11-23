@@ -17,6 +17,11 @@ void main() {
   var includeChapter = true;
   var emptyBody = false;
   var wrongTitle = false;
+  var chapterLicensed = true;
+  var chapterInProgress = false;
+  var collectionHeader = false;
+  var ownedDirectory = false;
+  var skipFirstChapter = false;
   var secondRev = 75;
   final upstreamResponses = <int>[];
   final actions = <String>[];
@@ -26,12 +31,14 @@ void main() {
     int revision,
     String content, {
     bool pd = true,
+    bool incomplete = false,
   }) => {
     'ns': 0,
     'title': name,
     'pageid': id,
     'categories': [
       if (pd) {'title': 'Category:PD-old-80-1923'},
+      if (incomplete) {'title': 'Category:25%'},
     ],
     'revisions': [
       {
@@ -47,6 +54,11 @@ void main() {
     includeChapter = true;
     emptyBody = false;
     wrongTitle = false;
+    chapterLicensed = true;
+    chapterInProgress = false;
+    collectionHeader = false;
+    ownedDirectory = false;
+    skipFirstChapter = false;
     secondRev = 75;
     upstreamResponses.clear();
     actions.clear();
@@ -73,6 +85,8 @@ void main() {
         final n = int.parse(q['oldid']!);
         final name = switch (n) {
           73 => title,
+          74 when ownedDirectory => '$title/第01回',
+          _ when ownedDirectory => '$title/第02回',
           74 => '第一章',
           _ => '第二章',
         };
@@ -89,6 +103,24 @@ void main() {
             'text': '<div class="mw-parser-output">$body</div>',
           },
         };
+      } else if (ownedDirectory && q['titles']!.contains('/')) {
+        payload = {
+          'query': {
+            'pages': [
+              if (!skipFirstChapter)
+                page('$title/第01回', 43, 74, '第一章的正文。', pd: false),
+              if (includeChapter)
+                page(
+                  '$title/第02回',
+                  44,
+                  secondRev,
+                  '第二章的正文。',
+                  pd: false,
+                  incomplete: chapterInProgress,
+                ),
+            ],
+          },
+        };
       } else if (q['titles']!.contains('第一章')) {
         payload = {
           'query': {
@@ -97,20 +129,32 @@ void main() {
             ],
             'pages': [
               page('第一章', 43, 74, '第一章的正文。'),
-              if (includeChapter) page('第二章', 44, secondRev, '第二章的正文。'),
+              if (includeChapter)
+                page('第二章', 44, secondRev, '第二章的正文。', pd: chapterLicensed),
             ],
           },
         };
       } else {
         payload = {
           'query': {
+            'redirects': [
+              {'from': '测试集', 'to': title},
+            ],
             'pages': [
               {'ns': 102, 'title': 'Author:魯迅'},
               page(
                 title,
                 42,
                 73,
-                '{{header\n| author = [[Author:魯迅|魯迅]]\n| 民 = 12\n}}\n<div class="ws-summary">* [[#序|序]]\n* [[第一章]]\n* [[第二章旧名|第二章]]</div>\n== 序 ==\n这里是序言。',
+                ownedDirectory
+                    ? '{{header\n| override_author = [[Author:魯迅|魯迅]]\n}}\n'
+                          '*[[/第01回|第一回]]\n*[[/第02回|第二回]]\n'
+                          '== 全覽 ==\n*[[/全覽]]\n{{明朝作品}}'
+                    : '{{${collectionHeader ? 'Collection header' : 'header'}\n'
+                          '| author = [[Author:魯迅|魯迅]]\n| 民 = 12\n}}\n'
+                          '<div class="ws-summary">* [[测试集#序|序]]\n'
+                          '* [[第一章]]\n* [[第二章旧名|第二章]]\n'
+                          '[[分类:散文集]]</div>\n== 序 ==\n这里是序言。',
                 pd: licensed,
               ),
             ],
@@ -208,6 +252,55 @@ void main() {
         ),
         isFalse,
       );
+    },
+  );
+
+  test('recognizes a collection header and an aliased root anchor', () async {
+    collectionHeader = true;
+    final book = await WikisourceBooks.find(client, query);
+    expect(book?.author, '魯迅');
+    final epub = ZipDecoder().decodeBytes(
+      await WikisourceBooks.build(client, book!),
+    );
+    final nav = XmlDocument.parse(
+      utf8.decode(epub.findFile('EPUB/nav.xhtml')!.content),
+    );
+    expect(nav.findAllElements('a').map((node) => node.innerText), [
+      '序',
+      '第一章',
+      '第二章',
+    ]);
+    expect(actions.where((action) => action == 'parse').length, 3);
+  });
+
+  test('uses the licensed publication’s list of owned chapter pages', () async {
+    licensed = false;
+    ownedDirectory = true;
+    final book = await WikisourceBooks.find(client, query);
+    expect(book?.author, '魯迅');
+    final epub = ZipDecoder().decodeBytes(
+      await WikisourceBooks.build(client, book!),
+    );
+    final nav = XmlDocument.parse(
+      utf8.decode(epub.findFile('EPUB/nav.xhtml')!.content),
+    );
+    expect(nav.findAllElements('a').map((node) => node.innerText), [
+      '第一回',
+      '第二回',
+    ]);
+
+    chapterInProgress = true;
+    expect(await WikisourceBooks.find(client, query), isNull);
+    chapterInProgress = false;
+    skipFirstChapter = true;
+    expect(await WikisourceBooks.find(client, query), isNull);
+  });
+
+  test(
+    'requires independent copyright evidence for separately linked works',
+    () async {
+      chapterLicensed = false;
+      expect(await WikisourceBooks.find(client, query), isNull);
     },
   );
   test(

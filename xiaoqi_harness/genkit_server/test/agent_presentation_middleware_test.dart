@@ -4,6 +4,44 @@ import 'package:xiaoqi_genkit_server/src/agent_presentation_middleware.dart';
 
 void main() {
   test(
+    'book search uses the business result after tools are disabled',
+    () async {
+      final chunks = <ModelResponseChunk>[];
+      const fallback = '已找到电子书获取入口，下载后再核验。';
+      var calls = 0;
+      final middleware = AgentPresentationMiddleware(
+        preparing: false,
+        onEvent: (_) {},
+        toolProtocolFallback: () => fallback,
+      );
+      final response = await middleware.model(
+        ModelRequest(messages: [], toolChoice: ToolChoice.none),
+        ActionFnArg<ModelResponseChunk, ModelRequest, void>(
+          sendChunk: chunks.add,
+        ),
+        (_, context) async {
+          calls++;
+          final parts = [
+            TextPart(text: '未校验的模型草稿。'),
+            ToolRequestPart(
+              toolRequest: ToolRequest(name: 'find_book_material', input: {}),
+            ),
+          ];
+          context.sendChunk(ModelResponseChunk(content: parts));
+          return ModelResponse(
+            finishReason: FinishReason.unknown,
+            message: Message(role: Role.model, content: parts),
+          );
+        },
+      );
+      expect(calls, 1);
+      expect(response.finishReason, FinishReason.stop);
+      expect(response.message!.content.single.text, fallback);
+      expect(chunks.single.content.single.text, fallback);
+    },
+  );
+
+  test(
     'answer phase rejects native calls before any tool can execute',
     () async {
       final chunks = <ModelResponseChunk>[];

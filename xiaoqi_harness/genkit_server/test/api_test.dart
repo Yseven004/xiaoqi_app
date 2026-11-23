@@ -7,7 +7,10 @@ import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/api.dart';
+import 'package:xiaoqi_genkit_server/src/book_search_plugin.dart';
+import 'package:xiaoqi_genkit_server/src/book_search_service.dart';
 import 'package:xiaoqi_genkit_server/src/code_execution_service.dart';
+import 'package:xiaoqi_genkit_server/src/image_service.dart';
 import 'package:xiaoqi_genkit_server/src/release.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
@@ -165,7 +168,10 @@ void main() {
         401,
       );
       expect((await call('POST', '$search/stop', auth: false)).statusCode, 401);
-      expect((await call('POST', resolve, auth: false)).statusCode, 401);
+      expect(
+        (await call('POST', resolve, auth: false, body: {})).statusCode,
+        401,
+      );
       final initial = await call('GET', settings);
       expect(initial.statusCode, 200);
       expect(jsonDecode(await initial.readAsString()), {'enabled': true});
@@ -179,6 +185,8 @@ void main() {
         'query': '',
         'status': 'stopped',
         'revision': 1,
+        'attemptsUsed': 0,
+        'attemptsRemaining': 5,
         'candidates': [],
       });
       final delayed = await call('POST', searches, body: startBody);
@@ -191,7 +199,7 @@ void main() {
         (await call('GET', search, deviceToken: otherToken)).statusCode,
         404,
       );
-      expect((await call('POST', resolve)).statusCode, 404);
+      expect((await call('POST', resolve, body: {})).statusCode, 409);
 
       final disabled = await call('PUT', settings, body: {'enabled': false});
       expect(disabled.statusCode, 200);
@@ -199,7 +207,7 @@ void main() {
       for (final response in [
         await call('POST', searches, body: startBody),
         await call('GET', search),
-        await call('POST', resolve),
+        await call('POST', resolve, body: {}),
       ]) {
         expect(response.statusCode, 403);
         expect(jsonDecode(await response.readAsString()), {
@@ -207,6 +215,123 @@ void main() {
         });
       }
       expect((await call('POST', '$search/stop')).statusCode, 200);
+    },
+  );
+
+  test(
+    'only the owner can accept and download the verified alternate file',
+    () async {
+      const id = 'book-search-accept-0001';
+      const candidate = 'alternate-edition';
+      const path = '/v1/book-searches/$id/candidates/$candidate';
+      final contents = List<int>.filled(256, 42);
+      final sha = sha256.convert(contents).toString();
+      final plugin = BookSearchPlugin(
+        store,
+        find: (_, _) => Stream.value(
+          BookSearchCandidate(
+            id: candidate,
+            title: '测试书',
+            author: '测试作者',
+            edition: '第2版',
+            format: 'epub',
+            language: '简体中文',
+            sourceName: '作者发布页',
+            sourceUri: Uri.https('books.example', '/book'),
+            downloadUri: Uri.https('books.example', '/book.epub'),
+            alternateEdition: true,
+          ),
+        ),
+        acquire: (_, _) async {
+          final temp = directory.createTempSync('acquire-');
+          return File('${temp.path}/test.epub')..writeAsBytesSync(contents);
+        },
+      );
+      api = XiaoqiApi(
+        store,
+        GenkitXiaoqiAgentRuntime(
+          store,
+          ImageService(store),
+          bookSearch: plugin,
+        ),
+      );
+      const otherToken = 'unrelated-book-search-device';
+      store.put('device/${sha256.convert(utf8.encode(otherToken))}', {
+        'tenant_id': 'personal',
+        'device_id': 'other-device',
+        'auth_method': 'email',
+        'account_email': 'owner@example.com',
+        'revoked_at': null,
+      }, null);
+      expect(
+        (await call(
+          'POST',
+          '/v1/book-searches',
+          body: {'id': id, 'query': '《测试书》中文第3版 EPUB'},
+        )).statusCode,
+        200,
+      );
+      final snapshot = await plugin.searches.wait(
+        owner: 'device/${sha256.convert(utf8.encode(token))}',
+        id: id,
+      );
+      final row = (snapshot['candidates'] as List).single as Map;
+      expect(row['verified'], isFalse);
+      expect(row['downloadable'], isTrue);
+      expect(row['importable'], isFalse);
+      expect(row['confirmationReason'], contains('第3版'));
+      expect(row.containsKey('fileSha256'), isFalse);
+      final candidateToken = row['candidateToken'] as String;
+      expect((await call('GET', '$path/file')).statusCode, 404);
+      expect((await call('POST', '$path/resolve', body: {})).statusCode, 409);
+      expect(
+        (await call(
+          'POST',
+          '$path/resolve',
+          body: {'acceptedCandidateToken': 'a' * 64},
+        )).statusCode,
+        409,
+      );
+      expect(
+        (await call(
+          'POST',
+          '$path/resolve',
+          deviceToken: otherToken,
+          body: {'acceptedCandidateToken': candidateToken},
+        )).statusCode,
+        404,
+      );
+
+      final accepted = await call(
+        'POST',
+        '$path/resolve',
+        body: {'acceptedCandidateToken': candidateToken},
+      );
+      expect(accepted.statusCode, 200);
+      final resolved = jsonDecode(await accepted.readAsString()) as Map;
+      expect(resolved['importable'], isTrue);
+      expect(resolved['fileSha256'], sha);
+      expect(resolved.containsKey('acceptedSha256'), isFalse);
+      expect(resolved.containsKey('acceptedCandidateToken'), isFalse);
+      expect(resolved['candidateToken'], candidateToken);
+      expect(
+        (await call('GET', '$path/file', deviceToken: otherToken)).statusCode,
+        404,
+      );
+      final response = await call('GET', '$path/file');
+      expect(response.statusCode, 200);
+      expect(response.headers['x-book-sha256'], sha);
+      expect(await response.read().expand((bytes) => bytes).toList(), contents);
+      final after = plugin.searches.read(
+        owner: 'device/${sha256.convert(utf8.encode(token))}',
+        id: id,
+      );
+      expect((after['candidates'] as List).single['importable'], isFalse);
+      expect(
+        (await call('POST', '/v1/book-searches/$id/stop')).statusCode,
+        200,
+      );
+      expect((await call('GET', '$path/file')).statusCode, 409);
     },
   );
 

@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../features/capabilities/data/capability_cloud_sync.dart';
 
@@ -11,6 +14,7 @@ class OnlineBookSearch {
 
   static final instance = OnlineBookSearch._();
   final enabled = ValueNotifier<bool?>(null);
+  final _transfers = <String, Set<http.Client>>{};
 
   static String newId() => CapabilityCloudSync.newTaskId();
 
@@ -19,11 +23,15 @@ class OnlineBookSearch {
     String path, {
     Map<String, dynamic>? body,
     Duration timeout = const Duration(seconds: 12),
+    String? transferId,
   }) async {
     final sync = CapabilityCloudSync.instance;
-    final headers = await sync.authenticatedHeaders();
     final client = http.Client();
+    if (transferId != null) {
+      (_transfers[transferId] ??= {}).add(client);
+    }
     try {
+      final headers = await sync.authenticatedHeaders();
       final request = http.Request(method, sync.capabilityEndpoint(path))
         ..headers.addAll(headers);
       if (body != null) request.body = jsonEncode(body);
@@ -42,6 +50,7 @@ class OnlineBookSearch {
       }
       return Map<String, dynamic>.from(payload);
     } finally {
+      if (transferId != null) _removeTransfer(transferId, client);
       client.close();
     }
   }
@@ -55,6 +64,14 @@ class OnlineBookSearch {
   Future<void> setEnabled(bool value) async {
     await _request('PUT', 'book-search-settings', body: {'enabled': value});
     enabled.value = value;
+    if (!value) {
+      for (final clients in _transfers.values) {
+        for (final client in clients) {
+          client.close();
+        }
+      }
+      _transfers.clear();
+    }
   }
 
   Future<Map<String, dynamic>> start(String id, String query) =>
@@ -63,15 +80,103 @@ class OnlineBookSearch {
   Future<Map<String, dynamic>> read(String id) =>
       _request('GET', 'book-searches/${Uri.encodeComponent(id)}');
 
-  Future<Map<String, dynamic>> resolve(String id, String candidate) => _request(
+  Future<Map<String, dynamic>> resolve(
+    String id,
+    String candidate, {
+    String? acceptedCandidateToken,
+  }) => _request(
     'POST',
     'book-searches/${Uri.encodeComponent(id)}/candidates/${Uri.encodeComponent(candidate)}/resolve',
-    timeout: Duration(
-      seconds: candidate.startsWith('wikisource-zh-') ? 100 : 22,
-    ),
+    body: {'acceptedCandidateToken': ?acceptedCandidateToken},
+    timeout: const Duration(seconds: 105),
+    transferId: id,
   );
 
+  Future<File> downloadVerifiedFile(
+    String id,
+    String candidate, {
+    required int expectedLength,
+    required String expectedSha256,
+  }) async {
+    final sync = CapabilityCloudSync.instance;
+    final client = http.Client();
+    (_transfers[id] ??= {}).add(client);
+    Directory? directory;
+    try {
+      directory = await (await getTemporaryDirectory()).createTemp(
+        'online-book-search-',
+      );
+      final file = File(p.join(directory.path, 'book.bin'));
+      final request = http.Request(
+        'GET',
+        sync.capabilityEndpoint(
+          'book-searches/${Uri.encodeComponent(id)}/candidates/'
+          '${Uri.encodeComponent(candidate)}/file',
+        ),
+      )..headers.addAll(await sync.authenticatedHeaders());
+      final response = await client
+          .send(request)
+          .timeout(const Duration(minutes: 2));
+      if (response.statusCode != 200) {
+        final error = await http.Response.fromStream(response);
+        final payload = jsonDecode(utf8.decode(error.bodyBytes));
+        final message = payload is Map
+            ? ((payload['error'] as Map?)?['message']?.toString() ?? '下载核验文件失败')
+            : '下载核验文件失败';
+        throw OnlineBookSearchException(response.statusCode, message);
+      }
+      if (response.headers['x-book-sha256'] != expectedSha256 ||
+          int.tryParse(response.headers['content-length'] ?? '') !=
+              expectedLength ||
+          expectedLength <= 128 ||
+          expectedLength > 256 * 1024 * 1024) {
+        throw const FormatException('服务端核验文件信息与书目不一致');
+      }
+      final sink = file.openWrite();
+      var received = 0;
+      try {
+        await for (final chunk in response.stream.timeout(
+          const Duration(seconds: 30),
+        )) {
+          received += chunk.length;
+          if (received > expectedLength) {
+            throw const FormatException('核验文件长度超过书目记录');
+          }
+          sink.add(chunk);
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+      if (received != expectedLength || await file.length() != expectedLength) {
+        throw const FormatException('核验文件传输不完整');
+      }
+      return file;
+    } on Object {
+      if (directory != null) {
+        try {
+          await directory.delete(recursive: true);
+        } on FileSystemException {
+          // Keep the transfer failure visible even if temporary cleanup fails.
+        }
+      }
+      rethrow;
+    } finally {
+      _removeTransfer(id, client);
+      client.close();
+    }
+  }
+
+  void _removeTransfer(String id, http.Client client) {
+    final clients = _transfers[id];
+    clients?.remove(client);
+    if (clients?.isEmpty == true) _transfers.remove(id);
+  }
+
   Future<Map<String, dynamic>?> stop(String id) async {
+    for (final client in _transfers.remove(id) ?? <http.Client>{}) {
+      client.close();
+    }
     // Stop uses the ID allocated before submission, so even a lost startup
     // response can be cancelled. Retry transient transport failures.
     for (var attempt = 0; attempt < 10; attempt++) {

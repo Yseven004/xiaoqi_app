@@ -906,10 +906,24 @@ class XiaoqiApi {
         (Request request, String id, String candidateId) => _authenticated(
           request,
           (device) => _bookSearchCall(device, () async {
+            final body = await _body(request, 1024);
+            if (!_bookSearch.enabled(device.key)) {
+              throw const BookSearchException(403, '网上找书已关闭');
+            }
+            final accepted = body['acceptedCandidateToken'];
+            if (body.containsKey('acceptedSha256')) {
+              throw const FormatException('确认参数已更新，请使用当前客户端');
+            }
+            if (body.containsKey('acceptedCandidateToken') &&
+                (accepted is! String ||
+                    !RegExp(r'^[a-f0-9]{64}$').hasMatch(accepted))) {
+              throw const FormatException('确认候选版本无效');
+            }
             final resolved = await _bookSearch.searches.resolve(
               owner: device.key,
               id: id,
               candidateId: candidateId,
+              acceptedCandidateToken: accepted as String?,
             );
             if (!_bookSearch.enabled(device.key)) {
               throw const BookSearchException(403, '网上找书已关闭');
@@ -917,6 +931,49 @@ class XiaoqiApi {
             return resolved;
           }),
         ),
+      )
+      ..get(
+        '/v1/book-searches/<id>/candidates/<candidateId>/file',
+        (Request request, String id, String candidateId) =>
+            _authenticated(request, (device) async {
+              if (!_bookSearch.enabled(device.key)) {
+                return _error('网上找书已关闭', 403);
+              }
+              try {
+                final file = _bookSearch.searches.verifiedFile(
+                  owner: device.key,
+                  id: id,
+                  candidateId: candidateId,
+                );
+                final snapshot = _bookSearch.searches.read(
+                  owner: device.key,
+                  id: id,
+                );
+                final candidate = (snapshot['candidates'] as List)
+                    .whereType<Map>()
+                    .firstWhere((row) => row['id'] == candidateId);
+                Stream<List<int>> guarded() async* {
+                  await for (final chunk in file.openRead()) {
+                    if (!_bookSearch.enabled(device.key)) {
+                      throw const BookSearchException(403, '网上找书已关闭');
+                    }
+                    yield chunk;
+                  }
+                }
+
+                return Response.ok(
+                  guarded(),
+                  headers: {
+                    'content-type': 'application/octet-stream',
+                    'content-length': '${file.lengthSync()}',
+                    'x-book-sha256': candidate['fileSha256'] as String,
+                    'cache-control': 'no-store',
+                  },
+                );
+              } on BookSearchException catch (error) {
+                return _error(error.message, error.statusCode);
+              }
+            }),
       )
       ..get(
         '/v1/agent/message-task/<workflow>/<message>',

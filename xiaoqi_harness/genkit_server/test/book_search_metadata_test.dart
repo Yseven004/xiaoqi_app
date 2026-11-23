@@ -19,7 +19,11 @@ void main() {
       server.listen((request) async {
         if (request.uri.path != '/search.json') {
           request.response.headers.contentType = ContentType.json;
-          request.response.write('{"query":{"pages":[]}}');
+          request.response.write(switch (request.uri.path) {
+            '/advancedsearch.php' => '{"response":{"docs":[]}}',
+            '/graphql' => '{"data":{"books":[]}}',
+            _ => '{"query":{"pages":[]}}',
+          });
           await request.response.close();
           return;
         }
@@ -70,6 +74,12 @@ void main() {
       expect(result.single.author, isEmpty);
       expect(result.single.language, '中文');
       expect(result.single.downloadUri, isNull);
+
+      final otherFormat = await sources
+          .search('《测试作品》中文版 PDF', BookSearchCancellation())
+          .single;
+      expect(otherFormat.id, result.single.id);
+      expect(requests, [('测试作品', 'identity')]);
     },
   );
 
@@ -136,6 +146,9 @@ void main() {
         request.response.headers.contentType = ContentType.json;
         request.response.write(
           jsonEncode(switch (request.uri.path) {
+            '/graphql' => {
+              'data': {'books': []},
+            },
             '/search.json' => {'docs': []},
             '/api/books' => {
               'OLID:OL71M': {
@@ -190,7 +203,7 @@ void main() {
           )
           .toList();
       expect(
-        requests.map((r) => r.path),
+        requests.where((r) => r.path != '/graphql').map((r) => r.path),
         unorderedEquals(['/search.json', '/advancedsearch.php', '/api/books']),
       );
       expect(
@@ -217,6 +230,112 @@ void main() {
       expect(book.format, isEmpty);
     },
   );
+  test(
+    'prefers a catalog title in the original script only for the exact ISBN and edition',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      const isbn = '9787508630779';
+      const otherIsbn = '9787508621050';
+      final requests = <Uri>[];
+      var archiveRecord = (isbn: isbn, edition: 'OL71M', title: '科普实例：副标题');
+      server.listen((request) async {
+        requests.add(request.uri);
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(
+          jsonEncode(switch (request.uri.path) {
+            '/search.json' => {
+              'docs': [
+                {
+                  'author_name': ['Ada Writer'],
+                  'editions': {
+                    'docs': [
+                      {
+                        'key': '/books/OL71M',
+                        'title': 'Ke pu shi li',
+                        'language': ['chi'],
+                        'isbn': [isbn],
+                        'edition_name': 'Di 2 ban',
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+            '/advancedsearch.php' => {
+              'response': {
+                'docs': [
+                  {
+                    'identifier': 'native-edition',
+                    'title-alt-script': archiveRecord.title,
+                    'creator': 'Writer, Ada',
+                    'language': 'chi',
+                    'year': 2011,
+                    'isbn': [otherIsbn, archiveRecord.isbn],
+                    'openlibrary_edition': archiveRecord.edition,
+                  },
+                ],
+              },
+            },
+            '/api/books' => {
+              'OLID:OL71M': {
+                'details': {
+                  'key': '/books/OL71M',
+                  'edition_name': 'Di 2 ban',
+                  'isbn_13': [isbn],
+                },
+              },
+            },
+            _ => {},
+          }),
+        );
+        await request.response.close();
+      });
+      BookSearchSources sources() => BookSearchSources(
+        clientFactory: () => HttpClient()
+          ..connectionFactory = ((_, _, _) =>
+              Socket.startConnect(InternetAddress.loopbackIPv4, server.port))
+          ..findProxy = (_) => 'DIRECT',
+      );
+      Future<BookSearchCandidate> lookup() => sources()
+          .search('ISBN：978-7-5086-3077-9', BookSearchCancellation())
+          .single;
+
+      final original = await lookup();
+      expect(
+        requests
+            .singleWhere((r) => r.path == '/advancedsearch.php')
+            .queryParameters['q'],
+        'mediatype:texts AND collection:internetarchivebooks AND isbn:"$isbn"',
+      );
+      expect(original.title, '科普实例');
+      expect(original.isbn, isbn);
+      expect(original.author, 'Ada Writer');
+      expect(original.edition, '第2版 · 2011');
+      expect(
+        original.sourceUri.toString(),
+        'https://archive.org/details/native-edition',
+      );
+      expect(original.downloadUri, isNull);
+
+      for (final (wrongIsbn, wrongEdition, title) in [
+        (otherIsbn, 'OL71M', '另一版本'),
+        (isbn, 'OL73M', '不一致的版本'),
+        (isbn, 'OL71M', 'Ke pu shi li: Chinese text only after colon 科普'),
+      ]) {
+        archiveRecord = (isbn: wrongIsbn, edition: wrongEdition, title: title);
+        final fallback = await lookup();
+        expect(fallback.title, 'Ke pu shi li');
+        expect(fallback.isbn, isbn);
+        expect(
+          fallback.sourceUri.toString(),
+          'https://openlibrary.org/books/OL71M',
+        );
+        expect(fallback.downloadUri, isNull);
+      }
+    },
+  );
+
   test(
     'rate-limited title catalog falls back to OPAC ISBN and verified related editions',
     () async {
@@ -282,6 +401,30 @@ void main() {
       final webRequests = <String>[];
       final webHttp = MockClient((request) async {
         webRequests.add(request.url.host);
+        if (request.url.host == 'api.search.tinyfish.ai') {
+          expect(request.url.queryParameters['query'], '科普实例 中文 pdf');
+          return http.Response(
+            jsonEncode({
+              'results': [
+                {
+                  'url': 'https://publisher.example/books/kepu',
+                  'title': '科普实例 · 图书详情',
+                  'snippet': '未核实作者和版本',
+                },
+                {
+                  'url': 'https://publisher.example/files/kepu.pdf',
+                  'title': '科普实例 PDF',
+                },
+                {
+                  'url': 'https://publisher.example/books/other',
+                  'title': '其他书籍',
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json; charset=utf-8'},
+          );
+        }
         expect(request.method, 'POST');
         expect(request.url.path, '/v1/tools/search');
         expect(jsonDecode(request.body), {
@@ -334,10 +477,15 @@ void main() {
             BookSearchCancellation(),
           )
           .toList();
-      expect(webRequests, ['api.deepseek.com']);
+      expect(webRequests, ['api.deepseek.com', 'api.search.tinyfish.ai']);
       expect(requested, ['isbn:9787508630779']);
-      expect(found.map((r) => r.edition), ['第2版', '第1版']);
-      expect(found.map((r) => r.id), ['OL2M', 'OL1M']);
+      expect(found.map((r) => r.edition), ['第2版', '第1版', '']);
+      expect(found.take(2).map((r) => r.id), ['OL2M', 'OL1M']);
+      expect(found.last.sourceUri.host, 'publisher.example');
+      expect(found.last.sourceUri.path, '/books/kepu');
+      expect(found.last.availability, contains('来源和版本待核'));
+      expect(found.last.author, isEmpty);
+      expect(found.last.format, isEmpty);
       expect(
         found.every((r) => r.title == '科普实例' && r.downloadUri == null),
         isTrue,

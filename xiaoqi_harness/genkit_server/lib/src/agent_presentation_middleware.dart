@@ -43,12 +43,16 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
     required this.onEvent,
     this.protectedValues = const [],
     this.allowToolCalls = true,
+    this.toolProtocolFallback,
   });
 
   final bool preparing;
   final void Function(Map<String, Object?> event) onEvent;
   final Iterable<String> protectedValues;
   final bool allowToolCalls;
+  // Book search reads its durable result to recover from malformed model I/O.
+  final String Function()? toolProtocolFallback;
+  bool _repairedToolProtocol = false;
 
   @override
   Future<ModelResponse> model(
@@ -63,6 +67,11 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
     onEvent({'type': 'thinking_started'});
     final modelStopwatch = Stopwatch()..start();
     var answerStarted = false;
+    final guardToolProtocol = toolProtocolFallback != null;
+    final declaredTools =
+        request.tools?.map((tool) => tool.name).toSet() ?? const <String>{};
+    final canCallTools =
+        allowToolCalls && request.toolChoice != ToolChoice.none;
     final reasoningId = const Uuid().v4();
     final reasoning = PublicReasoningBuffer(
       protectedValues: protectedValues,
@@ -85,13 +94,15 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
             reasoning.add(part.reasoning ?? '');
             continue;
           }
-          if (part.isToolRequest && !allowToolCalls) continue;
+          if (part.isToolRequest && (!allowToolCalls || guardToolProtocol)) {
+            continue;
+          }
           if (part.isToolRequest || (!preparing && part.isText)) {
             reasoning.boundary();
           }
           if (part.isText) {
             final visible = textBuffer.add(part.text ?? '');
-            if (preparing) continue;
+            if (preparing || guardToolProtocol) continue;
             final text = sanitizeAssistantText(visible);
             if (text.isEmpty) continue;
             forwarded.add(TextPart(text: text));
@@ -119,6 +130,25 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
         );
       },
     );
+    void publishText(String text, Role? role) {
+      if (preparing || text.isEmpty || context.cancel?.isCancelled == true) {
+        return;
+      }
+      if (!answerStarted) {
+        answerStarted = true;
+        onEvent({
+          'type': 'answer_started',
+          'model_first_token_ms': modelStopwatch.elapsedMilliseconds,
+        });
+      }
+      context.sendChunk(
+        ModelResponseChunk(
+          role: role,
+          content: [TextPart(text: sanitizeAssistantText(text))],
+        ),
+      );
+    }
+
     try {
       var modelRequest = request;
       late ModelResponse response;
@@ -132,20 +162,31 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
                 .map((part) => part.text ?? '')
                 .join() ??
             '';
+        final toolNames = (response.message?.content ?? const <Part>[])
+            .map((part) => part.toolRequestPart?.toolRequest.name)
+            .nonNulls
+            .toList();
         final unexpectedCall =
-            !allowToolCalls &&
-            response.message?.content.any((part) => part.isToolRequest) == true;
+            toolNames.isNotEmpty &&
+            (!allowToolCalls ||
+                (guardToolProtocol &&
+                    (!canCallTools ||
+                        toolNames.length > 1 ||
+                        !declaredTools.contains(toolNames.first))));
         if (textBuffer.sawProtocol ||
             containsModelToolProtocol(rawText) ||
             unexpectedCall) {
           if (attempt == 0 &&
               !answerStarted &&
+              (!guardToolProtocol ||
+                  (canCallTools &&
+                      declaredTools.isNotEmpty &&
+                      !_repairedToolProtocol)) &&
               context.cancel?.isCancelled != true) {
             // No tool has executed at the model boundary. Retry the format,
             // never a billable tool request or an already published answer.
-            final canCallTools =
-                request.tools?.isNotEmpty == true &&
-                request.toJson()['toolChoice'] != 'none';
+            if (guardToolProtocol) _repairedToolProtocol = true;
+            final retryTools = canCallTools && declaredTools.isNotEmpty;
             modelRequest = ModelRequest.fromJson({
               ...request.toJson(),
               'messages': [
@@ -156,7 +197,8 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
                     TextPart(
                       text:
                           '上一响应未遵守 API 输出格式。禁止把内部工具协议写入正文。'
-                          '${canCallTools ? "需要工具时仅使用本请求声明的原生 tool_calls；否则直接回答。" : "本阶段禁止工具调用和追问卡片，只输出自然语言 Markdown 最终回答，不再规划任务。"}',
+                          '${retryTools ? "需要工具时仅使用本请求声明的原生 tool_calls；否则直接回答。" : "本阶段禁止工具调用和追问卡片，只输出自然语言 Markdown 最终回答，不再规划任务。"}'
+                          '${guardToolProtocol && retryTools ? "每次只能请求一个已声明工具。author 等字段是参数名，不是工具名。" : ""}',
                     ),
                   ],
                 ).toJson(),
@@ -164,25 +206,27 @@ class AgentPresentationMiddleware extends GenerateMiddleware {
             });
             continue;
           }
+          context.cancel?.throwIfCancelled();
+          final fallback = toolProtocolFallback?.call();
+          if (fallback != null) {
+            final message = Message(
+              role: Role.model,
+              content: [TextPart(text: fallback)],
+            );
+            response = ModelResponse.fromJson({
+              ...response.toJson(),
+              'message': message.toJson(),
+              'finishReason': FinishReason.stop.value,
+            });
+            publishText(fallback, Role.model);
+            break;
+          }
           throw const FormatException('模型返回了无效的响应格式，请重试。');
         }
-        if (!preparing &&
-            tail.isNotEmpty &&
-            context.cancel?.isCancelled != true) {
-          if (!answerStarted) {
-            answerStarted = true;
-            onEvent({
-              'type': 'answer_started',
-              'model_first_token_ms': modelStopwatch.elapsedMilliseconds,
-            });
-          }
-          context.sendChunk(
-            ModelResponseChunk(
-              role: response.message?.role,
-              content: [TextPart(text: sanitizeAssistantText(tail))],
-            ),
-          );
-        }
+        final text = guardToolProtocol
+            ? (toolNames.isEmpty ? rawText : '')
+            : tail;
+        publishText(text, response.message?.role);
         break;
       }
       reasoning.finish(

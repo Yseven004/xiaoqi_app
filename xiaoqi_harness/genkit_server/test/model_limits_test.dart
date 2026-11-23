@@ -14,6 +14,14 @@ void main() {
     expect(() => ModelLimits.forModel('unknown'), throwsArgumentError);
   });
 
+  test('SiliconFlow book search uses explicit application budgets', () {
+    final limits = ModelLimits.forModel(ModelLimits.siliconFlowBookSearchModel);
+    expect(limits.applicationBudget, isTrue);
+    expect(limits.contextTokens, 32768);
+    expect(limits.maxOutputTokens, 8192);
+    expect(limits, isNot(same(ModelLimits.deepSeek)));
+  });
+
   test(
     'helper API preserves long input and uses the official output ceiling',
     () async {

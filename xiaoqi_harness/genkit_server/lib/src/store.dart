@@ -163,6 +163,36 @@ class CloudStore {
   void putTaskBlob(String key, List<int> bytes) =>
       _writeObject(key, bytes, immutable: false);
 
+  Future<void> putTaskBlobFile(String key, File source) async {
+    final destination = _objectFile(key);
+    destination.parent.createSync(recursive: true);
+    final temporary = File(
+      p.join(
+        destination.parent.path,
+        '.tmp-${DateTime.now().microsecondsSinceEpoch}',
+      ),
+    );
+    try {
+      await source.copy(temporary.path);
+      if (destination.existsSync()) await destination.delete();
+      await temporary.rename(destination.path);
+      _db.execute(
+        'INSERT INTO objects(key, updated_at) VALUES(?, unixepoch()) '
+        'ON CONFLICT(key) DO UPDATE SET updated_at=excluded.updated_at',
+        [key],
+      );
+    } finally {
+      temporary.deleteSyncSafe();
+    }
+  }
+
+  File taskBlobFile(String key) => _objectFile(key);
+
+  void deleteTaskBlob(String key) {
+    _objectFile(key).deleteSyncSafe();
+    _db.execute('DELETE FROM objects WHERE key=?', [key]);
+  }
+
   List<int> getObject(String key) => _objectFile(key).readAsBytesSync();
   Stream<List<int>> readObjectChunks(String key) => _objectFile(key).openRead();
 

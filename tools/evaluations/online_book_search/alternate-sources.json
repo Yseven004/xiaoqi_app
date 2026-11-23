@@ -1,0 +1,24 @@
+{
+  "xiyou": [
+    {
+      "source": "https://www.gutenberg.org/ebooks/23962",
+      "edition": ["古登堡电子版"],
+      "language": ["中文"],
+      "spine": 13,
+      "epub_author": ["Cheng'en Wu"],
+      "epub_heading_pattern": "^第([一二三四五六七八九〇十]{1,3})[回囘囬]",
+      "epub_heading_count": 100
+    }
+  ],
+  "sunzi": [
+    {
+      "source": "https://www.gutenberg.org/ebooks/23864",
+      "edition": ["古登堡电子版"],
+      "language": ["中文"],
+      "spine": 3,
+      "epub_author": ["Sunzi"],
+      "epub_heading_pattern": "^[^\\s]{1,3}第([一二三四五六七八九]|十[一二三]?)$",
+      "epub_heading_count": 13
+    }
+  ]
+}

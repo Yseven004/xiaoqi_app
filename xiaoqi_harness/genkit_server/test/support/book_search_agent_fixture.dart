@@ -3,10 +3,12 @@ import 'dart:io';
 
 import 'package:genkit/genkit.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
+import 'package:xiaoqi_genkit_server/src/book_search_plugin.dart';
+import 'package:xiaoqi_genkit_server/src/book_search_service.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
   final temp = await Directory.systemTemp.createTemp('xiaoqi-book-agent-');
   final store = CloudStore(root: temp.path);
   const owner = 'device/personal/book-search-test';
@@ -18,7 +20,72 @@ Future<void> main() async {
     'status': 'running',
     'artifacts': [],
   }, null);
-  final runtime = GenkitXiaoqiAgentRuntime(store, ImageService(store));
+  var attempts = 0;
+  var acquisitions = 0;
+  final ordinary = args.contains('ordinary');
+  final alternate = args.contains('alternate');
+  final downloadable = alternate || args.contains('downloadable');
+  final correction = args.contains('correction');
+  final plugin = BookSearchPlugin(
+    store,
+    find: (query, cancellation) async* {
+      attempts++;
+      if (correction) {
+        cancellation.report({
+          'source': 'books.example',
+          'stage': 'extract',
+          'reason': 'no_matching_book_file_evidence',
+        });
+      }
+      if (alternate && attempts > 1) return;
+      yield BookSearchCandidate(
+        id: alternate ? 'verified-alternate' : 'catalog-$attempts',
+        title: 'Hello 算法',
+        author: '靳宇栋',
+        language: '简体中文',
+        edition: alternate ? '1.3.0' : query.edition,
+        format: downloadable ? 'pdf' : '',
+        sourceName: '测试书目',
+        sourceUri: Uri.https('books.example', '/catalog/$attempts'),
+        availability: downloadable ? null : '仅查到书目，未取得完整文件',
+        downloadUri: downloadable
+            ? Uri.https('books.example', '/book.pdf')
+            : null,
+        alternateEdition: alternate,
+      );
+    },
+    inspect: correction
+        ? (source, query, cancellation) async* {
+            if (source != Uri.https('books.example', '/catalog/1')) {
+              throw StateError('Unexpected source');
+            }
+            yield BookSearchCandidate(
+              id: 'checked-release',
+              title: 'Hello 算法',
+              author: '靳宇栋',
+              language: '简体中文',
+              edition: query.edition,
+              format: 'pdf',
+              sourceName: '测试原始来源',
+              sourceUri: source,
+              downloadUri: Uri.https('books.example', '/verified.pdf'),
+            );
+          }
+        : null,
+    acquire: (_, _) async {
+      acquisitions++;
+      final directory = await Directory.systemTemp.createTemp(
+        'book-agent-file-',
+      );
+      return File('${directory.path}/book.pdf')
+        ..writeAsBytesSync(List<int>.filled(256, 1));
+    },
+  );
+  final runtime = GenkitXiaoqiAgentRuntime(
+    store,
+    ImageService(store),
+    bookSearch: plugin,
+  );
   final events = <Map<String, Object?>>[];
   try {
     final result = await runtime.runAgentTurn(
@@ -26,7 +93,7 @@ Future<void> main() async {
       taskId: task,
       request: {
         '_authenticated_device_key': owner,
-        'book_search_id': search,
+        if (!ordinary) 'book_search_id': search,
         'model_id': 'mimo-v2.6-flash',
         'current_turn_text': userText,
       },
@@ -44,7 +111,7 @@ Future<void> main() async {
         .get('task/personal/$task')
         ?.value['scope_operations'];
     stdout.writeln(
-      'RESULT:${jsonEncode({'text': result.text, 'status': runtime.bookSearch.searches.read(owner: owner, id: search)['status'], 'starts': events.where((event) => event['type'] == 'tool_started' && event['tool'] == 'find_book_material').length, 'operation_count': (operations as Map?)?.length})}',
+      'RESULT:${jsonEncode({'text': result.text, if (!ordinary) 'search': runtime.bookSearch.searches.read(owner: owner, id: search), 'starts': events.where((event) => event['type'] == 'tool_started' && event['tool'] == 'find_book_material').length, 'attempts': attempts, 'acquisitions': acquisitions, 'operation_count': (operations as Map?)?.length})}',
     );
   } finally {
     store.close();

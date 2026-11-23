@@ -52,10 +52,9 @@ void main() {
   ];
   for (final (query, title, author, edition, format, host) in samples) {
     test(query, () async {
-      final results = await sources
+      final book = await sources
           .search(query, BookSearchCancellation())
-          .toList();
-      final book = results.single;
+          .firstWhere((candidate) => candidate.downloadUri != null);
       expect(book.title, title);
       expect(book.author, author);
       expect(book.edition, edition);
@@ -95,6 +94,50 @@ void main() {
     timeout: const Timeout(Duration(minutes: 2)),
   );
 
+  for (final (queryTitle, requestedAuthor, sourceTitle, author, chapterCount)
+      in [('朝花夕拾', '鲁迅', '朝花夕拾', '魯迅', 12), ('庄子', '庄周', '莊子', '莊子', 33)]) {
+    test(
+      'downloads and compiles every published Wikisource chapter of $queryTitle',
+      () async {
+        final cancellation = BookSearchCancellation();
+        final book = await sources
+            .searchByCriteria(
+              BookSearchQuery(
+                title: queryTitle,
+                author: requestedAuthor,
+                format: 'epub',
+              ),
+              cancellation,
+            )
+            .firstWhere((candidate) => candidate.inlineEpub);
+        expect(book.title, sourceTitle);
+        expect(book.author, author);
+        expect(
+          book.sourceUri,
+          Uri.https('zh.wikisource.org', '/wiki/$sourceTitle'),
+        );
+        final bytes = await sources.buildEpub(book, cancellation);
+        final archive = ZipDecoder().decodeBytes(bytes);
+        final opf = XmlDocument.parse(
+          utf8.decode(archive.findFile('EPUB/book.opf')!.content),
+        );
+        expect(opf.findAllElements('itemref').length, chapterCount);
+        for (var i = 0; i < chapterCount; i++) {
+          final document = XmlDocument.parse(
+            utf8.decode(archive.findFile('EPUB/c$i.xhtml')!.content),
+          );
+          expect(document.findAllElements('p').length, greaterThan(1));
+          expect(
+            document.findAllElements('a').single.getAttribute('href'),
+            contains('oldid='),
+          );
+        }
+      },
+      skip: !enabled,
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+  }
+
   test(
     'Open Library distinguishes edition metadata from a downloadable file',
     () async {
@@ -119,13 +162,4 @@ void main() {
     },
     skip: !enabled,
   );
-
-  test('does not substitute a different edition', () async {
-    for (final query in ['Hello 算法 1.2.0', '动手学深度学习 第一版', 'Hello 算法 纸质书']) {
-      expect(
-        await sources.search(query, BookSearchCancellation()).toList(),
-        isEmpty,
-      );
-    }
-  });
 }

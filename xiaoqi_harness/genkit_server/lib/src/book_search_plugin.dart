@@ -7,13 +7,16 @@ class BookSearchPlugin {
   BookSearchPlugin(
     this.store, {
     WebService Function(void Function())? webService,
+    BookSearchProvider? find,
+    BookSearchFileAcquirer? acquire,
+    BookSearchSourceInspector? inspect,
   }) {
     final sources = BookSearchSources(webService: webService);
     searches = BookSearchService(
       store: store,
-      find: sources.searchByCriteria,
-      verify: sources.verify,
-      buildEpub: sources.buildEpub,
+      find: find ?? sources.searchByCriteria,
+      acquire: acquire ?? sources.acquire,
+      inspect: inspect ?? sources.inspect,
     );
   }
 

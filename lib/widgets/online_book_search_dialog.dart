@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:a2ui_core/a2ui_core.dart' as a2ui;
@@ -181,7 +182,12 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
     if (_closed) return;
     _closed = true;
     _turn?.abort();
-    for (final id in {_searchId, _pendingId}.whereType<String>()) {
+    for (final id in {
+      _searchId,
+      _pendingId,
+      _importActivity.value?.$1,
+      ..._messages.map((entry) => entry.searchId),
+    }.whereType<String>()) {
       unawaited(_search.stop(id));
     }
   }
@@ -216,8 +222,6 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
 
   void _attachSearch(_BookSearchMessage entry, String id) {
     if (entry.searchId == id) return;
-    final previous = _searchId;
-    if (previous != null && previous != id) unawaited(_search.stop(previous));
     setState(() {
       entry.searchId = id;
       _searchId = id;
@@ -316,10 +320,6 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
       if (!mounted || _closed) break;
       if (chunk.custom?['book_search_reference'] == id) {
         _attachSearch(entry, id);
-      }
-      if (chunk.text.isNotEmpty) {
-        setState(() => entry.reply += chunk.text);
-        _keepLatestInView();
       }
     }
     if (!mounted || _closed) return;
@@ -551,10 +551,7 @@ class _OnlineBookSearchDialogState extends State<_OnlineBookSearchDialog>
             library: widget.library,
             bookId: widget.bookId,
             importActivity: _importActivity,
-            awaitingReply:
-                _turn != null &&
-                identical(entry, _messages.last) &&
-                reply.trim().isEmpty,
+            awaitingReply: _turn != null && identical(entry, _messages.last),
             onImporting: widget.onImporting,
             onImported: (result) {
               if (_closed || ModalRoute.of(context)?.isCurrent != true) return;
@@ -736,6 +733,7 @@ class OnlineBookSearchResults extends StatefulWidget {
 class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
   static const _surfaceId = 'online-book-results';
   static const _catalogId = 'https://xiaoqi.app/a2ui/online-book-results';
+  static final _sha256 = RegExp(r'^[0-9a-f]{64}$');
   late final _processor = a2ui.MessageProcessor<ui.ComponentImplementation>(
     catalogs: [
       ui.CatalogImplementation(
@@ -762,10 +760,12 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
   Map<String, dynamic>? _snapshot;
   String? _error;
   String? _localVersion;
+  final _skippedAlternatives = <(String, String)>{};
   late final _importActivity =
       widget.importActivity ?? ValueNotifier<(String, String)?>(null);
   bool _stopping = false;
   bool _loaded = false;
+  int _refreshEpoch = 0;
   int _misses = 0;
   Timer? _poll;
 
@@ -790,12 +790,23 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
     _subscription = _processor.model.onAction.subscribe((event) {
       final data = event.toJson();
       final context = data['context'];
-      final id = context is Map ? context['candidateId'] as String? : null;
+      final id = switch (context) {
+        {'candidateId': final String id} => id,
+        _ => null,
+      };
+      final token = switch (context) {
+        {'candidateToken': final String token} => token,
+        _ => null,
+      };
       switch (data['name']) {
         case 'book_stop':
           unawaited(_stop());
         case 'book_import' when id != null:
           unawaited(_import(id));
+        case 'book_accept' when id != null && token != null:
+          unawaited(_import(id, acceptedCandidateToken: token));
+        case 'book_skip' when id != null && token != null:
+          _skip(id, token);
         case 'book_select' when id != null:
           _localVersion = id;
           _changed();
@@ -813,14 +824,19 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
   @override
   void didUpdateWidget(covariant OnlineBookSearchResults oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.awaitingReply && !widget.awaitingReply) {
+      _poll?.cancel();
+      unawaited(_refresh());
+    }
     if (oldWidget.awaitingReply != widget.awaitingReply) _changed();
   }
 
   Future<void> _refresh() async {
+    final epoch = ++_refreshEpoch;
     var retry = false;
     try {
       final snapshot = await _search.read(widget.searchId);
-      if (!mounted) return;
+      if (!mounted || epoch != _refreshEpoch) return;
       final oldRevision = _snapshot?['revision'] as int? ?? -1;
       if ((snapshot['revision'] as int? ?? 0) >= oldRevision) {
         _snapshot = snapshot;
@@ -828,9 +844,9 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
       _loaded = true;
       _misses = 0;
       _error = null;
-      retry = _snapshot?['status'] == 'searching';
+      retry = _snapshot?['status'] == 'searching' || widget.awaitingReply;
     } on OnlineBookSearchException catch (error) {
-      if (!mounted) return;
+      if (!mounted || epoch != _refreshEpoch) return;
       if (error.statusCode == 404 && !_loaded && _misses++ < 5) {
         // The first poll may arrive before the submission reaches the API.
         retry = true;
@@ -839,7 +855,7 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
         retry = error.statusCode >= 500 && _misses++ < 12;
       }
     } on Object {
-      if (!mounted) return;
+      if (!mounted || epoch != _refreshEpoch) return;
       _error = '连接中断，正在尝试重新连接…';
       retry = _misses++ < 12;
       if (!retry) _error = '暂时无法获取找书结果，可重试。';
@@ -860,35 +876,113 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
     _changed();
   }
 
-  Future<void> _import(String id) async {
-    if (_search.enabled.value == false) return;
+  Iterable<Map> get _candidates =>
+      (_snapshot?['candidates'] as List? ?? const []).whereType<Map>();
+
+  String? _confirmationToken(Map row) {
+    final reason = row['confirmationReason'];
+    final token = row['candidateToken'];
+    if (row['downloadable'] != true ||
+        reason is! String ||
+        reason.trim().isEmpty ||
+        token is! String ||
+        !_sha256.hasMatch(token)) {
+      return null;
+    }
+    return token;
+  }
+
+  bool get _awaitingResults =>
+      _snapshot == null || _snapshot?['status'] == 'searching';
+
+  bool get _canCompleteImport =>
+      mounted &&
+      _search.enabled.value != false &&
+      ModalRoute.of(context)?.isCurrent != false;
+
+  void _skip(String id, String token) {
+    if (_awaitingResults ||
+        widget.awaitingReply ||
+        _search.enabled.value == false ||
+        _importActivity.value == (widget.searchId, id) ||
+        !_candidates.any(
+          (row) => row['id'] == id && _confirmationToken(row) == token,
+        )) {
+      return;
+    }
+    _skippedAlternatives.add((id, token));
+    _changed();
+  }
+
+  Future<void> _import(String id, {String? acceptedCandidateToken}) async {
+    if (_awaitingResults ||
+        (acceptedCandidateToken != null && widget.awaitingReply) ||
+        _snapshot?['status'] == 'stopped' ||
+        _search.enabled.value == false) {
+      return;
+    }
     if (_importActivity.value != null) {
       AppToast.show(context, '资料正在导入，请稍候');
       return;
     }
-    final rows = (_snapshot?['candidates'] as List? ?? const []);
-    if (!rows.whereType<Map>().any(
-      (r) => r['id'] == id && r['importable'] == true,
-    )) {
+    final row = _candidates.where((row) => row['id'] == id).firstOrNull;
+    final canImport =
+        row != null &&
+        (acceptedCandidateToken == null
+            ? row['downloadable'] == true && row['confirmationReason'] == null
+            : _confirmationToken(row) == acceptedCandidateToken &&
+                  !_skippedAlternatives.contains((id, acceptedCandidateToken)));
+    if (!canImport) {
+      if (acceptedCandidateToken != null) {
+        AppToast.show(context, '找书结果已更新，请重新确认');
+      }
       return;
     }
     _importActivity.value = (widget.searchId, id);
+    File? stagedFile;
     try {
       widget.onImporting?.call();
-      final file = await _search.resolve(widget.searchId, id);
-      if (!mounted || _search.enabled.value == false) return;
+      final file = await _search.resolve(
+        widget.searchId,
+        id,
+        acceptedCandidateToken: acceptedCandidateToken,
+      );
+      if (!_canCompleteImport) return;
+      if (acceptedCandidateToken != null &&
+          file['candidateToken'] != acceptedCandidateToken) {
+        throw const FormatException('版本已更新，请重新确认');
+      }
+      stagedFile = await _search.downloadVerifiedFile(
+        widget.searchId,
+        id,
+        expectedLength: file['fileLength'] as int,
+        expectedSha256: file['fileSha256'] as String,
+      );
+      if (!_canCompleteImport) return;
       final result = await importOnlineBook(
-        file,
+        {...file, 'stagedFilePath': stagedFile.path},
         bookId: widget.bookId,
         library: widget.library,
       );
       if (!mounted) return;
-      AppToast.show(context, result.reusedExisting ? '这份资料已在书库中' : '已导入书库');
+      AppToast.show(context, '已保存到系统下载目录并导入书库');
       widget.onImported?.call(result);
+    } on OnlineBookDownloadSaveException catch (error) {
+      if (_canCompleteImport) AppToast.show(context, error.message);
     } on Object catch (error) {
-      if (mounted) AppToast.show(context, '导入失败：$error');
+      if (_canCompleteImport) AppToast.show(context, '导入失败：$error');
     } finally {
-      if (mounted) _importActivity.value = null;
+      if (stagedFile != null) {
+        try {
+          await stagedFile.parent.delete(recursive: true);
+        } on FileSystemException {
+          // A failed temporary transfer cleanup does not change import status.
+        }
+      }
+      if (mounted) {
+        _importActivity.value = null;
+        unawaited(_refresh());
+      }
     }
   }
 
@@ -897,27 +991,44 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
     String componentId,
     String name, [
     String? id,
+    String? token,
   ]) => unawaited(
     ui.A2uiSurface.of(context).dispatchAction({
       'event': {
         'name': name,
-        'context': {'candidateId': ?id},
+        'context': {'candidateId': ?id, 'candidateToken': ?token},
       },
     }, componentId),
   );
 
   Widget _resultBody(BuildContext context, String componentId) {
-    final rows = (_snapshot?['candidates'] as List? ?? const [])
-        .whereType<Map>()
-        .toList();
-    final selection = _localVersion ?? (rows.isEmpty ? null : rows.first['id']);
+    final rows = _candidates.where((row) {
+      final token = _confirmationToken(row);
+      return token == null ||
+          (!widget.awaitingReply &&
+              !_skippedAlternatives.contains((row['id'], token)));
+    }).toList();
+    final selection =
+        (rows.where((row) => row['id'] == _localVersion).firstOrNull ??
+        rows
+            .where(
+              (row) =>
+                  row['downloadable'] == true &&
+                  row['confirmationReason'] == null,
+            )
+            .firstOrNull ??
+        rows.where((row) => _confirmationToken(row) != null).firstOrNull ??
+        rows.firstOrNull)?['id'];
     final status = _snapshot?['status'] as String?;
     final statusLabel = switch (status) {
       'searching' when rows.isEmpty => '正在查找书源…',
       'searching' => '正在查找其他来源…',
-      'complete' || 'unavailable' when widget.awaitingReply => '小七正在整理查找结果…',
+      'complete' ||
+      'unavailable' when widget.awaitingReply && rows.isEmpty => '正在查找其他来源…',
       'stopped' => '已停止找书',
       'unavailable' => '书源暂时无法访问',
+      'complete' when rows.isEmpty && _skippedAlternatives.isNotEmpty =>
+        '已跳过替代版本',
       'complete' when rows.isEmpty => '未找到匹配书目',
       'complete' when _snapshot?['partial'] == true => '部分书源未能访问',
       null when _error == null => '正在查找书源…',
@@ -1016,6 +1127,7 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
   Widget _bookCard(BuildContext context, String componentId, Map row) {
     final candidate = row['id'] as String;
     final importing = _importActivity.value == (widget.searchId, candidate);
+    final confirmationToken = _confirmationToken(row);
     final title = row['title']?.toString() ?? '';
     final source = Uri.tryParse(row['sourceUrl']?.toString() ?? '');
     final format = (row['format']?.toString() ?? '').toUpperCase();
@@ -1061,7 +1173,60 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
                     onPressed: () => _openBookSource(context, source),
                     child: Text('来源　${row['sourceName']} ↗'),
                   ),
-                if (row['importable'] != true)
+                if (row['downloadable'] == true && row['verified'] != true)
+                  Text(
+                    row['preparationStatus'] == 'failed' ||
+                            row['preparationStatus'] == 'timed_out'
+                        ? row['availability']?.toString() ?? '文件准备失败，可重试'
+                        : row['preparationRequired'] == true
+                        ? '点击后生成电子书并校验'
+                        : '已找到文件入口，下载后校验完整性',
+                    style: BookFlowTheme.body,
+                  ),
+                if (confirmationToken != null) ...[
+                  Text(
+                    row['confirmationReason'] as String,
+                    style: BookFlowTheme.body,
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: Wrap(
+                      alignment: WrapAlignment.end,
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        TextButton(
+                          style: TextButton.styleFrom(
+                            foregroundColor: BookFlowTheme.ink,
+                            minimumSize: const Size(64, 48),
+                          ),
+                          onPressed:
+                              importing ||
+                                  _awaitingResults ||
+                                  widget.awaitingReply
+                              ? null
+                              : () => _action(
+                                  context,
+                                  componentId,
+                                  'book_skip',
+                                  candidate,
+                                  confirmationToken,
+                                ),
+                          child: const Text('跳过'),
+                        ),
+                        _importButton(
+                          context,
+                          componentId,
+                          candidate,
+                          importing: importing,
+                          label: '下载并导入',
+                          confirmationToken: confirmationToken,
+                        ),
+                      ],
+                    ),
+                  ),
+                ] else if (row['downloadable'] != true)
                   Text(
                     row['availability']?.toString() ?? '暂无可导入文件',
                     style: BookFlowTheme.body,
@@ -1069,39 +1234,59 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
               ],
             ),
           ),
-          if (row['importable'] == true) ...[
+          if (row['downloadable'] == true && confirmationToken == null) ...[
             const SizedBox(width: 8),
-            FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: BookFlowTheme.ink,
-                foregroundColor: Colors.white,
-                disabledBackgroundColor: const Color(0xFFE5E5E5),
-                disabledForegroundColor: BookFlowTheme.inkSecondary,
-                padding: const EdgeInsets.symmetric(horizontal: 13),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(9),
-                ),
-              ),
-              onPressed: importing
-                  ? null
-                  : () =>
-                        _action(context, componentId, 'book_import', candidate),
-              child: importing
-                  ? const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        BookImportProgress(),
-                        SizedBox(width: 6),
-                        Text(bookImportInProgressLabel),
-                      ],
-                    )
-                  : Text(format.isEmpty ? '导入' : '导入 $format'),
+            _importButton(
+              context,
+              componentId,
+              candidate,
+              importing: importing,
+              label: '下载并导入',
             ),
           ],
         ],
       ),
     );
   }
+
+  Widget _importButton(
+    BuildContext context,
+    String componentId,
+    String candidate, {
+    required bool importing,
+    required String label,
+    String? confirmationToken,
+  }) => FilledButton(
+    style: FilledButton.styleFrom(
+      backgroundColor: BookFlowTheme.ink,
+      foregroundColor: Colors.white,
+      disabledBackgroundColor: const Color(0xFFE5E5E5),
+      disabledForegroundColor: BookFlowTheme.inkSecondary,
+      padding: const EdgeInsets.symmetric(horizontal: 13),
+      minimumSize: const Size(64, 48),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+    ),
+    onPressed:
+        importing || _awaitingResults || _snapshot?['status'] == 'stopped'
+        ? null
+        : () => _action(
+            context,
+            componentId,
+            confirmationToken == null ? 'book_import' : 'book_accept',
+            candidate,
+            confirmationToken,
+          ),
+    child: importing
+        ? const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              BookImportProgress(),
+              SizedBox(width: 6),
+              Text(bookImportInProgressLabel),
+            ],
+          )
+        : Text(label),
+  );
 
   @override
   Widget build(BuildContext context) =>

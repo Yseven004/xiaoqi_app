@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:image/image.dart' as image;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -13,14 +13,26 @@ import '../models/book_recognition.dart';
 import '../models/book_source.dart';
 import '../utils/isbn.dart';
 import 'book_library_service.dart';
+import 'book_download_storage.dart';
 import 'epub_document_service.dart';
-import 'pdf_catalog_service.dart';
+
+/// The book is safely in the library; publishing the user-visible copy failed.
+class OnlineBookDownloadSaveException implements Exception {
+  const OnlineBookDownloadSaveException(this.result, this.message);
+
+  final BookSourceImportResult result;
+  final String message;
+
+  @override
+  String toString() => message;
+}
 
 /// Downloads a resolved candidate and commits the selected edition to the library.
 Future<BookSourceImportResult> importOnlineBook(
   Map<String, dynamic> candidate, {
   int? bookId,
   BookLibraryService? library,
+  BookDownloadSaver saveDownload = saveVerifiedBookToDownloads,
 }) async {
   String field(String key) => candidate[key]?.toString().trim() ?? '';
 
@@ -28,24 +40,21 @@ Future<BookSourceImportResult> importOnlineBook(
   final title = field('title');
   final candidateId = field('id');
   final sourcePage = Uri.tryParse(field('sourceUrl'));
-  final download = Uri.tryParse(field('downloadUrl'));
-  final inline = candidate['inlineEpub'] == true;
+  final stagedFilePath = field('stagedFilePath');
+  final expectedSha256 = field('fileSha256');
+  final expectedLength = candidate['fileLength'];
   if (candidate['importable'] != true ||
+      candidate['verified'] != true ||
       title.isEmpty ||
       candidateId.isEmpty ||
       !supportedBookSourceFormats.contains(format) ||
       !_isHttps(sourcePage) ||
-      (inline
-          ? format != 'epub' ||
-                !candidateId.startsWith('wikisource-zh-') ||
-                sourcePage !=
-                    Uri.https(
-                      'zh.wikisource.org',
-                      '/wiki/${title.replaceAll(' ', '_')}',
-                    ) ||
-                field('downloadUrl').isNotEmpty
-          : !_isAllowedDownload(download))) {
-    throw const FormatException('这个版本没有经过核验的下载地址');
+      stagedFilePath.isEmpty ||
+      !RegExp(r'^[a-f0-9]{64}$').hasMatch(expectedSha256) ||
+      expectedLength is! int ||
+      expectedLength <= 128 ||
+      expectedLength > 256 * 1024 * 1024) {
+    throw const FormatException('这个版本没有经过核验的整本文件');
   }
 
   final edition = field('edition');
@@ -65,28 +74,17 @@ Future<BookSourceImportResult> importOnlineBook(
   );
   try {
     final filePath = p.join(directory.path, 'book.$format');
-    if (inline) {
-      final encoded = candidate['epubBase64'];
-      const maxBytes = 4 * 1024 * 1024;
-      if (encoded is! String ||
-          encoded.isEmpty ||
-          encoded.length > ((maxBytes + 2) ~/ 3) * 4) {
-        throw const FormatException('维基文库电子书为空或超过大小限制');
-      }
-      final bytes = base64Decode(encoded);
-      if (bytes.length > maxBytes ||
-          sha256.convert(bytes).toString() != candidate['sha256']) {
-        throw const FormatException('维基文库电子书传输校验失败');
-      }
-      await File(filePath).writeAsBytes(bytes);
-    } else {
-      await _downloadBook(download!, filePath, format);
+    final stagedFile = File(stagedFilePath);
+    if (!await stagedFile.exists() ||
+        await stagedFile.length() != expectedLength ||
+        (await sha256.bind(stagedFile.openRead()).first).toString() !=
+            expectedSha256) {
+      throw const FormatException('已核验文件传输不完整或校验值不一致');
     }
+    await stagedFile.copy(filePath);
     final embeddedCoverPath = await _validateBookAndStageCover(
       filePath,
       format,
-      compiledTitle: inline ? title : null,
-      compiledAuthor: inline ? author : null,
     );
     final result = await targetLibrary.importVerifiedOnlineBook(
       book: BookRecord(
@@ -135,6 +133,27 @@ Future<BookSourceImportResult> importOnlineBook(
             .then<void>((_) {}, onError: (Object _, StackTrace _) {}),
       );
     }
+    try {
+      await saveDownload(
+        file: File(result.source.filePath),
+        displayName: edition.isEmpty
+            ? '$title.$format'
+            : '$title · $edition.$format',
+        format: format,
+        sha256: expectedSha256,
+      );
+    } on Object catch (error) {
+      final detail = switch (error) {
+        PlatformException(
+          code: 'downloads_not_supported',
+          message: final String message,
+        ) =>
+          message,
+        UnsupportedError(:final message) => message,
+        _ => '保存到系统下载目录失败，请重试',
+      };
+      throw OnlineBookDownloadSaveException(result, '已导入书库，但$detail');
+    }
     return result;
   } finally {
     try {
@@ -151,163 +170,6 @@ bool _isHttps(Uri? uri) =>
     uri.port == 443 &&
     uri.userInfo.isEmpty &&
     uri.host.isNotEmpty;
-
-const _githubReleases = {
-  '/krahets/hello-algo/releases/download/': '561730219',
-  '/progit/progit2-zh/releases/download/': '26017730',
-};
-
-bool _isAllowedDownload(Uri? uri) {
-  if (!_isHttps(uri) || uri!.hasFragment || uri.hasQuery) return false;
-  return switch (uri.host) {
-    'github.com' => _githubReleases.keys.any(uri.path.startsWith),
-    'zh-v2.d2l.ai' => const {
-      '/d2l-zh.pdf',
-      '/d2l-zh-pytorch.pdf',
-    }.contains(uri.path),
-    _ => false,
-  };
-}
-
-bool _isAllowedRedirect(Uri? redirect, Uri original) {
-  if (!_isHttps(redirect) || redirect!.hasFragment) return false;
-
-  if (redirect.host == original.host) return redirect.path == original.path;
-  if (original.host != 'github.com' ||
-      redirect.host != 'release-assets.githubusercontent.com') {
-    return false;
-  }
-  return _githubReleases.entries.any(
-    (entry) =>
-        original.path.startsWith(entry.key) &&
-        redirect.path.startsWith(
-          '/github-production-release-asset/${entry.value}/',
-        ),
-  );
-}
-
-Future<void> _downloadBook(Uri link, String filePath, String format) async {
-  final client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 12)
-    ..autoUncompress = false
-    ..findProxy = ((_) => 'DIRECT')
-    ..connectionFactory = (uri, _, _) async {
-      final addresses = await InternetAddress.lookup(
-        uri.host,
-      ).timeout(const Duration(seconds: 5));
-      final publicAddresses = addresses.where(_isPublicAddress).toList();
-      if (publicAddresses.isEmpty ||
-          publicAddresses.length != addresses.length) {
-        throw const FormatException('下载地址解析到了内网或无效 IP');
-      }
-      // The resolved address retains the DNS host for certificate validation.
-      final address = publicAddresses.firstWhere(
-        (address) => address.type == InternetAddressType.IPv4,
-        orElse: () => publicAddresses.first,
-      );
-      return SecureSocket.startConnect(address, uri.port);
-    };
-  final deadline = Timer(
-    const Duration(minutes: 2),
-    () => client.close(force: true),
-  );
-  final maxBytes = format == 'pdf'
-      ? PdfCatalogService.maxPdfBytes
-      : EpubDocumentService.maxInputBytes;
-  final expectedMime = format == 'pdf'
-      ? 'application/pdf'
-      : 'application/epub+zip';
-  try {
-    var uri = link;
-    for (var redirects = 0; redirects <= 5; redirects++) {
-      final request = await client.getUrl(uri);
-      request.followRedirects = false;
-      request.headers.set(HttpHeaders.acceptHeader, expectedMime);
-      request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
-      final response = await request.close().timeout(
-        const Duration(seconds: 20),
-      );
-      if (response.isRedirect) {
-        final location = response.headers.value(HttpHeaders.locationHeader);
-        final redirect = location == null ? null : uri.resolve(location);
-        if (redirects == 5 || !_isAllowedRedirect(redirect, link)) {
-          throw const FormatException('来源的下载跳转已失效');
-        }
-        await response.listen((_) {}).cancel();
-        uri = redirect!;
-        continue;
-      }
-      if (response.statusCode != HttpStatus.ok) {
-        throw StateError('下载失败（HTTP ${response.statusCode}）');
-      }
-      final type = response.headers.contentType?.mimeType;
-      if (type != null &&
-          type != expectedMime &&
-          type != 'application/octet-stream' &&
-          !(format == 'epub' && type == 'application/zip')) {
-        throw FormatException('来源未返回当前版本的 ${format.toUpperCase()} 文件');
-      }
-      if (response.contentLength > maxBytes) {
-        throw const FormatException('下载资料超出允许的大小');
-      }
-      final target = await File(filePath).open(mode: FileMode.write);
-      var written = 0;
-      try {
-        await for (final bytes in response.timeout(
-          const Duration(seconds: 20),
-        )) {
-          written += bytes.length;
-          if (written > maxBytes) throw const FormatException('下载资料超出允许的大小');
-          await target.writeFrom(bytes);
-        }
-      } finally {
-        await target.close();
-      }
-      if (written == 0 ||
-          (response.contentLength >= 0 && written != response.contentLength)) {
-        throw const FormatException('没有收到完整的电子书文件');
-      }
-      return;
-    }
-    throw const FormatException('下载地址跳转过多');
-  } on TimeoutException {
-    throw StateError('下载超时，请稍后重试');
-  } on SocketException {
-    throw StateError('无法连接到书籍来源，请检查网络后重试');
-  } on HandshakeException {
-    throw StateError('无法验证书籍来源的 HTTPS 连接');
-  } on HttpException {
-    throw StateError('下载连接已中断，请稍后重试');
-  } finally {
-    deadline.cancel();
-    client.close(force: true);
-  }
-}
-
-bool _isPublicAddress(InternetAddress address) {
-  final bytes = address.rawAddress;
-  if (address.type == InternetAddressType.IPv4) {
-    final [a, b, c, _] = bytes;
-    return a != 0 &&
-        a != 10 &&
-        a != 127 &&
-        a < 224 &&
-        !(a == 100 && b >= 64 && b <= 127) &&
-        !(a == 169 && b == 254) &&
-        !(a == 172 && b >= 16 && b <= 31) &&
-        !(a == 192 && (b == 168 || (b == 0 && (c == 0 || c == 2)))) &&
-        !(a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100))) &&
-        !(a == 203 && b == 0 && c == 113);
-  }
-  // Restrict IPv6 to global unicast and exclude transition/documentation blocks.
-  return address.type == InternetAddressType.IPv6 &&
-      (bytes.first & 0xe0) == 0x20 &&
-      !(bytes[0] == 0x20 && bytes[1] == 0x02) &&
-      !(bytes[0] == 0x20 &&
-          bytes[1] == 0x01 &&
-          bytes[2] == 0x0d &&
-          bytes[3] == 0xb8);
-}
 
 Future<String?> _validateBookAndStageCover(
   String filePath,

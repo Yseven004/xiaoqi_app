@@ -9,6 +9,15 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.plugins.add(FastOcrChannel())
 
+        val bookDownloads = BookDownloads(applicationContext)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "xiaoqi_app/book_downloads",
+        ).setMethodCallHandler { call, result ->
+            if (call.method == "saveVerifiedBook") bookDownloads.save(call, result)
+            else result.notImplemented()
+        }
+
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "xiaoqi_app/runtime_config",
