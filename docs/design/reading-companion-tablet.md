@@ -106,3 +106,15 @@
 | 添加、语音、发送 | `assets/images/home_composer_add.svg`、`home_composer_microphone.svg`、`home_send_idle.svg`、`home_send_active.svg`、`home_send_stop.svg`，沿用首页资产 | 0 0 40 40 / 28 dp | 发送根据输入和生成状态选用闲置、可发送或停止图标。 |
 | 文件、技能 / 插件、MCP 连接器 | `assets/icons/extension_market/detail/paperclip.svg`、`assets/icons/capabilities/skill_plugin_capsule.svg`、`assets/icons/capabilities/mcp_connector.svg`，沿用市场和首页资产 | 见独立 SVG / 17 dp | 图标常驻，点击整行切换面板。 |
 | 附件来源和常驻操作 | `assets/images/home_attachment_*.svg`、`assets/icons/capabilities/image.svg`、`assets/icons/capabilities/brush.svg`，沿用首页资产 | 见独立 SVG / 17 dp | 每行点按；创建图像、绘图始终可用。 |
+
+## 2026-11-23 伴读阅读器修订
+
+- 进入伴读默认沉浸。上下操作栏和面板覆盖正文，显隐共用同一个阅读视口。底栏等分目录、进度、显示，滑杆只出现在进度面板。目录按初始高度打开，上拉把手至顶部安全区，当前章节用浅灰底和静态阴影。按钮沿用无按压阴影的阅读主题。
+- 电子书正文默认左右各留 4% 边距。显示依次为亮度、主题、字号、边距、行距、翻页。PDF 原页提供亮度、主题和翻页，排版行打开电子书。深色下保留彩色 PDF 的原色。长按用主界面铅笔手柄和「复制／注释／AI」，外文的「译／原」与圆形「AI」并排。
+- 点「电子书」立即选中，未就绪时只在该按钮显示小圈，原页留在视口。可读后用既有重排组件呈现当前页，预取下一页。启动新请求、返回 PDF、换资料或关闭插件会撤销旧请求，保留当前阅读位置。文字层直接提取；扫描页及含疑似扫描区域的混合页调用端侧 OCR。保存原页号、段落与原页文字框的对应关系，图表、空白及顺序不可靠的页保留原布局。
+- 涂鸦复用绘图插件的小胶囊、文字和图片对象及子弹窗。点开即进入沉浸。顶部胶囊右侧的 ✓ 保存涂鸦，完成后仍在原位。曾在旧版保存的笔迹可继续读取。资料位置或排版变化时，可以回看原绘制布局。输入按小栖全局焦点规则处理。
+- 内置开关由伴读插件管理。Android 首版随包提供 `chi_sim`、`chi_tra`、`eng`、`jpn` 模型。iOS 通过 Vision 查询当前系统识别语种。两端共用 Flutter 阅读器和按资料版本隔离的本地可再生缓存。参考和直接复用依赖为 [pdfrx 2.4.8](https://pub.dev/packages/pdfrx/versions/2.4.8)、[Tesseract4Android 4.9.0](https://github.com/adaptech-cz/Tesseract4Android/releases/tag/4.9.0)、[tessdata_fast（Apache-2.0）](https://github.com/tesseract-ocr/tessdata_fast)及 [Apple Vision](https://developer.apple.com/documentation/vision/recognizing-text-in-images)。
+
+首版扫描验收使用简体中文、繁体中文、英文、日文四组样页，记录断网首用、缓存重开、分栏顺序及回到原页的结果。关闭插件可回滚入口和运行行为，原书、已有阅读位置和笔记仍由本机资料库管理。
+
+Flutter 回归覆盖沉浸和工具栏切换、原页回切、PDF 文字选区、涂鸦保存及恢复。800 × 1280 的界面渲染核对了目录两档、显示面板、涂鸦胶囊和图片子面板。Android 与 iPad 的真机截图、离线识别质量和耗时仍待验收。

@@ -637,7 +637,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _readingCompanionKey = GlobalKey<ReadingCompanionState>();
   final _companionPreferences = ReadingCompanionPreferences.instance;
   bool _readingCompanionOpen = false;
-  bool _companionImmersive = false;
+  bool _companionImmersive = true;
   bool _companionDark = false;
   ReadingCompanionTarget? _companionTarget;
   String? _companionHistoryNotice;
@@ -8647,6 +8647,13 @@ $text''';
   void _companionPreferenceChanged() {
     if (!mounted) return;
     if (!_companionPreferences.enabled.value && _readingCompanionOpen) {
+      if (_readingCompanionKey.currentState?.finishInkForBack(
+            onSaved: () {
+              if (mounted && !_companionPreferences.enabled.value) _closeReadingCompanion();
+            },
+          ) == true) {
+        return;
+      }
       _closeReadingCompanion();
     } else {
       setState(() {});
@@ -8701,6 +8708,7 @@ $text''';
       _attachmentPanelOpen = false;
       _attachmentPanelPending = false;
       _spaceMenuOpen = false;
+      _companionImmersive = true;
       _readingCompanionOpen = true;
     });
   }
@@ -8754,7 +8762,7 @@ $text''';
     ++_readingTaskGeneration;
     setState(() {
       _readingCompanionOpen = false;
-      _companionImmersive = false;
+      _companionImmersive = true;
       _companionDark = false;
       _companionMenuOpen = false;
       _readingPassage = null;

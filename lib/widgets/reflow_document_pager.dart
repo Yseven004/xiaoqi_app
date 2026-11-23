@@ -37,9 +37,14 @@ class ReflowDocumentPager extends StatefulWidget {
     this.onChapterChanged,
     this.onProgressChanged,
     this.verticalChapterTitleStyle,
+    this.chapterTitleAlign = TextAlign.start,
     this.verticalPadding = const EdgeInsets.fromLTRB(24, 18, 24, 28),
     this.verticalBackground = Colors.white,
     this.onVisibleBlocksChanged,
+    this.textStyleBuilder,
+    this.translations,
+    this.onPreviousDocument,
+    this.onNextDocument,
   });
 
   final XiaoqiDocument document;
@@ -52,9 +57,14 @@ class ReflowDocumentPager extends StatefulWidget {
   final ValueChanged<String>? onChapterChanged;
   final ValueChanged<ReaderPaginationProgress>? onProgressChanged;
   final TextStyle? verticalChapterTitleStyle;
+  final TextAlign chapterTitleAlign;
   final EdgeInsets verticalPadding;
   final Color verticalBackground;
   final ValueChanged<List<XiaoqiDocumentBlock>>? onVisibleBlocksChanged;
+  final TextStyle Function(TextStyle)? textStyleBuilder;
+  final Map<String, String>? translations;
+  final VoidCallback? onPreviousDocument;
+  final VoidCallback? onNextDocument;
 
   @override
   State<ReflowDocumentPager> createState() => _ReflowDocumentPagerState();
@@ -74,6 +84,11 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   int _dragStartPage = 0;
   final Map<String, GlobalKey> _verticalBlockKeys = {};
   bool _verticalRestoreScheduled = false;
+  Offset? _edgeStart;
+  int? _edgePointer;
+  bool _startedAtFirst = false;
+  bool _startedAtLast = false;
+  TextStyle? _lastBlockStyle;
 
   /// Chapter whose pages are currently published on their own, before the
   /// chapters in front of it have been paginated.
@@ -127,6 +142,10 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         _scheduleJump(target);
       }
     }
+    if (oldWidget.verticalPadding != widget.verticalPadding &&
+        widget.mode == ReaderPaginationMode.vertical) {
+      _verticalRestoreScheduled = true;
+    }
   }
 
   @override
@@ -150,17 +169,33 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
+    final pager = LayoutBuilder(
       builder: (context, constraints) {
         final textScaler = MediaQuery.textScalerOf(context);
-        final width = math.max(1.0, constraints.maxWidth - 48).toDouble();
-        final height = math.max(1.0, constraints.maxHeight - 46).toDouble();
+        final blockStyle = widget.textStyleBuilder?.call(
+          _styleForBlock(_headingBlock),
+        );
+        if (_lastBlockStyle != blockStyle &&
+            _lastBlockStyle != null &&
+            widget.mode == ReaderPaginationMode.vertical) {
+          _verticalRestoreScheduled = true;
+        }
+        _lastBlockStyle = blockStyle;
+        final width = math
+            .max(1.0, constraints.maxWidth - widget.verticalPadding.horizontal)
+            .toDouble();
+        final height = math
+            .max(1.0, constraints.maxHeight - widget.verticalPadding.vertical)
+            .toDouble();
         final signature = Object.hash(
           widget.document,
           widget.sourceId,
           width.round(),
           height.round(),
           textScaler.hashCode,
+          blockStyle,
+          widget.verticalChapterTitleStyle,
+          widget.translations?.length,
         );
         if (widget.mode == ReaderPaginationMode.horizontal &&
             _layoutSignature != signature &&
@@ -176,7 +211,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
           return _buildVertical(context);
         }
 
-        if (_layoutSignature != signature || _pages.isEmpty) {
+        if (_pages.isEmpty) {
           return Center(
             child: Text(_isPreparing ? '正在准备阅读页面' : '资料暂时没有可读取的内容'),
           );
@@ -232,6 +267,50 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         );
       },
     );
+    if (widget.onNextDocument == null && widget.onPreviousDocument == null) {
+      return pager;
+    }
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        if (_edgePointer != null || _selectionActive) {
+          _edgeStart = null;
+          return;
+        }
+        final controller = widget.mode == ReaderPaginationMode.vertical
+            ? _verticalController
+            : _pageController;
+        if (!controller.hasClients ||
+            !controller.position.hasContentDimensions) {
+          return;
+        }
+        final position = controller.position;
+        _edgePointer = event.pointer;
+        _edgeStart = event.position;
+        _startedAtFirst = position.pixels <= position.minScrollExtent + 1;
+        _startedAtLast =
+            position.pixels >= position.maxScrollExtent - 1 && !_isPreparing;
+      },
+      onPointerCancel: (_) {
+        _edgePointer = null;
+        _edgeStart = null;
+      },
+      onPointerUp: (event) {
+        if (_edgePointer != event.pointer) return;
+        final start = _edgeStart;
+        _edgePointer = null;
+        _edgeStart = null;
+        if (start == null || _selectionActive) return;
+        final delta = event.position - start;
+        final horizontal = widget.mode == ReaderPaginationMode.horizontal;
+        final main = horizontal ? delta.dx : delta.dy;
+        final cross = horizontal ? delta.dy : delta.dx;
+        if (main.abs() < 42 || main.abs() <= cross.abs() * 1.4) return;
+        if (main < 0 && _startedAtLast) widget.onNextDocument?.call();
+        if (main > 0 && _startedAtFirst) widget.onPreviousDocument?.call();
+      },
+      child: pager,
+    );
   }
 
   void _schedulePrepare(
@@ -286,6 +365,9 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       height: height,
       textScaler: textScaler,
       preferredChapterId: _preferredChapterId(),
+      headingStyle: widget.verticalChapterTitleStyle,
+      textStyleBuilder: widget.textStyleBuilder,
+      translations: Map.of(widget.translations ?? const <String, String>{}),
       gate: gate,
       onPublish: (publish) => _applyPublish(signature, epoch, publish),
     );
@@ -397,6 +479,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
               if (showTitle) ...[
                 Text(
                   chapter.title,
+                  textAlign: widget.chapterTitleAlign,
                   style:
                       widget.verticalChapterTitleStyle ??
                       const TextStyle(
@@ -419,6 +502,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
                   child: widget.blockBuilder(
                     context,
                     ReaderBlockSlice(
+                      chapterId: chapter.id,
                       block: blocks[index],
                       text: blocks[index].text,
                     ),
@@ -555,12 +639,15 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         if (page.showChapterTitle) ...[
           Text(
             page.chapterTitle,
-            style: const TextStyle(
-              color: Color(0xFF252525),
-              fontSize: 22,
-              height: 1.3,
-              fontWeight: FontWeight.w700,
-            ),
+            textAlign: widget.chapterTitleAlign,
+            style:
+                widget.verticalChapterTitleStyle ??
+                const TextStyle(
+                  color: Color(0xFF252525),
+                  fontSize: 22,
+                  height: 1.3,
+                  fontWeight: FontWeight.w700,
+                ),
           ),
           const SizedBox(height: 18),
         ],
@@ -576,15 +663,17 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       key: Key('book_body_document_page_$index'),
       label: _pageSemantics(page, index),
       child: ColoredBox(
-        color: Colors.white,
+        color: widget.verticalBackground,
         child: SingleChildScrollView(
           physics: page.mayOverflow
               ? const ClampingScrollPhysics()
               : const NeverScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
+          padding: widget.verticalPadding,
           child: ConstrainedBox(
             constraints: BoxConstraints(
-              minHeight: math.max(0, pageHeight - 46).toDouble(),
+              minHeight: math
+                  .max(0, pageHeight - widget.verticalPadding.vertical)
+                  .toDouble(),
             ),
             child: content,
           ),
@@ -629,11 +718,16 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       sourceId: widget.sourceId,
       chapterId: page.chapterId,
       blockId: first?.block.id,
-      characterOffset: first?.startOffset ?? 0,
+      characterOffset: widget.translations?.containsKey(first?.block.id) == true
+          ? 0
+          : first?.startOffset ?? 0,
     );
     _requestedAnchor = anchor;
     widget.onAnchorChanged?.call(anchor);
     widget.onChapterChanged?.call(page.chapterId);
+    widget.onVisibleBlocksChanged?.call(
+      page.blocks.map((slice) => slice.block).toSet().toList(),
+    );
   }
 
   void _emitProgress(int index) {
@@ -858,6 +952,9 @@ Future<void> _paginateDocumentProgressive(
   required double height,
   required TextScaler textScaler,
   required String? preferredChapterId,
+  required TextStyle? headingStyle,
+  required TextStyle Function(TextStyle)? textStyleBuilder,
+  required Map<String, String> translations,
   required _PageYieldGate gate,
   required void Function(_PaginationPublish publish) onPublish,
 }) async {
@@ -883,6 +980,9 @@ Future<void> _paginateDocumentProgressive(
     final headChapter = chapters[preferredIndex];
     final headResult = await _paginateChapter(
       headChapter,
+      translations: translations,
+      headingStyle: headingStyle,
+      textStyleBuilder: textStyleBuilder,
       width: width,
       height: height,
       textScaler: textScaler,
@@ -938,6 +1038,9 @@ Future<void> _paginateDocumentProgressive(
     } else {
       final chapterResult = await _paginateChapter(
         chapter,
+        translations: translations,
+        headingStyle: headingStyle,
+        textStyleBuilder: textStyleBuilder,
         width: width,
         height: height,
         textScaler: textScaler,
@@ -1005,6 +1108,9 @@ Future<void> _paginateDocumentProgressive(
     );
     final fallbackResult = await _paginateChapter(
       fallback,
+      translations: translations,
+      headingStyle: headingStyle,
+      textStyleBuilder: textStyleBuilder,
       width: width,
       height: height,
       textScaler: textScaler,
@@ -1030,6 +1136,9 @@ Future<void> _paginateDocumentProgressive(
 /// pass stops measuring instead of competing with its replacement.
 Future<_ChapterPaginationResult?> _paginateChapter(
   XiaoqiDocumentChapter chapter, {
+  required Map<String, String> translations,
+  required TextStyle? headingStyle,
+  required TextStyle Function(TextStyle)? textStyleBuilder,
   required double width,
   required double height,
   required TextScaler textScaler,
@@ -1055,7 +1164,14 @@ Future<_ChapterPaginationResult?> _paginateChapter(
   final pages = <ReaderPageSlice>[];
   var current = <ReaderBlockSlice>[];
   var used = showTitle
-      ? _headingHeight(chapter.title, width, textScaler) + 18
+      ? _measureText(
+              chapter.title,
+              _headingBlock,
+              width,
+              textScaler,
+              style: headingStyle,
+            ) +
+            24
       : 0;
   var mayOverflow = false;
   var firstPage = true;
@@ -1092,7 +1208,7 @@ Future<_ChapterPaginationResult?> _paginateChapter(
     // never measure anything, so they need their own cheap way to yield.
     await gate.tickBlock();
     if (gate.cancelled) return null;
-    final text = block.text;
+    final text = translations[block.id] ?? block.text;
     if (block.kind == 'page_break') {
       flush();
       currentOriginalPageLabel = block.originalPageLabel;
@@ -1123,6 +1239,7 @@ Future<_ChapterPaginationResult?> _paginateChapter(
         }
         put(
           ReaderBlockSlice(
+            chapterId: chapter.id,
             block: block,
             text: text,
             startOffset: rowStart,
@@ -1138,15 +1255,22 @@ Future<_ChapterPaginationResult?> _paginateChapter(
     }
 
     if (block.kind == 'image') {
-      put(ReaderBlockSlice(block: block, text: text), 430);
+      put(
+        ReaderBlockSlice(chapterId: chapter.id, block: block, text: text),
+        430,
+      );
       continue;
     }
     if (block.kind == 'divider') {
-      put(ReaderBlockSlice(block: block, text: text), 18);
+      put(
+        ReaderBlockSlice(chapterId: chapter.id, block: block, text: text),
+        18,
+      );
       continue;
     }
     if (text.trim().isEmpty) continue;
 
+    final blockStyle = textStyleBuilder?.call(_styleForBlock(block));
     var start = 0;
     while (start < text.length) {
       if (gate.cancelled) return null;
@@ -1161,6 +1285,7 @@ Future<_ChapterPaginationResult?> _paginateChapter(
         textScaler,
         gate: gate,
         continuation: continuation,
+        style: blockStyle,
       );
       if (count <= 0) {
         if (current.isNotEmpty) {
@@ -1175,6 +1300,7 @@ Future<_ChapterPaginationResult?> _paginateChapter(
           textScaler,
           gate: gate,
           continuation: continuation,
+          style: blockStyle,
         );
         if (count <= 0) count = 1;
         mayOverflow = true;
@@ -1187,10 +1313,12 @@ Future<_ChapterPaginationResult?> _paginateChapter(
             block,
             width,
             textScaler,
+            style: blockStyle,
           ) +
           overhead;
       put(
         ReaderBlockSlice(
+          chapterId: chapter.id,
           block: block,
           text: part,
           startOffset: start,
@@ -1238,9 +1366,6 @@ List<List<String>>? _decodeTableRows(XiaoqiDocumentBlock block) {
     return null;
   }
 }
-
-double _headingHeight(String text, double width, TextScaler scaler) =>
-    _measureText(text, _headingBlock, width, scaler) + 6;
 
 final _headingBlock = XiaoqiDocumentBlock(
   id: 'reader:heading',
@@ -1295,10 +1420,11 @@ double _measureText(
   String text,
   XiaoqiDocumentBlock block,
   double width,
-  TextScaler scaler,
-) {
+  TextScaler scaler, {
+  TextStyle? style,
+}) {
   final painter = TextPainter(
-    text: TextSpan(text: text, style: _styleForBlock(block)),
+    text: TextSpan(text: text, style: style ?? _styleForBlock(block)),
     textDirection: TextDirection.ltr,
     textScaler: scaler,
   )..layout(maxWidth: width);
@@ -1328,6 +1454,7 @@ Future<int> _fitTextPrefix(
   TextScaler scaler, {
   required _PageYieldGate gate,
   required bool continuation,
+  required TextStyle? style,
 }) async {
   if (text.isEmpty) return 0;
   await gate.tick();
@@ -1336,6 +1463,7 @@ Future<int> _fitTextPrefix(
     block,
     width,
     scaler,
+    style: style,
   );
   if (full <= maxHeight) return text.length;
   var low = 1;
@@ -1350,6 +1478,7 @@ Future<int> _fitTextPrefix(
       block,
       width,
       scaler,
+      style: style,
     );
     if (measured <= maxHeight) {
       best = middle;

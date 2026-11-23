@@ -11,6 +11,7 @@ import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/services/reader_pagination_preferences.dart';
 import 'package:xiaoqi_app/widgets/message_selection_action_card.dart';
 import 'package:xiaoqi_app/widgets/reading_companion.dart';
+import 'package:xiaoqi_app/widgets/reflow_document_pager.dart';
 
 void main() {
   testWidgets('task PDF is preferred and its restored page is shown', (
@@ -28,7 +29,15 @@ void main() {
     Pdfrx.cacheDirectoryPath = directory.path;
     addTearDown(() async {
       Pdfrx.cacheDirectoryPath = previousCache;
-      await directory.delete(recursive: true);
+      for (var attempt = 0; ; attempt++) {
+        try {
+          await directory.delete(recursive: true);
+          break;
+        } on FileSystemException catch (error) {
+          if (!Platform.isWindows || error.osError?.errorCode != 32 || attempt >= 20) rethrow;
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+      }
     });
     final file = File('${directory.path}/book.pdf');
     await tester.runAsync(() => file.writeAsString(_samplePdf()));
@@ -52,22 +61,59 @@ void main() {
       ),
     );
 
-    final footer = find.textContaining(' / 3');
-    for (var frame = 0; frame < 100 && footer.evaluate().isEmpty; frame++) {
+    final viewer = find.byType(PdfViewer);
+    final progress = find.ancestor(of: find.text('进度'), matching: find.byType(InkWell));
+    bool ready() =>
+        viewer.evaluate().isNotEmpty &&
+        tester.widget<PdfViewer>(viewer).controller!.isReady &&
+        tester.widgetList<InkWell>(progress).any((button) => button.onTap != null);
+    for (var frame = 0; frame < 100 && !ready(); frame++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
       );
       await tester.pump(const Duration(milliseconds: 20));
     }
-    final pageLabel = tester.widgetList<Text>(footer).singleOrNull?.data;
+    expect(ready(), isTrue);
+    expect(find.byType(Slider), findsNothing);
+    final viewport = tester.getRect(viewer);
     await tester.tap(find.text('进度'));
     await tester.pumpAndSettle();
     final slider = tester.widgetList<Slider>(find.byType(Slider)).singleOrNull;
+    expect(tester.getRect(viewer), viewport);
+    expect(find.text('第 2 页 / 共 3 页'), findsOneWidget);
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     final controller = tester
         .widget<PdfViewer>(find.byType(PdfViewer))
         .controller!;
+    final ebook = find.text('电子书');
+    await tester.tap(ebook);
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(viewer, findsOneWidget);
+    await tester.tap(find.text('PDF'));
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byType(ReflowDocumentPager), findsNothing);
+    await tester.tap(ebook);
+    for (var frame = 0; frame < 120 && find.byType(ReflowDocumentPager).evaluate().isEmpty; frame++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 15)));
+      await tester.pump(const Duration(milliseconds: 24));
+    }
+    expect(find.text('Read this page.'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    await tester.tap(find.text('显示'));
+    await tester.pumpAndSettle();
+    for (final label in ['字号', '边距', '行距', '左右翻页']) {
+      expect(find.text(label), findsOneWidget);
+    }
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('PDF'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ReflowDocumentPager), findsNothing);
+    expect(tester.widget<PdfViewer>(viewer).controller, same(controller));
+    expect(controller.pageNumber, 2);
     for (
       var frame = 0;
       frame < 100 && !controller.document.pages[1].isLoaded;
@@ -119,8 +165,14 @@ void main() {
     expect(find.text('复制'), findsOneWidget);
     expect(find.text('注释'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 3));
     await tester.pumpAndSettle();
-    expect(pageLabel, '2 / 3');
+    // The PDFium worker releases the OS handle on its own isolate. Flush
+    // notifications back to the widget-test zone before cleaning the file.
+    for (var i = 0; i < 5; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump();
+    }
     expect(slider?.value, 2);
     expect(tester.takeException(), isNull);
   });

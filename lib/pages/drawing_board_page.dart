@@ -13,6 +13,8 @@ import 'package:image_picker/image_picker.dart';
 
 import '../services/home_chat_drawing_draft_store.dart';
 
+part 'drawing_annotation.dart';
+
 class HomeChatDrawingResult {
   const HomeChatDrawingResult({
     required this.pngBytes,
@@ -46,7 +48,26 @@ class DrawingBoardPage extends StatefulWidget {
     this.surfaceController,
     this.showToolbar = true,
     super.key,
-  });
+  }) : annotation = null,
+       annotationTools = null;
+
+  const DrawingBoardPage.annotation({
+    required DrawingAnnotationLayer layer,
+    this.annotationTools,
+    super.key,
+  }) : annotation = layer,
+       conversationId = '',
+       accountScope = 'local',
+       embedded = true,
+       showToolbar = false,
+       imagePicker = null,
+       draftPath = null,
+       draftStore = null,
+       imageAspectRatio = null,
+       surfaceController = null;
+
+  final DrawingAnnotationLayer? annotation;
+  final DrawingAnnotationTools? annotationTools;
 
   final String conversationId;
   final String accountScope;
@@ -108,6 +129,8 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   bool _imagePopoverOpen = false;
   bool _eraserPopoverOpen = false;
   bool _textEditing = false;
+  TextDrawable? _editingExistingText;
+  bool _keyboardVisible = false;
   Size _canvasSize = Size.zero;
   Size _canvasViewSize = Size.zero;
   Size? _imageSceneSize;
@@ -129,7 +152,11 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   Future<void> _saveQueue = Future<void>.value();
 
   bool get _canEdit =>
-      _ready && _draft != null && !_saving && !_closing && !_imagePicking;
+      _ready &&
+      (_draft != null || widget.annotationTools != null) &&
+      !_saving &&
+      !_closing &&
+      !_imagePicking;
 
   static const _strokeOptions = <double>[2, 5, 9, 16];
   static const _eraserStrokeOptions = <double>[9, 18, 30];
@@ -164,8 +191,59 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     _controller.freeStyleMode = FreeStyleMode.draw;
     _controller.addListener(_onControllerChanged);
     _textFocusNode.addListener(_onTextFocusChanged);
-    _restoreFuture = _restoreDraft();
+    if (widget.annotation case final layer?) {
+      _imageSceneSize = layer.size;
+      // A ColorBackgroundDrawable uses BlendMode.src, even at zero alpha:
+      // it would clear the page already painted beneath this overlay.
+      _controller.background = null;
+      _controller.scaleSettings = const ScaleSettings(
+        enabled: true,
+        minScale: 1,
+        maxScale: 1,
+      );
+      layer._attachments++;
+      widget.annotationTools?._attach(this);
+      _restoreFuture = _restoreAnnotation(layer);
+    } else {
+      _restoreFuture = _restoreDraft();
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _measureCanvas());
+  }
+
+  Future<void> _restoreAnnotation(DrawingAnnotationLayer layer) async {
+    try {
+      final items = await layer._load();
+      if (!mounted) return;
+      _controller.addDrawables(items);
+      _controller.performedActions.clear();
+      _observedDrawables = List.of(items);
+      _observedBackground = _controller.value.background;
+      setState(() => _ready = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _measureCanvas();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _saveError = '绘图读取失败：$error';
+        _retryOperation = () => _restoreAnnotation(layer);
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant DrawingBoardPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.annotationTools != oldWidget.annotationTools) {
+      oldWidget.annotationTools?._detach(this);
+      widget.annotationTools?._attach(this);
+    }
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    widget.annotationTools?._refresh();
   }
 
   @override
@@ -180,6 +258,11 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     _textFocusNode.dispose();
     _inlineTextController.dispose();
     _controller.dispose();
+    widget.annotationTools?._detach(this);
+    if (widget.annotation case final layer?) {
+      layer._attachments--;
+      layer._releaseDetached();
+    }
     _backgroundImage?.dispose();
     for (final image in _ownedDrawableImages) {
       image.dispose();
@@ -189,6 +272,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (widget.annotation != null) return;
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
@@ -245,6 +329,19 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     if (mounted) setState(() {});
   }
 
+  @override
+  void didChangeMetrics() {
+    if (!mounted || !_textEditing) return;
+    final visible = View.of(context).viewInsets.bottom > 0;
+    if (_keyboardVisible &&
+        !visible &&
+        _textFocusNode.hasFocus &&
+        _inlineTextController.text.isEmpty) {
+      _commitInlineText();
+    }
+    _keyboardVisible = visible;
+  }
+
   void _measureCanvas() {
     final renderObject = _controller.painterKey.currentContext
         ?.findRenderObject();
@@ -257,7 +354,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   }
 
   void _onControllerChanged() {
-    if (!_ready || _draft == null) return;
+    if (!_ready || (_draft == null && widget.annotation == null)) return;
     final drawables = _controller.value.drawables;
     final background = _controller.value.background;
     final selected = _selectedObject;
@@ -272,6 +369,10 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     }
     _observedDrawables = List<Drawable>.of(drawables);
     _observedBackground = background;
+    if (widget.annotation case final layer?) {
+      layer._replace(drawables);
+      return;
+    }
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 450), _enqueueSave);
   }
@@ -361,13 +462,18 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       final frame = await codec.getNextFrame();
       codec.dispose();
       final image = frame.image;
-      _ownedDrawableImages.add(image);
+      if (!mounted) {
+        image.dispose();
+        return;
+      }
+      final owner = widget.annotation?._images ?? _ownedDrawableImages;
+      owner.add(image);
       final canvasSize = _currentCanvasSize.isEmpty
           ? _canvasViewSize
           : _currentCanvasSize;
       if (canvasSize.isEmpty) {
         image.dispose();
-        _ownedDrawableImages.remove(image);
+        owner.remove(image);
         throw const FormatException('画板尚未准备好，请重试');
       }
       final maxWidth = canvasSize.width * .68;
@@ -462,10 +568,14 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   }
 
   void _beginInlineText() {
-    if (!_canEdit) return;
+    if (!_canEdit || _textEditing) return;
+    final selected = _selectedObject;
+    _editingExistingText = widget.annotation != null && selected is TextDrawable
+        ? selected
+        : null;
     _deselectObject();
     _textFocusNode.unfocus();
-    _inlineTextController.clear();
+    _inlineTextController.text = _editingExistingText?.text ?? '';
     setState(() {
       _tool = 2;
       _textEditing = true;
@@ -483,7 +593,16 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
         ? _canvasViewSize
         : _currentCanvasSize;
     ObjectDrawable? drawable;
-    if (text.isNotEmpty && !canvasSize.isEmpty) {
+    final original = _editingExistingText;
+    _editingExistingText = null;
+    if (original != null) {
+      if (text.isEmpty || text == original.text) {
+        drawable = original;
+      } else {
+        drawable = original.copyWith(text: text);
+        _controller.replaceDrawable(original, drawable);
+      }
+    } else if (text.isNotEmpty && !canvasSize.isEmpty) {
       final fieldObject = _inlineTextKey.currentContext?.findRenderObject();
       final painterObject = _controller.painterKey.currentContext
           ?.findRenderObject();
@@ -808,20 +927,20 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
         if (drawable is ImageDrawable && _showImageDeleteButton)
           Positioned(
             left: (rotatedBounds.right + 4)
-                .clamp(4.0, displaySize.width - 40)
+                .clamp(4.0, math.max(4.0, displaySize.width - 40))
                 .toDouble(),
             top: (rotatedBounds.top - 18)
-                .clamp(4.0, displaySize.height - 40)
+                .clamp(4.0, math.max(4.0, displaySize.height - 40))
                 .toDouble(),
             child: _buildDeleteImageButton(),
           ),
         if (drawable is ImageDrawable)
           Positioned(
             left: (rotatedBounds.center.dx - 18)
-                .clamp(4.0, displaySize.width - 40)
+                .clamp(4.0, math.max(4.0, displaySize.width - 40))
                 .toDouble(),
             top: (rotatedBounds.bottom + 8)
-                .clamp(4.0, displaySize.height - 40)
+                .clamp(4.0, math.max(4.0, displaySize.height - 40))
                 .toDouble(),
             child: GestureDetector(
               key: const ValueKey('drawing-image-rotation-handle'),
@@ -932,6 +1051,8 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
 
   void _toggleColorPopover() {
     if (!_canEdit) return;
+    if (_textEditing) _commitInlineText();
+    _textFocusNode.unfocus();
     setState(() {
       _colorPopoverOpen = !_colorPopoverOpen;
       _imagePopoverOpen = false;
@@ -1099,7 +1220,16 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
         builder: (context, constraints) {
           _canvasViewSize = constraints.biggest;
           _imageSceneSize ??= constraints.biggest;
-          return _buildCanvasCard(colors, constraints.biggest);
+          final card = _buildCanvasCard(colors, constraints.biggest);
+          if (widget.annotation == null) return card;
+          return IgnorePointer(
+            ignoring: widget.annotationTools == null,
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => widget.annotationTools?._select(this),
+              child: card,
+            ),
+          );
         },
       );
     }
@@ -1255,68 +1385,72 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           right: 12,
           child: _buildToolbar(colors, size),
         ),
-      if (_colorPopoverOpen || _imagePopoverOpen || _eraserPopoverOpen)
-        Positioned.fill(
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _dismissPopovers,
-            child: const ColoredBox(color: Colors.transparent),
-          ),
-        ),
-      if (_colorPopoverOpen)
-        Positioned(
-          top: 60,
-          left: 12,
-          right: 12,
-          child: Center(child: _buildColorPopover(size.width)),
-        ),
-      if (_imagePopoverOpen)
-        Positioned(
-          top: 60,
-          left: 12,
-          right: 12,
-          child: Center(child: _buildImagePopover(size.width)),
-        ),
-      if (_eraserPopoverOpen)
-        Positioned(
-          top: 60,
-          left: 12,
-          right: 12,
-          child: Center(child: _buildEraserPopover(size.width)),
-        ),
-      if (_saveError != null)
-        Positioned(
-          left: 16,
-          right: 16,
-          top: 62,
-          child: Material(
-            color: const Color(0xFFFFF3F0),
-            borderRadius: BorderRadius.circular(12),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      _saveError!,
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: _retryOperation == null
-                        ? null
-                        : _retryLastOperation,
-                    child: const Text('重试'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
+      if (widget.annotation == null) ..._drawingPopovers(size),
       if (!widget.embedded)
         Positioned(right: 14, bottom: 14, child: _buildFinishButton()),
     ],
   );
+
+  List<Widget> _drawingPopovers(Size size) => [
+    if (_colorPopoverOpen || _imagePopoverOpen || _eraserPopoverOpen)
+      Positioned.fill(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _dismissPopovers,
+          child: const ColoredBox(color: Colors.transparent),
+        ),
+      ),
+    if (_colorPopoverOpen)
+      Positioned(
+        top: 60,
+        left: 12,
+        right: 12,
+        child: Center(child: _buildColorPopover(size.width)),
+      ),
+    if (_imagePopoverOpen)
+      Positioned(
+        top: 60,
+        left: 12,
+        right: 12,
+        child: Center(child: _buildImagePopover(size.width)),
+      ),
+    if (_eraserPopoverOpen)
+      Positioned(
+        top: 60,
+        left: 12,
+        right: 12,
+        child: Center(child: _buildEraserPopover(size.width)),
+      ),
+    if (_saveError != null)
+      Positioned(
+        left: 16,
+        right: 16,
+        top: 62,
+        child: Material(
+          color: const Color(0xFFFFF3F0),
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _saveError!,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _retryOperation == null
+                      ? null
+                      : _retryLastOperation,
+                  child: const Text('重试'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+  ];
 
   double get _eraserCursorDiameter {
     final displaySize = _canvasViewSize;
@@ -1667,7 +1801,9 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     required double iconSize,
     required VoidCallback onTap,
   }) {
-    final selected = _tool == tool;
+    final selected = widget.annotation != null && _imagePopoverOpen
+        ? tool == 5
+        : _tool == tool;
     return Tooltip(
       message: tooltip,
       child: Material(
@@ -1844,7 +1980,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         _imageAction(
-          icon: Icons.camera_alt_outlined,
+          iconAsset: 'assets/images/home_attachment_camera.svg',
           label: '拍照',
           onTap: () {
             setState(() => _imagePopoverOpen = false);
@@ -1864,8 +2000,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   );
 
   Widget _imageAction({
-    IconData? icon,
-    String? iconAsset,
+    required String iconAsset,
     required String label,
     required VoidCallback onTap,
   }) => InkWell(
@@ -1878,11 +2013,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           const SizedBox(width: 6),
           SizedBox(
             width: 26,
-            child: Center(
-              child: iconAsset != null
-                  ? _drawingIcon(iconAsset, _ink, 21)
-                  : Icon(icon, color: _ink, size: 21),
-            ),
+            child: Center(child: _drawingIcon(iconAsset, _ink, 21)),
           ),
           const SizedBox(width: 12),
           Text(label, style: const TextStyle(color: _ink, fontSize: 15)),

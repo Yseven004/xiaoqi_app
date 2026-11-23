@@ -68,6 +68,10 @@ extensions.configure<ApplicationExtension> {
     }
 }
 
+dependencies {
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)

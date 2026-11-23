@@ -10,11 +10,15 @@ import 'package:flutter/rendering.dart';
 /// framework still owns the gesture hit target and drag semantics; this class
 /// only supplies the visible handle and its anchor points.
 class BookPencilTextSelectionControls extends MaterialTextSelectionControls {
-  BookPencilTextSelectionControls({this.textDirection = TextDirection.ltr});
+  BookPencilTextSelectionControls({
+    this.textDirection = TextDirection.ltr,
+    this.tintForDarkTheme = false,
+  });
 
   /// The paragraph direction Flutter uses to map start/end handles onto
   /// [TextSelectionHandleType.left] and [TextSelectionHandleType.right].
   final TextDirection textDirection;
+  final bool tintForDarkTheme;
 
   static const String assetPath =
       'assets/icons/editor/selection_pencil_handle.png';
@@ -92,6 +96,10 @@ class BookPencilTextSelectionControls extends MaterialTextSelectionControls {
     }
     final image = Image.asset(
       assetPath,
+      color: tintForDarkTheme && Theme.of(context).brightness == Brightness.dark
+          ? const Color(0xFFF2EEE6)
+          : null,
+      colorBlendMode: BlendMode.srcIn,
       fit: BoxFit.contain,
       filterQuality: FilterQuality.medium,
       gaplessPlayback: true,

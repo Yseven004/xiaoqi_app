@@ -11,15 +11,22 @@ class MessageSelectionActionCard extends StatelessWidget {
     this.onAnnotate,
     this.primaryEnabled = true,
     this.copyFirst = false,
+    this.dark = false,
   });
 
   final String primaryLabel;
   final String primaryAsset;
   final bool primaryEnabled;
   final bool copyFirst;
+  final bool dark;
   final VoidCallback onPrimaryAction;
   final VoidCallback? onCopy;
   final VoidCallback? onAnnotate;
+
+  Color get _foreground =>
+      dark ? const Color(0xFFE6E3DC) : const Color(0xFF2B2F36);
+  Color get _disabled =>
+      dark ? const Color(0xFF96938D) : const Color(0xFFB8BBC0);
 
   Widget _actionButton({
     required String label,
@@ -29,8 +36,8 @@ class MessageSelectionActionCard extends StatelessWidget {
   }) => TextButton(
     onPressed: enabled ? onPressed : null,
     style: TextButton.styleFrom(
-      foregroundColor: const Color(0xFF2B2F36),
-      disabledForegroundColor: const Color(0xFFB8BBC0),
+      foregroundColor: _foreground,
+      disabledForegroundColor: _disabled,
       minimumSize: const Size(48, 48),
       padding: const EdgeInsets.symmetric(horizontal: 8),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -45,7 +52,7 @@ class MessageSelectionActionCard extends StatelessWidget {
           height: 18,
           excludeFromSemantics: true,
           colorFilter: ColorFilter.mode(
-            enabled ? const Color(0xFF2B2F36) : const Color(0xFFB8BBC0),
+            enabled ? _foreground : _disabled,
             BlendMode.srcIn,
           ),
         ),
@@ -60,12 +67,14 @@ class MessageSelectionActionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-    color: Colors.white,
+    color: dark ? const Color(0xFF222426) : Colors.white,
     elevation: 5,
     shadowColor: const Color(0x26000000),
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(18),
-      side: const BorderSide(color: Color(0xFFE8E9EB)),
+      side: BorderSide(
+        color: dark ? const Color(0xFF414345) : const Color(0xFFE8E9EB),
+      ),
     ),
     clipBehavior: Clip.antiAlias,
     child: Padding(

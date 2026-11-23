@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_painter/flutter_painter.dart' show FreeStyleDrawable;
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -19,20 +20,24 @@ import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/book_source.dart';
 import '../models/note.dart';
 import '../models/page_annotation.dart';
+import '../pages/drawing_board_page.dart';
 import '../models/pdf_catalog.dart';
 import '../models/reader_pagination.dart';
 import '../models/xiaoqi_document.dart';
 import '../services/book_library_service.dart';
+import '../services/companion_pdf_reflow.dart';
 import '../services/database_service.dart';
 import '../services/reader_pagination_preferences.dart';
 import '../services/reading_task_context.dart';
 import '../services/reading_companion_translation.dart';
 import '../services/source_document_loader.dart';
 import 'app_toast.dart';
+import 'book_text_selection_controls.dart';
 import 'chat_annotation_navigation.dart';
 import 'chat_message_scroll_view.dart';
 import 'companion_ink_surface.dart';
 import 'message_selection_action_card.dart';
+import 'pdf_page_canvas.dart' show horizontalPdfPageLayout;
 import 'reflow_document_pager.dart';
 import 'xiaoqi_document_block_view.dart';
 
@@ -214,7 +219,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
   int _historyRequest = 0;
   int? _sourceId;
   bool _minimized = false;
-  (int, int, String)? _documentIdentity;
+  (int, int, String, String)? _documentIdentity;
   GlobalKey<_CompanionDocumentState>? _documentKey;
 
   bool closeReaderPanelForBack() =>
@@ -223,12 +228,9 @@ class ReadingCompanionState extends State<ReadingCompanion> {
   bool finishInkForBack({VoidCallback? onSaved}) {
     final state = _documentKey?.currentState;
     if (state == null || !state._inkEditing) return false;
+    if (onSaved != null) state._afterInkSave = onSaved;
     if (!state._inkSaving) {
-      unawaited(
-        state._finishInk().then((_) {
-          if (state.mounted && !state._inkEditing) onSaved?.call();
-        }),
-      );
+      unawaited(state._finishInk());
     }
     return true;
   }
@@ -496,6 +498,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                   current.bookId,
                   current.id,
                   current.contentHash,
+                  current.sourceVersionId,
                 );
                 if (_documentIdentity != identity) {
                   _documentIdentity = identity;
@@ -504,6 +507,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                 return _CompanionDocument(
                   key: _documentKey,
                   source: current,
+                  bookTitle: book.title,
                   immersive: widget.immersive,
                   onToggleImmersive: _chatOpen
                       ? null
@@ -658,6 +662,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
 class _CompanionDocument extends StatefulWidget {
   const _CompanionDocument({
     super.key,
+    required this.bookTitle,
     required this.source,
     required this.library,
     required this.onAsk,
@@ -674,6 +679,7 @@ class _CompanionDocument extends StatefulWidget {
 
   final BookSourceRecord source;
   final BookLibraryService library;
+  final String bookTitle;
   final void Function(ReadingCompanionPassage, Offset) onAsk;
   final ValueChanged<ReadingCompanionPassage> onAnnotate;
   final VoidCallback? onChooseSource;
@@ -698,6 +704,23 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   static const _preferences = ReaderPaginationPreferences();
   late Future<({XiaoqiDocument? document, ReaderAnchor? anchor})> _loading;
   final _pdf = PdfViewerController();
+  late final _selectablePdfReference = PdfDocumentRefByLoader(
+    (_) async => CompanionSelectionDocument(
+      await PdfDocument.openFile(_source.filePath, useProgressiveLoading: true),
+    ),
+    key: PdfDocumentRefKey(_source.filePath, [this]),
+  );
+  bool _pdfToolbarVisible = false;
+  bool _pdfHandleMoving = false;
+  int _pdfGestureRevision = 0;
+  late final _pdfReflow = CompanionPdfReflow(_source);
+  CompanionReflowPage? _convertedPage;
+  XiaoqiDocument? _convertedDocument;
+  ReaderAnchor? _convertedEntry;
+  bool _requestedEbook = false;
+  bool _ebookSwitchPending = false;
+  int? _requestedPdfPage;
+  int _ebookSwitchRevision = 0;
   FlowReaderAnchor? _chapterNavigation;
   FlowReaderAnchor? _flowPosition;
   FlowReaderAnchor? _flowPositionBeforeJump;
@@ -706,12 +729,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   int _pdfPageCount = 0;
   int? _pageBeforeJump;
   _ReaderPanel? _activePanel;
+  double _outlineExtent = 0;
+  bool _outlineDragging = false;
   LocalHistoryEntry? _panelHistory;
   WidgetBuilder? _outlinePanel;
   double? _progressPreview;
   double _fontScale = 1;
   double _marginFraction = .04;
   double _lineScale = 1;
+  ReaderPaginationMode _pageTurnMode = ReaderPaginationMode.vertical;
   double _brightness = .65;
   bool _hasBrightnessOverride = false;
   bool _dark = false;
@@ -733,11 +759,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   int? _translatedPdfNumber;
   VoidCallback? _applyDeferredTranslation;
   final _savedInk = <String, _CompanionInkRecord>{};
-  final _draftInk = <String, _CompanionInkRecord>{};
-  final _inkUndo = <({String key, _CompanionInkRecord? previous})>[];
+  final _largeDrawings = <String>{};
+  final _loadingDrawings = <String>{};
+  final _failedDrawings = <String>{};
+  final _drawingTools = DrawingAnnotationTools();
+  final _drawingLayers =
+      <String, ({DrawingAnnotationLayer layer, String? text})>{};
   bool _inkEditing = false;
-  bool _inkErasing = false;
   bool _inkSaving = false;
+  VoidCallback? _afterInkSave;
   bool _inkLoaded = false;
   bool _inkLoadFailed = false;
   double _previousPdfScale = 1;
@@ -752,12 +782,27 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       dynamicSchemeVariant: DynamicSchemeVariant.monochrome,
     );
     final base = Theme.of(context);
+    final flatButtons = ButtonStyle(
+      elevation: const WidgetStatePropertyAll(0.0),
+      overlayColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.focused)
+            ? _ink.withValues(alpha: .10)
+            : Colors.transparent,
+      ),
+    );
     return base.copyWith(
       brightness: scheme.brightness,
       colorScheme: scheme,
       scaffoldBackgroundColor: _dark ? _paperDark : Colors.white,
       textTheme: base.textTheme.apply(bodyColor: _ink, displayColor: _ink),
       iconTheme: base.iconTheme.copyWith(color: _ink),
+      splashFactory: NoSplash.splashFactory,
+      splashColor: Colors.transparent,
+      highlightColor: Colors.transparent,
+      textButtonTheme: TextButtonThemeData(style: flatButtons),
+      iconButtonTheme: IconButtonThemeData(style: flatButtons),
+      filledButtonTheme: FilledButtonThemeData(style: flatButtons),
+      outlinedButtonTheme: OutlinedButtonThemeData(style: flatButtons),
     );
   }
 
@@ -765,6 +810,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   BookSourceRecord get _source => widget.source;
   String get _sourceKey => _source.id.toString();
+  bool get _isPdfDocument => _isCompanionPdf(_source) && _convertedPage == null;
+  bool get _isSelectingEbook => !_isCompanionPdf(_source) || _requestedEbook;
+  bool get _canRetryEbook =>
+      _isPdfDocument && _requestedEbook && !_ebookSwitchPending;
+  bool get _hasActiveSelection =>
+      _selectionActive ||
+      (_isPdfDocument &&
+          _pdf.isReady &&
+          _pdf.textSelectionDelegate.hasSelectedText);
 
   @override
   void initState() {
@@ -773,6 +827,258 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     unawaited(_restoreDisplay());
     unawaited(_restoreTranslation());
     unawaited(_loadInk());
+  }
+
+  void _switchReaderFormat(bool pdf) {
+    if (!_isCompanionPdf(_source)) {
+      if (pdf) widget.onSwitchFormat?.call();
+      return;
+    }
+    if (pdf) {
+      _returnToPdf();
+    } else if (!_requestedEbook || _canRetryEbook) {
+      unawaited(_openConvertedPage(_pdfPage, fromPdf: !_requestedEbook));
+    }
+  }
+
+  Future<void> _openConvertedPage(int number, {bool fromPdf = false}) async {
+    if (!_pdf.isReady || number < 1 || number > _pdfPageCount || _inkEditing) {
+      return;
+    }
+    if (_pdfDocumentRef?.permissions?.allowsCopying == false) {
+      AppToast.show(context, '这份 PDF 限制复制文字');
+      return;
+    }
+    final visible = _visiblePdfPageFraction(number);
+    if (_pdf.textSelectionDelegate.hasSelectedText) {
+      unawaited(_pdf.textSelectionDelegate.clearTextSelection());
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    final revision = ++_ebookSwitchRevision;
+    ++_pdfGestureRevision;
+    _pdfReflow.cancel(exceptPage: number);
+    final cached = _pdfReflow.cached(number);
+    setState(() {
+      _requestedEbook = true;
+      _ebookSwitchPending = cached == null;
+      _requestedPdfPage = number;
+    });
+    CompanionReflowPage? result;
+    try {
+      result = cached ?? await _pdfReflow.load(_pdf, number);
+    } on Exception {
+      // A failed page remains available in its original layout.
+    }
+    if (!mounted || revision != _ebookSwitchRevision || !_requestedEbook) {
+      return;
+    }
+    if (result == null || result.keepOriginal) {
+      setState(() {
+        _ebookSwitchPending = false;
+        _convertedPage = null;
+        _convertedDocument = null;
+        _convertedEntry = null;
+        if (fromPdf) _requestedEbook = false;
+      });
+      if (_pdf.pageNumber != number) {
+        await _pdf.goToPage(pageNumber: number, duration: Duration.zero);
+      }
+      if (!mounted || revision != _ebookSwitchRevision) return;
+      AppToast.show(context, '第 $number 页保留 PDF 原页');
+      _scheduleTranslation();
+      return;
+    }
+    final document = result.document(_pdfPageCount);
+    final entry = result.entryNear(visible);
+    setState(() {
+      _ebookSwitchPending = false;
+      _convertedPage = result;
+      _convertedDocument = document;
+      _convertedEntry = FlowReaderAnchor(
+        sourceId: _sourceKey,
+        chapterId: result!.chapterId,
+        blockId: entry?.blockId,
+        characterOffset: entry?.offset ?? 0,
+      );
+      _chapterNavigation = null;
+      _flowPosition = _convertedEntry as FlowReaderAnchor?;
+      _visibleBlocks = const [];
+      _foreignSource =
+          _foreignSource || ReadingCompanionTranslation.isForeign(result.text);
+      _navigationRevision++;
+    });
+    unawaited(_savePdfAnchor(number));
+    _scheduleTranslation();
+    _prefetchConvertedPage(number + 1);
+  }
+
+  double? _visiblePdfPageFraction(int number) {
+    if (_pdf.pageNumber != number) return null;
+    final layout = _pdf.layout.pageLayouts[number - 1];
+    if (layout.isEmpty) return null;
+    return ((_pdf.visibleRect.top - layout.top) / layout.height)
+        .clamp(0.0, 1.0)
+        .toDouble();
+  }
+
+  void _prefetchConvertedPage(int number) {
+    if (number > _pdfPageCount || _pdfReflow.cached(number) != null) return;
+    unawaited(() async {
+      try {
+        await _pdfReflow.load(_pdf, number, prefetch: true);
+      } on Exception {
+        // Foreground reading retries a failed prefetch.
+      }
+    }());
+  }
+
+  void _returnToPdf() {
+    if (!_requestedEbook) return;
+    ++_ebookSwitchRevision;
+    _pdfReflow.cancel();
+    final converted = _convertedPage;
+    final anchor = _flowPosition;
+    if (converted != null) _installPdfText(converted);
+    if (converted != null && _pdf.isReady) {
+      final top = converted.originalTop(
+        anchor?.blockId,
+        anchor?.characterOffset,
+      );
+      final layout = _pdf.layout.pageLayouts[converted.number - 1];
+      final current = _pdf.visibleRect;
+      final alreadyOnPage = _pdf.pageNumber == converted.number;
+      if (top != null) {
+        final line = layout.top + top * layout.height;
+        if (!alreadyOnPage || line < current.top || line > current.bottom) {
+          final halfViewport = current.height / 2;
+          final inset = math.min(halfViewport, layout.height / 2);
+          final center = (line + current.height / 6)
+              .clamp(layout.top + inset, layout.bottom - inset)
+              .toDouble();
+          final left = alreadyOnPage
+              ? current.left
+              : layout.center.dx - current.width / 2;
+          unawaited(
+            _pdf.goToPosition(
+              documentOffset: Offset(left, center - halfViewport),
+            ),
+          );
+        }
+      } else if (!alreadyOnPage) {
+        unawaited(
+          _pdf.goToPage(pageNumber: converted.number, duration: Duration.zero),
+        );
+      }
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    _reportSelection(false);
+    setState(() {
+      _requestedEbook = false;
+      _requestedPdfPage = null;
+      _ebookSwitchPending = false;
+      _convertedPage = null;
+      _convertedDocument = null;
+      _convertedEntry = null;
+      _visibleBlocks = const [];
+    });
+    _scheduleTranslation();
+  }
+
+  Future<void> _savePdfAnchor(int page) => _preferences.saveAnchor(
+    bookId: _source.bookId,
+    anchor: PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page),
+  );
+
+  void _installPdfText(CompanionReflowPage result) {
+    final document = _pdfDocumentRef;
+    if (document is CompanionSelectionDocument) document.install(result);
+    if (_isPdfDocument && result.number == _pdfPage && document != null) {
+      unawaited(_detectPdfPage(document, result.number));
+    }
+  }
+
+  Future<void> _selectRecognizedText(Offset target) async {
+    final revision = ++_pdfGestureRevision;
+    if (!_pdf.isReady) return;
+    final index = _pdf.layout.pageLayouts.indexWhere(
+      (rect) => rect.contains(target),
+    );
+    if (index < 0) return;
+    if (_pdfDocumentRef?.permissions?.allowsCopying == false) {
+      AppToast.show(context, '这份 PDF 限制复制文字');
+      return;
+    }
+    CompanionReflowPage? recognized;
+    try {
+      recognized = await _pdfReflow.load(_pdf, index + 1);
+    } on Exception {
+      // The original page stays visible if its text cannot be recognized.
+    }
+    if (!mounted ||
+        !_isPdfDocument ||
+        _inkEditing ||
+        revision != _pdfGestureRevision ||
+        !_pdf.isReady) {
+      return;
+    }
+    if (recognized == null) {
+      if (!_pdfTextAvailable) AppToast.show(context, '此页暂时无法识别文字');
+      return;
+    }
+    final rect = _pdf.layout.pageLayouts[index];
+    final point = Offset(
+      (target.dx - rect.left) / rect.width,
+      (target.dy - rect.top) / rect.height,
+    );
+    final line = recognized.lines
+        .where(
+          (item) =>
+              item.recognized && item.bounds.inflate(.012).contains(point),
+        )
+        .firstOrNull;
+    if (line == null) {
+      if (!_pdfTextAvailable) AppToast.show(context, '此处没有可选文字');
+      return;
+    }
+    _installPdfText(recognized);
+    final text = await _pdf.document.pages[index].loadStructuredText();
+    if (!mounted ||
+        !_isPdfDocument ||
+        _inkEditing ||
+        revision != _pdfGestureRevision ||
+        !_pdf.isReady) {
+      return;
+    }
+    final fragment = text.fragments.where((run) {
+      final bounds = _pdf.calcRectForRectInsidePage(
+        pageNumber: index + 1,
+        rect: run.bounds,
+      );
+      return bounds.inflate(6 / _pdf.currentZoom).contains(target);
+    }).firstOrNull;
+    if (fragment == null || fragment.length < 1) return;
+    await _pdf.textSelectionDelegate.setTextSelectionPointRange(
+      PdfTextSelectionRange.fromPoints(
+        PdfTextSelectionPoint(text, fragment.index),
+        PdfTextSelectionPoint(text, fragment.end - 1),
+      ),
+    );
+  }
+
+  Widget _readerBody(ReaderAnchor? anchor) {
+    final converted = _convertedPage;
+    final document = _convertedDocument;
+    return IndexedStack(
+      sizing: StackFit.expand,
+      index: converted == null ? 0 : 1,
+      children: [
+        _pdfDocument(anchor),
+        if (converted != null && document != null)
+          _flow(document, _convertedEntry, originalPage: converted.number)
+        else
+          const SizedBox.shrink(),
+      ],
+    );
   }
 
   String _inkLocation(ReaderAnchor anchor, String view) => jsonEncode([
@@ -786,18 +1092,24 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   Future<void> _loadInk() async {
     try {
       final db = await DatabaseService().database;
-      final rows = await db.query(
-        'companion_ink',
-        where: 'source_id = ?',
-        whereArgs: [_source.id],
+      // Camera images in the drawing codec may exceed Android's CursorWindow.
+      // Index large records first and read them only for visible anchors.
+      final rows = await db.rawQuery(
+        'SELECT location, CASE WHEN length(drawing) < 131072 THEN drawing END AS drawing '
+        'FROM companion_ink WHERE source_id = ?',
+        [_source.id],
       );
       if (!mounted) return;
       setState(() {
         for (final row in rows) {
-          final record = _CompanionInkRecord.fromJson(
-            row['drawing']! as String,
-          );
-          if (record != null) _savedInk[row['location']! as String] = record;
+          final key = row['location']! as String;
+          final source = row['drawing'] as String?;
+          if (source == null) {
+            _largeDrawings.add(key);
+          } else {
+            final record = _CompanionInkRecord.fromJson(source);
+            if (record != null) _savedInk[key] = record;
+          }
         }
         _inkLoaded = true;
         _inkLoadFailed = false;
@@ -807,15 +1119,93 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     }
   }
 
+  void _startInk() {
+    if (_inkLoadFailed) {
+      unawaited(_loadInk());
+      return;
+    }
+    _closeReaderPanel();
+    if (_ebookSwitchPending) {
+      ++_ebookSwitchRevision;
+      _pdfReflow.cancel();
+    }
+    ++_pdfGestureRevision;
+    if (_pdf.isReady) {
+      unawaited(_pdf.textSelectionDelegate.clearTextSelection());
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    _drawingTools.begin(
+      color: _dark ? const Color(0xFFE5E4DF) : const Color(0xFF252525),
+    );
+    setState(() {
+      if (_ebookSwitchPending) {
+        _ebookSwitchPending = false;
+        _requestedEbook = _convertedPage != null;
+        _requestedPdfPage = _convertedPage?.number;
+      }
+      _inkEditing = true;
+    });
+    if (!widget.immersive) widget.onToggleImmersive?.call();
+  }
+
+  Future<void> _readLargeDrawing(String key) async {
+    if (!_loadingDrawings.add(key)) return;
+    try {
+      final db = await DatabaseService().database;
+      final data = await db.transaction((tx) async {
+        final buffer = StringBuffer();
+        const chunk = 131072;
+        for (var start = 1; ; start += chunk) {
+          final result = await tx.rawQuery(
+            'SELECT substr(drawing, ?, ?) AS part FROM companion_ink WHERE source_id = ? AND location = ?',
+            [start, chunk, _source.id, key],
+          );
+          if (result.isEmpty) return null;
+          final part = result.single['part'] as String;
+          buffer.write(part);
+          if (part.length < chunk) return buffer.toString();
+        }
+      });
+      if (!mounted) return;
+      final record = data == null ? null : _CompanionInkRecord.fromJson(data);
+      if (data != null && record == null) throw const FormatException('涂鸦数据损坏');
+      setState(() {
+        _largeDrawings.remove(key);
+        if (record != null) _savedInk[key] = record;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _failedDrawings.add(key));
+    } finally {
+      _loadingDrawings.remove(key);
+    }
+  }
+
+  Widget _buildDrawingControls() => AbsorbPointer(
+    absorbing: _inkSaving,
+    child: _drawingTools.controls(onFinish: _inkSaving ? null : _finishInk),
+  );
+
   Future<void> _finishInk() async {
-    if (_inkSaving) return;
+    if (_inkSaving || _drawingTools.busy) return;
+    _drawingTools.commitText();
     setState(() => _inkSaving = true);
     try {
-      if (_draftInk.isNotEmpty) {
+      final updates = <String, _CompanionInkRecord>{};
+      for (final entry in _drawingLayers.entries.toList()) {
+        final part = entry.value;
+        if (!part.layer.changed) continue;
+        updates[entry.key] = _CompanionInkRecord(
+          part.layer.size,
+          part.text,
+          const [],
+          await part.layer.encode(),
+        );
+      }
+      if (updates.isNotEmpty) {
         final db = await DatabaseService().database;
         final batch = db.batch();
-        for (final entry in _draftInk.entries) {
-          if (entry.value.strokes.isEmpty) {
+        for (final entry in updates.entries) {
+          if (entry.value.isEmpty) {
             batch.delete(
               'companion_ink',
               where: 'source_id = ? AND location = ?',
@@ -833,37 +1223,26 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       }
       if (!mounted) return;
       setState(() {
-        for (final entry in _draftInk.entries) {
-          if (entry.value.strokes.isEmpty) {
+        for (final entry in updates.entries) {
+          _drawingLayers[entry.key]!.layer.saved(entry.value.document!);
+          if (entry.value.isEmpty) {
             _savedInk.remove(entry.key);
           } else {
             _savedInk[entry.key] = entry.value;
           }
         }
-        _draftInk.clear();
-        _inkUndo.clear();
         _inkEditing = false;
         _inkSaving = false;
       });
       _reportSelection(false);
-    } on Exception {
+      final afterSave = _afterInkSave;
+      _afterInkSave = null;
+      afterSave?.call();
+    } catch (_) {
       if (!mounted) return;
       setState(() => _inkSaving = false);
       AppToast.show(context, '涂鸦保存失败，请重试');
     }
-  }
-
-  void _undoInk() {
-    if (_inkUndo.isEmpty || _inkSaving) return;
-    setState(() {
-      final undo = _inkUndo.removeLast();
-      final previous = undo.previous;
-      if (previous == null) {
-        _draftInk.remove(undo.key);
-      } else {
-        _draftInk[undo.key] = previous;
-      }
-    });
   }
 
   void _navigatePdfInk(ScaleUpdateDetails details) {
@@ -913,7 +1292,31 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               sha256.convert(utf8.encode(text)).toString(),
             ]);
       final key = '$location/$layout';
-      final record = _draftInk[key] ?? _savedInk[key];
+      final record = _savedInk[key];
+      final pendingKey = _largeDrawings.contains(key)
+          ? key
+          : record == null && !_inkEditing
+          ? _largeDrawings
+                .where((other) => other.startsWith('$location/'))
+                .lastOrNull
+          : null;
+      if (pendingKey != null) {
+        if (_failedDrawings.contains(pendingKey)) {
+          return Align(
+            alignment: Alignment.topRight,
+            child: IconButton(
+              tooltip: '重新读取涂鸦',
+              icon: const Icon(Icons.refresh),
+              onPressed: () {
+                setState(() => _failedDrawings.remove(pendingKey));
+                unawaited(_readLargeDrawing(pendingKey));
+              },
+            ),
+          );
+        }
+        unawaited(_readLargeDrawing(pendingKey));
+        return const SizedBox.shrink();
+      }
       final archived = record == null && !_inkEditing
           ? _savedInk.entries
                 .where(
@@ -924,41 +1327,59 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 .lastOrNull
                 ?.value
           : null;
-      final surface = CompanionInkSurface(
-        enabled: _inkEditing && !_inkSaving,
-        erasing: _inkErasing,
-        color: _dark ? const Color(0xFFFFB76A) : const Color(0xFF9B3028),
-        strokes: record?.strokes ?? const [],
-        onChanged: (strokes) => setState(() {
-          _inkUndo.add((key: key, previous: _draftInk[key]));
-          _draftInk[key] = _CompanionInkRecord(size, text, strokes);
-        }),
-        onNavigate: text == null
-            ? _navigatePdfInk
-            : (details) {
-                final position = Scrollable.maybeOf(overlayContext)?.position;
-                if (position != null && position.hasContentDimensions) {
-                  position.jumpTo(
-                    (position.pixels - details.focalPointDelta.dy)
-                        .clamp(
-                          position.minScrollExtent,
-                          position.maxScrollExtent,
-                        )
-                        .toDouble(),
-                  );
-                }
-              },
-        onNavigationEnd: (scale) {
-          _previousPdfScale = 1;
-          if (text != null &&
-              view != 'pdf-translation' &&
-              (scale - 1).abs() > .06) {
-            setState(
-              () => _fontScale = (_fontScale * scale).clamp(.8, 1.5).toDouble(),
+      if (!_inkEditing && record == null && archived == null) {
+        return const SizedBox.shrink();
+      }
+      final initial = record ?? _CompanionInkRecord(size, text, const []);
+      final layer = _drawingLayers
+          .putIfAbsent(key, () => (layer: initial.createLayer(), text: text))
+          .layer;
+      final viewLayer = !_inkEditing && record?.document == null
+          ? IgnorePointer(
+              child: CustomPaint(painter: CompanionInkPainter(initial.strokes)),
+            )
+          : DrawingBoardPage.annotation(
+              key: ValueKey(key),
+              layer: layer,
+              annotationTools: _inkEditing ? _drawingTools : null,
             );
-          }
-        },
-      );
+      final surface = !_inkEditing
+          ? viewLayer
+          : AbsorbPointer(
+              absorbing: _inkSaving,
+              child: CompanionInkNavigation(
+                onNavigate: text == null
+                    ? _navigatePdfInk
+                    : (details) {
+                        final position = Scrollable.maybeOf(
+                          overlayContext,
+                        )?.position;
+                        if (position != null && position.hasContentDimensions) {
+                          position.jumpTo(
+                            (position.pixels - details.focalPointDelta.dy)
+                                .clamp(
+                                  position.minScrollExtent,
+                                  position.maxScrollExtent,
+                                )
+                                .toDouble(),
+                          );
+                        }
+                      },
+                onNavigationEnd: (scale) {
+                  _previousPdfScale = 1;
+                  if (text != null &&
+                      view != 'pdf-translation' &&
+                      (scale - 1).abs() > .06) {
+                    setState(
+                      () => _fontScale = (_fontScale * scale)
+                          .clamp(.8, 1.5)
+                          .toDouble(),
+                    );
+                  }
+                },
+                child: viewLayer,
+              ),
+            );
       if (archived == null) return surface;
       return Stack(
         fit: StackFit.expand,
@@ -980,6 +1401,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   );
 
   void _showArchivedInk(_CompanionInkRecord record) {
+    final layer = record.createLayer();
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1004,7 +1426,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       ),
                     ),
                   ),
-                  CustomPaint(painter: CompanionInkPainter(record.strokes)),
+                  if (record.document == null)
+                    CustomPaint(painter: CompanionInkPainter(record.strokes))
+                  else
+                    DrawingBoardPage.annotation(layer: layer),
                 ],
               ),
             ),
@@ -1135,7 +1560,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final blocks = _visibleBlocks
         .where((block) => !_flowTranslations.containsKey(block.id))
         .toList();
-    final pdf = _pdfDocumentRef;
+    final pdf = _isPdfDocument ? _pdfDocumentRef : null;
     if ((pdf == null && blocks.isEmpty) ||
         (pdf != null &&
             (!_pdfTextAvailable || _translatedPdfNumber == number))) {
@@ -1175,7 +1600,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           _translatedPdfNumber = number;
         }
       });
-      if (_selectionActive || _inkEditing) {
+      if (_hasActiveSelection || _inkEditing) {
         _applyDeferredTranslation = apply;
       } else {
         apply();
@@ -1198,9 +1623,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     _selectionActive = active;
     if (active || _inkEditing || _applyDeferredTranslation == null) return;
     final apply = _applyDeferredTranslation;
+    final revision = _translationRevision;
     _applyDeferredTranslation = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && !_selectionActive && !_inkEditing && _translationEnabled) {
+      if (mounted &&
+          revision == _translationRevision &&
+          !_selectionActive &&
+          !_inkEditing &&
+          _translationEnabled) {
         apply?.call();
       }
     });
@@ -1214,6 +1644,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       _fontScale = prefs.getDouble('reading-companion.font') ?? 1;
       _marginFraction = prefs.getDouble('reading-companion.margin') ?? .04;
       _lineScale = prefs.getDouble('reading-companion.line') ?? 1;
+      _pageTurnMode = prefs.getString('reading-companion.turn') == 'horizontal'
+          ? ReaderPaginationMode.horizontal
+          : ReaderPaginationMode.vertical;
       final brightness = prefs.getDouble('reading-companion.brightness');
       if (brightness != null) {
         _brightness = brightness;
@@ -1226,7 +1659,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }
 
   Future<void> _applyBrightness(double? value) async {
-    if (defaultTargetPlatform != TargetPlatform.android) return;
+    if (!_supportsReaderBrightness) return;
     try {
       await _brightnessChannel.invokeMethod<void>('setCompanionBrightness', {
         'brightness': value,
@@ -1240,11 +1673,17 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   @override
   void dispose() {
+    _drawingTools.dispose();
+    for (final part in _drawingLayers.values) {
+      part.layer.dispose();
+    }
     final panelHistory = _panelHistory;
     _panelHistory = null;
     panelHistory?.remove();
     _translationDelay?.cancel();
     ++_translationRevision;
+    ++_ebookSwitchRevision;
+    if (_isCompanionPdf(_source)) _pdfReflow.cancel();
     if (_hasBrightnessOverride) unawaited(_applyBrightness(null));
     super.dispose();
   }
@@ -1353,6 +1792,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     _openReaderPanel(
       _ReaderPanel.outline,
       outline: (context) => _ReaderOutlineList(
+        bookTitle: widget.bookTitle.trim().isEmpty
+            ? _source.displayName
+            : widget.bookTitle,
         titles: titles,
         current: current,
         onSelected: (index) {
@@ -1385,9 +1827,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
     setState(() {
       _chapterNavigation = next;
+      _flowPosition = next;
       _navigationRevision++;
     });
-    unawaited(_preferences.saveAnchor(bookId: _source.bookId, anchor: next));
+    if (_convertedPage == null) {
+      unawaited(_preferences.saveAnchor(bookId: _source.bookId, anchor: next));
+    }
   }
 
   void _showFlowOutline(
@@ -1446,13 +1891,19 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
   }
 
-  Widget _flow(XiaoqiDocument document, ReaderAnchor? anchor) {
+  Widget _flow(
+    XiaoqiDocument document,
+    ReaderAnchor? anchor, {
+    int? originalPage,
+  }) {
     final current =
         _chapterNavigation ?? (anchor is FlowReaderAnchor ? anchor : null);
     final chapters = document.chapters;
     final chapterIndex = math.max(
       0,
-      chapters.indexWhere((chapter) => chapter.id == current?.chapterId),
+      chapters.indexWhere(
+        (chapter) => chapter.id == (_flowPosition ?? current)?.chapterId,
+      ),
     );
     final chapter = chapters[chapterIndex];
     // A long chapter is laid out as selectable blocks on the UI isolate.
@@ -1470,24 +1921,58 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     }
     _renderedChapter = true;
     final assets = {for (final asset in document.assets) asset.id: asset};
+    final chaptersById = {for (final entry in chapters) entry.id: entry};
     return _footerWithBody(
       body: LayoutBuilder(
         builder: (context, dimensions) {
+          TextStyle textStyle(TextStyle style) => style.copyWith(
+            fontFamily: style.fontFamily == 'monospace'
+                ? 'monospace'
+                : 'NotoSerifCJKSC',
+            color: _ink,
+            height: (style.height ?? 1.5) * _lineScale,
+            fontSize:
+                _fontScale * (style.fontSize ?? 17) +
+                (dimensions.maxWidth >= 600 ? 3 : 0),
+          );
           return ReflowDocumentPager(
             verticalPadding: EdgeInsets.fromLTRB(
               dimensions.maxWidth * _marginFraction,
-              16,
+              readingCompanionToolbarHeight(context) + (_readerWide ? 42 : 24),
               dimensions.maxWidth * _marginFraction,
-              28,
+              _readerNavHeight + 8,
             ),
             key: ValueKey(_navigationRevision),
             sourceId: _sourceKey,
             document: document,
             initialChapterId: chapter.id,
             initialAnchor: current,
-            mode: ReaderPaginationMode.vertical,
+            mode: _pageTurnMode,
+            textStyleBuilder: textStyle,
+            translations: _translationEnabled ? _flowTranslations : null,
+            onPreviousDocument: _inkEditing || _ebookSwitchPending
+                ? null
+                : originalPage != null
+                ? originalPage > 1
+                      ? () => unawaited(_openConvertedPage(originalPage - 1))
+                      : null
+                : _pageTurnMode == ReaderPaginationMode.vertical &&
+                      chapterIndex > 0
+                ? () => _chapter(chapters[chapterIndex - 1])
+                : null,
+            onNextDocument: _inkEditing || _ebookSwitchPending
+                ? null
+                : originalPage != null
+                ? originalPage < _pdfPageCount
+                      ? () => unawaited(_openConvertedPage(originalPage + 1))
+                      : null
+                : _pageTurnMode == ReaderPaginationMode.vertical &&
+                      chapterIndex + 1 < chapters.length
+                ? () => _chapter(chapters[chapterIndex + 1])
+                : null,
             verticalBackground: _dark ? _paperDark : Colors.white,
             onVisibleBlocksChanged: _onVisibleBlocks,
+            chapterTitleAlign: TextAlign.center,
             verticalChapterTitleStyle: TextStyle(
               fontFamily: 'NotoSerifCJKSC',
               fontSize: dimensions.maxWidth >= 600 ? 36 : 26,
@@ -1496,19 +1981,30 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               color: _ink,
             ),
             onAnchorChanged: (value) {
-              _flowPosition = value;
+              if (value.chapterId == _flowPosition?.chapterId) {
+                _flowPosition = value;
+              } else {
+                setState(() => _flowPosition = value);
+              }
+              if (originalPage != null) return;
               unawaited(
                 _preferences.saveAnchor(bookId: _source.bookId, anchor: value),
               );
             },
             blockBuilder: (context, slice, setSelection) {
+              final sliceChapter = chaptersById[slice.chapterId] ?? chapter;
               final translation = _translationEnabled
                   ? _flowTranslations[slice.block.id]
                   : null;
+              final displayText =
+                  _pageTurnMode == ReaderPaginationMode.horizontal
+                  ? slice.text
+                  : translation ?? slice.text;
               final block = XiaoqiDocumentBlockView(
                 block: slice.block,
+                selectionControls: _companionTextSelectionControls,
                 asset: assets[slice.block.assetId],
-                textOverride: translation ?? slice.text,
+                textOverride: displayText,
                 tableRowsOverride: slice.tableRows,
                 continuation: slice.continuation,
                 onSelectionChanged: (selected) {
@@ -1521,21 +2017,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   }
                 },
                 contextMenuBuilder: (context, editable) =>
-                    _flowSelection(editable, chapter, slice),
-                textStyleBuilder: (style) => style.copyWith(
-                  fontFamily: slice.block.kind == 'code'
-                      ? 'monospace'
-                      : 'NotoSerifCJKSC',
-                  color: _ink,
-                  height: (style.height ?? 1.5) * _lineScale,
-                  fontSize:
-                      (_fontScale * (style.fontSize ?? 17)) +
-                      (dimensions.maxWidth >= 600 ? 3 : 0),
-                ),
+                    _flowSelection(editable, sliceChapter, slice, originalPage),
+                textStyleBuilder: textStyle,
               );
               final location = FlowReaderAnchor(
                 sourceId: _sourceKey,
-                chapterId: chapter.id,
+                chapterId: sliceChapter.id,
                 blockId: slice.block.id,
                 characterOffset: slice.startOffset,
               );
@@ -1546,7 +2033,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                     child: _inkSurface(
                       location,
                       translation == null ? 'original' : 'ebook-translation',
-                      text: translation ?? slice.text,
+                      text: displayText,
                     ),
                   ),
                 ],
@@ -1555,34 +2042,41 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           );
         },
       ),
-      page: chapterIndex + 1,
-      pageCount: chapters.length,
+      page: originalPage ?? chapterIndex + 1,
+      pageCount: originalPage == null ? chapters.length : _pdfPageCount,
+      usesOriginalPages: originalPage != null,
       chapterTitle: chapter.title,
-      onPageSelected: (page) => _chapter(chapters[page - 1]),
-      onRestoreFlow: (position) {
-        final target = chapters
-            .where((chapter) => chapter.id == position.chapterId)
-            .firstOrNull;
-        if (target != null) {
-          _chapter(
-            target,
-            blockId: position.blockId,
-            characterOffset: position.characterOffset,
-          );
-        }
-      },
-      onOutline: () => _showFlowOutline(
-        document,
-        chapterIndex,
-        _flowPosition?.chapterId == chapter.id
-            ? _flowPosition?.blockId
-            : current?.blockId,
-      ),
+      onPageSelected: originalPage == null
+          ? (page) => _chapter(chapters[page - 1])
+          : (page) => unawaited(_openConvertedPage(page)),
+      onRestoreFlow: originalPage != null
+          ? null
+          : (position) {
+              final target = chapters
+                  .where((chapter) => chapter.id == position.chapterId)
+                  .firstOrNull;
+              if (target != null) {
+                _chapter(
+                  target,
+                  blockId: position.blockId,
+                  characterOffset: position.characterOffset,
+                );
+              }
+            },
+      onOutline: originalPage != null
+          ? _showPdfOutline
+          : () => _showFlowOutline(
+              document,
+              chapterIndex,
+              _flowPosition?.chapterId == chapter.id
+                  ? _flowPosition?.blockId
+                  : current?.blockId,
+            ),
     );
   }
 
   Widget _displayPanel() {
-    final pdf = _isCompanionPdf(_source);
+    final pdf = _isPdfDocument;
     Widget setting(String label, Widget control, {double wideHeight = 54}) =>
         ConstrainedBox(
           constraints: BoxConstraints(minHeight: _readerWide ? wideHeight : 48),
@@ -1630,7 +2124,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           ? Colors.transparent
           : dark
           ? const Color(0xFF333333)
-          : const Color(0xFFE6E0D6);
+          : const Color(0xFFEEEEEE);
       final foreground = selected
           ? _ink
           : dark
@@ -1663,7 +2157,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (selected) ...[
-                Icon(Icons.check, size: _readerWide ? 20 : 15),
+                _readerIcon(
+                  'assets/icons/drawing/check.svg',
+                  _readerWide ? 20 : 15,
+                  color: foreground,
+                ),
                 const SizedBox(width: 6),
               ],
               Text(dark ? '深色' : '默认'),
@@ -1677,7 +2175,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (defaultTargetPlatform == TargetPlatform.android) ...[
+          if (_supportsReaderBrightness) ...[
             slider(
               '亮度',
               _brightness,
@@ -1699,7 +2197,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           setting(
             '主题',
             Align(
-              alignment: pdf ? Alignment.centerRight : Alignment.centerLeft,
+              alignment: Alignment.centerLeft,
               child: Wrap(
                 spacing: _readerWide ? 25 : 8,
                 children: [themeChoice(false), themeChoice(true)],
@@ -1740,6 +2238,66 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               wideHeight: 65,
             ),
           ],
+          Divider(height: 1, thickness: 1, color: _readerRule),
+          setting(
+            '翻页',
+            Wrap(
+              spacing: _readerWide ? 15 : 8,
+              children: [
+                for (final mode in [
+                  ReaderPaginationMode.vertical,
+                  ReaderPaginationMode.horizontal,
+                ])
+                  Semantics(
+                    selected: _pageTurnMode == mode,
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: _pageTurnMode == mode
+                            ? _readerChrome
+                            : _ink,
+                        backgroundColor: _pageTurnMode == mode
+                            ? _ink
+                            : Colors.transparent,
+                        side: BorderSide(color: _readerRule),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        minimumSize: const Size(64, 40),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: _readerWide ? 14 : 10,
+                        ),
+                      ),
+                      onPressed: () {
+                        if (_pageTurnMode == mode) return;
+                        setState(() => _pageTurnMode = mode);
+                      },
+                      child: Text(
+                        mode == ReaderPaginationMode.vertical ? '上下滑动' : '左右翻页',
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (pdf) ...[
+            Divider(height: 1, thickness: 1, color: _readerRule),
+            setting(
+              '排版',
+              Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  const Text('字号、边距、行距可在电子书中调整。'),
+                  TextButton(
+                    onPressed: () {
+                      _closeReaderPanel();
+                      _switchReaderFormat(false);
+                    },
+                    child: const Text('打开电子书'),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -1752,6 +2310,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       prefs.setDouble('reading-companion.font', _fontScale),
       prefs.setDouble('reading-companion.margin', _marginFraction),
       prefs.setDouble('reading-companion.line', _lineScale),
+      prefs.setString('reading-companion.turn', _pageTurnMode.name),
       if (_hasBrightnessOverride)
         prefs.setDouble('reading-companion.brightness', _brightness),
     ]);
@@ -1761,6 +2320,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     EditableTextState editable,
     XiaoqiDocumentChapter chapter,
     ReaderBlockSlice slice,
+    int? originalPage,
   ) {
     final value = editable.textEditingValue;
     final range = value.selection;
@@ -1771,17 +2331,22 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final translated =
         _translationEnabled && _flowTranslations.containsKey(slice.block.id);
     final offset = value.text == slice.text ? slice.startOffset : 0;
+    final location = originalPage == null ? chapter.title : '第 $originalPage 页';
     final passage = _passage(
       text,
-      translated ? '${chapter.title} · 译文' : chapter.title,
-      FlowReaderAnchor(
-        sourceId: _sourceKey,
-        chapterId: chapter.id,
-        blockId: slice.block.id,
-        characterOffset: translated ? slice.startOffset : offset + range.start,
-      ),
-      startOffset: translated ? null : offset + range.start,
-      endOffset: translated ? null : offset + range.end,
+      translated ? '$location · 译文' : location,
+      originalPage == null
+          ? FlowReaderAnchor(
+              sourceId: _sourceKey,
+              chapterId: chapter.id,
+              blockId: slice.block.id,
+              characterOffset: translated ? 0 : offset + range.start,
+            )
+          : PdfReaderAnchor(sourceId: _sourceKey, pageNumber: originalPage),
+      startOffset: translated || originalPage != null
+          ? null
+          : offset + range.start,
+      endOffset: translated || originalPage != null ? null : offset + range.end,
       translationSnapshot: translated ? value.text : null,
     );
     return _selectionToolbar(
@@ -1827,22 +2392,31 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   Widget _pdfDocument(ReaderAnchor? anchor) {
     final page = anchor is PdfReaderAnchor ? anchor.pageNumber : 1;
     final surround = _dark ? const Color(0xFF111315) : const Color(0xFFF2F3F5);
+    final translation =
+        _convertedPage == null &&
+            _translationEnabled &&
+            _translatedPdfNumber == _pdfPage
+        ? _translatedPdfPage
+        : null;
+    final showsOriginalPage = _convertedPage == null && translation == null;
     return _footerWithBody(
+      showChrome: _convertedPage == null,
       body: ColoredBox(
         color: surround,
         child: Padding(
-          padding: EdgeInsets.only(
-            top: widget.immersive ? 0 : (_readerWide ? 16 : 9),
-          ),
+          padding: EdgeInsets.zero,
           child: Stack(
             fit: StackFit.expand,
             children: [
-              PdfViewer.file(
-                _source.filePath,
+              PdfViewer(
+                _selectablePdfReference,
                 controller: _pdf,
                 initialPageNumber: page,
                 params: PdfViewerParams(
                   backgroundColor: surround,
+                  layoutPages: _pageTurnMode == ReaderPaginationMode.horizontal
+                      ? horizontalPdfPageLayout
+                      : null,
                   margin: 17,
                   pageDropShadow: _dark
                       ? null
@@ -1853,15 +2427,16 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         ),
                   pagePaintCallbacks: [_paintDarkPage],
                   pageOverlaysBuilder: (context, rect, page) => [
-                    Positioned.fill(
-                      child: _inkSurface(
-                        PdfReaderAnchor(
-                          sourceId: _sourceKey,
-                          pageNumber: page.pageNumber,
+                    if (showsOriginalPage)
+                      Positioned.fill(
+                        child: _inkSurface(
+                          PdfReaderAnchor(
+                            sourceId: _sourceKey,
+                            pageNumber: page.pageNumber,
+                          ),
+                          'original',
                         ),
-                        'original',
                       ),
-                    ),
                   ],
                   panEnabled: !_inkEditing,
                   scaleEnabled: !_inkEditing,
@@ -1884,12 +2459,18 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   },
                   onPageChanged: (next) {
                     if (!mounted || next == null) return;
+                    ++_pdfGestureRevision;
                     setState(() {
                       _pdfPage = next;
+                      if (_convertedPage != null) return;
                       _pdfTextAvailable = false;
                       _translationPending = false;
                       _translationError = null;
                     });
+                    if (_convertedPage != null) return;
+                    if (_requestedEbook && _requestedPdfPage != next) {
+                      unawaited(_openConvertedPage(next));
+                    }
                     _reportSelection(false);
                     _scheduleTranslation();
                     final document = _pdfDocumentRef;
@@ -1897,35 +2478,35 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       unawaited(_detectPdfPage(document, next));
                     }
                     _classifyNearbyPages();
-                    unawaited(
-                      _preferences.saveAnchor(
-                        bookId: _source.bookId,
-                        anchor: PdfReaderAnchor(
-                          sourceId: _sourceKey,
-                          pageNumber: next,
-                        ),
-                      ),
-                    );
+                    unawaited(_savePdfAnchor(next));
                   },
                   textSelectionParams: PdfTextSelectionParams(
                     enabled: !_inkEditing,
-                    showContextMenuAutomatically: true,
+                    showContextMenuAutomatically: false,
                     buildSelectionHandle: _buildPdfSelectionHandle,
                     calcSelectionHandleOffset: _pdfSelectionHandleOffset,
                     onTextSelectionChange: _onPdfTextSelection,
+                    onSelectionHandlePanStart: (_) {
+                      _pdfHandleMoving = true;
+                      _updatePdfToolbar();
+                    },
+                    onSelectionHandlePanEnd: (_) {
+                      _pdfHandleMoving = false;
+                      _updatePdfToolbar();
+                    },
                   ),
-                  buildContextMenu: _pdfSelection,
+                  buildContextMenu: (_, _) => null,
                   onGeneralTap: (_, controller, details) {
                     if (!_inkEditing &&
                         details.type == PdfViewerGeneralTapType.longPress &&
-                        details.tapOn == PdfViewerPart.background &&
-                        !_pdfTextAvailable) {
-                      AppToast.show(
-                        context,
-                        _pdfDocumentRef?.permissions?.allowsCopying == false
-                            ? '这份 PDF 限制复制文字'
-                            : '此页没有可选文字',
+                        details.tapOn == PdfViewerPart.background) {
+                      unawaited(
+                        _selectRecognizedText(details.documentPosition),
                       );
+                      return true;
+                    }
+                    if (details.type == PdfViewerGeneralTapType.tap) {
+                      ++_pdfGestureRevision;
                     }
                     if (!_inkEditing &&
                         !_selectionActive &&
@@ -1937,10 +2518,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   },
                 ),
               ),
-              if (_translationEnabled &&
-                  _translatedPdfNumber == _pdfPage &&
-                  _translatedPdfPage != null)
-                _pdfTranslationView(_translatedPdfPage!),
+              if (_pdfToolbarVisible && !_inkEditing && showsOriginalPage)
+                ListenableBuilder(
+                  listenable: _pdf,
+                  builder: (context, _) => _pdfSelection(),
+                ),
+              if (translation != null) _pdfTranslationView(translation),
             ],
           ),
         ),
@@ -1956,100 +2539,140 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   void _onPdfTextSelection(PdfTextSelection selection) {
     _reportSelection(selection.hasSelectedText);
+    if (!selection.hasSelectedText) _pdfHandleMoving = false;
+    _updatePdfToolbar();
+  }
+
+  void _updatePdfToolbar() {
+    if (!mounted) return;
+    final visible =
+        _pdf.isReady &&
+        !_pdfHandleMoving &&
+        _pdf.textSelectionDelegate.isCopyAllowed &&
+        _pdf.textSelectionDelegate.hasSelectedText;
+    if (visible != _pdfToolbarVisible) {
+      setState(() => _pdfToolbarVisible = visible);
+    }
   }
 
   Widget _pdfTranslationView(String translation) {
     final page = _pdfPage;
     var overscroll = 0.0;
+    var horizontalDelta = 0.0;
+    void turnPage(int delta) {
+      final target = page + delta;
+      if (!_selectionActive &&
+          !_inkEditing &&
+          target != page &&
+          target >= 1 &&
+          target <= _pdfPageCount &&
+          _pdf.isReady) {
+        unawaited(_pdf.goToPage(pageNumber: target));
+      }
+    }
+
     return Material(
       color: _dark ? _paperDark : Colors.white,
-      child: NotificationListener<ScrollNotification>(
-        onNotification: (event) {
-          if (event is OverscrollNotification && event.dragDetails != null) {
-            overscroll += event.overscroll;
-          }
-          if (event is ScrollEndNotification) {
-            final target =
-                page +
-                (overscroll > 56
+      child: GestureDetector(
+        onHorizontalDragStart: _pageTurnMode == ReaderPaginationMode.horizontal
+            ? (_) => horizontalDelta = 0
+            : null,
+        onHorizontalDragUpdate: _pageTurnMode == ReaderPaginationMode.horizontal
+            ? (details) => horizontalDelta += details.delta.dx
+            : null,
+        onHorizontalDragEnd: _pageTurnMode == ReaderPaginationMode.horizontal
+            ? (_) => turnPage(
+                horizontalDelta < -44
+                    ? 1
+                    : horizontalDelta > 44
+                    ? -1
+                    : 0,
+              )
+            : null,
+        child: NotificationListener<ScrollNotification>(
+          onNotification: (event) {
+            if (event is OverscrollNotification &&
+                event.dragDetails != null &&
+                _pageTurnMode == ReaderPaginationMode.vertical) {
+              overscroll += event.overscroll;
+            }
+            if (event is ScrollEndNotification) {
+              turnPage(
+                overscroll > 56
                     ? 1
                     : overscroll < -56
                     ? -1
-                    : 0);
-            overscroll = 0;
-            if (!_selectionActive &&
-                target != page &&
-                target >= 1 &&
-                target <= _pdfPageCount &&
-                _pdf.isReady) {
-              unawaited(_pdf.goToPage(pageNumber: target));
+                    : 0,
+              );
+              overscroll = 0;
             }
-          }
-          return false;
-        },
-        child: SingleChildScrollView(
-          key: ValueKey(('translation', page)),
-          physics: const AlwaysScrollableScrollPhysics(
-            parent: ClampingScrollPhysics(),
-          ),
-          padding: const EdgeInsets.fromLTRB(32, 20, 32, 24),
-          child: Stack(
-            children: [
-              SelectableText(
-                translation,
-                onTap: _selectionActive || _inkEditing
-                    ? null
-                    : widget.onToggleImmersive,
-                onSelectionChanged: (selection, _) =>
-                    _reportSelection(!selection.isCollapsed),
-                style: TextStyle(
-                  color: _ink,
-                  fontSize: 20,
-                  height: 1.6,
-                  fontFamily: 'NotoSerifCJKSC',
+            return false;
+          },
+          child: SingleChildScrollView(
+            key: ValueKey(('translation', page)),
+            physics: const AlwaysScrollableScrollPhysics(
+              parent: ClampingScrollPhysics(),
+            ),
+            padding: const EdgeInsets.fromLTRB(32, 20, 32, 24),
+            child: Stack(
+              children: [
+                SelectableText(
+                  translation,
+                  selectionControls: _companionTextSelectionControls,
+                  onTap: _selectionActive || _inkEditing
+                      ? null
+                      : widget.onToggleImmersive,
+                  onSelectionChanged: (selection, _) =>
+                      _reportSelection(!selection.isCollapsed),
+                  style: TextStyle(
+                    color: _ink,
+                    fontSize: 20,
+                    height: 1.6,
+                    fontFamily: 'NotoSerifCJKSC',
+                  ),
+                  contextMenuBuilder: (context, editable) {
+                    final selected = editable.textEditingValue.selection;
+                    if (!selected.isValid || selected.isCollapsed) {
+                      return const SizedBox.shrink();
+                    }
+                    final text = selected.textInside(translation);
+                    final anchor = editable.contextMenuAnchors;
+                    final passage = _passage(
+                      text,
+                      '第 $page 页 · 译文',
+                      PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page),
+                      translationSnapshot: translation,
+                    );
+                    return _selectionToolbar(
+                      above: anchor.primaryAnchor,
+                      below: anchor.secondaryAnchor,
+                      onCopy: () {
+                        editable.hideToolbar(false);
+                        _copy(text);
+                      },
+                      onAnnotate: () {
+                        editable.hideToolbar();
+                        widget.onAnnotate(passage);
+                      },
+                      onAsk: () {
+                        editable.hideToolbar();
+                        widget.onAsk(
+                          passage,
+                          anchor.secondaryAnchor ?? anchor.primaryAnchor,
+                        );
+                      },
+                    );
+                  },
                 ),
-                contextMenuBuilder: (context, editable) {
-                  final selected = editable.textEditingValue.selection;
-                  if (!selected.isValid || selected.isCollapsed) {
-                    return const SizedBox.shrink();
-                  }
-                  final text = selected.textInside(translation);
-                  final anchor = editable.contextMenuAnchors;
-                  final passage = _passage(
-                    text,
-                    '第 $page 页 · 译文',
+                Positioned.fill(
+                  child: _inkSurface(
                     PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page),
-                    translationSnapshot: translation,
-                  );
-                  return _selectionToolbar(
-                    above: anchor.primaryAnchor,
-                    below: anchor.secondaryAnchor,
-                    onCopy: () {
-                      editable.hideToolbar(false);
-                      _copy(text);
-                    },
-                    onAnnotate: () {
-                      editable.hideToolbar();
-                      widget.onAnnotate(passage);
-                    },
-                    onAsk: () {
-                      editable.hideToolbar();
-                      widget.onAsk(
-                        passage,
-                        anchor.secondaryAnchor ?? anchor.primaryAnchor,
-                      );
-                    },
-                  );
-                },
-              ),
-              Positioned.fill(
-                child: _inkSurface(
-                  PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page),
-                  'pdf-translation',
-                  text: translation,
+                    'pdf-translation',
+                    text: translation,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -2069,17 +2692,24 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final titles = entries.isEmpty
         ? pages.map((page) => '第 $page 页').toList(growable: false)
         : entries.map((entry) => entry.title).toList(growable: false);
+    final readingPage = _convertedPage?.number ?? _pdfPage;
     _showOutline(
       titles,
-      pages.lastIndexWhere((page) => page <= _pdfPage),
+      pages.lastIndexWhere((page) => page <= readingPage),
       (index) {
-        if (pages[index] != _pdfPage) {
-          setState(() => _pageBeforeJump = _pdfPage);
+        final target = pages[index];
+        if (target != readingPage) {
+          setState(() => _pageBeforeJump = readingPage);
         }
-        if (_pdf.isReady) unawaited(_pdf.goToPage(pageNumber: pages[index]));
+        if (_requestedEbook) {
+          unawaited(_openConvertedPage(target));
+        } else if (_pdf.isReady) {
+          unawaited(_pdf.goToPage(pageNumber: target));
+        }
       },
+      levels: entries.map((entry) => entry.level - 1).toList(growable: false),
       pages: pages,
-      readingPage: _pdfPage,
+      readingPage: readingPage,
     );
   }
 
@@ -2096,32 +2726,47 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     }
   }
 
-  Widget? _pdfSelection(
-    BuildContext context,
-    PdfViewerContextMenuBuilderParams params,
-  ) {
-    final delegate = params.textSelectionDelegate;
-    if (!delegate.isCopyAllowed || !delegate.hasSelectedText) return null;
-    final localAnchor = params.anchorB ?? params.anchorA;
-    final page = params.a?.page.pageNumber ?? _pdfPage;
-    final endPage = params.b?.page.pageNumber ?? page;
+  Widget _pdfSelection() {
+    if (!_pdf.isReady) return const SizedBox.shrink();
+    final delegate = _pdf.textSelectionDelegate;
+    final range = delegate.textSelectionPointRange;
+    if (!delegate.isCopyAllowed || range == null) {
+      return const SizedBox.shrink();
+    }
+    final page = range.start.text.pageNumber;
+    final endPage = range.end.text.pageNumber;
+    final first = _pdf.calcRectForRectInsidePage(
+      pageNumber: page,
+      rect: range.start.text.charRects[range.start.index],
+    );
+    final last = _pdf.calcRectForRectInsidePage(
+      pageNumber: endPage,
+      rect: range.end.text.charRects[range.end.index],
+    );
+    final above = _pdf.documentToLocal(
+      Offset((first.center.dx + last.center.dx) / 2, first.top),
+    );
+    final below = _pdf.documentToLocal(
+      Offset((first.center.dx + last.center.dx) / 2, last.bottom),
+    );
+    if (below.dy < 0 || above.dy > _pdf.viewSize.height) {
+      return const SizedBox.shrink();
+    }
     final label = endPage == page ? '第 $page 页' : '第 $page–$endPage 页';
     final anchor = PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page);
 
     Future<void> withText(bool ask) async {
-      final box = context.findRenderObject();
-      final globalAnchor = box is RenderBox && box.attached
-          ? box.localToGlobal(localAnchor)
-          : localAnchor;
+      final globalAnchor = _pdf.localToGlobal(below) ?? below;
       final text = (await delegate.getSelectedText()).trim();
       if (!mounted || text.isEmpty) return;
-      params.dismissContextMenu();
+      await delegate.clearTextSelection();
+      if (!mounted) return;
       final passage = _passage(
         text,
         label,
         anchor,
-        startOffset: params.a?.index,
-        endOffset: params.b == null ? null : params.b!.index + 1,
+        startOffset: range.start.index,
+        endOffset: page == endPage ? range.end.index + 1 : null,
       );
       if (ask) {
         widget.onAsk(passage, globalAnchor);
@@ -2130,18 +2775,18 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       }
     }
 
-    return Align(
-      alignment: Alignment.topLeft,
-      child: _selectionToolbar(
-        above: params.anchorA,
-        below: params.anchorB,
-        onCopy: () {
-          unawaited(delegate.copyTextSelection());
-          params.dismissContextMenu();
-        },
-        onAnnotate: () => unawaited(withText(false)),
-        onAsk: () => unawaited(withText(true)),
-      ),
+    return _selectionToolbar(
+      above: above,
+      below: below,
+      onCopy: () {
+        unawaited(
+          delegate.copyTextSelection().then(
+            (_) => delegate.clearTextSelection(),
+          ),
+        );
+      },
+      onAnnotate: () => unawaited(withText(false)),
+      onAsk: () => unawaited(withText(true)),
     );
   }
 
@@ -2152,17 +2797,17 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }
 
   bool get _readerPanelOpen => _activePanel != null;
+  bool get _supportsReaderBrightness =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
   bool get _readerWide => MediaQuery.sizeOf(context).width >= 600;
   double get _readerSideInset => _readerWide ? 34 : 16;
-  double get _readerProgressHeight => _readerWide ? 52 : 44;
   double get _readerNavHeight => math.max(
     _readerWide ? 60.0 : 44.0,
     MediaQuery.textScalerOf(context).scale(_readerWide ? 18 : 14) + 20,
   );
   double get _readerFooterHeight =>
-      _readerNavHeight +
-      _readerProgressHeight +
-      MediaQuery.paddingOf(context).bottom;
+      _readerNavHeight + MediaQuery.paddingOf(context).bottom;
   Color get _readerChrome =>
       _dark ? const Color(0xFF16181A) : const Color(0xFFFCFCFC);
   Color get _readerPanelSurface =>
@@ -2198,6 +2843,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     }
     setState(() {
       _activePanel = panel;
+      _outlineExtent = 0;
+      _outlineDragging = false;
       _outlinePanel = outline;
       _progressPreview = null;
     });
@@ -2247,11 +2894,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             ? const Color(0xFF606163)
             : const Color(0xFFD7D8D9),
         thumbColor: _dark ? const Color(0xFFF0ECE3) : const Color(0xFF363636),
-        overlayColor: _ink.withValues(alpha: .08),
+        overlayColor: Colors.transparent,
+        overlayShape: SliderComponentShape.noOverlay,
         trackShape: const RoundedRectSliderTrackShape(),
         trackHeight: compact ? 3.5 : 4.5,
         thumbShape: RoundSliderThumbShape(
           enabledThumbRadius: compact ? 5.5 : 7,
+          elevation: 0,
+          pressedElevation: 0,
         ),
         padding: const EdgeInsets.symmetric(horizontal: 7),
         showValueIndicator: ShowValueIndicator.never,
@@ -2269,6 +2919,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   Widget _footerWithBody({
     required Widget body,
+    bool usesOriginalPages = false,
+    bool showChrome = true,
     required int page,
     required int pageCount,
     String? chapterTitle,
@@ -2277,7 +2929,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     ValueChanged<FlowReaderAnchor>? onRestoreFlow,
   }) {
     final shownPage = (_progressPreview ?? page.toDouble()).round();
-    final pdf = _isCompanionPdf(_source);
+    final pdf = _isPdfDocument || usesOriginalPages;
     final section = chapterTitle?.trim() ?? '';
     final sectionNumber = RegExp(
       r'^第\s*[0-9零〇一二三四五六七八九十百千]+\s*[章节部卷篇回]',
@@ -2384,88 +3036,44 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         ],
       ),
     );
-    final panel = widget.immersive ? null : _activePanel;
+    final chromeVisible = showChrome && !widget.immersive && !_inkEditing;
+    final panel = chromeVisible ? _activePanel : null;
     final bottomInset = MediaQuery.paddingOf(context).bottom;
     final panelBottom = _readerNavHeight + bottomInset;
-    final shortcutClearance =
-        !widget.immersive &&
-            chapterTitle != null &&
-            (widget.toolbarBuilder != null ||
-                widget.onFreeChat != null ||
-                _foreignSource)
-        ? 52.0
-        : 0.0;
     return LayoutBuilder(
       builder: (context, dimensions) => Stack(
         fit: StackFit.expand,
         children: [
-          Column(
-            children: [
-              Expanded(
-                child: ExcludeFocus(
-                  excluding: panel != null,
-                  child: ExcludeSemantics(
-                    excluding: panel != null,
-                    child: Padding(
-                      padding: EdgeInsets.only(bottom: shortcutClearance),
-                      child: body,
-                    ),
+          ExcludeFocus(
+            excluding: panel != null,
+            child: ExcludeSemantics(excluding: panel != null, child: body),
+          ),
+          if (chromeVisible)
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 0,
+              child: Material(color: _readerChrome, child: _toolbar(context)),
+            ),
+          if (chromeVisible)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Material(
+                color: _readerChrome,
+                child: Padding(
+                  padding: EdgeInsets.only(bottom: bottomInset),
+                  child: _readerBottomNavigation(
+                    onOutline: onOutline,
+                    onProgress: pageCount > 0
+                        ? () => _openReaderPanel(_ReaderPanel.progress)
+                        : null,
                   ),
                 ),
               ),
-              if (!widget.immersive)
-                Material(
-                  color: _readerChrome,
-                  child: Padding(
-                    padding: EdgeInsets.only(bottom: bottomInset),
-                    child: Column(
-                      children: [
-                        SizedBox(
-                          height: _readerProgressHeight,
-                          child: panel != null || pageCount == 0
-                              ? null
-                              : Padding(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: _readerSideInset,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        child: progressSlider(compact: true),
-                                      ),
-                                      SizedBox(width: _readerWide ? 45 : 12),
-                                      ConstrainedBox(
-                                        constraints: BoxConstraints(
-                                          maxWidth: _readerWide ? 150 : 92,
-                                        ),
-                                        child: Text(
-                                          locationLabel(shownPage),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            color: _ink,
-                                            fontSize: size,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                        ),
-                        _readerBottomNavigation(
-                          onOutline: onOutline,
-                          onProgress: pageCount > 0
-                              ? () => _openReaderPanel(_ReaderPanel.progress)
-                              : null,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          if (widget.immersive && pageCount > 0)
+            ),
+          if (showChrome && widget.immersive && !_inkEditing && pageCount > 0)
             PositionedDirectional(
               end: _readerSideInset,
               bottom: bottomInset + 8,
@@ -2499,18 +3107,124 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 constraints: BoxConstraints(
                   maxHeight: math.max(0, dimensions.maxHeight - panelBottom),
                 ),
-                child: _readerPanel(panel, switch (panel) {
-                  _ReaderPanel.outline => SizedBox(
-                    height: MediaQuery.sizeOf(context).height * .33,
-                    child: Builder(builder: _outlinePanel!),
-                  ),
-                  _ReaderPanel.progress => progressPanel(),
-                  _ReaderPanel.display => _displayPanel(),
-                }),
+                child: panel == _ReaderPanel.outline
+                    ? _outlineSheet(
+                        dimensions.maxHeight - panelBottom,
+                        locationLabel(page),
+                      )
+                    : _readerPanel(panel, switch (panel) {
+                        _ReaderPanel.outline => const SizedBox.shrink(),
+                        _ReaderPanel.progress => progressPanel(),
+                        _ReaderPanel.display => _displayPanel(),
+                      }),
               ),
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _outlineSheet(double availableHeight, String location) {
+    final full = math.max(0.0, availableHeight);
+    final compact = math.min(
+      full,
+      MediaQuery.sizeOf(context).height * .33 + (_readerWide ? 72 : 46),
+    );
+    final travel = full - compact;
+    void snap(bool expand) => setState(() {
+      _outlineDragging = false;
+      _outlineExtent = expand ? 1 : 0;
+    });
+    return AnimatedContainer(
+      duration: _outlineDragging
+          ? Duration.zero
+          : const Duration(milliseconds: 170),
+      curve: Curves.easeOut,
+      height: compact + travel * _outlineExtent,
+      child: Material(
+        color: _dark ? _readerPanelSurface : const Color(0xFFF8F9FA),
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          side: BorderSide(color: _readerRule),
+        ),
+        child: Column(
+          children: [
+            Semantics(
+              button: true,
+              label: _outlineExtent >= .5 ? '收起目录' : '展开目录',
+              onTap: () => snap(_outlineExtent < .5),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => snap(_outlineExtent < .5),
+                onVerticalDragStart: (_) =>
+                    setState(() => _outlineDragging = true),
+                onVerticalDragUpdate: (details) {
+                  if (travel > 0) {
+                    setState(
+                      () => _outlineExtent =
+                          (_outlineExtent - details.delta.dy / travel).clamp(
+                            0.0,
+                            1.0,
+                          ),
+                    );
+                  }
+                },
+                onVerticalDragEnd: (details) {
+                  final speed = details.primaryVelocity ?? 0;
+                  snap(speed.abs() > 250 ? speed < 0 : _outlineExtent >= .5);
+                },
+                onVerticalDragCancel: () => snap(_outlineExtent >= .5),
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    _readerSideInset,
+                    10,
+                    _readerSideInset,
+                    9,
+                  ),
+                  child: Column(
+                    children: [
+                      Container(
+                        width: 42,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: _readerRule,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                      const SizedBox(height: 11),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '目录',
+                              style: TextStyle(
+                                color: _ink,
+                                fontSize: _readerWide ? 23 : 18,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          Text(location, style: TextStyle(color: _readerMuted)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Divider(height: 1, color: _readerRule),
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: _readerSideInset * .6,
+                ),
+                child: Builder(builder: _outlinePanel!),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2638,8 +3352,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   minHeight: _readerWide
                       ? switch (panel) {
                           _ReaderPanel.outline => 72,
-                          _ReaderPanel.display =>
-                            _isCompanionPdf(_source) ? 54 : 66,
+                          _ReaderPanel.display => _isPdfDocument ? 54 : 66,
                           _ReaderPanel.progress => 54,
                         }
                       : 46,
@@ -2689,8 +3402,6 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       child: Material(
         color: _dark ? const Color(0xFF3B3C3F) : const Color(0xFF393A3C),
         shape: const CircleBorder(),
-        elevation: _dark ? 0 : 1,
-        shadowColor: const Color(0x25000000),
         child: InkWell(
           customBorder: const CircleBorder(),
           onTap: onPressed,
@@ -2712,7 +3423,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
   }
 
-  Widget _toolbar(BuildContext context, {required bool isPdf}) {
+  Widget _toolbar(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 600;
     final showDoodleLabel = MediaQuery.sizeOf(context).width >= 380;
     final controlColor = _dark
@@ -2721,10 +3432,26 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final selectedColor = _dark ? const Color(0xFF48494B) : Colors.white;
     final library = widget.onChooseSource;
     Widget segment(bool pdf, String label) {
-      final selected = pdf == isPdf;
-      final onTap = selected ? library : widget.onSwitchFormat;
+      final selected = pdf != _isSelectingEbook;
+      final loading = !pdf && _ebookSwitchPending;
+      final retry = !pdf && _canRetryEbook;
+      final VoidCallback? onTap = loading
+          ? null
+          : retry
+          ? () => _switchReaderFormat(false)
+          : selected
+          ? library
+          : (pdf && !_isCompanionPdf(_source) && widget.onSwitchFormat == null
+                ? null
+                : () => _switchReaderFormat(pdf));
       return Tooltip(
-        message: selected && library != null ? '切换阅读资料' : label,
+        message: loading
+            ? '正在准备电子书'
+            : retry
+            ? '重试电子书'
+            : selected && library != null
+            ? '切换阅读资料'
+            : label,
         excludeFromSemantics: true,
         child: Semantics(
           button: true,
@@ -2738,7 +3465,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                     onTap();
                   },
             child: SizedBox(
-              width: wide ? 61 : (pdf ? 41 : 51),
+              width: wide ? (pdf ? 61 : 80) : (pdf ? 36 : 68),
               height: 44,
               child: Center(
                 child: Ink(
@@ -2749,17 +3476,31 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Center(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.clip,
-                      style: TextStyle(
-                        color: selected || onTap != null
-                            ? _ink
-                            : _ink.withValues(alpha: .48),
-                        fontSize: wide ? 14 : 12,
-                        fontWeight: FontWeight.w600,
-                      ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (loading) ...[
+                          SizedBox.square(
+                            dimension: wide ? 12 : 10,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 1.5,
+                              color: _ink,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+                        Text(
+                          label,
+                          maxLines: 1,
+                          style: TextStyle(
+                            color: selected || onTap != null
+                                ? _ink
+                                : _ink.withValues(alpha: .48),
+                            fontSize: wide ? 14 : 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -2797,19 +3538,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             const SizedBox(width: 8),
           ],
           TextButton(
-            onPressed: !_inkLoaded && !_inkLoadFailed
-                ? null
-                : () {
-                    if (_inkLoadFailed) {
-                      unawaited(_loadInk());
-                      return;
-                    }
-                    _closeReaderPanel();
-                    setState(() {
-                      _inkEditing = true;
-                      _inkErasing = false;
-                    });
-                  },
+            onPressed: !_inkLoaded && !_inkLoadFailed ? null : _startInk,
             style: TextButton.styleFrom(
               foregroundColor: _ink,
               minimumSize: const Size(44, 44),
@@ -2837,32 +3566,6 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 ],
               ),
             ),
-          ),
-        ] else ...[
-          IconButton(
-            tooltip: '画笔',
-            icon: const Icon(Icons.edit_outlined),
-            isSelected: !_inkErasing,
-            onPressed: _inkSaving
-                ? null
-                : () => setState(() => _inkErasing = false),
-          ),
-          IconButton(
-            tooltip: '橡皮',
-            icon: const Icon(Icons.auto_fix_normal_outlined),
-            isSelected: _inkErasing,
-            onPressed: _inkSaving
-                ? null
-                : () => setState(() => _inkErasing = true),
-          ),
-          IconButton(
-            tooltip: '撤销涂鸦',
-            icon: const Icon(Icons.undo),
-            onPressed: _inkSaving || _inkUndo.isEmpty ? null : _undoInk,
-          ),
-          FilledButton(
-            onPressed: _inkSaving ? null : _finishInk,
-            child: Text(_inkSaving ? '保存中' : '完成'),
           ),
         ],
       ],
@@ -2900,7 +3603,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           );
         } else {
           body = document == null
-              ? _pdfDocument(data.anchor)
+              ? _readerBody(data.anchor)
               : _flow(document, data.anchor);
         }
         return Material(
@@ -2908,13 +3611,17 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Column(
-                children: [
-                  if (!widget.immersive)
-                    _toolbar(context, isPdf: _isCompanionPdf(_source)),
-                  Expanded(child: body),
-                ],
-              ),
+              body,
+              if (data == null && !widget.immersive && !_inkEditing)
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: Material(
+                    color: _readerChrome,
+                    child: _toolbar(context),
+                  ),
+                ),
               if (data != null &&
                   !widget.immersive &&
                   !_readerPanelOpen &&
@@ -2938,6 +3645,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   ),
                 ),
               if (!widget.immersive &&
+                  !_inkEditing &&
                   !_readerPanelOpen &&
                   (_translationPending || _translationError != null))
                 Positioned(
@@ -2950,6 +3658,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                           onPressed: _scheduleTranslation,
                         ),
                 ),
+              if (_inkEditing) Positioned.fill(child: _buildDrawingControls()),
             ],
           ),
         );
@@ -2959,13 +3668,41 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 }
 
 class _CompanionInkRecord {
-  const _CompanionInkRecord(this.size, this.text, this.strokes);
+  const _CompanionInkRecord(
+    this.size,
+    this.text,
+    this.strokes, [
+    this.document,
+  ]);
 
   final Size size;
   final String? text;
   final List<PageStroke> strokes;
 
+  final Map<String, Object?>? document;
+
+  bool get isEmpty =>
+      strokes.isEmpty && (document?['drawables'] as List?)?.isNotEmpty != true;
+
+  DrawingAnnotationLayer createLayer() => DrawingAnnotationLayer(
+    size: size,
+    document: document,
+    initial: [
+      for (final stroke in strokes)
+        if (stroke.points.isNotEmpty)
+          FreeStyleDrawable(
+            path: [
+              for (final point in stroke.points)
+                Offset(point.dx * size.width, point.dy * size.height),
+            ],
+            color: Color(stroke.colorValue).withValues(alpha: stroke.opacity),
+            strokeWidth: stroke.width,
+          ),
+    ],
+  );
+
   String encode() => jsonEncode({
+    if (document != null) 'drawingDocument': document,
     'width': size.width,
     'height': size.height,
     'text': text,
@@ -2985,6 +3722,7 @@ class _CompanionInkRecord {
             .whereType<Map>()
             .map(PageStroke.fromJson)
             .toList(),
+        (value['drawingDocument'] as Map?)?.cast<String, Object?>(),
       );
     } on Object {
       return null;
@@ -3006,11 +3744,9 @@ Widget _buildPdfSelectionHandle(
   BuildContext context,
   PdfTextSelectionAnchor anchor,
   PdfViewerTextSelectionAnchorHandleState state,
-) => materialTextSelectionHandleControls.buildHandle(
-  context,
-  _pdfSelectionHandleType(anchor),
-  0,
-);
+) => _handleControlsForPdf(
+  anchor,
+).buildHandle(context, _pdfSelectionHandleType(anchor), 0);
 
 Offset _pdfSelectionHandleOffset(
   BuildContext context,
@@ -3018,7 +3754,7 @@ Offset _pdfSelectionHandleOffset(
   PdfViewerTextSelectionAnchorHandleState state,
 ) {
   final type = _pdfSelectionHandleType(anchor);
-  final controls = materialTextSelectionHandleControls;
+  final controls = _handleControlsForPdf(anchor);
   final tip = controls.getHandleAnchor(type, 0);
   final size = controls.getHandleSize(0);
   return Offset(
@@ -3028,6 +3764,22 @@ Offset _pdfSelectionHandleOffset(
         : -tip.dy,
   );
 }
+
+class _CompanionTextSelectionControls extends BookPencilTextSelectionControls
+    with TextSelectionHandleControls {
+  _CompanionTextSelectionControls({super.textDirection})
+    : super(tintForDarkTheme: true);
+}
+
+final _companionTextSelectionControls = _CompanionTextSelectionControls();
+
+BookPencilTextSelectionControls _handleControlsForPdf(
+  PdfTextSelectionAnchor anchor,
+) =>
+    anchor.direction == PdfTextDirection.rtl ||
+        anchor.direction == PdfTextDirection.vrtl
+    ? _CompanionTextSelectionControls(textDirection: TextDirection.rtl)
+    : _companionTextSelectionControls;
 
 Widget _selectionToolbar({
   required Offset above,
@@ -3040,13 +3792,16 @@ Widget _selectionToolbar({
   anchorBelow: below ?? above,
   toolbarBuilder: (context, child) => child,
   children: [
-    MessageSelectionActionCard(
-      primaryLabel: 'AI',
-      primaryAsset: 'assets/icons/chat_note_editor/sparkle.svg',
-      copyFirst: true,
-      onPrimaryAction: onAsk,
-      onCopy: onCopy,
-      onAnnotate: onAnnotate,
+    Builder(
+      builder: (context) => MessageSelectionActionCard(
+        primaryLabel: 'AI',
+        primaryAsset: 'assets/icons/chat_note_editor/sparkle.svg',
+        copyFirst: true,
+        dark: Theme.of(context).brightness == Brightness.dark,
+        onPrimaryAction: onAsk,
+        onCopy: onCopy,
+        onAnnotate: onAnnotate,
+      ),
     ),
   ],
 );
@@ -3418,6 +4173,7 @@ Future<int?> _chooseReaderItem(
 
 class _ReaderOutlineList extends StatefulWidget {
   const _ReaderOutlineList({
+    required this.bookTitle,
     required this.titles,
     required this.current,
     required this.onSelected,
@@ -3432,6 +4188,7 @@ class _ReaderOutlineList extends StatefulWidget {
   });
 
   final List<String> titles;
+  final String bookTitle;
   final int current;
   final ValueChanged<int> onSelected;
   final List<int> levels;
@@ -3449,6 +4206,7 @@ class _ReaderOutlineList extends StatefulWidget {
 
 class _ReaderOutlineListState extends State<_ReaderOutlineList> {
   ScrollController? _scroll;
+  final _collapsed = <int>{};
 
   @override
   void dispose() {
@@ -3466,6 +4224,15 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
       textScaler.scale(titleSize) + 22,
     );
     final selectedExtra = textScaler.scale(subtitleSize) + 9;
+    final hasLevels = widget.levels.length == widget.titles.length;
+    final visible = <int>[];
+    int? hiddenBelow;
+    for (var index = 0; index < widget.titles.length; index++) {
+      final level = hasLevels ? widget.levels[index] : 0;
+      if (hiddenBelow != null && level > hiddenBelow) continue;
+      hiddenBelow = _collapsed.contains(index) ? level : null;
+      visible.add(index);
+    }
     final subtitle = switch (widget.readingPage) {
       final page? => '正在读 · 第 $page 页',
       null => '正在读',
@@ -3474,11 +4241,11 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final targetOffset =
-            widget.current * rowHeight -
+            (1 + visible.indexOf(widget.current)) * rowHeight -
             (constraints.maxHeight - rowHeight - selectedExtra) / 2;
         final maxOffset = math.max(
           0.0,
-          widget.titles.length * rowHeight +
+          (1 + visible.length) * rowHeight +
               selectedExtra -
               constraints.maxHeight,
         );
@@ -3489,13 +4256,46 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
         return ListView.builder(
           controller: scroll,
           padding: EdgeInsets.zero,
-          itemCount: widget.titles.length,
-          itemExtentBuilder: (index, _) =>
-              rowHeight + (widget.current == index ? selectedExtra : 0),
-          itemBuilder: (context, index) {
+          itemCount: visible.length + 1,
+          itemExtentBuilder: (row, _) =>
+              rowHeight +
+              (row > 0 && widget.current == visible[row - 1]
+                  ? selectedExtra
+                  : 0),
+          itemBuilder: (context, row) {
+            if (row == 0) {
+              return Semantics(
+                header: true,
+                child: Container(
+                  alignment: AlignmentDirectional.centerStart,
+                  padding: const EdgeInsetsDirectional.only(start: 10),
+                  decoration: BoxDecoration(
+                    border: Border(bottom: BorderSide(color: widget.rule)),
+                  ),
+                  child: Text(
+                    widget.bookTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: widget.ink,
+                      fontSize: titleSize,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              );
+            }
+            final index = visible[row - 1];
             final selected = widget.current == index;
             final group = widget.groupLabels.contains(index);
             final level = widget.levels.isEmpty ? 0 : widget.levels[index];
+            final hasChildren =
+                hasLevels &&
+                index + 1 < widget.levels.length &&
+                widget.levels[index + 1] > level;
+            void toggleGroup() => setState(() {
+              if (!_collapsed.remove(index)) _collapsed.add(index);
+            });
             final foreground = group
                 ? widget.ink.withValues(alpha: .68)
                 : widget.ink;
@@ -3503,11 +4303,20 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
               selected: selected,
               header: group,
               child: InkWell(
-                onTap: group ? null : () => widget.onSelected(index),
+                onTap: group
+                    ? (hasChildren ? toggleGroup : null)
+                    : () => widget.onSelected(index),
                 child: Ink(
                   decoration: selected
                       ? BoxDecoration(
                           color: widget.selectedColor,
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x1C000000),
+                              blurRadius: 3,
+                              offset: Offset(0, 1),
+                            ),
+                          ],
                           borderRadius: BorderRadius.circular(8),
                         )
                       : BoxDecoration(
@@ -3522,6 +4331,22 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
                   height: rowHeight + (selected ? selectedExtra : 0),
                   child: Row(
                     children: [
+                      if (hasChildren)
+                        IconButton(
+                          tooltip: _collapsed.contains(index) ? '展开章节' : '收起章节',
+                          onPressed: toggleGroup,
+                          icon: SvgPicture.asset(
+                            _collapsed.contains(index)
+                                ? 'assets/icons/extension_market/detail/caret-right.svg'
+                                : 'assets/icons/extension_market/detail/caret-down.svg',
+                            width: 15,
+                            height: 15,
+                            colorFilter: ColorFilter.mode(
+                              foreground,
+                              BlendMode.srcIn,
+                            ),
+                          ),
+                        ),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,

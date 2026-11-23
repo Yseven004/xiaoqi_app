@@ -171,16 +171,14 @@ void main() {
     expect(firstReaderX, greaterThan(0));
     await tester.pump(const Duration(milliseconds: 200));
     expect(tester.getTopLeft(reader).dx, inExclusiveRange(0, firstReaderX));
-    await _waitFor(tester, find.text('目录'));
+    final body = find.text('这是一段测试原文。');
+    await _waitFor(tester, body);
     expect(tester.getTopLeft(reader).dx, 0);
     expect(find.text('创建图像'), findsNothing);
     final initialReader = tester.state(reader);
-    final body = find.text('这是一段测试原文。');
-    await _waitFor(tester, body);
     final pager = find.byType(ReflowDocumentPager);
     final initialPager = tester.state(pager);
-    await tester.tap(body);
-    await tester.pumpAndSettle();
+    final immersiveBodyRect = tester.getRect(body);
     expect(find.text('目录'), findsNothing);
     expect(tester.state(pager), same(initialPager));
     expect(find.byTooltip('AI 问答'), findsNothing);
@@ -189,6 +187,7 @@ void main() {
     await tester.tap(body);
     await tester.pumpAndSettle();
     expect(find.text('目录'), findsOneWidget);
+    expect(tester.getRect(body), immersiveBodyRect);
     expect(find.byTooltip('AI 问答'), findsOneWidget);
     expect(tester.state(reader), same(initialReader));
     expect(tester.state(pager), same(initialPager));
@@ -214,8 +213,9 @@ void main() {
     await _waitFor(tester, doodle);
     await tester.tap(doodle);
     await tester.pumpAndSettle();
-    final finishInk = find.widgetWithText(FilledButton, '完成');
+    final finishInk = find.byTooltip('完成涂鸦');
     expect(finishInk, findsOneWidget);
+    expect(find.text('目录'), findsNothing);
     await tester.dragFrom(tester.getCenter(body), const Offset(65, 4));
     await tester.pumpAndSettle();
     final center = tester.getCenter(body);
@@ -229,11 +229,18 @@ void main() {
     await finger.up();
     await tester.pumpAndSettle();
     await tester.tap(finishInk);
+    for (int i = 0; i < 100 && finishInk.evaluate().isNotEmpty; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 12)));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(find.text('目录'), findsNothing);
+    await tester.tap(body);
     await _waitFor(tester, doodle);
     final inkCount = await tester.runAsync(() async {
       final rows = await db.query('companion_ink');
       final drawing = jsonDecode(rows.single['drawing']! as String) as Map;
-      return (drawing['strokes'] as List).length;
+      final document = drawing['drawingDocument'] as Map;
+      return (document['drawables'] as List).length;
     });
     expect(inkCount, 1);
     await tester.tap(find.bySemanticsLabel('打开侧边栏'));
@@ -336,6 +343,9 @@ void main() {
     await tester.tap(find.byTooltip('沉浸伴读'));
     await _waitFor(tester, reader, settle: false);
     expect(tester.getTopLeft(reader).dx, 0);
+    await _waitFor(tester, body);
+    expect(find.text('目录'), findsNothing);
+    await tester.tap(body);
     await _waitFor(tester, find.text('目录'));
     await tester.tap(find.text('阅读空间'));
     await tester.pumpAndSettle();

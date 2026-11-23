@@ -11,6 +11,10 @@ allprojects {
         maven("https://maven.aliyun.com/repository/google")
         google()
         mavenCentral()
+        exclusiveContent {
+            forRepository { maven("https://jitpack.io") }
+            filter { includeModule("cz.adaptech.tesseract4android", "tesseract4android") }
+        }
     }
 }
 

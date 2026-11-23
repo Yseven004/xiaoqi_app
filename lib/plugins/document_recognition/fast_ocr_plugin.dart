@@ -17,6 +17,10 @@ class FastOcrUnavailableException implements Exception {
   String toString() => message;
 }
 
+class FastOcrCancelledException implements Exception {
+  const FastOcrCancelledException();
+}
+
 class FastOcrLine {
   const FastOcrLine({
     required this.text,
@@ -73,6 +77,7 @@ class FastOcrResult {
     required this.elapsedMs,
     this.blocks = const [],
     this.appliedRotation = 0,
+    this.unsupportedLanguages = const [],
   });
 
   final String fullText;
@@ -84,10 +89,12 @@ class FastOcrResult {
 
   /// Clockwise source-pixel rotation used before the final native OCR pass.
   final int appliedRotation;
+
+  /// Requested scripts unavailable in this installation of the native engine.
+  final List<String> unsupportedLanguages;
 }
 
-/// Android ML Kit bridge. Unsupported platforms throw a typed error so the
-/// router can transparently retain the existing VLM path.
+/// Offline OCR using Tesseract on Android and Vision on iOS.
 class NativeFastOcrPlugin implements FastOcrPlugin {
   NativeFastOcrPlugin({MethodChannel? channel})
     : _channel = channel ?? _defaultChannel;
@@ -96,14 +103,40 @@ class NativeFastOcrPlugin implements FastOcrPlugin {
     'xiaoqi_app/fast_ocr',
   );
 
+  static const defaultPageLanguages = ['zh-Hans', 'zh-Hant', 'en', 'ja'];
+
   final MethodChannel _channel;
 
   @override
-  Future<FastOcrResult> recognize(String imagePath) async {
+  Future<FastOcrResult> recognize(String imagePath) =>
+      _recognize('recognizeChineseText', {'imagePath': imagePath});
+
+  Future<FastOcrResult> recognizePage(
+    String imagePath, {
+    List<String> languages = defaultPageLanguages,
+    String? jobId,
+  }) => _recognize('recognizePage', {
+    'imagePath': imagePath,
+    'languages': languages,
+    'jobId': ?jobId,
+  });
+
+  Future<void> cancelRecognition(String jobId) async {
+    try {
+      await _channel.invokeMethod<void>('cancelRecognition', {'jobId': jobId});
+    } on MissingPluginException {
+      // This installation cannot have started a native OCR job.
+    }
+  }
+
+  Future<FastOcrResult> _recognize(
+    String method,
+    Map<String, Object?> arguments,
+  ) async {
     try {
       final raw = await _channel.invokeMapMethod<Object?, Object?>(
-        'recognizeChineseText',
-        {'imagePath': imagePath},
+        method,
+        arguments,
       );
       if (raw == null) {
         throw const FastOcrUnavailableException('本地 OCR 未返回结果');
@@ -118,10 +151,15 @@ class NativeFastOcrPlugin implements FastOcrPlugin {
         elapsedMs: _number(raw['elapsedMs']).round(),
         blocks: blocks,
         appliedRotation: _number(raw['appliedRotation']).round(),
+        unsupportedLanguages: switch (raw['unsupportedLanguages']) {
+          final List values => List.unmodifiable(values.whereType<String>()),
+          _ => const [],
+        },
       );
     } on MissingPluginException {
       throw const FastOcrUnavailableException('当前平台未提供本地 OCR');
     } on PlatformException catch (error) {
+      if (error.code == 'cancelled') throw const FastOcrCancelledException();
       throw FastOcrUnavailableException(error.message ?? '本地 OCR 不可用');
     }
   }
@@ -236,11 +274,9 @@ class FastOcrQuality {
   static bool _hasLargeBlankBand(List<FastOcrLine> lines, int imageHeight) {
     if (imageHeight <= 0 || lines.length < 4) return false;
     final sorted = [...lines]..sort((a, b) => a.top.compareTo(b.top));
-    final heights = sorted
-        .map((line) => line.height)
-        .where((height) => height > 0)
-        .toList()
-      ..sort();
+    final heights =
+        sorted.map((line) => line.height).where((height) => height > 0).toList()
+          ..sort();
     if (heights.isEmpty) return false;
     final medianHeight = heights[heights.length ~/ 2];
     final threshold = math.max(imageHeight * 0.10, medianHeight * 4);
@@ -262,10 +298,11 @@ class FastOcrQuality {
   /// row such as 「益友名字 / 上次联系 / 下次联系」.
   static bool _hasAlignedShortCells(List<FastOcrLine> lines, int imageWidth) {
     if (imageWidth <= 0 || lines.length < 3) return false;
-    final short = lines
-        .where((line) => line.width > 0 && line.width < imageWidth * 0.4)
-        .toList()
-      ..sort((a, b) => a.top.compareTo(b.top));
+    final short =
+        lines
+            .where((line) => line.width > 0 && line.width < imageWidth * 0.4)
+            .toList()
+          ..sort((a, b) => a.top.compareTo(b.top));
     for (var i = 0; i < short.length; i++) {
       final anchor = short[i];
       final band = <FastOcrLine>[anchor];

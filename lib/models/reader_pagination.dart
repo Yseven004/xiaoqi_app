@@ -66,17 +66,14 @@ String readerAnchorJson(ReaderAnchor anchor) => switch (anchor) {
     'source_id': anchor.sourceId,
     'page': pageNumber,
   }),
-  FlowReaderAnchor(
-    :final chapterId,
-    :final blockId,
-    :final characterOffset,
-  ) => jsonEncode({
-    'kind': 'flow',
-    'source_id': anchor.sourceId,
-    'chapter_id': chapterId,
-    'block_id': blockId,
-    'character_offset': characterOffset,
-  }),
+  FlowReaderAnchor(:final chapterId, :final blockId, :final characterOffset) =>
+    jsonEncode({
+      'kind': 'flow',
+      'source_id': anchor.sourceId,
+      'chapter_id': chapterId,
+      'block_id': blockId,
+      'character_offset': characterOffset,
+    }),
 };
 
 ReaderAnchor? readerAnchorFromJson(String? raw) {
@@ -138,6 +135,7 @@ class ReaderBlockSlice {
   const ReaderBlockSlice({
     required this.block,
     required this.text,
+    this.chapterId,
     this.startOffset = 0,
     this.endOffset,
     this.tableRows,
@@ -145,6 +143,7 @@ class ReaderBlockSlice {
   });
 
   final XiaoqiDocumentBlock block;
+  final String? chapterId;
   final String text;
   final int startOffset;
   final int? endOffset;
