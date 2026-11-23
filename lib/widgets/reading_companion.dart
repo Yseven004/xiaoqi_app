@@ -749,6 +749,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   bool _outlineDragging = false;
   LocalHistoryEntry? _panelHistory;
   WidgetBuilder? _outlinePanel;
+  Future<List<PdfCatalogEntry>>? _pdfBookmarkOutline;
   double? _progressPreview;
   double _fontScale = 1;
   double _marginFraction = .04;
@@ -1892,32 +1893,49 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     ValueChanged<int> onSelected, {
     List<int> levels = const [],
     Set<int> groupLabels = const {},
-    List<int> pages = const [],
+    List<int?> pages = const [],
     int? readingPage,
   }) {
     _openReaderPanel(
       _ReaderPanel.outline,
-      outline: (context) => _ReaderOutlineList(
-        bookTitle: widget.bookTitle.trim().isEmpty
-            ? _source.displayName
-            : widget.bookTitle,
+      outline: (context) => _outlineList(
         titles: titles,
         current: current,
-        onSelected: (index) {
-          _closeReaderPanel();
-          onSelected(index);
-        },
+        onSelected: onSelected,
         levels: levels,
         groupLabels: groupLabels,
         pages: pages,
         readingPage: readingPage,
-        wide: _readerWide,
-        ink: _ink,
-        rule: _readerRule,
-        selectedColor: _readerSelected,
       ),
     );
   }
+
+  Widget _outlineList({
+    Key? key,
+    required List<String> titles,
+    required int current,
+    required ValueChanged<int> onSelected,
+    required List<int> levels,
+    required Set<int> groupLabels,
+    required List<int?> pages,
+    required int? readingPage,
+  }) => _ReaderOutlineList(
+    key: key,
+    titles: titles,
+    current: current,
+    onSelected: (index) {
+      _closeReaderPanel();
+      onSelected(index);
+    },
+    levels: levels,
+    groupLabels: groupLabels,
+    pages: pages,
+    readingPage: readingPage,
+    wide: _readerWide,
+    ink: _ink,
+    rule: _readerRule,
+    selectedColor: _readerSelected,
+  );
 
   void _chapter(
     XiaoqiDocumentChapter chapter, {
@@ -2941,37 +2959,151 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }
 
   void _showPdfOutline() {
-    final entries = _pdfCatalogEntries()
-        .where((entry) {
-          final page = entry.pdfPage;
-          return page != null && page > 0 && page <= _pdfPageCount;
-        })
-        .toList(growable: false);
-    final pages = entries.isEmpty
-        ? List<int>.generate(_pdfPageCount, (index) => index + 1)
-        : entries.map((entry) => entry.pdfPage!).toList(growable: false);
-    final titles = entries.isEmpty
-        ? pages.map((page) => '第 $page 页').toList(growable: false)
-        : entries.map((entry) => entry.title).toList(growable: false);
+    final catalog = _organizePdfOutline(_pdfCatalogEntries());
+    final hasGroups = catalog.any((row) => row.level > 1);
+    final bookmarks = hasGroups
+        ? null
+        : _pdfBookmarkOutline ??= _readPdfBookmarks();
     final readingPage = _convertedPage?.number ?? _pdfPage;
-    _showOutline(
-      titles,
-      pages.lastIndexWhere((page) => page <= readingPage),
-      (index) {
-        final target = pages[index];
-        if (target != readingPage) {
-          setState(() => _pageBeforeJump = readingPage);
+    Widget list(List<PdfCatalogEntry> entries) {
+      final pages = entries.isEmpty
+          ? List<int>.generate(_pdfPageCount, (index) => index + 1)
+          : entries.map((entry) => entry.pdfPage).toList(growable: false);
+      final titles = entries.isEmpty
+          ? List.generate(_pdfPageCount, (index) => '第 ${index + 1} 页')
+          : entries.map((entry) => entry.title).toList(growable: false);
+      var current = -1;
+      for (var index = 0; index < pages.length; index++) {
+        final page = pages[index];
+        if (page != null &&
+            page <= readingPage &&
+            (current == -1 || page >= pages[current]!)) {
+          current = index;
         }
-        if (_requestedEbook) {
-          unawaited(_openConvertedPage(target));
-        } else if (_pdf.isReady) {
-          unawaited(_pdf.goToPage(pageNumber: target));
-        }
-      },
-      levels: entries.map((entry) => entry.level - 1).toList(growable: false),
-      pages: pages,
-      readingPage: readingPage,
+      }
+      return _outlineList(
+        key: ObjectKey(entries),
+        titles: titles,
+        current: current,
+        onSelected: (index) {
+          final target = pages[index]!;
+          if (target != readingPage) {
+            setState(() => _pageBeforeJump = readingPage);
+          }
+          if (_requestedEbook) {
+            unawaited(_openConvertedPage(target));
+          } else if (_pdf.isReady) {
+            unawaited(_goToPdfReaderPage(target));
+          }
+        },
+        levels: entries.map((entry) => entry.level - 1).toList(growable: false),
+        groupLabels: {
+          for (var index = 0; index < pages.length; index++)
+            if (pages[index] == null) index,
+        },
+        pages: pages,
+        readingPage: readingPage,
+      );
+    }
+
+    _openReaderPanel(
+      _ReaderPanel.outline,
+      outline: (context) => bookmarks == null
+          ? list(catalog)
+          : FutureBuilder<List<PdfCatalogEntry>>(
+              future: bookmarks,
+              builder: (context, snapshot) {
+                final native = snapshot.data;
+                return list(
+                  native != null &&
+                          native.isNotEmpty &&
+                          (catalog.isEmpty ||
+                              native.any((entry) => entry.level > 1))
+                      ? native
+                      : catalog,
+                );
+              },
+            ),
     );
+  }
+
+  List<PdfCatalogEntry> _organizePdfOutline(List<PdfCatalogEntry> catalog) {
+    final earlier = <String, int>{};
+    final children = <int?, List<int>>{};
+    final depthStack = <int>[];
+    for (var index = 0; index < catalog.length; index++) {
+      final entry = catalog[index];
+      while (depthStack.isNotEmpty &&
+          catalog[depthStack.last].level >= entry.level) {
+        depthStack.removeLast();
+      }
+      final parent = earlier[entry.parentId] ?? depthStack.lastOrNull;
+      children.putIfAbsent(parent, () => []).add(index);
+      if (entry.id.isNotEmpty) earlier[entry.id] = index;
+      depthStack.add(index);
+    }
+    final rows = <PdfCatalogEntry>[];
+    void append(int index, int level) {
+      final entry = catalog[index];
+      final title = entry.title.trim();
+      final sourcePage = entry.pdfPage;
+      final page =
+          sourcePage != null && sourcePage > 0 && sourcePage <= _pdfPageCount
+          ? sourcePage
+          : null;
+      final position = rows.length;
+      final childLevel = title.isEmpty ? level : level + 1;
+      for (final child in children[index] ?? const <int>[]) {
+        append(child, childLevel);
+      }
+      if (title.isEmpty || (page == null && position == rows.length)) return;
+      rows.insert(
+        position,
+        PdfCatalogEntry(
+          id: entry.id,
+          title: title,
+          level: level,
+          pdfPage: page,
+          sourceKind: entry.sourceKind,
+        ),
+      );
+    }
+
+    for (final root in children[null] ?? const <int>[]) {
+      append(root, 1);
+    }
+    return rows;
+  }
+
+  Future<List<PdfCatalogEntry>> _readPdfBookmarks() async {
+    if (!_pdf.isReady) return const [];
+    try {
+      final nodes = await _pdf.useDocument(
+        (document) => document.loadOutline(),
+      );
+      if (!mounted || nodes == null) return const [];
+      final entries = <PdfCatalogEntry>[];
+      void add(List<PdfOutlineNode> nodes, int depth) {
+        for (final node in nodes) {
+          entries.add(
+            PdfCatalogEntry(
+              id: 'bookmark:${entries.length}',
+              title: node.title,
+              level: depth,
+              pdfPage: node.dest?.pageNumber,
+              sourceKind: 'pdf_outline',
+            ),
+          );
+          add(node.children, depth + 1);
+        }
+      }
+
+      add(nodes, 1);
+      return _organizePdfOutline(entries);
+    } on Exception {
+      // A broken optional outline must leave the page list usable.
+      return const [];
+    }
   }
 
   List<PdfCatalogEntry> _pdfCatalogEntries() {
@@ -3388,6 +3520,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   Widget _outlineSheet(double availableHeight, String location) {
     final full = math.max(0.0, availableHeight);
+    final surface = _dark ? _readerPanelSurface : const Color(0xFFF8F9FA);
+    final bookTitle = widget.bookTitle.trim().isEmpty
+        ? _source.displayName
+        : widget.bookTitle;
     final compact = math.min(
       full,
       MediaQuery.sizeOf(context).height * .33 + (_readerWide ? 72 : 46),
@@ -3404,7 +3540,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       curve: Curves.easeOut,
       height: compact + travel * _outlineExtent,
       child: Material(
-        color: _dark ? _readerPanelSurface : const Color(0xFFF8F9FA),
+        color: surface,
         clipBehavior: Clip.antiAlias,
         shape: RoundedRectangleBorder(
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
@@ -3412,76 +3548,114 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         ),
         child: Column(
           children: [
-            Semantics(
-              button: true,
-              label: _outlineExtent >= .5 ? '收起目录' : '展开目录',
-              onTap: () => snap(_outlineExtent < .5),
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
+            ColoredBox(
+              color: surface,
+              child: Semantics(
+                button: true,
+                label: _outlineExtent >= .5 ? '收起目录' : '展开目录',
                 onTap: () => snap(_outlineExtent < .5),
-                onVerticalDragStart: (_) =>
-                    setState(() => _outlineDragging = true),
-                onVerticalDragUpdate: (details) {
-                  if (travel > 0) {
-                    setState(
-                      () => _outlineExtent =
-                          (_outlineExtent - details.delta.dy / travel).clamp(
-                            0.0,
-                            1.0,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => snap(_outlineExtent < .5),
+                  onVerticalDragStart: (_) =>
+                      setState(() => _outlineDragging = true),
+                  onVerticalDragUpdate: (details) {
+                    if (travel > 0) {
+                      setState(
+                        () => _outlineExtent =
+                            (_outlineExtent - details.delta.dy / travel).clamp(
+                              0.0,
+                              1.0,
+                            ),
+                      );
+                    }
+                  },
+                  onVerticalDragEnd: (details) {
+                    final speed = details.primaryVelocity ?? 0;
+                    snap(speed.abs() > 250 ? speed < 0 : _outlineExtent >= .5);
+                  },
+                  onVerticalDragCancel: () => snap(_outlineExtent >= .5),
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      _readerSideInset,
+                      10,
+                      _readerSideInset,
+                      9,
+                    ),
+                    child: Column(
+                      children: [
+                        Container(
+                          width: 42,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: _readerRule,
+                            borderRadius: BorderRadius.circular(4),
                           ),
-                    );
-                  }
-                },
-                onVerticalDragEnd: (details) {
-                  final speed = details.primaryVelocity ?? 0;
-                  snap(speed.abs() > 250 ? speed < 0 : _outlineExtent >= .5);
-                },
-                onVerticalDragCancel: () => snap(_outlineExtent >= .5),
-                child: Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    _readerSideInset,
-                    10,
-                    _readerSideInset,
-                    9,
-                  ),
-                  child: Column(
-                    children: [
-                      Container(
-                        width: 42,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: _readerRule,
-                          borderRadius: BorderRadius.circular(4),
                         ),
-                      ),
-                      const SizedBox(height: 11),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              '目录',
-                              style: TextStyle(
-                                color: _ink,
-                                fontSize: _readerWide ? 23 : 18,
-                                fontWeight: FontWeight.w600,
+                        const SizedBox(height: 11),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '目录',
+                                style: TextStyle(
+                                  color: _ink,
+                                  fontSize: _readerWide ? 23 : 18,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
-                          ),
-                          Text(location, style: TextStyle(color: _readerMuted)),
-                        ],
-                      ),
-                    ],
+                            Text(
+                              location,
+                              style: TextStyle(color: _readerMuted),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-            Divider(height: 1, color: _readerRule),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: _readerSideInset),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Divider(height: 1, color: _readerRule),
+                  Padding(
+                    padding: EdgeInsets.symmetric(
+                      vertical: _readerWide ? 12 : 9,
+                    ),
+                    child: Semantics(
+                      header: true,
+                      child: Text(
+                        bookTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: _ink,
+                          fontSize: _readerWide ? 18 : 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Divider(height: 1, color: _readerRule),
+                ],
+              ),
+            ),
             Expanded(
-              child: Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: _readerSideInset * .6,
+              child: ClipRect(
+                child: Material(
+                  color: surface,
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: _readerSideInset * .6,
+                    ),
+                    child: Builder(builder: _outlinePanel!),
+                  ),
                 ),
-                child: Builder(builder: _outlinePanel!),
               ),
             ),
           ],
@@ -4434,7 +4608,7 @@ Future<int?> _chooseReaderItem(
 
 class _ReaderOutlineList extends StatefulWidget {
   const _ReaderOutlineList({
-    required this.bookTitle,
+    super.key,
     required this.titles,
     required this.current,
     required this.onSelected,
@@ -4449,12 +4623,11 @@ class _ReaderOutlineList extends StatefulWidget {
   });
 
   final List<String> titles;
-  final String bookTitle;
   final int current;
   final ValueChanged<int> onSelected;
   final List<int> levels;
   final Set<int> groupLabels;
-  final List<int> pages;
+  final List<int?> pages;
   final int? readingPage;
   final bool wide;
   final Color ink;
@@ -4468,6 +4641,34 @@ class _ReaderOutlineList extends StatefulWidget {
 class _ReaderOutlineListState extends State<_ReaderOutlineList> {
   ScrollController? _scroll;
   final _collapsed = <int>{};
+  bool get _hasLevels => widget.levels.length == widget.titles.length;
+
+  bool _hasChildren(int index) =>
+      _hasLevels &&
+      index + 1 < widget.levels.length &&
+      widget.levels[index + 1] > widget.levels[index];
+
+  @override
+  void initState() {
+    super.initState();
+    if (!_hasLevels) return;
+    final open = <int>{};
+    final current = widget.current;
+    if (current >= 0 && current < widget.levels.length) {
+      open.add(current);
+      var depth = widget.levels[current];
+      for (var index = current - 1; index >= 0 && depth > 0; index--) {
+        if (widget.levels[index] >= depth) continue;
+        open.add(index);
+        depth = widget.levels[index];
+      }
+    }
+    for (var index = 0; index < widget.levels.length; index++) {
+      if (_hasChildren(index) && !open.contains(index)) {
+        _collapsed.add(index);
+      }
+    }
+  }
 
   @override
   void dispose() {
@@ -4485,11 +4686,10 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
       textScaler.scale(titleSize) + 22,
     );
     final selectedExtra = textScaler.scale(subtitleSize) + 9;
-    final hasLevels = widget.levels.length == widget.titles.length;
     final visible = <int>[];
     int? hiddenBelow;
     for (var index = 0; index < widget.titles.length; index++) {
-      final level = hasLevels ? widget.levels[index] : 0;
+      final level = _hasLevels ? widget.levels[index] : 0;
       if (hiddenBelow != null && level > hiddenBelow) continue;
       hiddenBelow = _collapsed.contains(index) ? level : null;
       visible.add(index);
@@ -4501,13 +4701,15 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final targetOffset =
-            (1 + visible.indexOf(widget.current)) * rowHeight -
-            (constraints.maxHeight - rowHeight - selectedExtra) / 2;
+        final currentIndex = visible.indexOf(widget.current);
+        final targetOffset = currentIndex < 0
+            ? 0.0
+            : currentIndex * rowHeight -
+                  (constraints.maxHeight - rowHeight - selectedExtra) / 2;
         final maxOffset = math.max(
           0.0,
-          (1 + visible.length) * rowHeight +
-              selectedExtra -
+          visible.length * rowHeight +
+              (currentIndex < 0 ? 0 : selectedExtra) -
               constraints.maxHeight,
         );
         final scroll = _scroll ??= ScrollController(
@@ -4517,43 +4719,16 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
         return ListView.builder(
           controller: scroll,
           padding: EdgeInsets.zero,
-          itemCount: visible.length + 1,
+          itemCount: visible.length,
           itemExtentBuilder: (row, _) =>
-              rowHeight +
-              (row > 0 && widget.current == visible[row - 1]
-                  ? selectedExtra
-                  : 0),
+              rowHeight + (widget.current == visible[row] ? selectedExtra : 0),
           itemBuilder: (context, row) {
-            if (row == 0) {
-              return Semantics(
-                header: true,
-                child: Container(
-                  alignment: AlignmentDirectional.centerStart,
-                  padding: const EdgeInsetsDirectional.only(start: 10),
-                  decoration: BoxDecoration(
-                    border: Border(bottom: BorderSide(color: widget.rule)),
-                  ),
-                  child: Text(
-                    widget.bookTitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: widget.ink,
-                      fontSize: titleSize,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              );
-            }
-            final index = visible[row - 1];
+            final index = visible[row];
             final selected = widget.current == index;
             final group = widget.groupLabels.contains(index);
-            final level = widget.levels.isEmpty ? 0 : widget.levels[index];
-            final hasChildren =
-                hasLevels &&
-                index + 1 < widget.levels.length &&
-                widget.levels[index + 1] > level;
+            final level = _hasLevels ? widget.levels[index] : 0;
+            final hasChildren = _hasChildren(index);
+            final page = widget.pages.isEmpty ? null : widget.pages[index];
             void toggleGroup() => setState(() {
               if (!_collapsed.remove(index)) _collapsed.add(index);
             });
@@ -4586,27 +4761,34 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
                           ),
                         ),
                   padding: EdgeInsetsDirectional.only(
-                    start: 10 + 10.0 * level.clamp(0, 4),
+                    start: 10 + (widget.wide ? 28.0 : 20.0) * level.clamp(0, 4),
                     end: 10,
                   ),
                   height: rowHeight + (selected ? selectedExtra : 0),
                   child: Row(
                     children: [
-                      if (hasChildren)
-                        IconButton(
-                          tooltip: _collapsed.contains(index) ? '展开章节' : '收起章节',
-                          onPressed: toggleGroup,
-                          icon: SvgPicture.asset(
-                            _collapsed.contains(index)
-                                ? 'assets/icons/extension_market/detail/caret-right.svg'
-                                : 'assets/icons/extension_market/detail/caret-down.svg',
-                            width: 15,
-                            height: 15,
-                            colorFilter: ColorFilter.mode(
-                              foreground,
-                              BlendMode.srcIn,
-                            ),
-                          ),
+                      if (hasChildren || level > 0)
+                        SizedBox(
+                          width: 44,
+                          child: hasChildren
+                              ? IconButton(
+                                  tooltip: _collapsed.contains(index)
+                                      ? '展开章节'
+                                      : '收起章节',
+                                  onPressed: toggleGroup,
+                                  icon: SvgPicture.asset(
+                                    _collapsed.contains(index)
+                                        ? 'assets/icons/extension_market/detail/caret-right.svg'
+                                        : 'assets/icons/extension_market/detail/caret-down.svg',
+                                    width: 15,
+                                    height: 15,
+                                    colorFilter: ColorFilter.mode(
+                                      foreground,
+                                      BlendMode.srcIn,
+                                    ),
+                                  ),
+                                )
+                              : null,
                         ),
                       Expanded(
                         child: Column(
@@ -4640,10 +4822,10 @@ class _ReaderOutlineListState extends State<_ReaderOutlineList> {
                           ],
                         ),
                       ),
-                      if (widget.pages.isNotEmpty) ...[
+                      if (page != null) ...[
                         const SizedBox(width: 12),
                         Text(
-                          '${widget.pages[index]}',
+                          '$page',
                           style: TextStyle(
                             color: foreground,
                             fontSize: titleSize,
