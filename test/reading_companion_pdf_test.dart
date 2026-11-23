@@ -34,7 +34,11 @@ void main() {
           await directory.delete(recursive: true);
           break;
         } on FileSystemException catch (error) {
-          if (!Platform.isWindows || error.osError?.errorCode != 32 || attempt >= 20) rethrow;
+          if (!Platform.isWindows ||
+              error.osError?.errorCode != 32 ||
+              attempt >= 20) {
+            rethrow;
+          }
           await Future<void>.delayed(const Duration(milliseconds: 100));
         }
       }
@@ -62,11 +66,16 @@ void main() {
     );
 
     final viewer = find.byType(PdfViewer);
-    final progress = find.ancestor(of: find.text('进度'), matching: find.byType(InkWell));
+    final progress = find.ancestor(
+      of: find.text('进度'),
+      matching: find.byType(InkWell),
+    );
     bool ready() =>
         viewer.evaluate().isNotEmpty &&
         tester.widget<PdfViewer>(viewer).controller!.isReady &&
-        tester.widgetList<InkWell>(progress).any((button) => button.onTap != null);
+        tester
+            .widgetList<InkWell>(progress)
+            .any((button) => button.onTap != null);
     for (var frame = 0; frame < 100 && !ready(); frame++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
@@ -81,6 +90,13 @@ void main() {
     final slider = tester.widgetList<Slider>(find.byType(Slider)).singleOrNull;
     expect(tester.getRect(viewer), viewport);
     expect(find.text('第 2 页 / 共 3 页'), findsOneWidget);
+    slider!.onChanged!(2.35);
+    await tester.pump();
+    expect(
+      tester.widget<Slider>(find.byType(Slider)).value,
+      closeTo(2.35, .001),
+    );
+    expect(tester.widget<PdfViewer>(viewer).controller!.pageNumber, 2);
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     final controller = tester
@@ -96,8 +112,14 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.byType(ReflowDocumentPager), findsNothing);
     await tester.tap(ebook);
-    for (var frame = 0; frame < 120 && find.byType(ReflowDocumentPager).evaluate().isEmpty; frame++) {
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 15)));
+    for (
+      var frame = 0;
+      frame < 120 && find.byType(ReflowDocumentPager).evaluate().isEmpty;
+      frame++
+    ) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 15)),
+      );
       await tester.pump(const Duration(milliseconds: 24));
     }
     expect(find.text('Read this page.'), findsOneWidget);
@@ -170,10 +192,12 @@ void main() {
     // The PDFium worker releases the OS handle on its own isolate. Flush
     // notifications back to the widget-test zone before cleaning the file.
     for (var i = 0; i < 5; i++) {
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
       await tester.pump();
     }
-    expect(slider?.value, 2);
+    expect(slider.value, 2);
     expect(tester.takeException(), isNull);
   });
 }

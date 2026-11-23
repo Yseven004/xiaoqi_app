@@ -193,7 +193,7 @@ void main() {
     expect(tester.state(pager), same(initialPager));
     await tester.tap(find.text('显示'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('深色'));
+    await tester.tap(find.text('暗夜'));
     await tester.pumpAndSettle();
     expect(
       find.ancestor(
@@ -205,7 +205,7 @@ void main() {
       ),
       findsWidgets,
     );
-    await tester.tap(find.text('默认'));
+    await tester.tap(find.text('白天'));
     await tester.pumpAndSettle();
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();

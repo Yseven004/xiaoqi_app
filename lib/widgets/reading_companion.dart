@@ -750,12 +750,17 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   LocalHistoryEntry? _panelHistory;
   WidgetBuilder? _outlinePanel;
   Future<List<PdfCatalogEntry>>? _pdfBookmarkOutline;
-  double? _progressPreview;
-  double _fontScale = 1;
-  double _marginFraction = .04;
-  double _lineScale = 1;
+  final _progressPreview = ValueNotifier<double?>(null);
+  static const _defaultFontScale = 1.0;
+  static const _defaultMarginFraction = .04;
+  static const _defaultLineScale = 1.0;
+  static const _defaultBrightness = .65;
+  static const _brightnessPreference = 'reading-companion.brightness';
+  double _fontScale = _defaultFontScale;
+  double _marginFraction = _defaultMarginFraction;
+  double _lineScale = _defaultLineScale;
   ReaderPaginationMode _pageTurnMode = ReaderPaginationMode.vertical;
-  double _brightness = .65;
+  double _brightness = _defaultBrightness;
   bool _hasBrightnessOverride = false;
   bool _dark = false;
   PdfDocument? _pdfDocumentRef;
@@ -1742,13 +1747,16 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     if (!mounted) return;
     setState(() {
       _dark = prefs.getBool('reading-companion.dark') ?? false;
-      _fontScale = prefs.getDouble('reading-companion.font') ?? 1;
-      _marginFraction = prefs.getDouble('reading-companion.margin') ?? .04;
-      _lineScale = prefs.getDouble('reading-companion.line') ?? 1;
+      _fontScale =
+          prefs.getDouble('reading-companion.font') ?? _defaultFontScale;
+      _marginFraction =
+          prefs.getDouble('reading-companion.margin') ?? _defaultMarginFraction;
+      _lineScale =
+          prefs.getDouble('reading-companion.line') ?? _defaultLineScale;
       _pageTurnMode = prefs.getString('reading-companion.turn') == 'horizontal'
           ? ReaderPaginationMode.horizontal
           : ReaderPaginationMode.vertical;
-      final brightness = prefs.getDouble('reading-companion.brightness');
+      final brightness = prefs.getDouble(_brightnessPreference);
       if (brightness != null) {
         _brightness = brightness;
         _hasBrightnessOverride = true;
@@ -1781,6 +1789,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       );
     }
     _drawingTools.dispose();
+    _progressPreview.dispose();
     for (final part in _drawingLayers.values) {
       part.layer.dispose();
     }
@@ -2236,9 +2245,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       double value,
       double min,
       double max,
+      double defaultValue,
       Widget start,
       Widget end,
       ValueChanged<double> onChanged, {
+      VoidCallback? onReset,
       double wideHeight = 54,
     }) => setting(
       label,
@@ -2254,6 +2265,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 max: max,
                 onChanged: onChanged,
                 description: label,
+                defaultValue: defaultValue,
+                onReset: onReset ?? () => onChanged(defaultValue),
               ),
             ),
           ),
@@ -2264,14 +2277,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
     Widget themeChoice(bool dark) {
       final selected = _dark == dark;
-      final background = selected
-          ? Colors.transparent
-          : dark
-          ? const Color(0xFF333333)
-          : const Color(0xFFEEEEEE);
+      final background = selected ? const Color(0xFF292929) : Colors.white;
       final foreground = selected
-          ? _ink
-          : dark
           ? const Color(0xFFF7F5F1)
           : const Color(0xFF262626);
       return Semantics(
@@ -2289,7 +2296,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             backgroundColor: background,
             minimumSize: Size(_readerWide ? 110 : 67, 40),
             padding: EdgeInsets.symmetric(horizontal: _readerWide ? 15 : 8),
-            side: selected ? BorderSide(color: foreground, width: 1.4) : null,
+            side: BorderSide(
+              color: selected ? background : const Color(0xFFD8D8D8),
+            ),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(10),
             ),
@@ -2300,15 +2309,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (selected) ...[
-                _readerIcon(
-                  'assets/icons/drawing/check.svg',
-                  _readerWide ? 20 : 15,
-                  color: foreground,
-                ),
-                const SizedBox(width: 6),
-              ],
-              Text(dark ? '深色' : '默认'),
+              _readerIcon(
+                dark
+                    ? 'assets/icons/chat_note_editor/moon.svg'
+                    : 'assets/icons/chat_note_editor/sun.svg',
+                _readerWide ? 19 : 15,
+                color: foreground,
+              ),
+              const SizedBox(width: 6),
+              Text(dark ? '暗夜' : '白天'),
             ],
           ),
         ),
@@ -2325,6 +2334,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               _brightness,
               .05,
               1,
+              _defaultBrightness,
               _readerIcon('assets/icons/chat_note_editor/sun.svg', 20),
               _readerIcon('assets/icons/chat_note_editor/sun.svg', 26),
               (value) {
@@ -2333,6 +2343,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   _hasBrightnessOverride = true;
                 });
                 unawaited(_applyBrightness(value));
+              },
+              onReset: () {
+                setState(() {
+                  _brightness = _defaultBrightness;
+                  _hasBrightnessOverride = false;
+                });
+                unawaited(_applyBrightness(null));
+                unawaited(_clearSavedBrightness());
               },
               wideHeight: pdf ? 54 : 65,
             ),
@@ -2356,6 +2374,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               _fontScale,
               .8,
               1.5,
+              _defaultFontScale,
               const Text('A', style: TextStyle(fontSize: 17)),
               const Text('A', style: TextStyle(fontSize: 23)),
               (value) => setState(() => _fontScale = value),
@@ -2366,6 +2385,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               _marginFraction,
               .025,
               .12,
+              _defaultMarginFraction,
               const Text('小'),
               const Text('大'),
               (value) => setState(() => _marginFraction = value),
@@ -2376,6 +2396,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               _lineScale,
               .85,
               1.35,
+              _defaultLineScale,
               const Text('紧'),
               const Text('松'),
               (value) => setState(() => _lineScale = value),
@@ -2413,7 +2434,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       ),
                       onPressed: () {
                         if (_pageTurnMode == mode) return;
-                        setState(() => _pageTurnMode = mode);
+                        _changeReaderPageTurnMode(mode);
                       },
                       child: Text(
                         mode == ReaderPaginationMode.vertical ? '上下滑动' : '左右翻页',
@@ -2423,25 +2444,6 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               ],
             ),
           ),
-          if (pdf) ...[
-            Divider(height: 1, thickness: 1, color: _readerRule),
-            setting(
-              '排版',
-              Wrap(
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  const Text('字号、边距、行距可在电子书中调整。'),
-                  TextButton(
-                    onPressed: () {
-                      _closeReaderPanel();
-                      _switchReaderFormat(false);
-                    },
-                    child: const Text('打开电子书'),
-                  ),
-                ],
-              ),
-            ),
-          ],
         ],
       ),
     );
@@ -2456,8 +2458,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       prefs.setDouble('reading-companion.line', _lineScale),
       prefs.setString('reading-companion.turn', _pageTurnMode.name),
       if (_hasBrightnessOverride)
-        prefs.setDouble('reading-companion.brightness', _brightness),
+        prefs.setDouble(_brightnessPreference, _brightness),
     ]);
+  }
+
+  Future<void> _clearSavedBrightness() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!_hasBrightnessOverride) await prefs.remove(_brightnessPreference);
   }
 
   Widget _flowSelection(
@@ -3239,7 +3246,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       _outlineExtent = 0;
       _outlineDragging = false;
       _outlinePanel = outline;
-      _progressPreview = null;
+      _progressPreview.value = null;
     });
   }
 
@@ -3252,7 +3259,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     setState(() {
       _activePanel = null;
       _outlinePanel = null;
-      _progressPreview = null;
+      _progressPreview.value = null;
     });
     if (saveDisplay) unawaited(_persistDisplaySettings());
     return true;
@@ -3275,40 +3282,62 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     required ValueChanged<double>? onChanged,
     ValueChanged<double>? onChangeEnd,
     SemanticFormatterCallback? formatValue,
+    double? defaultValue,
+    VoidCallback? onReset,
     bool compact = false,
-  }) => Semantics(
-    label: description,
-    child: SliderTheme(
-      data: SliderThemeData(
-        activeTrackColor: _dark
-            ? const Color(0xFFC0BFBB)
-            : const Color(0xFF4B4B4B),
-        inactiveTrackColor: _dark
-            ? const Color(0xFF606163)
-            : const Color(0xFFD7D8D9),
-        thumbColor: _dark ? const Color(0xFFF0ECE3) : const Color(0xFF363636),
-        overlayColor: Colors.transparent,
-        overlayShape: SliderComponentShape.noOverlay,
-        trackShape: const RoundedRectSliderTrackShape(),
-        trackHeight: compact ? 3.5 : 4.5,
-        thumbShape: RoundSliderThumbShape(
-          enabledThumbRadius: compact ? 5.5 : 7,
-          elevation: 0,
-          pressedElevation: 0,
+  }) {
+    const trackInset = 7.0;
+    Widget slider(
+      double shownValue,
+      ValueChanged<double>? change,
+      ValueChanged<double>? finish,
+    ) => Semantics(
+      label: description,
+      child: SliderTheme(
+        data: SliderThemeData(
+          activeTrackColor: _dark
+              ? const Color(0xFFC0BFBB)
+              : const Color(0xFF4B4B4B),
+          inactiveTrackColor: _dark
+              ? const Color(0xFF606163)
+              : const Color(0xFFD7D8D9),
+          thumbColor: _dark ? const Color(0xFFF0ECE3) : const Color(0xFF363636),
+          overlayColor: Colors.transparent,
+          overlayShape: SliderComponentShape.noOverlay,
+          trackShape: const RoundedRectSliderTrackShape(),
+          trackHeight: compact ? 3.5 : 4.5,
+          thumbShape: RoundSliderThumbShape(
+            enabledThumbRadius: compact ? 5.5 : 7,
+            elevation: 0,
+            pressedElevation: 0,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: trackInset),
+          showValueIndicator: ShowValueIndicator.never,
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 7),
-        showValueIndicator: ShowValueIndicator.never,
+        child: Slider(
+          value: shownValue.clamp(min, max).toDouble(),
+          min: min,
+          max: max,
+          onChanged: change,
+          onChangeEnd: finish,
+          semanticFormatterCallback: formatValue,
+        ),
       ),
-      child: Slider(
-        value: value.clamp(min, max).toDouble(),
-        min: min,
-        max: max,
-        onChanged: onChanged,
-        onChangeEnd: onChangeEnd,
-        semanticFormatterCallback: formatValue,
-      ),
-    ),
-  );
+    );
+    if (defaultValue == null || onReset == null || onChanged == null) {
+      return slider(value, onChanged, onChangeEnd);
+    }
+    return _ReaderDisplaySlider(
+      key: ValueKey(description),
+      value: value,
+      defaultFraction: (defaultValue - min) / (max - min),
+      trackInset: trackInset,
+      label: '恢复默认$description',
+      onCommit: onChanged,
+      onReset: onReset,
+      buildSlider: slider,
+    );
+  }
 
   Widget _footerWithBody({
     required Widget body,
@@ -3321,7 +3350,6 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     required VoidCallback? onOutline,
     ValueChanged<FlowReaderAnchor>? onRestoreFlow,
   }) {
-    final shownPage = (_progressPreview ?? page.toDouble()).round();
     final pdf = _isPdfDocument || usesOriginalPages;
     final section = chapterTitle?.trim() ?? '';
     final sectionNumber = RegExp(
@@ -3338,7 +3366,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       if (closeProgress) _closeReaderPanel();
       if (destination != page || !closeProgress) {
         setState(() {
-          _progressPreview = null;
+          _progressPreview.value = null;
           if (destination != page) {
             _pageBeforeJump = page;
             _flowPositionBeforeJump = _flowPosition;
@@ -3362,42 +3390,55 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       }
     }
 
-    Widget progressSlider({bool compact = false}) => _readerSlider(
-      value: shownPage.toDouble(),
-      min: 1,
-      max: maxPage,
-      onChanged: pageCount > 1
-          ? (value) => setState(() => _progressPreview = value)
-          : null,
-      onChangeEnd: pageCount > 1 ? (value) => jumpTo(value.round()) : null,
-      description: '阅读进度',
-      formatValue: (value) => '${value.round()} / $pageCount',
-      compact: compact,
-    );
-
     final size = _readerWide ? 18.0 : 14.0;
     Widget progressPanel() => SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 5, bottom: 4),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    pdf
-                        ? '第 $shownPage 页 / 共 $pageCount 页'
-                        : '第 $shownPage 章 / 共 $pageCount 章',
-                    style: const TextStyle(fontWeight: FontWeight.w500),
+          ValueListenableBuilder<double?>(
+            valueListenable: _progressPreview,
+            builder: (context, preview, _) {
+              final position = preview ?? page.toDouble();
+              final shownPage = position.round();
+              return Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 5, bottom: 4),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            pdf
+                                ? '第 $shownPage 页 / 共 $pageCount 页'
+                                : '第 $shownPage 章 / 共 $pageCount 章',
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                        ),
+                        Text('${(shownPage * 100 / pageCount).round()}%'),
+                      ],
+                    ),
                   ),
-                ),
-                Text('${(shownPage * 100 / pageCount).round()}%'),
-              ],
-            ),
+                  SizedBox(
+                    height: 38,
+                    child: _readerSlider(
+                      value: position,
+                      min: 1,
+                      max: maxPage,
+                      onChanged: pageCount > 1
+                          ? (value) => _progressPreview.value = value
+                          : null,
+                      onChangeEnd: pageCount > 1
+                          ? (value) => jumpTo(value.round())
+                          : null,
+                      description: '阅读进度',
+                      formatValue: (value) => '${value.round()} / $pageCount',
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
-          SizedBox(height: 38, child: progressSlider()),
           DefaultTextStyle.merge(
             style: TextStyle(color: _readerMuted, fontSize: size - 2),
             child: Row(
@@ -4100,6 +4141,132 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       },
     ),
   );
+}
+
+class _ReaderDisplaySlider extends StatefulWidget {
+  const _ReaderDisplaySlider({
+    super.key,
+    required this.value,
+    required this.defaultFraction,
+    required this.trackInset,
+    required this.label,
+    required this.onCommit,
+    required this.onReset,
+    required this.buildSlider,
+  });
+
+  final double value;
+  final double defaultFraction;
+  final double trackInset;
+  final String label;
+  final ValueChanged<double> onCommit;
+  final VoidCallback onReset;
+  final Widget Function(
+    double value,
+    ValueChanged<double> onChanged,
+    ValueChanged<double> onChangeEnd,
+  )
+  buildSlider;
+
+  @override
+  State<_ReaderDisplaySlider> createState() => _ReaderDisplaySliderState();
+}
+
+class _ReaderDisplaySliderState extends State<_ReaderDisplaySlider> {
+  double? _dragValue;
+  int? _markerPointer;
+  Offset? _markerDown;
+
+  void _reset() {
+    setState(() => _dragValue = null);
+    widget.onReset();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const height = 48.0;
+    return SizedBox(
+      height: height,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final fraction = Directionality.of(context) == TextDirection.rtl
+              ? 1 - widget.defaultFraction
+              : widget.defaultFraction;
+          final marker = Offset(
+            widget.trackInset +
+                (constraints.maxWidth - 2 * widget.trackInset) * fraction,
+            height / 2,
+          );
+          return Listener(
+            onPointerDown: (event) {
+              final delta = event.localPosition - marker;
+              if (_markerPointer == null &&
+                  delta.dx.abs() <= 10 &&
+                  delta.dy.abs() <= 16) {
+                _markerPointer = event.pointer;
+                _markerDown = event.localPosition;
+              }
+            },
+            onPointerMove: (event) {
+              if (_markerPointer == event.pointer &&
+                  (event.localPosition - _markerDown!).distance > 6) {
+                _markerPointer = null;
+              }
+            },
+            onPointerUp: (event) {
+              if (_markerPointer != event.pointer) return;
+              // Let the slider's gesture recognizer finish the same event.
+              scheduleMicrotask(() {
+                _markerPointer = null;
+                if (mounted) _reset();
+              });
+            },
+            onPointerCancel: (event) {
+              if (_markerPointer != event.pointer) return;
+              _markerPointer = null;
+              setState(() => _dragValue = null);
+            },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                widget.buildSlider(
+                  _dragValue ?? widget.value,
+                  (value) => setState(() => _dragValue = value),
+                  (value) {
+                    if (_markerPointer != null) return;
+                    setState(() => _dragValue = null);
+                    widget.onCommit(value);
+                  },
+                ),
+                Positioned(
+                  left: marker.dx - 22,
+                  top: 0,
+                  bottom: 0,
+                  width: 44,
+                  child: Semantics(
+                    button: true,
+                    label: widget.label,
+                    onTap: _reset,
+                    child: const IgnorePointer(
+                      child: Center(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Color(0xFFA8A8A8),
+                            shape: BoxShape.circle,
+                          ),
+                          child: SizedBox.square(dimension: 4),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
 }
 
 class _CompanionInkRecord {
