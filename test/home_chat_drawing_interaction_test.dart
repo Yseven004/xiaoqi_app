@@ -19,6 +19,17 @@ void main() {
   late Uint8List drawingImageBytes;
   late int drawingImageByteLength;
 
+  bool toolSelected(WidgetTester tester, int tool) => tester
+      .widgetList<Semantics>(
+        find.ancestor(
+          of: find.byKey(ValueKey('drawing-tool-$tool')),
+          matching: find.byType(Semantics),
+        ),
+      )
+      .firstWhere((widget) => widget.properties.selected != null)
+      .properties
+      .selected!;
+
   setUp(() async {
     tempDirectory = await Directory.systemTemp.createTemp(
       'xiaoqi-drawing-widget-test-',
@@ -274,7 +285,8 @@ void main() {
     await tester.pump();
     field = tester.widget<TextField>(textFieldFinder);
     expect(field.focusNode!.hasFocus, isTrue);
-    await tester.enterText(textFieldFinder, '你好，小奇');
+    expect(field.style!.fontSize, 24);
+    await tester.enterText(textFieldFinder, 'g');
     await tester.pump();
 
     final cardRect = tester.getRect(
@@ -289,10 +301,37 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(textFieldFinder, findsNothing);
-    expect(
-      find.byKey(const ValueKey('drawing-selected-object-frame')),
-      findsOneWidget,
+    final frame = find.byKey(const ValueKey('drawing-selected-object-frame'));
+    expect(toolSelected(tester, 2), isTrue);
+    final objectRect = tester.widget<TransformableBox>(frame).rect;
+    final canvasOrigin = tester.getTopLeft(
+      find.byKey(const ValueKey('drawing-object-edit-lock')),
     );
+    expect(objectRect.width, greaterThanOrEqualTo(64));
+    await tester.tapAt(canvasOrigin + objectRect.center);
+    await tester.pumpAndSettle();
+    field = tester.widget<TextField>(textFieldFinder);
+    expect(field.controller!.text, 'g');
+    expect(field.focusNode!.hasFocus, isTrue);
+    await tester.enterText(textFieldFinder, '改好的文字');
+    await tester.tapAt(
+      Offset(
+        cardRect.left + cardRect.width * .75,
+        cardRect.top + cardRect.height * .7,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('删除文字'));
+    await tester.pumpAndSettle();
+    expect(frame, findsNothing);
+    expect(toolSelected(tester, 2), isTrue);
+    await tester.tap(find.byTooltip('撤销'));
+    await tester.pumpAndSettle();
+    await tester.tapAt(canvasOrigin + objectRect.center);
+    await tester.pumpAndSettle();
+    await tester.tapAt(canvasOrigin + objectRect.center);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(textFieldFinder).controller!.text, '改好的文字');
     expect(tester.takeException(), isNull);
   });
 
@@ -390,13 +429,14 @@ void main() {
 
       await tester.tap(find.byKey(const ValueKey('drawing-tool-5')));
       await tester.pumpAndSettle();
+      expect(toolSelected(tester, 5), isTrue);
       await tester.tapAt(
         tester.getCenter(find.byKey(const ValueKey('drawing-tool-2'))),
       );
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('drawing-inline-text-field')),
-        findsNothing,
+        findsOneWidget,
       );
 
       await tester.tap(find.byKey(const ValueKey('drawing-tool-5')));
@@ -442,6 +482,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.textContaining('图片导入失败'), findsNothing);
+      expect(toolSelected(tester, 5), isTrue);
       expect(
         tester
             .widget<InkWell>(find.byKey(const ValueKey('drawing-tool-2')))

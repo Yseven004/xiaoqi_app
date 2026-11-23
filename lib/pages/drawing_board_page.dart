@@ -49,11 +49,15 @@ class DrawingBoardPage extends StatefulWidget {
     this.showToolbar = true,
     super.key,
   }) : annotation = null,
-       annotationTools = null;
+       annotationTools = null,
+       legacyAnnotation = false,
+       adoptsLegacyAnnotations = false;
 
   const DrawingBoardPage.annotation({
     required DrawingAnnotationLayer layer,
     this.annotationTools,
+    this.legacyAnnotation = false,
+    this.adoptsLegacyAnnotations = false,
     super.key,
   }) : annotation = layer,
        conversationId = '',
@@ -68,6 +72,8 @@ class DrawingBoardPage extends StatefulWidget {
 
   final DrawingAnnotationLayer? annotation;
   final DrawingAnnotationTools? annotationTools;
+  final bool legacyAnnotation;
+  final bool adoptsLegacyAnnotations;
 
   final String conversationId;
   final String accountScope;
@@ -87,6 +93,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     with WidgetsBindingObserver {
   static const _paper = Color(0xFFFFFFFF);
   static const _ink = Color(0xFF252525);
+  static const _defaultTextSize = 24.0;
   static const _inlineTextTopFraction = .31;
   late final HomeChatDrawingDraftStore _store;
   final _textFocusNode = FocusNode();
@@ -95,7 +102,9 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   final _canvasCardKey = GlobalKey();
   final _controller = PainterController(
     settings: PainterSettings(
-      text: TextSettings(textStyle: const TextStyle(fontSize: 30, color: _ink)),
+      text: TextSettings(
+        textStyle: const TextStyle(fontSize: _defaultTextSize, color: _ink),
+      ),
       freeStyle: const FreeStyleSettings(color: _ink, strokeWidth: 5),
       shape: ShapeSettings(
         paint: Paint()
@@ -139,6 +148,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   bool _showImageDeleteButton = false;
   ObjectDrawable? _transformBaseDrawable;
   Rect? _transformBaseRect;
+  Offset? _objectDragStart;
   bool _transformHasRecordedAction = false;
   double _rotationStartPointerAngle = 0;
   double _rotationStartObjectAngle = 0;
@@ -154,6 +164,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
 
   bool get _canEdit =>
       _ready &&
+      !widget.legacyAnnotation &&
       (_draft != null || widget.annotationTools != null) &&
       !_saving &&
       !_closing &&
@@ -513,6 +524,76 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     return picked.readAsBytes();
   }
 
+  Future<void> _previewImage(ImageDrawable drawable) async {
+    // Keep a handle alive until the dialog has finished closing, including
+    // when its owning drawing surface has already been disposed.
+    final image = drawable.image.clone();
+    final route = DialogRoute<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: const Color.fromRGBO(0, 0, 0, .64),
+      barrierLabel: '关闭图片预览',
+      builder: (context) {
+        final screen = MediaQuery.sizeOf(context);
+        final baseScale = math.min(
+          screen.width * .72 / image.width,
+          screen.height * .68 / image.height,
+        );
+        final baseWidth = image.width * baseScale;
+        final baseHeight = image.height * baseScale;
+        final maxScale = math.min(
+          screen.width / baseWidth,
+          screen.height / baseHeight,
+        );
+        var zoom = 1.0;
+        var gestureZoom = zoom;
+
+        return Material(
+          type: MaterialType.transparency,
+          child: SizedBox.expand(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => Navigator.of(context).pop(),
+              child: Center(
+                child: StatefulBuilder(
+                  builder: (context, setPreviewState) {
+                    final width = baseWidth * zoom;
+                    final height = baseHeight * zoom;
+                    return GestureDetector(
+                      onTap: () => Navigator.of(context).pop(),
+                      onScaleStart: (_) => gestureZoom = zoom,
+                      onScaleUpdate: (details) {
+                        if (details.pointerCount < 2) return;
+                        setPreviewState(() {
+                          zoom = (gestureZoom * details.scale).clamp(
+                            .55,
+                            maxScale,
+                          );
+                        });
+                      },
+                      child: RawImage(
+                        image: image,
+                        width: width,
+                        height: height,
+                        fit: BoxFit.contain,
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    try {
+      await Navigator.of(context, rootNavigator: true).push(route);
+      await route.completed;
+    } finally {
+      image.dispose();
+    }
+  }
+
   Size get _currentCanvasSize {
     final renderObject = _controller.painterKey.currentContext
         ?.findRenderObject();
@@ -556,27 +637,21 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       _eraserPopoverOpen = false;
     });
     _controller.shapeFactory = null;
-    switch (tool) {
-      case 1:
-        _controller.freeStyleStrokeWidth = _penStrokeWidth;
-        _controller.freeStyleMode = FreeStyleMode.draw;
-      case 4:
-        _controller.freeStyleStrokeWidth = _eraserStrokeWidth;
-        _controller.freeStyleMode = FreeStyleMode.erase;
-      default:
-        _controller.freeStyleMode = FreeStyleMode.none;
-    }
+    _controller.freeStyleStrokeWidth = _activeStrokeWidth;
+    _syncFreeStyleMode();
   }
 
-  void _beginInlineText() {
+  void _beginInlineText({bool focus = false}) {
     if (!_canEdit || _textEditing) return;
     final selected = _selectedObject;
-    _editingExistingText = widget.annotation != null && selected is TextDrawable
-        ? selected
-        : null;
+    _editingExistingText = selected is TextDrawable ? selected : null;
     _deselectObject();
     _textFocusNode.unfocus();
-    _inlineTextController.text = _editingExistingText?.text ?? '';
+    final text = _editingExistingText?.text ?? '';
+    _inlineTextController.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
     setState(() {
       _tool = 2;
       _textEditing = true;
@@ -585,6 +660,9 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       _eraserPopoverOpen = false;
     });
     _controller.freeStyleMode = FreeStyleMode.none;
+    // The field attaches on the next frame. Only an explicit tap on the
+    // selected text is a request to show its keyboard immediately.
+    if (focus) _textFocusNode.requestFocus();
   }
 
   void _commitInlineText() {
@@ -625,23 +703,23 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       drawable = TextDrawable(
         text: text,
         position: position,
-        style: TextStyle(fontSize: 18, color: _selectedColor),
+        style: TextStyle(
+          fontSize: _defaultTextSize / _canvasTextScale,
+          color: _selectedColor,
+        ),
         textAlign: TextAlign.left,
       );
       _controller.addDrawables([drawable]);
     }
     _inlineTextController.clear();
     if (mounted) {
-      setState(() {
-        _textEditing = false;
-        _tool = 1;
-      });
+      setState(() => _textEditing = false);
       _textFocusNode.unfocus();
     }
     if (drawable != null) {
       _selectObject(drawable);
     } else {
-      _controller.freeStyleMode = FreeStyleMode.draw;
+      _syncFreeStyleMode();
     }
   }
 
@@ -671,12 +749,23 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       _showImageDeleteButton = false;
     });
     _controller.deselectObjectDrawable();
-    _controller.freeStyleMode = switch (_tool) {
-      4 => FreeStyleMode.erase,
-      1 => FreeStyleMode.draw,
-      _ => FreeStyleMode.none,
-    };
+    _syncFreeStyleMode();
   }
+
+  void _syncFreeStyleMode() {
+    _controller.freeStyleMode = _selectedObject != null || _textEditing
+        ? FreeStyleMode.none
+        : switch (_tool) {
+            4 => FreeStyleMode.erase,
+            1 => FreeStyleMode.draw,
+            _ => FreeStyleMode.none,
+          };
+  }
+
+  double get _canvasTextScale =>
+      _currentCanvasSize.isEmpty || _canvasViewSize.isEmpty
+      ? 1.0
+      : _canvasViewSize.height / _currentCanvasSize.height;
 
   void _handlePainterObjectSelection(ObjectDrawable? drawable) {
     if (drawable == null) {
@@ -707,6 +796,17 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     );
   }
 
+  Rect _objectControlRect(ObjectDrawable drawable, Size displaySize) {
+    final rect = _displayRectForObject(drawable, displaySize);
+    if (drawable is! TextDrawable || rect.isEmpty) return rect;
+    // Keep a usable center hit target between the resize handles for a single glyph.
+    return Rect.fromCenter(
+      center: rect.center,
+      width: math.max(68, rect.width),
+      height: math.max(56, rect.height),
+    );
+  }
+
   Offset _displayToCanvas(Offset point, Size displaySize) {
     final coordinateSize = _currentCanvasSize;
     if (coordinateSize.isEmpty || displaySize.isEmpty) return point;
@@ -719,8 +819,42 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   void _startObjectTransform(ObjectDrawable drawable, Size displaySize) {
     if (!identical(_selectedObject, drawable)) _selectObject(drawable);
     _transformBaseDrawable = drawable;
-    _transformBaseRect = _displayRectForObject(drawable, displaySize);
+    _transformBaseRect = _objectControlRect(drawable, displaySize);
+    _objectDragStart = null;
     _transformHasRecordedAction = false;
+  }
+
+  void _startCanvasDrag(
+    ObjectDrawable drawable,
+    Size displaySize,
+    DragStartDetails details,
+  ) {
+    _startObjectTransform(drawable, displaySize);
+    _objectDragStart = _globalToCanvasPosition(details.globalPosition);
+  }
+
+  void _dragSelectedObjectAcrossCanvas(
+    DragUpdateDetails details,
+    Size displaySize,
+  ) {
+    final baseRect = _transformBaseRect;
+    final start = _objectDragStart;
+    if (baseRect == null || start == null) return;
+    final delta = _globalToCanvasPosition(details.globalPosition) - start;
+    const inset = 8.0;
+    final proposed = baseRect.shift(delta);
+    final maxLeft = math.max(inset, displaySize.width - inset - proposed.width);
+    final maxTop = math.max(
+      inset,
+      displaySize.height - inset - proposed.height,
+    );
+    final clamped = proposed.shift(
+      Offset(
+        proposed.left.clamp(inset, maxLeft) - proposed.left,
+        proposed.top.clamp(inset, maxTop) - proposed.top,
+      ),
+    );
+    _applyObjectTransform(clamped, displaySize);
   }
 
   void _startObjectRotation(
@@ -819,6 +953,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   void _endObjectTransform() {
     _transformBaseDrawable = null;
     _transformBaseRect = null;
+    _objectDragStart = null;
     _transformHasRecordedAction = false;
   }
 
@@ -847,24 +982,59 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     return Rect.fromLTRB(left, top, right, bottom);
   }
 
-  Widget _buildObjectInteractions(Size displaySize) =>
-      ValueListenableBuilder<PainterControllerValue>(
-        valueListenable: _controller,
-        builder: (context, value, _) => Stack(
-          clipBehavior: Clip.none,
-          children: [
-            for (final drawable in value.drawables.whereType<ObjectDrawable>())
-              if (!(_tool == 4 && drawable.erasable))
-                _buildObjectInteraction(drawable, displaySize),
-          ],
-        ),
+  Widget _buildObjectInteractions(
+    Size displaySize,
+  ) => ValueListenableBuilder<PainterControllerValue>(
+    valueListenable: _controller,
+    builder: (context, value, _) {
+      final objects = value.drawables
+          .whereType<ObjectDrawable>()
+          .where((drawable) => !(_tool == 4 && drawable.erasable))
+          .toList(growable: false);
+      final selected = objects
+          .where((drawable) => identical(_selectedObject, drawable))
+          .firstOrNull;
+      return Stack(
+        clipBehavior: Clip.none,
+        children: [
+          if (selected != null)
+            Positioned.fill(
+              child: GestureDetector(
+                key: const ValueKey('drawing-selected-object-canvas-drag-area'),
+                behavior: HitTestBehavior.opaque,
+                onTap: _deselectObject,
+                onPanStart: (details) =>
+                    _startCanvasDrag(selected, displaySize, details),
+                onPanUpdate: (details) =>
+                    _dragSelectedObjectAcrossCanvas(details, displaySize),
+                onPanEnd: (_) => _endObjectTransform(),
+                onPanCancel: _endObjectTransform,
+                child: const SizedBox.expand(),
+              ),
+            ),
+          for (final drawable in objects)
+            if (!identical(drawable, selected))
+              _buildObjectInteraction(
+                drawable,
+                displaySize,
+                activeSelection: selected,
+              ),
+          if (selected != null) _buildObjectInteraction(selected, displaySize),
+        ],
       );
+    },
+  );
 
-  Widget _buildObjectInteraction(ObjectDrawable drawable, Size displaySize) {
-    final rect = _displayRectForObject(drawable, displaySize);
+  Widget _buildObjectInteraction(
+    ObjectDrawable drawable,
+    Size displaySize, {
+    ObjectDrawable? activeSelection,
+  }) {
+    final rect = _objectControlRect(drawable, displaySize);
     if (rect.isEmpty || !rect.isFinite) return const SizedBox.shrink();
     final selected = identical(_selectedObject, drawable);
     if (!selected) {
+      final dragTarget = activeSelection;
       return Positioned.fromRect(
         rect: rect,
         child: Transform.rotate(
@@ -872,19 +1042,62 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => _selectObject(drawable),
+            onDoubleTap: drawable is ImageDrawable
+                ? () => unawaited(_previewImage(drawable))
+                : null,
+            onPanStart: dragTarget == null
+                ? null
+                : (details) =>
+                      _startCanvasDrag(dragTarget, displaySize, details),
+            onPanUpdate: dragTarget == null
+                ? null
+                : (details) =>
+                      _dragSelectedObjectAcrossCanvas(details, displaySize),
+            onPanEnd: dragTarget == null ? null : (_) => _endObjectTransform(),
+            onPanCancel: dragTarget == null ? null : _endObjectTransform,
             child: const SizedBox.expand(),
           ),
         ),
       );
     }
 
-    final safeInset = math.min(
-      46.0,
-      math.min(displaySize.width, displaySize.height) / 4,
-    );
+    const safeInset = 8.0;
     final clampWidth = math.max(1.0, displaySize.width - safeInset * 2);
     final clampHeight = math.max(1.0, displaySize.height - safeInset * 2);
+    final rotationCosine = math.cos(drawable.rotationAngle);
+    final rotationSine = math.sin(drawable.rotationAngle);
+    final deleteCornerOffset = rect.topRight - rect.center;
+    final deleteCenter =
+        rect.center +
+        Offset(
+          deleteCornerOffset.dx * rotationCosine -
+              deleteCornerOffset.dy * rotationSine,
+          deleteCornerOffset.dx * rotationSine +
+              deleteCornerOffset.dy * rotationCosine,
+        );
     final rotatedBounds = _rotatedBounds(rect, drawable.rotationAngle);
+    final deleteVisible =
+        drawable is TextDrawable ||
+        drawable is ImageDrawable && _showImageDeleteButton;
+    final deleteIconSize = (math.min(rect.width, rect.height) * .22)
+        .clamp(10.0, 36.0)
+        .toDouble();
+    const deleteTapTarget = 48.0;
+    final handles = drawable is TextDrawable
+        ? const {
+            HandlePosition.topLeft,
+            HandlePosition.bottomLeft,
+            HandlePosition.bottomRight,
+          }
+        : const {
+            HandlePosition.left,
+            HandlePosition.top,
+            HandlePosition.right,
+            HandlePosition.bottom,
+            HandlePosition.topLeft,
+            HandlePosition.bottomLeft,
+            HandlePosition.bottomRight,
+          };
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -909,6 +1122,8 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           // visual handle. The compact center dot avoids the heavy eight-dot
           // look without making resize gestures difficult to start.
           handleTapSize: 18,
+          enabledHandles: handles,
+          visibleHandles: handles,
           draggable: true,
           resizable: true,
           // Rotation is handled by the larger, dedicated control below the
@@ -916,11 +1131,25 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           rotatable: false,
           cornerHandleBuilder: (_, _) => _buildSelectionHandle(),
           sideHandleBuilder: (_, _) => _buildSelectionHandle(),
-          contentBuilder: (_, _, _) => CustomPaint(
-            painter: const _DashedSelectionPainter(),
-            child: const SizedBox.expand(),
-          ),
-          onTap: () => _selectObject(drawable),
+          contentBuilder: (_, _, _) {
+            final outline = CustomPaint(
+              painter: _DashedSelectionPainter(
+                cornerGap: deleteVisible ? deleteIconSize + 6 : 0,
+              ),
+              child: const SizedBox.expand(),
+            );
+            return drawable is ImageDrawable
+                ? GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => _selectObject(drawable),
+                    onDoubleTap: () => unawaited(_previewImage(drawable)),
+                    child: outline,
+                  )
+                : outline;
+          },
+          onTap: drawable is TextDrawable
+              ? () => _beginInlineText(focus: true)
+              : null,
           onDragStart: (_) => _startObjectTransform(drawable, displaySize),
           onResizeStart: (_, _) => _startObjectTransform(drawable, displaySize),
           onChanged: (result, _) => _applyObjectTransform(
@@ -933,15 +1162,15 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           onDragCancel: _endObjectTransform,
           onResizeCancel: (_) => _endObjectTransform(),
         ),
-        if (drawable is ImageDrawable && _showImageDeleteButton)
+        if (deleteVisible)
           Positioned(
-            left: (rotatedBounds.right + 4)
-                .clamp(4.0, math.max(4.0, displaySize.width - 40))
+            left: (deleteCenter.dx - deleteTapTarget / 2)
+                .clamp(0.0, math.max(0.0, displaySize.width - deleteTapTarget))
                 .toDouble(),
-            top: (rotatedBounds.top - 18)
-                .clamp(4.0, math.max(4.0, displaySize.height - 40))
+            top: (deleteCenter.dy - deleteTapTarget / 2)
+                .clamp(0.0, math.max(0.0, displaySize.height - deleteTapTarget))
                 .toDouble(),
-            child: _buildDeleteImageButton(),
+            child: _buildDeleteObjectButton(drawable, deleteIconSize),
           ),
         if (drawable is ImageDrawable)
           Positioned(
@@ -1001,31 +1230,31 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     child: const Icon(Icons.rotate_right_rounded, size: 18, color: _ink),
   );
 
-  Widget _buildDeleteImageButton() => Material(
-    color: Colors.white,
-    shape: const CircleBorder(),
-    elevation: 2,
-    child: IconButton(
-      key: const ValueKey('drawing-delete-image'),
-      tooltip: '删除图片',
-      onPressed: () {
-        final drawable = _selectedObject;
-        if (drawable == null) return;
-        _controller.removeDrawable(drawable);
-        _selectedObject = null;
-        _showImageDeleteButton = false;
-        _controller.freeStyleMode = FreeStyleMode.draw;
-        setState(() {});
-      },
-      constraints: const BoxConstraints.tightFor(width: 40, height: 40),
-      padding: EdgeInsets.zero,
-      icon: _drawingIcon(
-        'assets/icons/chat_note_editor/trash.svg',
-        const Color(0xFFE53935),
-        19,
-      ),
-    ),
-  );
+  Widget _buildDeleteObjectButton(ObjectDrawable drawable, double iconSize) =>
+      IconButton(
+        key: ValueKey(
+          drawable is TextDrawable
+              ? 'drawing-delete-text'
+              : 'drawing-delete-image',
+        ),
+        tooltip: drawable is TextDrawable ? '删除文字' : '删除图片',
+        onPressed: () {
+          if (!_canEdit || !identical(_selectedObject, drawable)) return;
+          _controller.removeDrawable(drawable);
+          _deselectObject();
+        },
+        constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+        padding: EdgeInsets.zero,
+        splashColor: Colors.transparent,
+        highlightColor: Colors.transparent,
+        hoverColor: Colors.transparent,
+        focusColor: Colors.transparent,
+        icon: _drawingIcon(
+          'assets/icons/chat_note_editor/trash.svg',
+          const Color(0xFFE53935),
+          iconSize,
+        ),
+      );
 
   void _chooseColor(Color color) {
     setState(() => _selectedColor = color);
@@ -1037,7 +1266,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
         ..strokeWidth = _penStrokeWidth,
     );
     _controller.textSettings = _controller.textSettings.copyWith(
-      textStyle: TextStyle(fontSize: 30, color: color),
+      textStyle: TextStyle(fontSize: _defaultTextSize, color: color),
     );
   }
 
@@ -1075,10 +1304,12 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     _textFocusNode.unfocus();
     _deselectObject();
     setState(() {
+      _tool = 5;
       _imagePopoverOpen = !_imagePopoverOpen;
       _colorPopoverOpen = false;
       _eraserPopoverOpen = false;
     });
+    _syncFreeStyleMode();
   }
 
   void _toggleEraserPopover() {
@@ -1115,9 +1346,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       _imagePopoverOpen = false;
       _eraserPopoverOpen = false;
     });
-    _controller.freeStyleMode = _tool == 4
-        ? FreeStyleMode.erase
-        : FreeStyleMode.draw;
+    _syncFreeStyleMode();
     _onControllerChanged();
   }
 
@@ -1232,7 +1461,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           final card = _buildCanvasCard(colors, constraints.biggest);
           if (widget.annotation == null) return card;
           return IgnorePointer(
-            ignoring: widget.annotationTools == null,
+            ignoring: widget.annotationTools == null || widget.legacyAnnotation,
             child: Listener(
               behavior: HitTestBehavior.opaque,
               onPointerDown: (_) => widget.annotationTools?._select(this),
@@ -1387,6 +1616,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           ),
         ),
       if (_textEditing) _buildInlineTextEditor(size),
+      if (widget.annotation == null) ..._drawingPopovers(size),
       if (widget.showToolbar)
         Positioned(
           top: 8,
@@ -1394,7 +1624,6 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           right: 12,
           child: _buildToolbar(colors, size),
         ),
-      if (widget.annotation == null) ..._drawingPopovers(size),
       if (!widget.embedded)
         Positioned(right: 14, bottom: 14, child: _buildFinishButton()),
     ],
@@ -1512,21 +1741,41 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     final canvas = _canvasCardKey.currentContext?.findRenderObject();
     final keyboardTop = MediaQuery.sizeOf(context).height - keyboardInset;
     final keyboardBoundary =
-        widget.annotation != null &&
-            keyboardInset > 0 &&
-            canvas is RenderBox &&
-            canvas.hasSize
+        keyboardInset > 0 && canvas is RenderBox && canvas.hasSize
         ? canvas.globalToLocal(Offset(0, keyboardTop - 8)).dy
         : canvasSize.height;
     final visibleHeight = keyboardBoundary
         .clamp(0.0, canvasSize.height)
         .toDouble();
     final avoidsKeyboard = visibleHeight < canvasSize.height;
-    final defaultTop = canvasSize.height * _inlineTextTopFraction;
-    final top = avoidsKeyboard
-        ? math.min(defaultTop, math.max(0.0, visibleHeight - 48))
-        : defaultTop;
-    final maxWidth = math.min(320.0, math.max(0.0, canvasSize.width - 40));
+    final original = _editingExistingText;
+    final objectRect = original == null
+        ? null
+        : _displayRectForObject(original, canvasSize);
+    final fontSize = original == null
+        ? _defaultTextSize
+        : (original.style.fontSize ?? _defaultTextSize) *
+              original.scale *
+              _canvasTextScale;
+    final top =
+        (objectRect == null
+                ? canvasSize.height * _inlineTextTopFraction
+                : objectRect.top - 8)
+            .clamp(0.0, math.max(0.0, visibleHeight - fontSize * 1.35 - 16))
+            .toDouble();
+    final maxWidth = math.min(
+      math.max(320.0, objectRect?.width ?? 0.0) + (objectRect == null ? 0 : 22),
+      math.max(0.0, canvasSize.width - 16),
+    );
+    final minWidth = math.min(
+      maxWidth,
+      math.max(120.0, (objectRect?.width ?? 0) + 22),
+    );
+    final left = objectRect == null
+        ? 0.0
+        : (objectRect.left - 11)
+              .clamp(0.0, math.max(0.0, canvasSize.width - minWidth))
+              .toDouble();
     final colors = Theme.of(context).colorScheme;
     final isDarkAnnotation =
         widget.annotation != null && colors.brightness == Brightness.dark;
@@ -1546,7 +1795,8 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       child: Listener(
         behavior: HitTestBehavior.opaque,
         onPointerDown: (event) {
-          final renderObject = _inlineTextKey.currentContext?.findRenderObject();
+          final renderObject = _inlineTextKey.currentContext
+              ?.findRenderObject();
           if (renderObject is! RenderBox) return;
           final topLeft = renderObject.localToGlobal(Offset.zero);
           if (!(topLeft & renderObject.size).contains(event.position)) {
@@ -1557,56 +1807,64 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           fit: StackFit.expand,
           children: [
             Positioned(
-              left: 0,
+              left: left,
               right: 0,
               top: top,
               bottom: avoidsKeyboard ? canvasSize.height - visibleHeight : null,
               child: Align(
-                alignment: Alignment.topCenter,
-                child: IntrinsicWidth(
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      minWidth: math.min(120.0, maxWidth),
-                      maxWidth: maxWidth,
-                    ),
-                    child: CustomPaint(
-                      key: _inlineTextKey,
-                      foregroundPainter: const _DashedSelectionPainter(),
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: inputSurface,
-                          borderRadius: BorderRadius.circular(5),
-                        ),
-                        child: TextField(
-                          key: const ValueKey('drawing-inline-text-field'),
-                          controller: _inlineTextController,
-                          focusNode: _textFocusNode,
-                          enabled: _canEdit,
-                          autofocus: false,
-                          keyboardType: TextInputType.multiline,
-                          textInputAction: TextInputAction.newline,
-                          onTap: () {
-                            if (_canEdit && !_textFocusNode.hasFocus) {
-                              _textFocusNode.requestFocus();
-                            }
-                          },
-                          minLines: 1,
-                          maxLines: null,
-                          style: TextStyle(
-                            color: inputInk,
-                            fontSize: 18,
-                            height: 1.35,
+                alignment: objectRect == null
+                    ? Alignment.topCenter
+                    : Alignment.topLeft,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: math.max(1.0, visibleHeight - top - 4),
+                  ),
+                  child: IntrinsicWidth(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        minWidth: minWidth,
+                        maxWidth: maxWidth,
+                      ),
+                      child: CustomPaint(
+                        key: _inlineTextKey,
+                        foregroundPainter: const _DashedSelectionPainter(),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: inputSurface,
+                            borderRadius: BorderRadius.circular(5),
                           ),
-                          cursorColor: inputInk,
-                          decoration: const InputDecoration(
-                            isDense: true,
-                            border: InputBorder.none,
-                            contentPadding: EdgeInsets.symmetric(
-                              horizontal: 11,
-                              vertical: 8,
+                          child: TextField(
+                            key: const ValueKey('drawing-inline-text-field'),
+                            controller: _inlineTextController,
+                            focusNode: _textFocusNode,
+                            enabled: _canEdit,
+                            autofocus: false,
+                            keyboardType: TextInputType.multiline,
+                            textInputAction: TextInputAction.newline,
+                            onTap: () {
+                              if (_canEdit && !_textFocusNode.hasFocus) {
+                                _textFocusNode.requestFocus();
+                              }
+                            },
+                            onTapOutside: (_) => _commitInlineText(),
+                            minLines: 1,
+                            maxLines: null,
+                            style: TextStyle(
+                              color: inputInk,
+                              fontSize: fontSize,
+                              height: 1.35,
                             ),
+                            cursorColor: inputInk,
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              border: InputBorder.none,
+                              contentPadding: EdgeInsets.symmetric(
+                                horizontal: 11,
+                                vertical: 8,
+                              ),
+                            ),
+                            onChanged: (_) => setState(() {}),
                           ),
-                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                     ),
@@ -1837,26 +2095,27 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
     required double iconSize,
     required VoidCallback onTap,
   }) {
-    final selected = widget.annotation != null && _imagePopoverOpen
-        ? tool == 5
-        : _tool == tool;
-    return Tooltip(
-      message: tooltip,
-      child: Material(
-        color: selected ? const Color(0xFFE7F0FF) : Colors.transparent,
-        shape: const CircleBorder(),
-        child: InkWell(
-          key: ValueKey('drawing-tool-$tool'),
-          onTap: _canEdit ? onTap : null,
-          customBorder: const CircleBorder(),
-          child: SizedBox(
-            width: slotSize,
-            height: slotSize,
-            child: Center(
-              child: _drawingIcon(
-                icon,
-                selected ? const Color(0xFF1769D2) : _ink,
-                iconSize,
+    final selected = _tool == tool;
+    return Semantics(
+      selected: selected,
+      child: Tooltip(
+        message: tooltip,
+        child: Material(
+          color: selected ? const Color(0xFFE7F0FF) : Colors.transparent,
+          shape: const CircleBorder(),
+          child: InkWell(
+            key: ValueKey('drawing-tool-$tool'),
+            onTap: _canEdit ? onTap : null,
+            customBorder: const CircleBorder(),
+            child: SizedBox(
+              width: slotSize,
+              height: slotSize,
+              child: Center(
+                child: _drawingIcon(
+                  icon,
+                  selected ? const Color(0xFF1769D2) : _ink,
+                  iconSize,
+                ),
               ),
             ),
           ),
@@ -2224,16 +2483,48 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
 }
 
 class _DashedSelectionPainter extends CustomPainter {
-  const _DashedSelectionPainter();
+  const _DashedSelectionPainter({this.cornerGap = 0});
+
+  final double cornerGap;
 
   @override
   void paint(Canvas canvas, Size size) {
     if (size.width <= 1 || size.height <= 1) return;
     final rect = Offset.zero & size;
-    final path = Path()
-      ..addRRect(
-        RRect.fromRectAndRadius(rect.deflate(.7), const Radius.circular(5)),
-      );
+    final rounded = RRect.fromRectAndRadius(
+      rect.deflate(.7),
+      const Radius.circular(5),
+    );
+    final path = Path();
+    if (cornerGap <= 0) {
+      path.addRRect(rounded);
+    } else {
+      final outline = rounded.outerRect;
+      final radius = math.min(5.0, math.min(outline.width, outline.height) / 4);
+      final cornerArcLength = radius * math.pi / 2;
+      final extraGap = math.max(0.0, (cornerGap - cornerArcLength) / 2);
+      path
+        ..moveTo(outline.left + radius, outline.top)
+        ..lineTo(outline.right - radius - extraGap, outline.top)
+        // Leave a deliberate opening around the top-right corner for the
+        // delete glyph, making it part of the selection frame itself.
+        ..moveTo(outline.right, outline.top + radius + extraGap)
+        ..lineTo(outline.right, outline.bottom - radius)
+        ..arcToPoint(
+          Offset(outline.right - radius, outline.bottom),
+          radius: Radius.circular(radius),
+        )
+        ..lineTo(outline.left + radius, outline.bottom)
+        ..arcToPoint(
+          Offset(outline.left, outline.bottom - radius),
+          radius: Radius.circular(radius),
+        )
+        ..lineTo(outline.left, outline.top + radius)
+        ..arcToPoint(
+          Offset(outline.left + radius, outline.top),
+          radius: Radius.circular(radius),
+        );
+    }
     final paint = Paint()
       ..color = const Color(0xFF4C94F7)
       ..style = PaintingStyle.stroke
@@ -2250,5 +2541,6 @@ class _DashedSelectionPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _DashedSelectionPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _DashedSelectionPainter oldDelegate) =>
+      oldDelegate.cornerGap != cornerGap;
 }

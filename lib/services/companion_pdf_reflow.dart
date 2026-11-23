@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui';
@@ -25,21 +26,40 @@ class CompanionReflowPage {
     this.number,
     this.lines, {
     this.keepOriginal = false,
+    this.pictures = const [],
   });
 
   final int number;
   final List<CompanionReflowLine> lines;
   final bool keepOriginal;
+  final List<CompanionPagePicture> pictures;
+  int get imageByteCount =>
+      pictures.fold(0, (sum, picture) => sum + picture.asset.bytes.length);
+  bool get canRead =>
+      pictures.isNotEmpty || (!keepOriginal && lines.isNotEmpty);
 
   String get text => lines.map((line) => line.text).join('\n');
   String get chapterId => 'pdf-page-$number';
 
   List<_ReflowParagraph> get _paragraphs {
     final paragraphs = <_ReflowParagraph>[];
+    CompanionReflowLine? preceding;
     for (var index = 0; index < lines.length; index++) {
       final line = lines[index];
-      final previous = index == 0 ? null : lines[index - 1];
+      if (pictures.any((item) => item.bounds.contains(line.bounds.center))) {
+        preceding = null;
+        continue;
+      }
+      final previous = preceding;
       if (previous == null ||
+          pictures.any(
+            (item) =>
+                item.bounds.center.dy > previous.bounds.center.dy &&
+                item.bounds.center.dy < line.bounds.center.dy,
+          ) ||
+          _caption.hasMatch(line.text) ||
+          _caption.hasMatch(previous.text) ||
+          _listMarker.hasMatch(line.text) ||
           _isHeading(line.text) ||
           _isHeading(previous.text) ||
           line.bounds.top - previous.bounds.bottom >
@@ -50,6 +70,7 @@ class CompanionReflowPage {
       } else {
         paragraphs.last.append(line);
       }
+      preceding = line;
     }
     return paragraphs;
   }
@@ -59,20 +80,42 @@ class CompanionReflowPage {
       _chapterHeading.hasMatch(text) &&
       !RegExp(r'[。！？!?]$').hasMatch(text);
 
+  static final _caption = RegExp(
+    r'^(?:(?:图|圖|表)\s*[0-9０-９一二三四五六七八九十]+|(?:fig(?:ure)?\.?|table)\s*\d)',
+    caseSensitive: false,
+  );
+  static final _listMarker = RegExp(
+    r'^(?:[•●■▪]|[-–]\s|[（(][0-9０-９]+[)）]|[0-9０-９]+[、)]|\d+\.\s)',
+  );
+
   ({String blockId, int offset})? entryNear(double? top) {
-    if (top == null || lines.isEmpty) return null;
-    for (final paragraph in _paragraphs) {
-      for (final entry in paragraph.lines) {
-        if (entry.line.bounds.bottom >= top) {
-          return (blockId: paragraph.id, offset: entry.offset);
-        }
-      }
+    if (top == null) return null;
+    final entries = [
+      for (final paragraph in _paragraphs)
+        for (final entry in paragraph.lines)
+          (
+            bottom: entry.line.bounds.bottom,
+            id: paragraph.id,
+            offset: entry.offset,
+          ),
+      for (final picture in pictures)
+        (bottom: picture.bounds.bottom, id: picture.asset.id, offset: 0),
+    ]..sort((a, b) => a.bottom.compareTo(b.bottom));
+    if (entries.isNotEmpty) {
+      final entry = entries.firstWhere(
+        (item) => item.bottom >= top,
+        orElse: () => entries.last,
+      );
+      return (blockId: entry.id, offset: entry.offset);
     }
     return null;
   }
 
   double? originalTop(String? blockId, int? offset) {
     if (blockId == null || offset == null) return null;
+    for (final picture in pictures) {
+      if (picture.asset.id == blockId) return picture.bounds.top;
+    }
     for (final paragraph in _paragraphs) {
       if (paragraph.id == blockId) {
         return paragraph.lines
@@ -88,44 +131,165 @@ class CompanionReflowPage {
   static XiaoqiDocument readingWindow(
     Iterable<CompanionReflowPage> pages,
     int pageCount,
-  ) => XiaoqiDocument(
-    format: 'pdf-reflow',
-    title: '',
-    author: '',
-    language: '',
-    originalPageCount: pageCount,
-    chapters: [
-      XiaoqiDocumentChapter(
-        id: readingChapterId,
-        title: '',
-        href: readingChapterId,
-        html: '',
-        plainText: pages.map((page) => page.text).join('\n\n'),
-        order: 0,
-        blocks: [
-          for (final page in pages)
-            for (final paragraph in page._paragraphs)
-              XiaoqiDocumentBlock(
-                id: paragraph.id,
-                kind: _isHeading(paragraph.body.toString())
-                    ? 'heading'
-                    : 'paragraph',
-                level: 1,
-                text: paragraph.body.toString(),
-                sourceLocator: 'page:${page.number}',
-                originalPageLabel: '${page.number}',
-              ),
-        ],
-      ),
-    ],
-  );
+  ) {
+    final blocks = <XiaoqiDocumentBlock>[];
+    CompanionReflowPage? previous;
+    for (final page in pages) {
+      final items = page._blocks();
+      if (items.isNotEmpty &&
+          blocks.isNotEmpty &&
+          previous != null &&
+          page.number == previous.number + 1 &&
+          _continuesAcrossPage(blocks.last, items.first, previous, page)) {
+        final first = items.removeAt(0);
+        final last = blocks.removeLast();
+        final prefix =
+            last.text + _ReflowParagraph.separator(last.text, first.text);
+        blocks.add(
+          XiaoqiDocumentBlock(
+            id: last.id,
+            kind: last.kind,
+            level: last.level,
+            text: prefix + first.text,
+            sourceLocator: last.sourceLocator,
+            originalPageLabel: last.originalPageLabel,
+            attributes: {
+              ...last.attributes,
+              first.id: prefix.length.toString(),
+            },
+          ),
+        );
+      }
+      blocks.addAll(items);
+      previous = page;
+    }
+    return XiaoqiDocument(
+      format: 'pdf-reflow',
+      title: '',
+      author: '',
+      language: '',
+      originalPageCount: pageCount,
+      assets: [
+        for (final page in pages)
+          for (final picture in page.pictures) picture.asset,
+      ],
+      chapters: [
+        XiaoqiDocumentChapter(
+          id: readingChapterId,
+          title: '',
+          href: readingChapterId,
+          html: '',
+          plainText: pages.map((page) => page.text).join('\n\n'),
+          order: 0,
+          blocks: blocks,
+        ),
+      ],
+    );
+  }
+
+  List<XiaoqiDocumentBlock> _blocks() {
+    final items = <({double top, XiaoqiDocumentBlock block})>[
+      for (final paragraph in _paragraphs)
+        (
+          top: paragraph.lines.first.line.bounds.top,
+          block: XiaoqiDocumentBlock(
+            id: paragraph.id,
+            kind: _isHeading(paragraph.body.toString())
+                ? 'heading'
+                : 'paragraph',
+            level: 1,
+            text: paragraph.body.toString(),
+            sourceLocator: 'page:$number',
+            originalPageLabel: '$number',
+          ),
+        ),
+      for (final picture in pictures)
+        (
+          top: picture.bounds.top,
+          block: XiaoqiDocumentBlock(
+            id: picture.asset.id,
+            kind: 'image',
+            assetId: picture.asset.id,
+            text: '',
+            originalPageLabel: '$number',
+            sourceLocator: picture.asset.sourceLocator,
+            attributes: {
+              'aspectRatio': picture.aspectRatio.toString(),
+              if (picture.bounds == const Rect.fromLTWH(0, 0, 1, 1))
+                'originalPageImage': 'true',
+            },
+          ),
+        ),
+    ]..sort((a, b) => a.top.compareTo(b.top));
+    return items.map((item) => item.block).toList();
+  }
+
+  static bool _continuesAcrossPage(
+    XiaoqiDocumentBlock end,
+    XiaoqiDocumentBlock start,
+    CompanionReflowPage previous,
+    CompanionReflowPage next,
+  ) {
+    if (end.kind != 'paragraph' ||
+        start.kind != 'paragraph' ||
+        _caption.hasMatch(end.text) ||
+        _caption.hasMatch(start.text) ||
+        RegExp(r'''[。！？.!?:：；;”」』）)]$''').hasMatch(end.text) ||
+        _listMarker.hasMatch(start.text)) {
+      return false;
+    }
+    final last = previous.lines.last.bounds;
+    final first = next.lines.first.bounds;
+    return last.bottom > .65 &&
+        first.top < .35 &&
+        last.width > .48 &&
+        (first.left - last.left).abs() <= .025;
+  }
+
+  /// Map a position in a joined paragraph back to its original PDF block.
+  static ({String blockId, int offset})? sourcePosition(
+    XiaoqiDocument document,
+    String? blockId,
+    int offset,
+  ) {
+    if (blockId == null) return null;
+    for (final block in document.chapters.first.blocks) {
+      if (block.id != blockId) continue;
+      var id = blockId;
+      var base = 0;
+      for (final entry in block.attributes.entries) {
+        if (!entry.key.startsWith('pdf-page-')) continue;
+        final start = int.parse(entry.value);
+        if (start > offset) break;
+        id = entry.key;
+        base = start;
+      }
+      return (blockId: id, offset: offset - base);
+    }
+    return null;
+  }
+
+  /// Map an original PDF block to its containing paragraph in this window.
+  static ({String blockId, int offset})? displayPosition(
+    XiaoqiDocument document,
+    String? blockId,
+    int offset,
+  ) {
+    if (blockId == null) return null;
+    for (final block in document.chapters.first.blocks) {
+      if (block.id == blockId) return (blockId: blockId, offset: offset);
+      final base = int.tryParse(block.attributes[blockId] ?? '');
+      if (base != null) return (blockId: block.id, offset: base + offset);
+    }
+    return null;
+  }
 
   static int? pageForBlock(String? blockId) {
     final match = blockId == null ? null : _pageInBlock.firstMatch(blockId);
     return int.tryParse(match?.group(1) ?? '');
   }
 
-  static final _pageInBlock = RegExp(r'^pdf-page-(\d+)-line-');
+  static final _pageInBlock = RegExp(r'^pdf-page-(\d+)-(?:line|image)-');
 }
 
 class _ReflowParagraph {
@@ -136,16 +300,51 @@ class _ReflowParagraph {
   final String id;
   final StringBuffer body;
   final List<({CompanionReflowLine line, int offset})> lines;
-  static final _eastAsianEdge = RegExp(r'[\u2e80-\u9fff\uf900-\ufaff]');
+  static final _eastAsian = RegExp(
+    r'[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]',
+  );
+  static String separator(String previous, String next) {
+    final last = previous.substring(previous.length - 1);
+    final first = next.substring(0, 1);
+    if (_eastAsian.hasMatch(last) ||
+        _eastAsian.hasMatch(first) ||
+        '([{-/'.contains(last) ||
+        '.,;:!?)]}'.contains(first)) {
+      return '';
+    }
+    return ' ';
+  }
 
   void append(CompanionReflowLine line) {
     final previous = lines.last.line.text;
-    if (!_eastAsianEdge.hasMatch(previous.substring(previous.length - 1)) &&
-        !_eastAsianEdge.hasMatch(line.text.substring(0, 1))) {
-      body.write(' ');
-    }
+    body.write(separator(previous, line.text));
     lines.add((line: line, offset: body.length));
     body.write(line.text);
+  }
+}
+
+class CompanionPagePicture {
+  const CompanionPagePicture(this.bounds, this.aspectRatio, this.asset);
+  final Rect bounds;
+  final double aspectRatio;
+  final XiaoqiDocumentAsset asset;
+  Map<String, dynamic> toJson() => {
+    'box': [bounds.left, bounds.top, bounds.right, bounds.bottom],
+    'aspect': aspectRatio,
+    'asset': asset.toMap(),
+  };
+  factory CompanionPagePicture.fromJson(Map<String, dynamic> map) {
+    final box = (map['box'] as List).cast<num>();
+    return CompanionPagePicture(
+      Rect.fromLTRB(
+        box[0].toDouble(),
+        box[1].toDouble(),
+        box[2].toDouble(),
+        box[3].toDouble(),
+      ),
+      (map['aspect'] as num).toDouble(),
+      XiaoqiDocumentAsset.fromMap(map['asset'] as Map<String, dynamic>),
+    );
   }
 }
 
@@ -197,11 +396,12 @@ class CompanionPdfReflow {
   final String _cacheKey;
   final _ocr = NativeFastOcrPlugin();
   final _results = <int, CompanionReflowPage>{};
+  int _cachedImageBytes = 0;
   final _jobs = <int, _ReflowJob>{};
   int _sequence = 0;
   late final Future<Directory> _directory = getTemporaryDirectory().then(
     (root) => Directory(
-      '${root.path}${Platform.pathSeparator}companion-reflow-v1${Platform.pathSeparator}$_cacheKey',
+      '${root.path}${Platform.pathSeparator}companion-reflow-v2${Platform.pathSeparator}$_cacheKey',
     ).create(recursive: true),
   );
 
@@ -268,14 +468,7 @@ class CompanionPdfReflow {
           '${directory.path}${Platform.pathSeparator}$number.json',
         );
         if (await cacheFile.exists()) {
-          final data = jsonDecode(await cacheFile.readAsString()) as Map;
-          final cached = CompanionReflowPage(
-            number,
-            (data['lines'] as List)
-                .map((row) => CompanionReflowLine.fromJson(row as List))
-                .toList(growable: false),
-            keepOriginal: data['keepOriginal'] == true,
-          );
+          final cached = await _decodeCache(cacheFile, number);
           if (job.cancelled) return null;
           return _remember(cached);
         }
@@ -288,39 +481,123 @@ class CompanionPdfReflow {
       );
       if (job.cancelled || page == null) return null;
       final original = page is _RecognizedPdfPage ? page.original : page;
-      final raw = await original.loadText();
-      final lines = _nativeLines(page, raw);
+      PdfPageText? structured;
+      try {
+        structured = await original.loadStructuredText();
+      } on Exception {
+        // Broken text maps still have a readable rendered page.
+      }
+      if (job.cancelled) return null;
+      final lines = structured == null
+          ? <CompanionReflowLine>[]
+          : _nativeLines(page, structured);
+      const whole = Rect.fromLTWH(0, 0, 1, 1);
       final canRecognize = Platform.isAndroid || Platform.isIOS;
-      var keepOriginal = false;
+      var keepOriginal =
+          structured?.fragments.any(
+            (fragment) =>
+                fragment.direction == PdfTextDirection.vrtl ||
+                fragment.direction == PdfTextDirection.rtl,
+          ) ??
+          false;
       var persistResult = true;
+      final corruptGlyphs = RegExp(r'[\u0000\ufffd-\uffff\ue000-\uf8ff]');
+      if (lines.any((line) => corruptGlyphs.hasMatch(line.text))) {
+        // Encoding defects can affect part of a page. Retain valid native
+        // lines, and keep the rest of the printed area available as pixels.
+        lines.removeWhere((line) => corruptGlyphs.hasMatch(line.text));
+      }
+      List<Rect> regions = await _pictureRegions(page, lines, job);
       if (canRecognize &&
           !job.cancelled &&
-          (lines.isEmpty || await _hasUncoveredContent(page, lines, job))) {
+          !keepOriginal &&
+          regions.isNotEmpty) {
+        final captions = lines.where(
+          (line) => CompanionReflowPage._caption.hasMatch(line.text),
+        );
+        final missing = regions
+            .where(
+              (r) =>
+                  r.width >= .35 &&
+                  r.height >= .075 &&
+                  !captions.any(
+                    (line) =>
+                        (line.bounds.top - r.bottom).abs() < .06 ||
+                        (line.bounds.bottom - r.top).abs() < .04,
+                  ),
+            )
+            .toList();
+        var added = false;
         try {
-          final recognized = await _recognize(page, job);
-          final countBefore = lines.length;
-          for (final line in recognized.lines) {
-            if (!lines.any((native) => _duplicates(native, line))) {
-              lines.add(line);
+          for (final region in missing) {
+            if (job.cancelled) return null;
+            final recognized = await _recognize(page, job, region);
+            if (!recognized.reliable ||
+                (region != whole &&
+                    recognized.lines
+                            .where((line) => line.text.trim().length >= 6)
+                            .length <
+                        2)) {
+              continue;
+            }
+            for (final line in recognized.lines) {
+              if (!lines.any((native) => _duplicates(native, line))) {
+                lines.add(line);
+                added = true;
+              }
             }
           }
-          keepOriginal = !recognized.reliable || lines.length == countBefore;
+          if (added) {
+            lines.sort(_readingOrder);
+            regions = await _pictureRegions(page, lines, job);
+          }
         } on FastOcrUnavailableException {
-          // A system language or model may become available after an update.
-          keepOriginal = true;
+          // Preserve the missing region as a picture, retry after models update.
           persistResult = false;
         } on FastOcrCancelledException {
           return null;
+        } on Exception {
+          // A transient OCR or raster I/O failure must not hide the source.
+          persistResult = false;
         }
       }
       if (job.cancelled) return null;
-      lines.sort(
-        (first, second) => first.bounds.top.compareTo(second.bounds.top),
-      );
+      lines.sort(_readingOrder);
+      keepOriginal =
+          keepOriginal ||
+          lines.isEmpty ||
+          _isComplex(
+            lines
+                .where(
+                  (line) => !regions.any(
+                    (region) => region.contains(line.bounds.center),
+                  ),
+                )
+                .toList(),
+          );
+      if (regions.contains(whole)) keepOriginal = true;
+      final pictures = <CompanionPagePicture>[];
+      for (final region in keepOriginal ? [whole] : regions) {
+        if (job.cancelled) return null;
+        final picture = await _picture(
+          page,
+          region,
+          number,
+          pictures.length,
+          job,
+        );
+        if (picture == null) {
+          if (job.cancelled) return null;
+          return CompanionReflowPage(number, lines, keepOriginal: true);
+        }
+        pictures.add(picture);
+      }
+      if (job.cancelled) return null;
       final result = CompanionReflowPage(
         number,
         List.unmodifiable(lines),
-        keepOriginal: keepOriginal || lines.isEmpty || _isComplex(lines),
+        keepOriginal: keepOriginal,
+        pictures: List.unmodifiable(pictures),
       );
       if (persistResult) {
         _remember(result);
@@ -331,8 +608,40 @@ class CompanionPdfReflow {
   }
 
   CompanionReflowPage _remember(CompanionReflowPage result) {
-    if (_results.length >= 24) _results.remove(_results.keys.first);
+    final old = _results.remove(result.number);
+    _cachedImageBytes -= old?.imageByteCount ?? 0;
+    final bytes = result.imageByteCount;
+    while (_results.isNotEmpty &&
+        (_results.length >= 24 ||
+            _cachedImageBytes + bytes > 32 * 1024 * 1024)) {
+      _cachedImageBytes -= _results.remove(_results.keys.first)!.imageByteCount;
+    }
+    _cachedImageBytes += bytes;
     return _results[result.number] = result;
+  }
+
+  static Future<CompanionReflowPage> _decodeCache(File file, int number) async {
+    final encoded = await file.readAsString();
+    CompanionReflowPage decode() {
+      final data = jsonDecode(encoded) as Map;
+      return CompanionReflowPage(
+        number,
+        (data['lines'] as List)
+            .map((row) => CompanionReflowLine.fromJson(row as List))
+            .toList(growable: false),
+        keepOriginal: data['keepOriginal'] == true,
+        pictures: (data['pictures'] as List)
+            .map(
+              (item) =>
+                  CompanionPagePicture.fromJson(item as Map<String, dynamic>),
+            )
+            .toList(growable: false),
+      );
+    }
+
+    // A scanned original can be several MB; base64 and JSON must not steal
+    // a reader frame when the next page comes from the disk cache.
+    return encoded.length > 64 * 1024 ? Isolate.run(decode) : decode();
   }
 
   Future<void> _saveCache(
@@ -342,12 +651,15 @@ class CompanionPdfReflow {
   ) async {
     final staging = File('${cache.path}.$id.tmp');
     try {
-      await staging.writeAsString(
-        jsonEncode({
-          'keepOriginal': result.keepOriginal,
-          'lines': result.lines.map((line) => line.toJson()).toList(),
-        }),
-      );
+      String encode() => jsonEncode({
+        'keepOriginal': result.keepOriginal,
+        'pictures': result.pictures.map((picture) => picture.toJson()).toList(),
+        'lines': result.lines.map((line) => line.toJson()).toList(),
+      });
+      final payload = result.pictures.isEmpty
+          ? encode()
+          : await Isolate.run(encode);
+      await staging.writeAsString(payload);
       await staging.rename(cache.path);
     } on FileSystemException {
       if (await staging.exists()) {
@@ -360,26 +672,40 @@ class CompanionPdfReflow {
     }
   }
 
-  static List<CompanionReflowLine> _nativeLines(
-    PdfPage page,
-    PdfPageRawText? raw,
-  ) {
-    if (raw == null || raw.fullText.isEmpty) return [];
+  static int _readingOrder(CompanionReflowLine a, CompanionReflowLine b) {
+    final top = a.bounds.top.compareTo(b.bounds.top);
+    return top == 0 ? a.bounds.left.compareTo(b.bounds.left) : top;
+  }
+
+  // PDFium's word fragments retain their character spans. Build rows by
+  // baseline and order fragments within each row, keeping large gutters intact.
+  static List<CompanionReflowLine> _nativeLines(PdfPage page, PdfPageText raw) {
+    final words = <({PdfPageTextFragment run, Rect box})>[];
+    for (final fragment in raw.fragments) {
+      if (fragment.text.trim().isEmpty || fragment.bounds.isEmpty) continue;
+      final box = fragment.bounds.toRect(page: page);
+      words.add((run: fragment, box: box));
+    }
+    words.sort((a, b) => a.box.center.dy.compareTo(b.box.center.dy));
     final result = <CompanionReflowLine>[];
-    for (final match in RegExp(r'[^\r\n]+').allMatches(raw.fullText)) {
-      final text = match.group(0)!.trim();
-      if (text.isEmpty || match.end > raw.charRects.length) continue;
-      Rect? box;
-      for (var index = match.start; index < match.end; index++) {
-        final character = raw.charRects[index];
-        if (character.isEmpty) continue;
-        final bounds = character.toRect(page: page);
-        box = box?.expandToInclude(bounds) ?? bounds;
+    for (var start = 0; start < words.length;) {
+      final first = words[start];
+      var end = start + 1;
+      while (end < words.length &&
+          (words[end].box.center.dy - first.box.center.dy).abs() <
+              math.min(first.box.height, words[end].box.height) * .45) {
+        end++;
       }
-      if (box != null && box.width > 0 && box.height > 0) {
+      final row = words.sublist(start, end)
+        ..sort((a, b) => a.box.left.compareTo(b.box.left));
+      Rect? box;
+      var text = StringBuffer();
+      PdfPageTextFragment? previous;
+      void finish() {
+        if (box == null || text.isEmpty) return;
         result.add(
           CompanionReflowLine(
-            text,
+            text.toString().trim(),
             Rect.fromLTRB(
               box.left / page.width,
               box.top / page.height,
@@ -389,64 +715,240 @@ class CompanionPdfReflow {
           ),
         );
       }
+
+      for (final word in row) {
+        if (box != null &&
+            word.box.left - box.right >
+                math.max(page.width * .032, word.box.height * 1.7)) {
+          finish();
+          box = null;
+          previous = null;
+          text = StringBuffer();
+        }
+        if (previous != null) {
+          final gap = word.run.index >= previous.end
+              ? raw.fullText.substring(previous.end, word.run.index)
+              : '';
+          if (gap.isNotEmpty && gap.trim().isEmpty) {
+            text.write(
+              gap.contains('\n') || gap.contains('\r')
+                  ? _ReflowParagraph.separator(
+                      previous.text.trim(),
+                      word.run.text.trim(),
+                    )
+                  : gap,
+            );
+          } else if (box != null &&
+              word.box.left - box.right > word.box.height * .18) {
+            text.write(
+              _ReflowParagraph.separator(
+                previous.text.trim(),
+                word.run.text.trim(),
+              ),
+            );
+          }
+        }
+        box = box?.expandToInclude(word.box) ?? word.box;
+        text.write(word.run.text.trim());
+        previous = word.run;
+      }
+      finish();
+      start = end;
     }
-    return result;
+    return result..sort(_readingOrder);
   }
 
-  /// PDFium exposes text boxes and rendering. Sample outside those boxes at a
-  /// small resolution to find scanned body regions without OCRing born-digital
-  /// pages simply because they contain margins or whitespace.
-  Future<bool> _hasUncoveredContent(
+  // Recover diagrams made from paths as well as embedded bitmaps. Sparse thin
+  // lines may be all that connects a tree, so also use an adjacent caption to
+  // enclose the original figure, including any native text inside its boxes.
+  Future<List<Rect>> _pictureRegions(
     PdfPage page,
     List<CompanionReflowLine> lines,
     _ReflowJob job,
   ) async {
-    final image = await _render(page, job, 192);
-    if (image == null) return false;
+    const whole = Rect.fromLTWH(0, 0, 1, 1);
+    if (lines.isEmpty) return [whole];
+    final image = await _render(page, job, 448);
+    if (image == null) return [whole];
+    late final List<Rect> bands;
     try {
-      var rowsWithInk = 0;
-      for (var y = 0; y < image.height; y += 2) {
-        final dy = y / image.height;
-        final covered = lines
-            .where(
-              (line) =>
-                  dy >= line.bounds.top - .009 &&
-                  dy <= line.bounds.bottom + .009,
-            )
-            .toList();
-        var pixelsWithInk = 0;
-        for (var x = 0; x < image.width; x += 2) {
-          final i = (y * image.width + x) * 4;
-          final pixels = image.pixels;
-          if (pixels[i] >= 160 &&
-              pixels[i + 1] >= 160 &&
-              pixels[i + 2] >= 160) {
-            continue;
-          }
-          final dx = x / image.width;
-          if (!covered.any(
-            (line) =>
-                dx >= line.bounds.left - .015 && dx <= line.bounds.right + .015,
-          )) {
-            pixelsWithInk++;
-          }
-        }
-        if (pixelsWithInk > 3) rowsWithInk++;
-      }
-      return rowsWithInk > image.height * .025;
+      bands = await _scanUncoveredInk(image, lines);
     } finally {
       image.dispose();
     }
+    if (job.cancelled) return [];
+    final regions = bands
+        .where(
+          (b) =>
+              (b.height >= .022 && b.width >= .04) ||
+              (b.width >= .20 && b.height >= .004),
+        )
+        .toList();
+    if (regions.any((r) => r.height > .84 && r.width > .85)) return [whole];
+    for (var i = 0; i < lines.length; i++) {
+      final caption = lines[i];
+      if (!CompanionReflowPage._caption.hasMatch(caption.text)) continue;
+      if (i == 0) continue;
+      final preceding = lines
+          .take(i)
+          .where(
+            (line) =>
+                line.bounds.width > .4 &&
+                line.text.length > 12 &&
+                line.bounds.bottom <= caption.bounds.top,
+          );
+      final top = preceding.isEmpty ? 0.0 : preceding.last.bounds.bottom;
+      final bottom = caption.bounds.top;
+      if (bottom - top < .055 || bottom - top > .6) continue;
+      final nearby = bands
+          .where((b) => b.center.dy > top && b.center.dy < bottom)
+          .toList();
+      if (nearby.isEmpty) continue;
+      var bounds = nearby.reduce((a, b) => a.expandToInclude(b));
+      for (final line in lines) {
+        if (line.bounds.center.dy > top && line.bounds.center.dy < bottom) {
+          bounds = bounds.expandToInclude(line.bounds);
+        }
+      }
+      regions.add(bounds);
+    }
+    regions.sort((a, b) => a.top.compareTo(b.top));
+    final result = <Rect>[];
+    for (final region in regions) {
+      // Keep every native word whose glyphs touch this raster band on a single
+      // side of the boundary. It either remains readable text or is in the crop.
+      var box = region.inflate(.004).intersect(whole);
+      for (final line in lines) {
+        if (line.bounds.overlaps(box)) box = box.expandToInclude(line.bounds);
+      }
+      box = box.inflate(.002).intersect(whole);
+      if (result.isNotEmpty && result.last.bottom >= box.top) {
+        result.last = result.last.expandToInclude(box);
+      } else {
+        result.add(box);
+      }
+    }
+    return result;
   }
 
-  Future<PdfImage?> _render(PdfPage page, _ReflowJob job, double maxEdge) {
+  // Pass just raster bytes and text bounds to the worker, never the native image.
+  static Future<List<Rect>> _scanUncoveredInk(
+    PdfImage image,
+    List<CompanionReflowLine> lines,
+  ) {
+    return _scanBands(
+      TransferableTypedData.fromList([image.pixels]),
+      image.width,
+      image.height,
+      lines,
+    );
+  }
+
+  static Future<List<Rect>> _scanBands(
+    TransferableTypedData payload,
+    int width,
+    int height,
+    List<CompanionReflowLine> lines,
+  ) => Isolate.run(() {
+    final pixels = payload.materialize().asUint8List();
+    final bands = <Rect>[];
+    for (var y = 0; y < height; y++) {
+      final dy = (y + .5) / height;
+      final covered = lines
+          .where(
+            (l) => dy >= l.bounds.top - .003 && dy <= l.bounds.bottom + .003,
+          )
+          .toList();
+      var left = width, right = -1, count = 0;
+      for (var x = 0; x < width; x++) {
+        final offset = (y * width + x) * 4;
+        if (pixels[offset] > 227 &&
+            pixels[offset + 1] > 227 &&
+            pixels[offset + 2] > 227) {
+          continue;
+        }
+        final dx = (x + .5) / width;
+        if (covered.any(
+          (l) => dx >= l.bounds.left - .005 && dx <= l.bounds.right + .005,
+        )) {
+          continue;
+        }
+        left = math.min(left, x);
+        right = x;
+        count++;
+      }
+      if (count == 0) continue;
+      final row = Rect.fromLTRB(
+        left / width,
+        y / height,
+        (right + 1) / width,
+        (y + 1) / height,
+      );
+      if (bands.isNotEmpty && row.top - bands.last.bottom < .023) {
+        bands.last = bands.last.expandToInclude(row);
+      } else {
+        bands.add(row);
+      }
+    }
+    return bands;
+  });
+
+  Future<CompanionPagePicture?> _picture(
+    PdfPage page,
+    Rect region,
+    int number,
+    int index,
+    _ReflowJob job,
+  ) async {
+    final raster = await _render(page, job, 1560, region: region);
+    if (raster == null) return null;
+    try {
+      if (job.cancelled) return null;
+      final bitmap = await raster.createImage();
+      try {
+        final png = await bitmap.toByteData(format: ImageByteFormat.png);
+        if (png == null || job.cancelled) return null;
+        final full = region == const Rect.fromLTWH(0, 0, 1, 1);
+        return CompanionPagePicture(
+          region,
+          raster.width / raster.height,
+          XiaoqiDocumentAsset(
+            id: 'pdf-page-$number-image-$index',
+            mimeType: 'image/png',
+            bytes: png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+            altText: full ? '第 $number 页原貌' : '第 $number 页原图',
+            sourceLocator: 'page:$number',
+          ),
+        );
+      } finally {
+        bitmap.dispose();
+      }
+    } finally {
+      raster.dispose();
+    }
+  }
+
+  Future<PdfImage?> _render(
+    PdfPage page,
+    _ReflowJob job,
+    double maxEdge, {
+    Rect region = const Rect.fromLTWH(0, 0, 1, 1),
+  }) {
     if (job.cancelled) return Future.value(null);
     final scale = maxEdge / math.max(page.width, page.height);
     final token = page.createCancellationToken();
     job.render = token;
+    final width = math.max(1.0, (page.width * scale).roundToDouble());
+    final height = math.max(1.0, (page.height * scale).roundToDouble());
+    final x = (width * region.left).floor();
+    final y = (height * region.top).floor();
     return page.render(
-      fullWidth: math.max(1.0, page.width * scale),
-      fullHeight: math.max(1.0, page.height * scale),
+      fullWidth: width,
+      fullHeight: height,
+      x: x,
+      y: y,
+      width: math.max(1, (width * region.right).ceil() - x),
+      height: math.max(1, (height * region.bottom).ceil() - y),
       backgroundColor: 0xffffffff,
       annotationRenderingMode: PdfAnnotationRenderingMode.none,
       cancellationToken: token,
@@ -456,12 +958,13 @@ class CompanionPdfReflow {
   Future<({List<CompanionReflowLine> lines, bool reliable})> _recognize(
     PdfPage page,
     _ReflowJob job,
+    Rect region,
   ) async {
     final directory = await getTemporaryDirectory();
     final file = File(
       '${directory.path}${Platform.pathSeparator}companion-${job.id}.png',
     );
-    final raster = await _render(page, job, 2400);
+    final raster = await _render(page, job, 2400, region: region);
     const empty = (lines: <CompanionReflowLine>[], reliable: false);
     if (raster == null) return empty;
     try {
@@ -487,7 +990,11 @@ class CompanionPdfReflow {
           .length;
       return (
         reliable:
-            result.lines.isNotEmpty && lowConfidence * 4 <= result.lines.length,
+            result.lines.isNotEmpty &&
+            lowConfidence * 4 <= result.lines.length &&
+            !result.lines.any(
+              (line) => line.text.trim().isNotEmpty && line.confidence < .50,
+            ),
         lines: [
           for (final line in result.lines)
             if (line.text.isNotEmpty &&
@@ -497,10 +1004,10 @@ class CompanionPdfReflow {
               CompanionReflowLine(
                 line.text,
                 Rect.fromLTRB(
-                  line.left / result.imageWidth,
-                  line.top / result.imageHeight,
-                  line.right / result.imageWidth,
-                  line.bottom / result.imageHeight,
+                  region.left + region.width * line.left / result.imageWidth,
+                  region.top + region.height * line.top / result.imageHeight,
+                  region.left + region.width * line.right / result.imageWidth,
+                  region.top + region.height * line.bottom / result.imageHeight,
                 ),
                 recognized: true,
               ),

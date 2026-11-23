@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -12,6 +14,8 @@ import 'package:xiaoqi_app/models/reader_pagination.dart';
 import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/services/reader_pagination_preferences.dart';
 import 'package:xiaoqi_app/widgets/reading_companion.dart';
+
+const _paperCapture = ValueKey('companion-pdf-paper-capture');
 
 void main() {
   testWidgets('PDF outline keeps only the current branch open initially', (
@@ -101,12 +105,17 @@ void main() {
       final night = find.widgetWithText(TextButton, '暗夜');
       Color? fill(Finder button) =>
           tester.widget<TextButton>(button).style?.backgroundColor?.resolve({});
-      expect(fill(day), const Color(0xFF292929));
-      expect(fill(night), Colors.white);
+      expect(fill(day), const Color(0xFF262626));
+      expect(fill(night), Colors.transparent);
+      final paper =
+          tester.getRect(find.byType(PdfViewer)).topCenter +
+          const Offset(0, 350);
+      expect(await _paperRed(tester, paper), greaterThan(200));
       await tester.tap(night);
       await tester.pumpAndSettle();
-      expect(fill(day), Colors.white);
-      expect(fill(night), const Color(0xFF292929));
+      expect(fill(day), Colors.transparent);
+      expect(fill(night), const Color(0xFFE6E3DC));
+      expect(await _paperRed(tester, paper), lessThan(65));
 
       final slider = find.byType(Slider);
       final marker = find.bySemanticsLabel('恢复默认亮度');
@@ -146,6 +155,22 @@ void main() {
   });
 }
 
+Future<int?> _paperRed(WidgetTester tester, Offset point) =>
+    tester.runAsync(() async {
+      final capture = find.byKey(_paperCapture);
+      final local = point - tester.getTopLeft(capture);
+      final boundary = tester.renderObject<RenderRepaintBoundary>(capture);
+      final image = await boundary.toImage();
+      try {
+        final rgba = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+        return rgba!.getUint8(
+          (local.dy.round() * image.width + local.dx.round()) * 4,
+        );
+      } finally {
+        image.dispose();
+      }
+    });
+
 Future<void> _openReader(WidgetTester tester, BookSourceRecord source) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = const Size(800, 1280);
@@ -155,17 +180,20 @@ Future<void> _openReader(WidgetTester tester, BookSourceRecord source) async {
   addTearDown(reply.dispose);
   await tester.pumpWidget(
     MaterialApp(
-      home: ReadingCompanion(
-        bookId: 1,
-        library: BookLibraryService(),
-        messages: const [],
-        streamingReply: reply,
-        composerBuilder: (history) => history,
-        onPassageOpened: (_) {},
-        target: ReadingCompanionTarget(
-          title: '测试目录',
-          source: source,
-          sources: [source],
+      home: RepaintBoundary(
+        key: _paperCapture,
+        child: ReadingCompanion(
+          bookId: 1,
+          library: BookLibraryService(),
+          messages: const [],
+          streamingReply: reply,
+          composerBuilder: (history) => history,
+          onPassageOpened: (_) {},
+          target: ReadingCompanionTarget(
+            title: '测试目录',
+            source: source,
+            sources: [source],
+          ),
         ),
       ),
     ),

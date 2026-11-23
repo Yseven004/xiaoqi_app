@@ -219,7 +219,9 @@ void main() {
     final inkViewport = tester.getRect(reader);
     await tester.tap(find.byTooltip('文字'));
     await tester.pumpAndSettle();
-    final inkTextField = find.byKey(const ValueKey('drawing-inline-text-field'));
+    final inkTextField = find.byKey(
+      const ValueKey('drawing-inline-text-field'),
+    );
     await tester.showKeyboard(inkTextField);
     tester.view.viewInsets = const FakeViewPadding(bottom: 600);
     addTearDown(tester.view.resetViewInsets);
@@ -231,6 +233,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(inkTextField, findsNothing);
     expect(tester.getRect(reader), inkViewport);
+    await tester.tap(find.byTooltip('画笔'));
+    await tester.pump();
     await tester.dragFrom(tester.getCenter(body), const Offset(65, 4));
     await tester.pumpAndSettle();
     final center = tester.getCenter(body);
@@ -245,7 +249,9 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(finishInk);
     for (int i = 0; i < 100 && finishInk.evaluate().isNotEmpty; i++) {
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 12)));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 12)),
+      );
       await tester.pump(const Duration(milliseconds: 16));
     }
     expect(find.text('目录'), findsNothing);

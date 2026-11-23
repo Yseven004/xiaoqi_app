@@ -348,6 +348,22 @@ class XiaoqiDocumentImageBlock extends StatelessWidget {
         ),
       );
     }
+    final aspect = double.tryParse(block.attributes['aspectRatio'] ?? '');
+    if (aspect != null && aspect.isFinite && aspect > 0) {
+      final bytes = currentAsset.bytes;
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: AspectRatio(
+          aspectRatio: aspect,
+          child: Image.memory(
+            bytes is Uint8List ? bytes : Uint8List.fromList(bytes),
+            fit: BoxFit.contain,
+            semanticLabel: currentAsset.altText,
+            errorBuilder: (_, _, _) => const Text('文档图片暂时无法显示'),
+          ),
+        ),
+      );
+    }
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 14),

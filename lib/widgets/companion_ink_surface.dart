@@ -11,10 +11,12 @@ class CompanionInkNavigation extends StatefulWidget {
     required this.child,
     required this.onNavigate,
     required this.onNavigationEnd,
+    this.enabled = true,
   });
   final Widget child;
   final ValueChanged<ScaleUpdateDetails> onNavigate;
   final ValueChanged<double> onNavigationEnd;
+  final bool enabled;
   @override
   State<CompanionInkNavigation> createState() => _CompanionInkNavigationState();
 }
@@ -26,6 +28,7 @@ class _CompanionInkNavigationState extends State<CompanionInkNavigation> {
   Offset _center = Offset.zero;
 
   void _down(PointerDownEvent event) {
+    if (!widget.enabled) return;
     _positions[event.pointer] = event.position;
     if (_positions.length != 2) return;
     final pair = _positions.values.toList();
@@ -35,6 +38,7 @@ class _CompanionInkNavigationState extends State<CompanionInkNavigation> {
   }
 
   void _move(PointerMoveEvent event) {
+    if (!widget.enabled) return;
     if (!_positions.containsKey(event.pointer)) return;
     _positions[event.pointer] = event.position;
     if (_positions.length != 2 || _initialDistance <= 0) return;
@@ -53,6 +57,7 @@ class _CompanionInkNavigationState extends State<CompanionInkNavigation> {
   }
 
   void _end(PointerEvent event) {
+    if (!widget.enabled) return;
     _positions.remove(event.pointer);
     if (_positions.length >= 2 || _initialDistance <= 0) return;
     _initialDistance = 0;

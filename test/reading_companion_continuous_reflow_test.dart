@@ -74,4 +74,54 @@ void main() {
       },
     );
   }
+
+  testWidgets('prepending PDF text leaves the current screen in place', (
+    tester,
+  ) async {
+    final before = CompanionReflowPage(1, [
+      CompanionReflowLine(
+        List.filled(300, 'Earlier paragraph.').join(' '),
+        const Rect.fromLTWH(.1, .15, .8, .4),
+      ),
+    ]);
+    const current = CompanionReflowPage(2, [
+      CompanionReflowLine('当前章节的开头。', Rect.fromLTWH(.1, .15, .8, .03)),
+    ]);
+    final anchor = FlowReaderAnchor(
+      sourceId: 'source',
+      chapterId: CompanionReflowPage.readingChapterId,
+      blockId: current.entryNear(0)?.blockId,
+    );
+    final pages = ValueNotifier([current]);
+    addTearDown(pages.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ValueListenableBuilder(
+            valueListenable: pages,
+            builder: (context, value, _) => ReflowDocumentPager(
+              document: CompanionReflowPage.readingWindow(value, 2),
+              sourceId: anchor.sourceId,
+              initialChapterId: anchor.chapterId,
+              initialAnchor: anchor,
+              mode: ReaderPaginationMode.horizontal,
+              blockBuilder: (context, slice, _) => Text(slice.text),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final currentLine = find.text('当前章节的开头。');
+    final origin = tester.getTopLeft(currentLine);
+    pages.value = [before, current];
+    double screen() =>
+        tester.widget<PageView>(find.byType(PageView)).controller!.page!;
+    for (var frame = 0; frame < 120 && screen() < 1; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(currentLine.hitTestable(), findsOneWidget);
+      expect(tester.getTopLeft(currentLine), origin);
+    }
+    expect(screen(), greaterThanOrEqualTo(1));
+  });
 }

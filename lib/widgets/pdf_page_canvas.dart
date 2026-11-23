@@ -59,6 +59,35 @@ double horizontalPdfPageWidthZoom(PdfViewerController controller, int page) {
       : controller.viewSize.width / (width + controller.params.margin * 2);
 }
 
+/// A viewport-sized slot per original page. At zoom 1 every page is fully
+/// visible and the viewport never includes a strip from either neighbour.
+PdfPageLayout verticalPdfPageLayout(
+  List<PdfPage> pages,
+  Size viewport,
+  double margin,
+) {
+  final width = math.max(1.0, viewport.width - 2 * margin);
+  final height = math.max(1.0, viewport.height - 2 * margin);
+  final layouts = <Rect>[];
+  for (final page in pages) {
+    final scale = math.min(width / page.width, height / page.height);
+    layouts.add(
+      Rect.fromCenter(
+        center: Offset(
+          viewport.width / 2,
+          (layouts.length + .5) * viewport.height,
+        ),
+        width: page.width * scale,
+        height: page.height * scale,
+      ),
+    );
+  }
+  return PdfPageLayout(
+    pageLayouts: layouts,
+    documentSize: Size(viewport.width, viewport.height * pages.length),
+  );
+}
+
 /// The settled page after a drag. Distance is positive toward the next page,
 /// while finger velocity is negative when swiping left.
 int horizontalPdfPageTarget({
@@ -69,6 +98,25 @@ int horizontalPdfPageTarget({
   required double viewportWidth,
 }) {
   final threshold = math.max(48.0, viewportWidth * .16);
+  final shouldAdvance =
+      distance.abs() >= threshold || fingerVelocity.abs() >= 650;
+  if (!shouldAdvance) return startPage;
+
+  final forward = fingerVelocity.abs() >= 650
+      ? fingerVelocity < 0
+      : distance > 0;
+  return (startPage + (forward ? 1 : -1)).clamp(1, pageCount).toInt();
+}
+
+/// The settled page after an up/down drag, where an upward gesture advances.
+int verticalPdfPageTarget({
+  required int startPage,
+  required int pageCount,
+  required double distance,
+  required double fingerVelocity,
+  required double viewportHeight,
+}) {
+  final threshold = math.max(48.0, viewportHeight * .16);
   final shouldAdvance =
       distance.abs() >= threshold || fingerVelocity.abs() >= 650;
   if (!shouldAdvance) return startPage;

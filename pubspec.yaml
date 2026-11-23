@@ -1,7 +1,7 @@
 name: xiaoqi_app
 description: Recovered from the 2026-10-02 Android debug APK
 publish_to: 'none'
-version: 1.0.0+5
+version: 1.0.0+16
 
 environment:
   sdk: ^3.12.0
@@ -72,6 +72,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  shaders:
+    - shaders/companion_pdf_night.frag
   assets:
     - assets/
     - assets/builtin_plugins/skill_creator/plugin.json

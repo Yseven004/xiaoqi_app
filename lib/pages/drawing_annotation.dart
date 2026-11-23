@@ -74,37 +74,41 @@ class DrawingAnnotationLayer {
 /// One compact tool palette controls the currently touched page or text block.
 class DrawingAnnotationTools extends ChangeNotifier {
   final _boards = <_DrawingBoardPageState>{};
+  final _legacyBoards = <_DrawingBoardPageState>{};
   final _viewportKey = GlobalKey();
   _DrawingBoardPageState? _active;
   var _viewportSize = Size.zero;
   bool _scheduled = false;
   bool _disposed = false;
+  bool _canAdoptLegacy = false;
   var _brush = (
     color: _DrawingBoardPageState._ink,
     width: 5.0,
     eraserWidth: 30.0,
-    erasing: false,
+    tool: 1,
   );
 
   void begin({required Color color}) {
-    _brush = (color: color, width: 5, eraserWidth: 30, erasing: false);
+    _brush = (color: color, width: 5, eraserWidth: 30, tool: 1);
+    _canAdoptLegacy = true;
   }
 
   void _applyBrush(_DrawingBoardPageState board) {
     board._selectedColor = _brush.color;
     board._penStrokeWidth = _brush.width;
     board._eraserStrokeWidth = _brush.eraserWidth;
-    board._tool = _brush.erasing ? 4 : 1;
+    board._tool = _brush.tool;
     board._controller.freeStyleColor = _brush.color;
-    board._controller.freeStyleStrokeWidth = _brush.erasing
-        ? _brush.eraserWidth
-        : _brush.width;
-    board._controller.freeStyleMode = _brush.erasing
-        ? FreeStyleMode.erase
-        : FreeStyleMode.draw;
+    board._controller.freeStyleStrokeWidth = board._activeStrokeWidth;
+    board._syncFreeStyleMode();
   }
 
   void _attach(_DrawingBoardPageState board) {
+    if (board.widget.legacyAnnotation) {
+      _legacyBoards.add(board);
+      _refresh();
+      return;
+    }
     _boards.add(board);
     _applyBrush(board);
     _refresh();
@@ -122,7 +126,7 @@ class DrawingAnnotationTools extends ChangeNotifier {
           color: source._selectedColor,
           width: source._penStrokeWidth,
           eraserWidth: source._eraserStrokeWidth,
-          erasing: source._tool == 4,
+          tool: source._tool,
         );
         if (next != _brush) {
           _brush = next;
@@ -133,7 +137,14 @@ class DrawingAnnotationTools extends ChangeNotifier {
       }
       final render = _viewportKey.currentContext?.findRenderObject();
       if (render is RenderBox && render.attached && render.hasSize) {
-        _visibleBoard(render.localToGlobal(Offset.zero) & render.size);
+        final board = _visibleBoard(
+          render.localToGlobal(Offset.zero) & render.size,
+        );
+        if (_canAdoptLegacy &&
+            board != null &&
+            board.widget.adoptsLegacyAnnotations) {
+          _adoptLegacyObjects(board);
+        }
       }
       notifyListeners();
     });
@@ -141,9 +152,82 @@ class DrawingAnnotationTools extends ChangeNotifier {
   }
 
   void _detach(_DrawingBoardPageState board) {
+    _legacyBoards.remove(board);
     _boards.remove(board);
     if (_active == board) _active = null;
     _refresh();
+  }
+
+  void _adoptLegacyObjects(_DrawingBoardPageState target) {
+    final targetPainter = target._controller.painterKey.currentContext
+        ?.findRenderObject();
+    if (!target._canEdit ||
+        targetPainter is! RenderBox ||
+        !targetPainter.attached ||
+        !targetPainter.hasSize) {
+      return;
+    }
+    final targetBounds = Offset.zero & targetPainter.size;
+    final targetLayer = target.widget.annotation!;
+    for (final source in _legacyBoards) {
+      final sourcePainter = source._controller.painterKey.currentContext
+          ?.findRenderObject();
+      if (!source._ready ||
+          sourcePainter is! RenderBox ||
+          !sourcePainter.attached ||
+          !sourcePainter.hasSize) {
+        continue;
+      }
+      final sourceLayer = source.widget.annotation!;
+      Offset intoTarget(Offset point) =>
+          targetPainter.globalToLocal(sourcePainter.localToGlobal(point));
+      final scale =
+          (intoTarget(const Offset(0, 1)) - intoTarget(Offset.zero)).distance;
+      if (!scale.isFinite || scale <= 0) continue;
+      final migrated = <ObjectDrawable>[];
+      final objects = source._controller.value.drawables
+          .whereType<ObjectDrawable>()
+          .toList();
+      for (final object in objects) {
+        if (object is! ImageDrawable && object is! TextDrawable) continue;
+        if (sourceLayer._items?.contains(object) != true) continue;
+        final position = intoTarget(object.position);
+        final size = object.getSize(maxWidth: sourcePainter.size.width) * scale;
+        final bounds = Rect.fromCenter(
+          center: position,
+          width: size.width,
+          height: size.height,
+        );
+        final rotated = target._rotatedBounds(bounds, object.rotationAngle);
+        if (!rotated.isFinite ||
+            rotated.left < targetBounds.left ||
+            rotated.top < targetBounds.top ||
+            rotated.right > targetBounds.right ||
+            rotated.bottom > targetBounds.bottom) {
+          continue;
+        }
+        if (!source._controller.removeDrawable(object, newAction: false))
+          continue;
+        final objectScale = object.scale * scale;
+        if (object is ImageDrawable) {
+          final image = object.image.clone();
+          targetLayer._images.add(image);
+          migrated.add(
+            object.copyWith(
+              position: position,
+              scale: objectScale,
+              image: image,
+            ),
+          );
+        } else {
+          migrated.add(object.copyWith(position: position, scale: objectScale));
+        }
+      }
+      // Both layers go through the reader's existing atomic save.
+      if (migrated.isNotEmpty) {
+        target._controller.insertDrawables(0, migrated, newAction: false);
+      }
+    }
   }
 
   void _select(_DrawingBoardPageState board) {
@@ -179,6 +263,7 @@ class DrawingAnnotationTools extends ChangeNotifier {
   }
 
   void commitText() {
+    _canAdoptLegacy = false;
     for (final board in _boards.toList()) {
       if (board.mounted && board._textEditing) board._commitInlineText();
     }
@@ -245,6 +330,7 @@ class DrawingAnnotationTools extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _boards.clear();
+    _legacyBoards.clear();
     super.dispose();
   }
 }
