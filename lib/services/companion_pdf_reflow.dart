@@ -15,6 +15,12 @@ import '../plugins/document_recognition/fast_ocr_plugin.dart';
 
 /// A source page, in reading order, with geometry in original page fractions.
 class CompanionReflowPage {
+  static const readingChapterId = 'pdf-reflow-body';
+  static final _chapterHeading = RegExp(
+    r'^(?:第[\s零〇一二三四五六七八九十百千万两\d０-９]+[卷篇部章节回]|(?:chapter|part|section)\s+(?:\d+|[ivxlcdm]+)\b)',
+    caseSensitive: false,
+  );
+
   const CompanionReflowPage(
     this.number,
     this.lines, {
@@ -34,6 +40,8 @@ class CompanionReflowPage {
       final line = lines[index];
       final previous = index == 0 ? null : lines[index - 1];
       if (previous == null ||
+          _isHeading(line.text) ||
+          _isHeading(previous.text) ||
           line.bounds.top - previous.bounds.bottom >
               previous.bounds.height * .9 ||
           line.bounds.left - previous.bounds.left >
@@ -45,6 +53,11 @@ class CompanionReflowPage {
     }
     return paragraphs;
   }
+
+  static bool _isHeading(String text) =>
+      text.length <= 72 &&
+      _chapterHeading.hasMatch(text) &&
+      !RegExp(r'[。！？!?]$').hasMatch(text);
 
   ({String blockId, int offset})? entryNear(double? top) {
     if (top == null || lines.isEmpty) return null;
@@ -72,7 +85,10 @@ class CompanionReflowPage {
     return null;
   }
 
-  XiaoqiDocument document(int pageCount) => XiaoqiDocument(
+  static XiaoqiDocument readingWindow(
+    Iterable<CompanionReflowPage> pages,
+    int pageCount,
+  ) => XiaoqiDocument(
     format: 'pdf-reflow',
     title: '',
     author: '',
@@ -80,26 +96,36 @@ class CompanionReflowPage {
     originalPageCount: pageCount,
     chapters: [
       XiaoqiDocumentChapter(
-        id: chapterId,
+        id: readingChapterId,
         title: '',
-        href: chapterId,
+        href: readingChapterId,
         html: '',
-        plainText: text,
-        order: number - 1,
+        plainText: pages.map((page) => page.text).join('\n\n'),
+        order: 0,
         blocks: [
-          for (final paragraph in _paragraphs)
-            XiaoqiDocumentBlock(
-              id: paragraph.id,
-              kind: 'paragraph',
-              text: paragraph.body.toString(),
-              sourceLocator: 'page:$number',
-              originalPageLabel: '$number',
-            ),
+          for (final page in pages)
+            for (final paragraph in page._paragraphs)
+              XiaoqiDocumentBlock(
+                id: paragraph.id,
+                kind: _isHeading(paragraph.body.toString())
+                    ? 'heading'
+                    : 'paragraph',
+                level: 1,
+                text: paragraph.body.toString(),
+                sourceLocator: 'page:${page.number}',
+                originalPageLabel: '${page.number}',
+              ),
         ],
-        sourceLocator: 'page:$number',
       ),
     ],
   );
+
+  static int? pageForBlock(String? blockId) {
+    final match = blockId == null ? null : _pageInBlock.firstMatch(blockId);
+    return int.tryParse(match?.group(1) ?? '');
+  }
+
+  static final _pageInBlock = RegExp(r'^pdf-page-(\d+)-line-');
 }
 
 class _ReflowParagraph {

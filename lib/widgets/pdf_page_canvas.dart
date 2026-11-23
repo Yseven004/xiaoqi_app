@@ -52,6 +52,33 @@ PdfPageLayout horizontalPdfPageLayout(
   return PdfPageLayout(pageLayouts: layouts, documentSize: Size(x, height));
 }
 
+double horizontalPdfPageWidthZoom(PdfViewerController controller, int page) {
+  final width = controller.layout.pageLayouts[page - 1].width;
+  return width <= 0
+      ? controller.currentZoom
+      : controller.viewSize.width / (width + controller.params.margin * 2);
+}
+
+/// The settled page after a drag. Distance is positive toward the next page,
+/// while finger velocity is negative when swiping left.
+int horizontalPdfPageTarget({
+  required int startPage,
+  required int pageCount,
+  required double distance,
+  required double fingerVelocity,
+  required double viewportWidth,
+}) {
+  final threshold = math.max(48.0, viewportWidth * .16);
+  final shouldAdvance =
+      distance.abs() >= threshold || fingerVelocity.abs() >= 650;
+  if (!shouldAdvance) return startPage;
+
+  final forward = fingerVelocity.abs() >= 650
+      ? fingerVelocity < 0
+      : distance > 0;
+  return (startPage + (forward ? 1 : -1)).clamp(1, pageCount).toInt();
+}
+
 /// Shared PDF page surface used by the reader and the structured editor.
 ///
 /// The PDF page remains the visual base. Text changes are persisted as

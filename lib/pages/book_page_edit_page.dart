@@ -871,18 +871,18 @@ class _BookPageEditPageState extends State<BookPageEditPage>
         start == null ||
         startPage == null ||
         controller.currentZoom >
-            _pdfPageWidthZoom(controller, startPage) * 1.05) {
+            horizontalPdfPageWidthZoom(controller, startPage) * 1.05) {
       return;
     }
     final delta = controller.centerPosition.dx - start.dx;
     final velocity = details.velocity.pixelsPerSecond.dx;
-    final threshold = math.max(48.0, controller.viewSize.width * .16);
-    var target = startPage;
-    if (velocity.abs() >= 650 || delta.abs() >= threshold) {
-      final forward = velocity < -650 || delta > 0;
-      target = startPage + (forward ? 1 : -1);
-    }
-    target = target.clamp(1, controller.layout.pageLayouts.length).toInt();
+    final target = horizontalPdfPageTarget(
+      startPage: startPage,
+      pageCount: controller.layout.pageLayouts.length,
+      distance: delta,
+      fingerVelocity: velocity,
+      viewportWidth: controller.viewSize.width,
+    );
     await _goToPdfPage(
       target,
       duration: MediaQuery.disableAnimationsOf(context)
@@ -893,15 +893,6 @@ class _BookPageEditPageState extends State<BookPageEditPage>
       _dismissKeyboard();
       await _activatePdfPage(target);
     }
-  }
-
-  double _pdfPageWidthZoom(PdfViewerController controller, int pageNumber) {
-    final layouts = controller.layout.pageLayouts;
-    final index = pageNumber.clamp(1, layouts.length).toInt() - 1;
-    final width = layouts[index].width;
-    return width <= 0
-        ? controller.currentZoom
-        : controller.viewSize.width / width;
   }
 
   Future<void> _goToPdfPage(
@@ -915,7 +906,7 @@ class _BookPageEditPageState extends State<BookPageEditPage>
         .toInt();
     final pageRect = controller.layout.pageLayouts[safePage - 1];
     final zoom = _horizontalPdfPaging
-        ? _pdfPageWidthZoom(controller, safePage)
+        ? horizontalPdfPageWidthZoom(controller, safePage)
         : controller.alternativeFitScale ?? controller.currentZoom;
     final matrix = controller.calcMatrixFor(
       pageRect.center,

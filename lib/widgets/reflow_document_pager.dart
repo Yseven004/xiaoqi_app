@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -81,6 +82,8 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   int _currentPage = 0;
   bool _selectionActive = false;
   bool _isPreparing = false;
+  bool _refreshingContinuousDocument = false;
+  Timer? _continuousPublishDelay;
   int _dragStartPage = 0;
   final Map<String, GlobalKey> _verticalBlockKeys = {};
   bool _verticalRestoreScheduled = false;
@@ -115,9 +118,28 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.document != widget.document ||
         oldWidget.sourceId != widget.sourceId) {
-      _invalidatePagination(clearVerticalKeys: true);
+      final extendsPdfReflow =
+          widget.document.format == 'pdf-reflow' &&
+          oldWidget.document.format == widget.document.format &&
+          oldWidget.sourceId == widget.sourceId &&
+          oldWidget.initialAnchor == widget.initialAnchor &&
+          oldWidget.mode == widget.mode;
+      if (extendsPdfReflow) {
+        _continuousPublishDelay?.cancel();
+        _paginationEpoch++;
+        _preparingSignature = null;
+        _layoutSignature = null;
+        _refreshingContinuousDocument = _pages.isNotEmpty;
+        if (widget.mode == ReaderPaginationMode.vertical &&
+            oldWidget.document.chapters.first.blocks.firstOrNull?.id !=
+                widget.document.chapters.first.blocks.firstOrNull?.id) {
+          _preserveContinuousVerticalOffset();
+        }
+      } else {
+        _invalidatePagination(clearVerticalKeys: true);
+        _requestedAnchor = widget.initialAnchor;
+      }
       _isPreparing = false;
-      _requestedAnchor = widget.initialAnchor;
     } else if (oldWidget.mode != widget.mode) {
       // A mode change makes the old screen-page pass obsolete. In particular,
       // do not let a horizontal pass keep measuring while vertical mode builds
@@ -151,6 +173,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   @override
   void dispose() {
     _paginationEpoch++;
+    _continuousPublishDelay?.cancel();
     _pageController.dispose();
     _verticalController.dispose();
     super.dispose();
@@ -158,11 +181,13 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
 
   void _invalidatePagination({bool clearVerticalKeys = false}) {
     _paginationEpoch++;
+    _continuousPublishDelay?.cancel();
     _layoutSignature = null;
     _preparingSignature = null;
     _pages = const [];
     _chapterFirstPages = const {};
     _provisionalChapterId = null;
+    _refreshingContinuousDocument = false;
     _currentPage = 0;
     if (clearVerticalKeys) _verticalBlockKeys.clear();
   }
@@ -218,7 +243,9 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         }
 
         final safePage = _currentPage.clamp(0, _pages.length - 1).toInt();
-        final canPage = !_isPreparing && !_selectionActive;
+        final canPage =
+            (!_isPreparing || _refreshingContinuousDocument) &&
+            !_selectionActive;
         return Semantics(
           container: true,
           label: _pageSemantics(_pages[safePage], safePage),
@@ -381,6 +408,16 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   /// change under a reader who already started reading.
   void _applyPublish(Object signature, int epoch, _PaginationPublish publish) {
     if (!mounted || epoch != _paginationEpoch) return;
+    if (_refreshingContinuousDocument) {
+      if (!publish.complete) return;
+      if (_pageController.hasClients &&
+          _pageController.position.isScrollingNotifier.value) {
+        _continuousPublishDelay = Timer(const Duration(milliseconds: 50), () {
+          _applyPublish(signature, epoch, publish);
+        });
+        return;
+      }
+    }
     final anchorPage = _findAnchorPage(publish.pages);
     final shiftOffset = _shiftOffsetFor(publish);
     final int target;
@@ -405,6 +442,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       _layoutSignature = signature;
       _currentPage = target;
       _isPreparing = !publish.complete;
+      _refreshingContinuousDocument = false;
     });
     if (moved) {
       _scheduleJump(target, report: reportable);
@@ -456,10 +494,11 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
             ),
     };
     final showTitle =
-        blocks.isEmpty ||
-        blocks.first.kind != 'heading' ||
-        _chapterHeadingText(blocks.first.text) !=
-            _chapterHeadingText(chapter.title);
+        chapter.title.trim().isNotEmpty &&
+        (blocks.isEmpty ||
+            blocks.first.kind != 'heading' ||
+            _chapterHeadingText(blocks.first.text) !=
+                _chapterHeadingText(chapter.title));
     final result = ColoredBox(
       color: widget.verticalBackground,
       child: NotificationListener<ScrollEndNotification>(
@@ -530,7 +569,31 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   }
 
   String _verticalKey(String chapterId, String blockId, int index) =>
-      '$chapterId::$index::$blockId';
+      widget.document.format == 'pdf-reflow'
+      ? '$chapterId::$blockId'
+      : '$chapterId::$index::$blockId';
+
+  void _preserveContinuousVerticalOffset() {
+    final anchor = _requestedAnchor;
+    final blockId = anchor?.blockId;
+    if (anchor == null || blockId == null) return;
+    final key = _verticalBlockKeys[_verticalKey(anchor.chapterId, blockId, 0)];
+    final previous = key?.currentContext?.findRenderObject();
+    if (previous is! RenderBox || !previous.hasSize) return;
+    final before = previous.localToGlobal(Offset.zero).dy;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_verticalController.hasClients) return;
+      final next = key?.currentContext?.findRenderObject();
+      if (next is! RenderBox || !next.hasSize) return;
+      final delta = next.localToGlobal(Offset.zero).dy - before;
+      final position = _verticalController.position;
+      _verticalController.jumpTo(
+        (position.pixels + delta)
+            .clamp(position.minScrollExtent, position.maxScrollExtent)
+            .toDouble(),
+      );
+    });
+  }
 
   void _scheduleVerticalRestore(
     String chapterId,
@@ -683,12 +746,12 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   }
 
   String _pageSemantics(ReaderPageSlice page, int index) =>
-      '${page.chapterTitle}，第 ${index + 1} 页'
+      '${page.chapterTitle.isEmpty ? '' : '${page.chapterTitle}，'}第 ${index + 1} 页'
       '${page.originalPageLabel == null ? '' : '，原书第 ${page.originalPageLabel} 页'}';
 
   void _scheduleJump(int target, {bool report = true}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_pageController.hasClients) return;
+      if (!mounted || !_pageController.hasClients || _pages.isEmpty) return;
       final safe = target.clamp(0, _pages.length - 1).toInt();
       if ((_pageController.page ?? 0).round() != safe) {
         _pageController.jumpToPage(safe);
@@ -980,6 +1043,7 @@ Future<void> _paginateDocumentProgressive(
     final headChapter = chapters[preferredIndex];
     final headResult = await _paginateChapter(
       headChapter,
+      showUntitledHeading: document.format != 'pdf-reflow',
       translations: translations,
       headingStyle: headingStyle,
       textStyleBuilder: textStyleBuilder,
@@ -1038,6 +1102,7 @@ Future<void> _paginateDocumentProgressive(
     } else {
       final chapterResult = await _paginateChapter(
         chapter,
+        showUntitledHeading: document.format != 'pdf-reflow',
         translations: translations,
         headingStyle: headingStyle,
         textStyleBuilder: textStyleBuilder,
@@ -1143,6 +1208,7 @@ Future<_ChapterPaginationResult?> _paginateChapter(
   required double height,
   required TextScaler textScaler,
   required _PageYieldGate gate,
+  bool showUntitledHeading = true,
   String? initialOriginalPageLabel,
   _ChapterPageListener? onPageFlushed,
 }) async {
@@ -1157,10 +1223,11 @@ Future<_ChapterPaginationResult?> _paginateChapter(
         ]
       : chapter.blocks;
   final showTitle =
-      blocks.isEmpty ||
-      blocks.first.kind != 'heading' ||
-      _chapterHeadingText(blocks.first.text) !=
-          _chapterHeadingText(chapter.title);
+      (showUntitledHeading || chapter.title.trim().isNotEmpty) &&
+      (blocks.isEmpty ||
+          blocks.first.kind != 'heading' ||
+          _chapterHeadingText(blocks.first.text) !=
+              _chapterHeadingText(chapter.title));
   final pages = <ReaderPageSlice>[];
   var current = <ReaderBlockSlice>[];
   var used = showTitle
@@ -1182,7 +1249,9 @@ Future<_ChapterPaginationResult?> _paginateChapter(
     pages.add(
       ReaderPageSlice(
         chapterId: chapter.id,
-        chapterTitle: chapter.title.isEmpty ? '全文' : chapter.title,
+        chapterTitle: chapter.title.isEmpty && showUntitledHeading
+            ? '全文'
+            : chapter.title,
         blocks: List.unmodifiable(current),
         showChapterTitle: firstPage && showTitle,
         mayOverflow: mayOverflow,
@@ -1335,7 +1404,9 @@ Future<_ChapterPaginationResult?> _paginateChapter(
     pages.add(
       ReaderPageSlice(
         chapterId: chapter.id,
-        chapterTitle: chapter.title.isEmpty ? '全文' : chapter.title,
+        chapterTitle: chapter.title.isEmpty && showUntitledHeading
+            ? '全文'
+            : chapter.title,
         blocks: const [],
         showChapterTitle: showTitle,
         originalPageLabel: currentOriginalPageLabel,
