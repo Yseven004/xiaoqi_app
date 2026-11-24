@@ -639,7 +639,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _readingCompanionOpen = false;
   bool _companionInkEditing = false;
   bool _companionInkKeyboardClosing = false;
-  bool _companionImmersive = true;
+  bool _companionImmersive = false;
   bool _companionDark = false;
   ReadingCompanionTarget? _companionTarget;
   String? _companionHistoryNotice;
@@ -8713,7 +8713,7 @@ $text''';
       _attachmentPanelOpen = false;
       _attachmentPanelPending = false;
       _spaceMenuOpen = false;
-      _companionImmersive = true;
+      _companionImmersive = false;
       _readingCompanionOpen = true;
     });
   }
@@ -8767,7 +8767,7 @@ $text''';
     ++_readingTaskGeneration;
     setState(() {
       _readingCompanionOpen = false;
-      _companionImmersive = true;
+      _companionImmersive = false;
       _companionDark = false;
       _companionMenuOpen = false;
       _readingPassage = null;
@@ -8849,6 +8849,11 @@ $text''';
       onToggleImmersive: () {
         if (_readingCompanionOpen && !_spaceMenuOpen) {
           setState(() => _companionImmersive = !_companionImmersive);
+        }
+      },
+      onEnterImmersive: () {
+        if (_readingCompanionOpen && !_spaceMenuOpen && !_companionImmersive) {
+          setState(() => _companionImmersive = true);
         }
       },
       onFreeChat: _startNewConversationForCurrentBookContext,
@@ -10128,25 +10133,6 @@ $text''';
                             child: const SizedBox.expand(),
                           ),
                         ),
-                        Positioned(
-                          top: _readingCompanionOpen
-                              ? readingCompanionToolbarHeight(context)
-                              : 45,
-                          left: 0,
-                          right: 0,
-                          child: Center(
-                            child: _SpaceMenu(
-                              selectedSpace: _space,
-                              onSelect: _switchSpace,
-                              onExitCompanion: _readingCompanionOpen
-                                  ? () {
-                                      setState(() => _spaceMenuOpen = false);
-                                      _closeReadingCompanion();
-                                    }
-                                  : null,
-                            ),
-                          ),
-                        ),
                       ],
                       if (!_composerExpanded && !_readingCompanionOpen)
                         _buildTopBar(showNewConversation: _messages.isNotEmpty),
@@ -10240,17 +10226,41 @@ $text''';
 
   static const _topBarIconSize = 25.5;
 
+  Widget _spaceSwitcher({
+    bool companion = false,
+    Color? ink,
+    bool compact = false,
+  }) {
+    final expanded = _spaceMenuOpen && companion == _readingCompanionOpen;
+    final button = _SpaceSwitcher(
+      title: _spaceTitle,
+      expanded: expanded,
+      onToggle: _toggleSpaceMenu,
+      foreground: ink,
+      compact: compact,
+    );
+    if (!expanded) return button;
+    return _AnchoredSpaceMenu(
+      button: button,
+      menu: _SpaceMenu(
+        selectedSpace: _space,
+        onSelect: _switchSpace,
+        dark: companion && _companionDark,
+        onExitCompanion: companion
+            ? () {
+                setState(() => _spaceMenuOpen = false);
+                _closeReadingCompanion();
+              }
+            : null,
+      ),
+    );
+  }
+
   Widget _buildCompanionTopBar(BuildContext context, Widget readerTools) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final ink = dark ? const Color(0xFFE6E3DC) : const Color(0xFF262626);
     final wide = MediaQuery.sizeOf(context).width >= 600;
-    final title = _SpaceSwitcher(
-      title: _spaceTitle,
-      expanded: _spaceMenuOpen,
-      onToggle: _toggleSpaceMenu,
-      foreground: ink,
-      compact: !wide,
-    );
+    final title = _spaceSwitcher(companion: true, ink: ink, compact: !wide);
     Widget action(String label, String asset, VoidCallback onPressed) =>
         IconButton(
           tooltip: label,
@@ -10412,14 +10422,7 @@ $text''';
           Positioned.fill(
             left: rightControls,
             right: rightControls,
-            child: Align(
-              alignment: Alignment.center,
-              child: _SpaceSwitcher(
-                title: _spaceTitle,
-                expanded: _spaceMenuOpen,
-                onToggle: _toggleSpaceMenu,
-              ),
-            ),
+            child: Align(alignment: Alignment.center, child: _spaceSwitcher()),
           ),
         ],
       ),
@@ -10622,15 +10625,65 @@ class _SpaceSwitcher extends StatelessWidget {
   }
 }
 
+class _AnchoredSpaceMenu extends StatefulWidget {
+  const _AnchoredSpaceMenu({required this.button, required this.menu});
+
+  final Widget button;
+  final Widget menu;
+
+  @override
+  State<_AnchoredSpaceMenu> createState() => _AnchoredSpaceMenuState();
+}
+
+class _AnchoredSpaceMenuState extends State<_AnchoredSpaceMenu> {
+  final _portal = OverlayPortalController()..show();
+
+  @override
+  Widget build(BuildContext context) => OverlayPortal.overlayChildLayoutBuilder(
+    controller: _portal,
+    child: widget.button,
+    overlayChildBuilder: (context, info) {
+      final button = MatrixUtils.transformRect(
+        info.childPaintTransform,
+        Offset.zero & info.childSize,
+      );
+      final padding = MediaQuery.paddingOf(Overlay.of(context).context);
+      final leftEdge = padding.left + 8;
+      final rightEdge = info.overlaySize.width - padding.right - 8;
+      final width = min(240.0, max(0.0, rightEdge - leftEdge));
+      final left = (button.center.dx - width / 2)
+          .clamp(leftEdge, max(leftEdge, rightEdge - width))
+          .toDouble();
+      final top = button.bottom + 6;
+      return Positioned(
+        left: left,
+        top: top,
+        width: width,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: max(
+              0,
+              info.overlaySize.height - padding.bottom - top - 8,
+            ),
+          ),
+          child: SingleChildScrollView(child: widget.menu),
+        ),
+      );
+    },
+  );
+}
+
 class _SpaceMenu extends StatelessWidget {
   const _SpaceMenu({
     required this.selectedSpace,
     required this.onSelect,
+    required this.dark,
     this.onExitCompanion,
   });
 
   final _HomeSpace selectedSpace;
   final ValueChanged<_HomeSpace> onSelect;
+  final bool dark;
   final VoidCallback? onExitCompanion;
 
   @override
@@ -10638,12 +10691,13 @@ class _SpaceMenu extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: Container(
-        width: 240,
         padding: const EdgeInsets.all(6),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: dark ? const Color(0xFF242629) : Colors.white,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFFF0F0F1)),
+          border: Border.all(
+            color: dark ? const Color(0xFF3B3D40) : const Color(0xFFF0F0F1),
+          ),
           boxShadow: const [
             BoxShadow(
               color: Color(0x18000000),
@@ -10657,24 +10711,24 @@ class _SpaceMenu extends StatelessWidget {
           children: [
             _SpaceMenuItem(
               title: '学习空间',
+              dark: dark,
               description: '学习、创建、探索',
               selected: selectedSpace == _HomeSpace.learning,
               onTap: () => onSelect(_HomeSpace.learning),
             ),
             _SpaceMenuItem(
               title: '阅读空间',
+              dark: dark,
               description: '阅读、交流、感悟',
               selected: selectedSpace == _HomeSpace.reading,
               onTap: () => onSelect(_HomeSpace.reading),
             ),
             if (onExitCompanion case final exit?)
-              Material(
-                type: MaterialType.transparency,
-                child: ListTile(
-                  leading: const Icon(Icons.exit_to_app),
-                  title: const Text('退出伴读'),
-                  onTap: exit,
-                ),
+              _SpaceMenuItem(
+                title: '退出伴读',
+                dark: dark,
+                icon: Icons.exit_to_app,
+                onTap: exit,
               ),
           ],
         ),
@@ -10686,67 +10740,84 @@ class _SpaceMenu extends StatelessWidget {
 class _SpaceMenuItem extends StatelessWidget {
   const _SpaceMenuItem({
     required this.title,
-    required this.description,
+    this.description,
     required this.onTap,
+    required this.dark,
+    this.icon,
     this.selected = false,
   });
 
   final String title;
-  final String description;
+  final String? description;
   final VoidCallback onTap;
+  final bool dark;
+  final IconData? icon;
   final bool selected;
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       button: true,
-      selected: selected,
-      label: '$title，$description',
+      selected: description == null ? null : selected,
+      label: description == null ? title : '$title，$description',
       child: Material(
-        color: selected ? const Color(0xFFF1F2F3) : Colors.transparent,
+        color: selected
+            ? (dark ? const Color(0xFF36383B) : const Color(0xFFF1F2F3))
+            : Colors.transparent,
         borderRadius: BorderRadius.circular(12),
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(12),
-          child: SizedBox(
-            height: 76,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: description == null ? 48 : 64,
+            ),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(15, 9, 12, 9),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          color: Color(0xFF36383B),
-                          fontSize: 16.5,
-                          height: 1.05,
-                          fontWeight: FontWeight.w500,
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: TextStyle(
+                            color: dark
+                                ? const Color(0xFFE6E3DC)
+                                : const Color(0xFF36383B),
+                            fontSize: 16.5,
+                            height: 1.05,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 5),
-                      Text(
-                        description,
-                        style: const TextStyle(
-                          color: Color(0xFF929497),
-                          fontSize: 13.5,
-                          height: 1.05,
-                          fontWeight: FontWeight.w400,
-                        ),
-                      ),
-                    ],
+                        if (description case final detail?) ...[
+                          const SizedBox(height: 5),
+                          Text(
+                            detail,
+                            style: TextStyle(
+                              color: dark
+                                  ? const Color(0xFFB4B5B7)
+                                  : const Color(0xFF66686B),
+                              fontSize: 13.5,
+                              height: 1.05,
+                              fontWeight: FontWeight.w400,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
-                  const Spacer(),
-                  if (selected)
-                    const Padding(
-                      padding: EdgeInsets.only(left: 12),
+                  if (selected || icon != null)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 12),
                       child: Icon(
-                        Icons.check,
-                        color: Color(0xFF55575A),
+                        icon ?? Icons.check,
+                        color: dark
+                            ? const Color(0xFFD3D2CF)
+                            : const Color(0xFF55575A),
                         size: 19,
                       ),
                     ),

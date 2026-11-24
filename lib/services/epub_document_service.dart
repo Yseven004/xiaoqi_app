@@ -1,13 +1,46 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:html/dom.dart' as dom;
+import 'package:image/image.dart' as img;
 import 'package:html/parser.dart' as html_parser;
 import 'package:path/path.dart' as p;
+import 'package:path_parsing/path_parsing.dart';
 import 'package:xml/xml.dart';
 
 import '../models/xiaoqi_document.dart';
+
+part 'epub_reading_content.dart';
+part 'epub_svg_markers.dart';
+
+class EpubBookMetadata {
+  const EpubBookMetadata({
+    required this.title,
+    required this.authors,
+    required this.publisher,
+    required this.edition,
+    required this.publishedDate,
+    required this.cover,
+  });
+
+  final String title;
+  final List<String> authors;
+  String get author => authors.join('、');
+  final String publisher;
+  final String edition;
+  final String publishedDate;
+  final XiaoqiDocumentAsset? cover;
+}
+
+typedef _EpubPackage = ({
+  XmlDocument opf,
+  XmlElement? metadata,
+  Map<String, _ManifestItem> manifest,
+  Map<String, ArchiveFile> entries,
+});
 
 /// Parses an EPUB package into the app's format-neutral document model.
 ///
@@ -16,6 +49,7 @@ import '../models/xiaoqi_document.dart';
 /// Navigation metadata keeps the authored outline independent of spine order.
 class EpubDocumentService {
   const EpubDocumentService();
+  static const structureVersion = 2;
 
   // EPUB is an untrusted ZIP container. The central-directory preflight below
   // applies these limits before the decoder inflates any entry.
@@ -24,20 +58,81 @@ class EpubDocumentService {
   static const int maxEntryBytes = 32 * 1024 * 1024;
   static const int maxExpandedBytes = 512 * 1024 * 1024;
 
-  Future<XiaoqiDocument> parseFile(
-    String filePath, {
-    bool includeCover = false,
-  }) async {
+  Future<Uint8List> _readFile(String filePath) async {
     final file = File(filePath);
     if (!await file.exists()) throw StateError('EPUB 文件不存在');
     if (await file.length() > maxInputBytes) {
       throw const FormatException('EPUB 文件过大，无法安全解析');
     }
-    final bytes = await file.readAsBytes();
-    return parseBytes(bytes, includeCover: includeCover);
+    return file.readAsBytes();
   }
 
-  XiaoqiDocument parseBytes(List<int> bytes, {bool includeCover = false}) {
+  Future<XiaoqiDocument> parseFile(
+    String filePath, {
+    bool includeCover = false,
+  }) async => parseBytes(await _readFile(filePath), includeCover: includeCover);
+
+  Future<EpubBookMetadata> readMetadata(String filePath) async {
+    final package = _openPackage(await _readFile(filePath));
+    final metadata = package.metadata;
+    String field(String tag) =>
+        _firstElement(metadata, tag)?.innerText.trim() ?? '';
+    final edition = metadata == null
+        ? ''
+        : _allElements(metadata, 'meta')
+                  .where(
+                    (e) => const {
+                      'schema:bookEdition',
+                      'bookEdition',
+                    }.contains(e.getAttribute('property')),
+                  )
+                  .map((e) => e.innerText.trim())
+                  .where((v) => v.isNotEmpty)
+                  .firstOrNull ??
+              '';
+    return EpubBookMetadata(
+      title: field('title'),
+      authors: _authors(metadata),
+      publisher: field('publisher'),
+      edition: edition,
+      publishedDate: field('date'),
+      cover: _readCover(
+        metadata,
+        package.manifest,
+        package.entries,
+        package.opf,
+      ),
+    );
+  }
+
+  List<String> _authors(XmlElement? metadata) {
+    if (metadata == null) return const [];
+    final roles = {
+      for (final item in _allElements(metadata, 'meta'))
+        if (item.getAttribute('property') == 'role')
+          item.getAttribute('refines'): item.innerText.trim(),
+    };
+    final authors = <String>[];
+    for (final item in _allElements(metadata, 'creator')) {
+      final role =
+          roles['#${item.getAttribute('id')}'] ??
+          item.attributes
+              .where((a) => a.localName == 'role')
+              .firstOrNull
+              ?.value;
+      if (role != null &&
+          role.isNotEmpty &&
+          role != 'aut' &&
+          role != 'author') {
+        continue;
+      }
+      final name = item.innerText.trim();
+      if (name.isNotEmpty && !authors.contains(name)) authors.add(name);
+    }
+    return List.unmodifiable(authors);
+  }
+
+  _EpubPackage _openPackage(List<int> bytes) {
     if (bytes.length > maxInputBytes) {
       throw const FormatException('EPUB 文件过大，无法安全解析');
     }
@@ -84,17 +179,15 @@ class EpubDocumentService {
     final opf = XmlDocument.parse(readText(opfPath));
     final opfDirectory = p.posix.dirname(_normalizePath(opfPath));
     final metadata = _firstElement(opf, 'metadata');
-    final title = _firstElement(metadata, 'title')?.innerText.trim() ?? '';
-    final author = _firstElement(metadata, 'creator')?.innerText.trim() ?? '';
-    final language =
-        _firstElement(metadata, 'language')?.innerText.trim() ?? '';
-
     final manifest = <String, _ManifestItem>{};
     for (final item in _allElements(opf, 'item')) {
       final id = item.getAttribute('id');
       final href = item.getAttribute('href');
       if (id == null || href == null || id.isEmpty || href.isEmpty) continue;
+      final uri = Uri.tryParse(href);
+      if (uri == null || uri.hasScheme || uri.hasAuthority) continue;
       manifest[id] = _ManifestItem(
+        originalHref: href,
         id: id,
         href: _resolveArchivePath(opfDirectory, href),
         mediaType: item.getAttribute('media-type') ?? '',
@@ -102,6 +195,22 @@ class EpubDocumentService {
       );
     }
 
+    return (opf: opf, metadata: metadata, entries: entries, manifest: manifest);
+  }
+
+  XiaoqiDocument parseBytes(
+    List<int> bytes, {
+    bool includeCover = false,
+    Map<String, String>? legacyText,
+  }) {
+    final (:opf, :metadata, :entries, :manifest) = _openPackage(bytes);
+    final title = _firstElement(metadata, 'title')?.innerText.trim() ?? '';
+    final language =
+        _firstElement(metadata, 'language')?.innerText.trim() ?? '';
+    final author = _authors(metadata).join('、');
+    String readText(String path) =>
+        utf8.decode(entries[path]!.content, allowMalformed: true);
+    final media = _EpubMedia(manifest, entries);
     final spine = _firstElement(opf, 'spine');
     final spineRefs = spine == null
         ? const <String>[]
@@ -162,15 +271,6 @@ class EpubDocumentService {
     final ncxOutline = ncx == null || ncxItem == null
         ? const <_EpubOutlineReference>[]
         : _parseNcxOutline(ncx, ncxItem.href);
-    final fragmentsByPath = <String, Set<String>>{};
-    for (final entry in [...navOutline, ...ncxOutline]) {
-      final target = entry.target;
-      final fragment = target?.fragment;
-      if (target != null && fragment != null) {
-        fragmentsByPath.putIfAbsent(target.path, () => {}).add(fragment);
-      }
-    }
-
     final chapters = <XiaoqiDocumentChapter>[];
     final fragmentBlocksByPath = <String, Map<String, String>>{};
     var inlinePageBreakCount = 0;
@@ -179,10 +279,18 @@ class EpubDocumentService {
       final item = orderedItems[index];
       final html = readText(item.href);
       final document = html_parser.parse(html);
+      final chapterId = 'epub:${item.id}';
+      final priorIds = _legacyBlockIds(
+        document,
+        item.href,
+        chapterId,
+        pageLabels,
+        legacyText,
+      );
+      _prepareLocalMarkup(document, item.href, media);
       _removeUnsafeNodes(document);
       final chapterTitle = _chapterTitle(document, item.href, index + 1);
-      final chapterId = 'epub:${item.id}';
-      final fragments = fragmentsByPath[item.href] ?? const <String>{};
+
       final fragmentBlocks = <String, String>{};
       final blocksResult = _contentBlocks(
         document,
@@ -190,12 +298,16 @@ class EpubDocumentService {
         chapterId,
         pageLabels,
         fallbackPageNumber,
-        fragments,
+        media,
+        priorIds,
         fragmentBlocks,
       );
       inlinePageBreakCount += blocksResult.pageBreakCount;
       fallbackPageNumber += blocksResult.pageBreakCount;
-      final plainText = _plainText(document);
+      final plainText = blocksResult.blocks
+          .map((b) => b.text)
+          .where((text) => text.isNotEmpty)
+          .join('\n\n');
       if (chapterTitle.isEmpty && plainText.isEmpty) continue;
       if (fragmentBlocks.isNotEmpty) {
         fragmentBlocksByPath.putIfAbsent(item.href, () => fragmentBlocks);
@@ -211,6 +323,7 @@ class EpubDocumentService {
           plainText: plainText,
           order: chapters.length,
           blocks: blocksResult.blocks,
+          fragmentBlocks: fragmentBlocks,
         ),
       );
     }
@@ -228,15 +341,18 @@ class EpubDocumentService {
     final outline = resolvedNav.isNotEmpty
         ? resolvedNav
         : _resolveOutline(ncxOutline, chapterIdsByPath, fragmentBlocksByPath);
-    final cover = includeCover ? _readCover(metadata, manifest, entries) : null;
+    final cover = includeCover
+        ? _readCover(metadata, manifest, entries, opf)
+        : null;
     return XiaoqiDocument(
       format: 'epub',
+      structureVersion: EpubDocumentService.structureVersion,
       title: title,
       author: author,
       language: language,
       chapters: List.unmodifiable(chapters),
       outline: outline,
-      assets: [if (cover != null) cover],
+      assets: [?cover, ...media.assets.values.where((a) => a.id != cover?.id)],
       originalPageCount: pageList.isNotEmpty
           ? pageList.length
           : inlinePageBreakCount == 0
@@ -249,17 +365,51 @@ class EpubDocumentService {
     XmlElement? metadata,
     Map<String, _ManifestItem> manifest,
     Map<String, ArchiveFile> entries,
+    XmlDocument opf,
   ) {
     final legacyCovers = metadata == null
         ? const <String?>[]
         : _allElements(metadata, 'meta')
               .where((element) => element.getAttribute('name') == 'cover')
               .map((element) => element.getAttribute('content'));
+    final guide = _firstElement(opf, 'guide');
+    final coverPage = guide == null
+        ? null
+        : _allElements(guide, 'reference')
+              .where((r) => r.getAttribute('type') == 'cover')
+              .firstOrNull
+              ?.getAttribute('href');
+    _ManifestItem? guideImage;
+    if (coverPage != null) {
+      final candidate = manifest.values
+          .where((m) => m.originalHref == coverPage.split('#').first)
+          .firstOrNull;
+      if (candidate != null && candidate.mediaType.startsWith('image/')) {
+        guideImage = candidate;
+      } else if (candidate != null && entries.containsKey(candidate.href)) {
+        final chapter = entries[candidate.href]!;
+        final wrapper = html_parser.parse(
+          utf8.decode(chapter.content, allowMalformed: true),
+        );
+        final image = wrapper.querySelector('img, image');
+        final reference = image?.attributes.entries
+            .where(
+              (entry) =>
+                  entry.key.toString() == 'src' ||
+                  entry.key.toString().split(':').last == 'href',
+            )
+            .firstOrNull
+            ?.value;
+        final path = _navigationTarget(candidate.href, reference)?.path;
+        guideImage = manifest.values.where((m) => m.href == path).firstOrNull;
+      }
+    }
     for (final candidate in [
       ...manifest.values.where(
         (item) => item.properties.split(RegExp(r'\s+')).contains('cover-image'),
       ),
       ...legacyCovers.map((id) => manifest[id]).whereType<_ManifestItem>(),
+      ?guideImage,
     ]) {
       if (!const {
         'image/jpeg',
@@ -436,7 +586,8 @@ class EpubDocumentService {
     String chapterId,
     Map<String, String> pageLabels,
     int fallbackPageNumber,
-    Set<String> outlineFragments,
+    _EpubMedia media,
+    Map<dom.Element, List<int>> legacyIds,
     Map<String, String> outlineBlocks,
   ) {
     final blocks = <XiaoqiDocumentBlock>[];
@@ -452,7 +603,7 @@ class EpubDocumentService {
           : element.localName == 'a'
           ? element.attributes['name']
           : null;
-      if (fragment != null && outlineFragments.contains(fragment)) {
+      if (fragment != null && fragment.isNotEmpty) {
         pendingFragments.add(fragment);
       }
     }
@@ -474,6 +625,8 @@ class EpubDocumentService {
       'h6': (kind: 'heading', level: 6),
       'p': (kind: 'paragraph', level: 0),
       'li': (kind: 'list_item', level: 0),
+      'figcaption': (kind: 'caption', level: 0),
+      'caption': (kind: 'caption', level: 0),
       'blockquote': (kind: 'quote', level: 0),
       'pre': (kind: 'code', level: 0),
       'code': (kind: 'code', level: 0),
@@ -505,74 +658,216 @@ class EpubDocumentService {
       );
     }
 
+    var newIndex = 0;
+    String nextId(dom.Element node) {
+      final ids = legacyIds[node];
+      return ids != null && ids.isNotEmpty
+          ? '$chapterId:block:${ids.removeAt(0)}'
+          : '$chapterId:rich:${newIndex++}';
+    }
+
     void visit(dom.Node node) {
       if (node is! dom.Element) return;
       captureFragment(node);
       final pageListLabel = pageLabels['$chapterHref#${node.id}'];
       if (_isPageBreak(node)) {
         addPageBreak(node, labelOverride: pageListLabel);
-        node.remove();
         return;
       }
-      if (pageListLabel != null && !blockTags.containsKey(node.localName)) {
+      if (pageListLabel != null) {
         addPageBreak(node, labelOverride: pageListLabel);
+      }
+      final assetId = node.attributes['data-xiaoqi-asset'];
+      if (assetId != null && media.assets.containsKey(assetId)) {
+        final asset = media.assets[assetId]!;
+        var ancestor = node.parent;
+        while (ancestor != null && ancestor.localName != 'a') {
+          ancestor = ancestor.parent;
+        }
+        final link = _readingTarget(chapterHref, ancestor?.attributes['href']);
+        addBlock(
+          XiaoqiDocumentBlock(
+            id: nextId(node),
+            kind: 'image',
+            text: node.attributes['aria-label'] ?? asset.altText,
+            assetId: assetId,
+            sourceLocator: asset.sourceLocator,
+            attributes: {
+              'imageLink': ?link,
+              if (media.ratios[assetId] case final r?)
+                'aspectRatio': r.toString(),
+            },
+          ),
+        );
         return;
       }
-      final descriptor = blockTags[node.localName];
-      if (descriptor != null) {
-        if (pageListLabel != null) {
-          addPageBreak(node, labelOverride: pageListLabel);
+      if (node.localName == 'table') {
+        for (final caption in node.children.where(
+          (e) => e.localName == 'caption',
+        )) {
+          visit(caption);
         }
-        // A page marker may occur inside a paragraph. Emitting all nested
-        // markers before the paragraph shifts the original-page mapping.
-        var segment = StringBuffer();
-        void flushSegment() {
-          final text = segment
-              .toString()
-              .replaceAll(RegExp(r'\s+'), ' ')
-              .trim();
-          segment = StringBuffer();
-          if (text.isEmpty) return;
-          final blockIndex = blocks.length;
+        final rows = <List<String>>[];
+        var headerRows = 0;
+        final cellLinks = <String, List<List<Object>>>{};
+        final occupied = <int, int>{};
+        for (final tr in node.querySelectorAll('tr')) {
+          var owner = tr.parent;
+          while (owner != null && owner.localName != 'table') {
+            owner = owner.parent;
+          }
+          if (owner != node) continue;
+          final cells = tr.children.where(
+            (c) => c.localName == 'td' || c.localName == 'th',
+          );
+          if (cells.isEmpty) continue;
+          if (rows.length == headerRows &&
+              cells.every((c) => c.localName == 'th')) {
+            headerRows++;
+          }
+          final row = <String>[];
+          for (final c in cells) {
+            while ((occupied[row.length] ?? 0) > rows.length) {
+              row.add('');
+            }
+            final content = _InlineText(false);
+            void readCell(dom.Node node, String? link) {
+              if (node is dom.Text) {
+                content.append(node.data, link: link);
+                return;
+              }
+              if (node is! dom.Element) return;
+              if (node.localName == 'br') {
+                content.newline();
+                return;
+              }
+              final target = node.localName == 'a'
+                  ? _readingTarget(chapterHref, node.attributes['href'])
+                  : link;
+              for (final nested in node.nodes) {
+                readCell(nested, target);
+              }
+            }
+
+            readCell(c, null);
+            if (content.links.isNotEmpty) {
+              cellLinks['${rows.length}:${row.length}'] = content.links;
+            }
+            final columns = (int.tryParse(c.attributes['colspan'] ?? '') ?? 1)
+                .clamp(1, 256);
+            final span = (int.tryParse(c.attributes['rowspan'] ?? '') ?? 1)
+                .clamp(1, 65534);
+            for (var col = 0; col < columns; col++) {
+              if (span > 1) occupied[row.length] = rows.length + span;
+              row.add(col == 0 ? content.buffer.toString() : '');
+            }
+          }
+          rows.add(row);
+        }
+        if (rows.isNotEmpty) {
           addBlock(
             XiaoqiDocumentBlock(
-              id: '$chapterId:block:$blockIndex',
-              kind: descriptor.kind,
-              text: text,
-              level: descriptor.level,
-              sourceLocator: '$chapterHref#block-$blockIndex',
+              id: nextId(node),
+              kind: 'table',
+              text: rows.map((r) => r.join('\t')).join('\n'),
+              sourceLocator: chapterHref,
+              attributes: {
+                'rows': jsonEncode(rows),
+                if (cellLinks.isNotEmpty) 'cellLinks': jsonEncode(cellLinks),
+                if (headerRows > 0) 'headerRows': '$headerRows',
+              },
             ),
           );
         }
-
-        void collect(dom.Node child) {
-          if (child is dom.Text) {
-            segment.write(child.data);
-            return;
-          }
-          if (child is! dom.Element) return;
-          final markerLabel = pageLabels['$chapterHref#${child.id}'];
-          if (_isPageBreak(child) || markerLabel != null) {
-            flushSegment();
-            captureFragment(child);
-            addPageBreak(child, labelOverride: markerLabel);
-            return;
-          }
-          captureFragment(child);
-          for (final nested in child.nodes) {
-            collect(nested);
-          }
-        }
-
-        for (final child in node.nodes) {
-          collect(child);
-        }
-        flushSegment();
         return;
       }
-      for (final child in List<dom.Element>.from(node.children)) {
-        visit(child);
+      final descriptor = blockTags[node.localName];
+      if (descriptor == null) {
+        for (final child in node.children) {
+          visit(child);
+        }
+        return;
       }
+      final verbatim = descriptor.kind == 'code';
+      var segment = _InlineText(verbatim);
+      var listDepth = 0;
+      if (descriptor.kind == 'list_item') {
+        for (var parent = node.parent; parent != null; parent = parent.parent) {
+          if (parent.localName == 'li') listDepth++;
+        }
+      }
+      void flush() {
+        final text = segment.buffer.toString();
+        if (text.trim().isEmpty) {
+          segment = _InlineText(verbatim);
+          return;
+        }
+        final id = nextId(node);
+        addBlock(
+          XiaoqiDocumentBlock(
+            id: id,
+            kind: descriptor.kind,
+            text: text,
+            level: descriptor.level,
+            sourceLocator: id.startsWith('$chapterId:block:')
+                ? '$chapterHref#block-${id.split(':').last}'
+                : '$chapterHref#${node.id.isNotEmpty ? node.id : id}',
+            attributes: {
+              if (segment.links.isNotEmpty)
+                'linkRanges': jsonEncode(segment.links),
+              if (segment.bold.isNotEmpty)
+                'boldRanges': jsonEncode(segment.bold),
+              if (descriptor.kind == 'list_item') 'listDepth': '$listDepth',
+              if (descriptor.kind == 'list_item' &&
+                  node.parent?.localName == 'ol')
+                'listMarker':
+                    '${(int.tryParse(node.parent!.attributes['start'] ?? '') ?? 1) + node.parent!.children.where((e) => e.localName == 'li').toList().indexOf(node)}.',
+            },
+          ),
+        );
+        segment = _InlineText(verbatim);
+      }
+
+      void collect(dom.Node child, {String? link, bool bold = false}) {
+        if (child is dom.Text) {
+          segment.append(child.data, link: link, strong: bold);
+          return;
+        }
+        if (child is! dom.Element) return;
+        if (_isPageBreak(child) ||
+            pageLabels.containsKey('$chapterHref#${child.id}') ||
+            child.attributes.containsKey('data-xiaoqi-asset') ||
+            const {
+              'ol',
+              'ul',
+              'table',
+              'figure',
+              'pre',
+            }.contains(child.localName)) {
+          flush();
+          visit(child);
+          return;
+        }
+        captureFragment(child);
+        if (child.localName == 'br') {
+          segment.newline();
+          return;
+        }
+        final target = child.localName == 'a'
+            ? _readingTarget(chapterHref, child.attributes['href'])
+            : link;
+        final strong =
+            bold || child.localName == 'b' || child.localName == 'strong';
+        for (final n in child.nodes) {
+          collect(n, link: target, bold: strong);
+        }
+        if (child.localName == 'p' && descriptor.kind == 'quote') flush();
+      }
+
+      for (final child in node.nodes) {
+        collect(child);
+      }
+      flush();
     }
 
     final root = document.documentElement;
@@ -725,6 +1020,8 @@ class EpubDocumentService {
                 value.startsWith('vbscript:') ||
                 value.startsWith('data:text/html'));
         if (normalizedName.startsWith('on') ||
+            normalizedName == 'style' ||
+            normalizedName == 'srcset' ||
             normalizedName == 'srcdoc' ||
             dangerousUrl) {
           element.attributes.remove(attributeName);
@@ -811,6 +1108,7 @@ class EpubDocumentService {
 
 class _ManifestItem {
   const _ManifestItem({
+    required this.originalHref,
     required this.id,
     required this.href,
     required this.mediaType,
@@ -819,6 +1117,7 @@ class _ManifestItem {
 
   final String id;
   final String href;
+  final String originalHref;
   final String mediaType;
   final String properties;
 }

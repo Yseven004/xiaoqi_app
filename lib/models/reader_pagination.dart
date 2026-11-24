@@ -21,18 +21,31 @@ sealed class ReaderAnchor {
 }
 
 final class PdfReaderAnchor extends ReaderAnchor {
-  const PdfReaderAnchor({required super.sourceId, required this.pageNumber});
+  const PdfReaderAnchor({
+    required super.sourceId,
+    required this.pageNumber,
+    this.blockId,
+    this.characterOffset = 0,
+    this.pageFraction,
+  });
 
   final int pageNumber;
+  final String? blockId;
+  final int characterOffset;
+  final double? pageFraction;
 
   @override
   bool operator ==(Object other) =>
       other is PdfReaderAnchor &&
       other.sourceId == sourceId &&
-      other.pageNumber == pageNumber;
+      other.pageNumber == pageNumber &&
+      other.blockId == blockId &&
+      other.characterOffset == characterOffset &&
+      other.pageFraction == pageFraction;
 
   @override
-  int get hashCode => Object.hash(sourceId, pageNumber);
+  int get hashCode =>
+      Object.hash(sourceId, pageNumber, blockId, characterOffset, pageFraction);
 }
 
 final class FlowReaderAnchor extends ReaderAnchor {
@@ -61,11 +74,20 @@ final class FlowReaderAnchor extends ReaderAnchor {
 }
 
 String readerAnchorJson(ReaderAnchor anchor) => switch (anchor) {
-  PdfReaderAnchor(:final pageNumber) => jsonEncode({
-    'kind': 'pdf',
-    'source_id': anchor.sourceId,
-    'page': pageNumber,
-  }),
+  PdfReaderAnchor(
+    :final pageNumber,
+    :final blockId,
+    :final characterOffset,
+    :final pageFraction,
+  ) =>
+    jsonEncode({
+      'kind': 'pdf',
+      'source_id': anchor.sourceId,
+      'page': pageNumber,
+      'block_id': ?blockId,
+      if (characterOffset != 0) 'character_offset': characterOffset,
+      'page_fraction': ?pageFraction,
+    }),
   FlowReaderAnchor(:final chapterId, :final blockId, :final characterOffset) =>
     jsonEncode({
       'kind': 'flow',
@@ -87,7 +109,14 @@ ReaderAnchor? readerAnchorFromJson(String? raw) {
       final page = (value['page'] as num?)?.toInt();
       return page == null
           ? null
-          : PdfReaderAnchor(sourceId: sourceId, pageNumber: page);
+          : PdfReaderAnchor(
+              sourceId: sourceId,
+              pageNumber: page,
+              blockId: value['block_id'] as String?,
+              characterOffset:
+                  (value['character_offset'] as num?)?.toInt() ?? 0,
+              pageFraction: (value['page_fraction'] as num?)?.toDouble(),
+            );
     }
     if (value['kind'] == 'flow') {
       final chapterId = value['chapter_id'] as String?;

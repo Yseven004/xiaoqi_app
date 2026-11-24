@@ -1,14 +1,18 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../config/book_flow_theme.dart';
 import '../models/book_library_item.dart';
 import '../models/book_recognition.dart';
 import '../models/book_source.dart';
-import 'app_toast.dart';
+import '../services/book_source_metadata.dart';
 import 'book_cover.dart';
 import 'book_metadata_form_sheet.dart';
 
@@ -124,19 +128,22 @@ Future<BookPdfImportSelection?> showBookPdfImportSheet({
 class BookPdfImportSelection {
   const BookPdfImportSelection.existing(this.bookId)
     : newBook = null,
+      metadataPreview = null,
       shouldReselect = false;
 
-  const BookPdfImportSelection.newBook(this.newBook)
+  const BookPdfImportSelection.newBook(this.newBook, [this.metadataPreview])
     : bookId = null,
       shouldReselect = false;
 
   const BookPdfImportSelection.reselect()
     : bookId = null,
       newBook = null,
+      metadataPreview = null,
       shouldReselect = true;
 
   final int? bookId;
   final BookRecord? newBook;
+  final BookSourceMetadataPreview? metadataPreview;
   final bool shouldReselect;
 }
 
@@ -232,9 +239,7 @@ class _BookAddSourceCardState extends State<_BookAddSourceCard> {
           _SourceActionCard(
             iconAsset: 'assets/images/home_attachment_wechat.svg',
             title: '微信导入',
-            onTap: widget.forExistingBook
-                ? () => _finish(BookAddAction.importFromWechat)
-                : () => AppToast.show(context, '微信书籍导入暂未开放'),
+            onTap: () => _finish(BookAddAction.importFromWechat),
           ),
           _SourceActionCard(
             iconAsset: 'assets/images/online_book_search.svg',
@@ -332,6 +337,7 @@ class _BookPdfImportSheet extends StatefulWidget {
 
 class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
   int? _selectedBookId;
+  bool _readingMetadata = false;
 
   @override
   void initState() {
@@ -340,16 +346,53 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
   }
 
   Future<void> _createNewBook() async {
-    final selected = await showBookMetadataForm(
-      context: context,
-      initial: BookRecord(
-        title: _suggestedTitle(widget.file.name),
-        source: 'local_${inferBookSourceFormat(widget.file.name)}',
-        isCustom: true,
-      ),
+    if (_readingMetadata) return;
+    setState(() => _readingMetadata = true);
+    final fallback = BookRecord(
+      title: _suggestedTitle(widget.file.name),
+      source: 'local_${inferBookSourceFormat(widget.file.name)}',
+      isCustom: true,
     );
-    if (!mounted || selected == null) return;
-    Navigator.of(context).pop(BookPdfImportSelection.newBook(selected.book));
+    BookSourceMetadataPreview? preview;
+    Directory? sourceDirectory;
+    File? sourceFile;
+    try {
+      var path = widget.file.path;
+      if (path == null || path.isEmpty) {
+        try {
+          sourceDirectory = await (await getTemporaryDirectory()).createTemp(
+            'book-import-preview-',
+          );
+          sourceFile = File(p.join(sourceDirectory.path, 'original'));
+          await widget.file.xFile.saveTo(sourceFile.path);
+          path = sourceFile.path;
+        } on Object {
+          // Keep manual confirmation available if the preview cannot be made.
+        }
+      }
+      if (path != null && path.isNotEmpty) {
+        preview = await BookSourceMetadataPreview.read(path, fallback);
+      }
+      if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
+      final selected = await showBookMetadataForm(
+        context: context,
+        initial: preview?.book ?? fallback,
+      );
+      if (!mounted || selected == null) return;
+      Navigator.of(
+        context,
+      ).pop(BookPdfImportSelection.newBook(selected.book, preview));
+      preview = null;
+    } finally {
+      if (preview != null) unawaited(preview.dispose());
+      if (mounted) setState(() => _readingMetadata = false);
+      try {
+        if (await sourceFile?.exists() == true) await sourceFile!.delete();
+        await sourceDirectory?.delete();
+      } on FileSystemException {
+        // The source preview only exists in the temporary directory.
+      }
+    }
   }
 
   @override
@@ -380,9 +423,13 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
               const SizedBox(height: 16),
               _PdfFileCard(
                 file: widget.file,
-                onReselect: () => Navigator.of(
-                  context,
-                ).pop(const BookPdfImportSelection.reselect()),
+                onReselect: () {
+                  if (!_readingMetadata) {
+                    Navigator.of(
+                      context,
+                    ).pop(const BookPdfImportSelection.reselect());
+                  }
+                },
               ),
               const SizedBox(height: 12),
               if (widget.books.isNotEmpty) ...[
@@ -446,7 +493,7 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
                       SizedBox(
                         width: double.infinity,
                         child: FilledButton(
-                          onPressed: _selectedBookId == null
+                          onPressed: _selectedBookId == null || _readingMetadata
                               ? null
                               : () => Navigator.of(context).pop(
                                   BookPdfImportSelection.existing(
@@ -467,25 +514,27 @@ class _BookPdfImportSheetState extends State<_BookPdfImportSheet> {
                 const SizedBox(height: 10),
               ],
               _ImportChoiceCard(
-                onTap: _createNewBook,
-                child: const Row(
+                onTap: _readingMetadata ? null : _createNewBook,
+                child: Row(
                   children: [
-                    _ChoiceIcon(icon: Icons.note_add_rounded),
-                    SizedBox(width: 12),
+                    const _ChoiceIcon(icon: Icons.note_add_rounded),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('创建新书并关联', style: _bookCardTitle),
-                          SizedBox(height: 4),
+                          const Text('创建新书并关联', style: _bookCardTitle),
+                          const SizedBox(height: 4),
                           Text(
-                            '没有对应书籍？用这份资料创建一本新书',
+                            _readingMetadata
+                                ? '正在读取原书资料…'
+                                : '没有对应书籍？用这份资料创建一本新书',
                             style: BookFlowTheme.caption,
                           ),
                         ],
                       ),
                     ),
-                    Icon(
+                    const Icon(
                       Icons.chevron_right_rounded,
                       color: BookFlowTheme.inkSecondary,
                     ),

@@ -16,6 +16,7 @@ import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../features/ai_study_annotation/data/ai_conversation_history.dart';
 import '../features/ai_study_annotation/domain/ai_chat_process.dart';
@@ -38,14 +39,11 @@ import 'app_toast.dart';
 import 'chat_annotation_navigation.dart';
 import 'chat_message_scroll_view.dart';
 import 'companion_ink_surface.dart';
+import 'companion_pdf_object_view.dart';
+import 'epub_companion_object_preview.dart';
 import 'message_selection_action_card.dart';
 import 'pdf_page_canvas.dart'
-    show
-        horizontalPdfPageLayout,
-        horizontalPdfPageTarget,
-        horizontalPdfPageWidthZoom,
-        verticalPdfPageLayout,
-        verticalPdfPageTarget;
+    show horizontalPdfPageTarget, verticalPdfPageTarget, viewportPdfPageLayout;
 import 'reflow_document_pager.dart';
 import 'xiaoqi_document_block_view.dart';
 
@@ -189,6 +187,7 @@ class ReadingCompanion extends StatefulWidget {
     this.savedPassageExcerpt,
     this.immersive = false,
     this.onToggleImmersive,
+    this.onEnterImmersive,
     this.onFreeChat,
     this.onDarkChanged,
     this.toolbarBuilder,
@@ -211,6 +210,7 @@ class ReadingCompanion extends StatefulWidget {
   final Future<void> Function(BookSourceRecord source)? onSourceChanged;
   final bool immersive;
   final VoidCallback? onToggleImmersive;
+  final VoidCallback? onEnterImmersive;
   final VoidCallback? onFreeChat;
   final ValueChanged<bool>? onDarkChanged;
   final ReadingCompanionToolbarBuilder? toolbarBuilder;
@@ -522,6 +522,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                   onToggleImmersive: _chatOpen
                       ? null
                       : widget.onToggleImmersive,
+                  onEnterImmersive: _chatOpen ? null : widget.onEnterImmersive,
                   onFreeChat: _chatOpen ? null : widget.onFreeChat,
                   onDarkChanged: widget.onDarkChanged,
                   onInkEditingChanged: widget.onInkEditingChanged,
@@ -682,6 +683,7 @@ class _CompanionDocument extends StatefulWidget {
     this.onOpenLibrary,
     required this.immersive,
     this.onToggleImmersive,
+    this.onEnterImmersive,
     this.onSwitchFormat,
     this.onFreeChat,
     this.onDarkChanged,
@@ -698,6 +700,7 @@ class _CompanionDocument extends StatefulWidget {
   final VoidCallback? onOpenLibrary;
   final bool immersive;
   final VoidCallback? onToggleImmersive;
+  final VoidCallback? onEnterImmersive;
   final VoidCallback? onSwitchFormat;
   final VoidCallback? onFreeChat;
   final ValueChanged<bool>? onDarkChanged;
@@ -716,6 +719,7 @@ enum _ReaderPanel { outline, progress, display }
 class _CompanionDocumentState extends State<_CompanionDocument> {
   static const _preferences = ReaderPaginationPreferences();
   late Future<({XiaoqiDocument? document, ReaderAnchor? anchor})> _loading;
+  File? _epubLayoutCache;
   final _pdf = PdfViewerController();
   late final _selectablePdfReference = PdfDocumentRefByLoader(
     (_) async => CompanionSelectionDocument(
@@ -727,20 +731,39 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   bool _pdfHandleMoving = false;
   int _pdfGestureRevision = 0;
   ({int page, Offset center})? _pdfSwipeStart;
+  Offset? _pdfPanStart;
   int? _pdfGesturePage;
-  ({List<PdfPage> pages, Size viewport, double margin, PdfPageLayout layout})?
-  _verticalLayout;
+  double _pdfTranslationOverscroll = 0;
+  double _pdfTranslationHorizontalDelta = 0;
+  ({
+    List<PdfPage> pages,
+    Size viewport,
+    double margin,
+    Axis axis,
+    PdfPageLayout layout,
+  })?
+  _pdfViewportLayout;
   bool _pdfSnapPending = false;
   int _pdfSwipeRevision = 0;
+  Timer? _pdfPageWork;
+  bool _pdfTextProbePending = false;
+  bool _pdfEbookEntryPending = false;
   late final _pdfReflow = CompanionPdfReflow(_source);
   CompanionReflowPage? _convertedPage;
   final _convertedPages = <int, CompanionReflowPage>{};
-  final _stagedConvertedPages = <int, CompanionReflowPage>{};
+  PreparedCompanionPdf? _preparedBook;
+  bool _preparingBook = false;
+  String? _ebookError;
+  bool _ebookLayoutReady = false;
+  FlowReaderAnchor? _positionedEbookEntry;
+  bool _returningToPdf = false;
+  bool _readyAnnounced = false;
+  ui.Image? _returnPreview;
+  int? _returnPreviewPage;
+  List<XiaoqiDocumentBlock> _ebookScreen = const [];
+  int _ebookReadyRevision = 0;
   bool _ebookScrollActive = false;
-  ({int page, String blockId, int offset})? _lastConvertedLocation;
-  int? _continuationRevision;
-  int? _blockedBefore;
-  int? _blockedAfter;
+  PdfReaderAnchor? _pdfReadingAnchor;
   XiaoqiDocument? _convertedDocument;
   FlowReaderAnchor? _convertedEntry;
   bool _requestedEbook = false;
@@ -750,6 +773,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   FlowReaderAnchor? _chapterNavigation;
   FlowReaderAnchor? _flowPosition;
   FlowReaderAnchor? _flowPositionBeforeJump;
+  PdfReaderAnchor? _pdfPositionBeforeJump;
   int _navigationRevision = 0;
   int _pdfPage = 1;
   int _pdfPageCount = 0;
@@ -769,8 +793,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   double _fontScale = _defaultFontScale;
   double _marginFraction = _defaultMarginFraction;
   double _lineScale = _defaultLineScale;
-  ReaderPaginationMode _pageTurnMode = ReaderPaginationMode.vertical;
+  ReaderPaginationMode _pdfPageTurnMode = ReaderPaginationMode.vertical;
+  ReaderPaginationMode _ebookPageTurnMode = ReaderPaginationMode.vertical;
+  bool _ebookPaperTurn = false;
   double _brightness = _defaultBrightness;
+  bool _adjustingTypography = false;
+  bool _brightnessErrorReported = false;
   bool _hasBrightnessOverride = false;
   bool _dark = false;
   PdfDocument? _pdfDocumentRef;
@@ -871,14 +899,56 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   BookSourceRecord get _source => widget.source;
   String get _sourceKey => _source.id.toString();
   bool get _isPdfDocument => _isCompanionPdf(_source) && _convertedPage == null;
-  bool get _isSelectingEbook => !_isCompanionPdf(_source) || _requestedEbook;
+  bool get _isSelectingEbook =>
+      !_isCompanionPdf(_source) || _convertedPage != null;
   bool get _canRetryEbook =>
-      _isPdfDocument && _requestedEbook && !_ebookSwitchPending;
+      _isPdfDocument && _ebookError != null && !_preparingBook;
+  bool get _hasPendingFormatSwitch =>
+      _isPdfDocument ? _ebookSwitchPending && _requestedEbook : _returningToPdf;
   bool get _hasActiveSelection =>
       _selectionActive ||
       (_isPdfDocument &&
           _pdf.isReady &&
           _pdf.textSelectionDelegate.hasSelectedText);
+
+  void _toggleReaderChrome() {
+    if (_inkEditing) return;
+    if (_hasActiveSelection) {
+      _dismissFlowSelection();
+      return;
+    }
+    widget.onToggleImmersive?.call();
+  }
+
+  void _dismissFlowSelection() {
+    if (_isPdfDocument || !_selectionActive) return;
+    final focus = FocusManager.instance.primaryFocus;
+    final editor = focus?.context?.findAncestorStateOfType<EditableTextState>();
+    if (editor != null && editor.widget.readOnly) {
+      final value = editor.textEditingValue;
+      final selection = value.selection;
+      if (selection.isValid && !selection.isCollapsed) {
+        editor.userUpdateTextEditingValue(
+          value.copyWith(
+            selection: TextSelection.collapsed(offset: selection.extentOffset),
+          ),
+          SelectionChangedCause.tap,
+        );
+      }
+    }
+    focus?.unfocus();
+    if (_selectionActive) _reportSelection(false);
+  }
+
+  void _hideReaderChrome() {
+    if (widget.immersive ||
+        _inkEditing ||
+        _hasActiveSelection ||
+        _readerPanelOpen) {
+      return;
+    }
+    widget.onEnterImmersive?.call();
+  }
 
   @override
   void initState() {
@@ -895,104 +965,301 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     unawaited(_loadInk());
   }
 
+  Future<void> _prepareBook() async {
+    if (_preparingBook || _preparedBook != null) return;
+    setState(() {
+      _preparingBook = true;
+      _ebookError = null;
+    });
+    try {
+      final document = _pdfDocumentRef;
+      final book = await _pdfReflow.prepareBook(
+        loadedPageCount: document?.pages.length,
+        allowsCopying: document == null
+            ? null
+            : document.permissions?.allowsCopying != false,
+      );
+      if (!mounted) return;
+      setState(() {
+        _preparedBook = book;
+        _preparingBook = false;
+        _pdfEbookEntryPending = true;
+      });
+      _schedulePdfPageWork();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _preparingBook = false;
+        _ebookError = error is FormatException ? error.message : '电子书准备失败，请重试';
+      });
+    }
+  }
+
+  void _schedulePdfPageWork({bool probeText = false}) {
+    _pdfTextProbePending = _pdfTextProbePending || probeText;
+    _pdfPageWork?.cancel();
+    _pdfPageWork = Timer(const Duration(milliseconds: 140), () {
+      final document = _pdfDocumentRef;
+      if (!mounted || !_isPdfDocument || document == null || _inkEditing) {
+        return;
+      }
+      if (_pdfSnapPending || _pdfGesturePage != null) {
+        _schedulePdfPageWork();
+        return;
+      }
+      if (_pdfTextProbePending) {
+        _pdfTextProbePending = false;
+        unawaited(_detectPdfPage(document, _pdfPage));
+      }
+      if (_pdfEbookEntryPending && _preparedBook != null && !_requestedEbook) {
+        final anchor = _pdfReadingAnchor;
+        setState(
+          () => _targetEbook(anchor?.pageNumber ?? _pdfPage, previous: anchor),
+        );
+      }
+      if (_preparedBook == null && !_preparingBook && _ebookError == null) {
+        unawaited(_prepareBook());
+      }
+    });
+  }
+
   void _switchReaderFormat(bool pdf) {
     if (!_isCompanionPdf(_source)) {
       if (pdf) widget.onSwitchFormat?.call();
       return;
     }
     if (pdf) {
-      _returnToPdf();
-    } else if (!_requestedEbook || _canRetryEbook) {
-      unawaited(_openConvertedPage(_pdfPage, fromPdf: !_requestedEbook));
+      unawaited(_returnToPdf());
+    } else if (_canRetryEbook) {
+      unawaited(_prepareBook());
+    } else if (_ebookLayoutReady && !_inkEditing) {
+      unawaited(
+        _openConvertedPage(
+          _pdfReadingAnchor?.pageNumber ?? _pdfPage,
+          fromPdf: true,
+        ),
+      );
     }
   }
 
-  Future<void> _openConvertedPage(int number, {bool fromPdf = false}) async {
-    if (!_pdf.isReady || number < 1 || number > _pdfPageCount || _inkEditing) {
+  void _activateFormatButton(bool pdf) {
+    if (pdf == _isSelectingEbook) {
+      _switchReaderFormat(pdf);
       return;
     }
-    if (_pdfDocumentRef?.permissions?.allowsCopying == false) {
-      AppToast.show(context, '这份 PDF 限制复制文字');
+    if (!_hasPendingFormatSwitch) {
+      widget.onChooseSource?.call();
       return;
     }
-    final visible = _visiblePdfPageFraction(number);
-    if (_pdf.textSelectionDelegate.hasSelectedText) {
+    ++_ebookSwitchRevision;
+    setState(() {
+      _returningToPdf = false;
+      _ebookSwitchPending = false;
+      _requestedEbook = _convertedPage != null;
+    });
+  }
+
+  void _targetEbook(
+    int number, {
+    PdfReaderAnchor? previous,
+    bool recenter = false,
+    double? edge,
+  }) {
+    final book = _preparedBook;
+    final page = book?.pages[number];
+    if (page == null || book == null) return;
+    _pdfEbookEntryPending = false;
+    final before = _convertedDocument;
+    if (_ebookPageTurnMode == ReaderPaginationMode.horizontal) {
+      if (!identical(_convertedDocument, book.document)) {
+        _convertedPages
+          ..clear()
+          ..addAll(book.pages);
+        _convertedDocument = book.document;
+      }
+    } else if (recenter ||
+        _convertedDocument == null ||
+        !_convertedPages.containsKey(number) ||
+        (_convertedPages.length == book.pages.length &&
+            book.pages.length > 9)) {
+      _convertedPages.clear();
+      for (
+        var i = math.max(1, number - 4);
+        i <= math.min(book.pages.length, number + 4);
+        i++
+      ) {
+        _convertedPages[i] = book.pages[i]!;
+      }
+      _convertedDocument = CompanionReflowPage.readingWindow(
+        _convertedPages.values,
+        book.pages.length,
+      );
+    }
+    final target = _convertedAnchor(
+      page,
+      top: edge,
+      previous: previous?.pageNumber == number ? previous : null,
+    );
+    // Seeking to another paragraph in an already paginated book preserves
+    // its layout. Its offstage pager acknowledges the new position separately.
+    if (before != _convertedDocument) {
+      if (before == null ||
+          _ebookPageTurnMode == ReaderPaginationMode.horizontal) {
+        _ebookLayoutReady = false;
+      }
+    }
+    if (before != _convertedDocument || _convertedEntry != target) {
+      _positionedEbookEntry = null;
+      ++_ebookReadyRevision;
+    }
+    _requestedPdfPage = number;
+    _convertedEntry = target;
+    _chapterNavigation = null;
+    _flowPosition = target;
+    if (_convertedPage != null) _convertedPage = page;
+  }
+
+  Future<void> _openConvertedPage(
+    int number, {
+    bool fromPdf = false,
+    double? edge,
+    PdfReaderAnchor? position,
+  }) async {
+    if (_preparedBook?.pages.containsKey(number) != true || _inkEditing) return;
+    final page = _preparedBook!.pages[number]!;
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (_pdf.isReady && _pdf.textSelectionDelegate.hasSelectedText) {
       unawaited(_pdf.textSelectionDelegate.clearTextSelection());
     }
-    FocusManager.instance.primaryFocus?.unfocus();
-    final revision = ++_ebookSwitchRevision;
+    ++_ebookSwitchRevision;
     ++_pdfGestureRevision;
-    _pdfReflow.cancel(exceptPage: number);
-    _stagedConvertedPages.clear();
-    final cached = _pdfReflow.cached(number);
     setState(() {
-      _requestedEbook = true;
-      _ebookSwitchPending = cached == null;
-      _requestedPdfPage = number;
-    });
-    CompanionReflowPage? result;
-    try {
-      result = cached ?? await _pdfReflow.load(_pdf, number);
-    } on Exception {
-      // A failed page remains available in its original layout.
-    }
-    if (!mounted || revision != _ebookSwitchRevision || !_requestedEbook) {
-      return;
-    }
-    if (result == null || !result.canRead) {
-      setState(() {
-        _ebookSwitchPending = false;
-        if (fromPdf) _requestedEbook = false;
-      });
-      AppToast.show(context, '第 $number 页暂未准备好，请重试');
-      return;
-    }
-    final keepWindow = _convertedPages.containsKey(number);
-    setState(() {
-      _ebookSwitchPending = false;
-      _convertedPage = result;
-      if (!keepWindow) {
-        _convertedPages.clear();
-        _ebookScrollActive = false;
-      }
-      _convertedPages[number] = result!;
-      _blockedBefore = null;
-      _blockedAfter = null;
-      _rebuildConvertedDocument();
-      final lastLocation = _lastConvertedLocation;
-      _convertedEntry = _convertedAnchor(
-        result,
-        top: fromPdf ? visible : null,
-        previous:
-            fromPdf &&
-                (visible ?? 0) < .04 &&
-                lastLocation?.page == result.number
-            ? lastLocation
-            : null,
+      _targetEbook(
+        number,
+        previous: position ?? (fromPdf ? _pdfReadingAnchor : null),
+        edge: edge,
       );
-      _chapterNavigation = null;
-      _flowPosition = _convertedEntry;
-      _visibleBlocks = const [];
+      _returningToPdf = false;
+      _requestedEbook = true;
+      _ebookSwitchPending =
+          !_ebookLayoutReady || _positionedEbookEntry != _convertedEntry;
+      if (!fromPdf || !_ebookSwitchPending) _convertedPage = page;
       _foreignSource =
-          _foreignSource || ReadingCompanionTranslation.isForeign(result.text);
-      if (!keepWindow) _navigationRevision++;
+          _foreignSource || ReadingCompanionTranslation.isForeign(page.text);
     });
-    unawaited(_savePdfAnchor(number));
+    if (position != null && position.pageNumber == number) {
+      _rememberPdfPosition(
+        number,
+        blockId: position.blockId,
+        characterOffset: position.characterOffset,
+        pageFraction: position.pageFraction,
+      );
+    } else if (!fromPdf) {
+      _rememberConvertedPosition(_convertedDocument!, _convertedEntry!);
+    }
     _scheduleTranslation();
-    _prepareEbookNeighbors();
+  }
+
+  Future<void> _ebookLayoutChanged(
+    XiaoqiDocument document,
+    FlowReaderAnchor? target,
+    bool ready,
+  ) async {
+    if (!mounted ||
+        _convertedDocument != document ||
+        _convertedEntry != target) {
+      return;
+    }
+    final revision = ++_ebookReadyRevision;
+    if (_ebookLayoutReady == ready &&
+        (!ready || (_positionedEbookEntry == target && !_ebookSwitchPending))) {
+      return;
+    }
+    if (ready && _convertedPage == null) {
+      for (final block in _ebookScreen) {
+        if (block.kind != 'image') continue;
+        final number = CompanionReflowPage.pageForBlock(block.id);
+        final picture = _convertedPages[number]?.pictures
+            .where((p) => p.asset.id == block.assetId)
+            .firstOrNull;
+        final path = picture?.cachePath;
+        if (path == null) continue;
+        Object? failure;
+        await precacheImage(
+          FileImage(File(path)),
+          context,
+          onError: (error, _) => failure = error,
+        );
+        if (!mounted ||
+            revision != _ebookReadyRevision ||
+            _convertedDocument != document ||
+            _convertedEntry != target) {
+          return;
+        }
+        if (failure != null) {
+          if (number != null) {
+            try {
+              await _pdfReflow.invalidatePage(number);
+            } on FileSystemException {
+              /* Surface a retry below. */
+            }
+          }
+          if (!mounted || revision != _ebookReadyRevision) return;
+          setState(() {
+            _preparedBook = null;
+            _convertedDocument = null;
+            _ebookLayoutReady = false;
+            _positionedEbookEntry = null;
+            _requestedEbook = false;
+            _ebookSwitchPending = false;
+            _ebookError = '当前页图片暂不可读，请重试';
+          });
+          return;
+        }
+      }
+    }
+    setState(() {
+      _ebookLayoutReady = ready;
+      _positionedEbookEntry = ready ? target : null;
+      if (ready && _requestedEbook && _ebookSwitchPending && !_inkEditing) {
+        _convertedPage = _preparedBook?.pages[_requestedPdfPage];
+        _ebookSwitchPending = false;
+      }
+    });
+    if (ready && !_readyAnnounced && _convertedPage == null) {
+      _readyAnnounced = true;
+      AppToast.show(context, '电子书已就绪');
+    }
   }
 
   FlowReaderAnchor _convertedAnchor(
     CompanionReflowPage page, {
     double? top,
-    ({int page, String blockId, int offset})? previous,
+    PdfReaderAnchor? previous,
   }) {
-    final entry = page.entryNear(top ?? 0);
-    final position = CompanionReflowPage.displayPosition(
-      _convertedDocument!,
-      previous?.blockId ?? entry?.blockId,
-      previous?.offset ?? entry?.offset ?? 0,
+    final fraction = previous?.pageFraction;
+    final blockTop = page.originalTop(
+      previous?.blockId,
+      previous?.characterOffset,
     );
+    final savedPosition =
+        previous != null &&
+            blockTop != null &&
+            (fraction == null || (blockTop - fraction).abs() <= .015)
+        ? CompanionReflowPage.displayPosition(
+            _convertedDocument!,
+            previous.blockId,
+            previous.characterOffset,
+          )
+        : null;
+    final entry = page.entryNear(top ?? fraction ?? 0);
+    final position =
+        savedPosition ??
+        CompanionReflowPage.displayPosition(
+          _convertedDocument!,
+          entry?.blockId,
+          entry?.offset ?? 0,
+        );
     return FlowReaderAnchor(
       sourceId: _sourceKey,
       chapterId: CompanionReflowPage.readingChapterId,
@@ -1001,212 +1268,177 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
   }
 
-  double? _visiblePdfPageFraction(int number) {
-    if (_pdf.pageNumber != number) return null;
-    final layout = _pdf.layout.pageLayouts[number - 1];
-    if (layout.isEmpty) return null;
-    return ((_pdf.visibleRect.top - layout.top) / layout.height)
-        .clamp(0.0, 1.0)
-        .toDouble();
-  }
-
-  void _rebuildConvertedDocument() {
-    final numbers = _convertedPages.keys.toList()..sort();
-    _convertedDocument = CompanionReflowPage.readingWindow(
-      numbers.map((number) => _convertedPages[number]!),
-      _pdfPageCount,
-    );
-  }
-
-  int get _firstConvertedPage => _convertedPages.keys.reduce(math.min);
-  int get _lastConvertedPage => _convertedPages.keys.reduce(math.max);
+  int get _firstConvertedPage => _convertedPages.keys.first;
+  int get _lastConvertedPage => _convertedPages.keys.last;
 
   Future<void> _continueConvertedReading(
     int target, {
     required bool forward,
   }) async {
-    if (_ebookSwitchPending || _inkEditing || _hasActiveSelection) return;
-    final revision = _ebookSwitchRevision;
-    final positionAtRequest = _flowPosition;
-    setState(() => _ebookSwitchPending = true);
-    CompanionReflowPage? page;
-    try {
-      page = await _pdfReflow.load(_pdf, target);
-    } on Exception {
-      // The current page remains readable while the next page is retried.
-    }
-    if (!mounted ||
-        revision != _ebookSwitchRevision ||
-        _convertedPage == null) {
-      return;
-    }
-    final available = page;
-    setState(() {
-      _ebookSwitchPending = false;
-      if (available == null || !available.canRead) return;
-      _convertedPages[target] = available;
-      _stagedConvertedPages.remove(target);
-      _trimConvertedPages(available.number);
-      _rebuildConvertedDocument();
-      if (!_inkEditing &&
-          !_hasActiveSelection &&
-          !_ebookScrollActive &&
-          _flowPosition == positionAtRequest) {
-        _convertedEntry = _convertedAnchor(available, top: forward ? 0 : 1);
-      }
-    });
-    if (available == null || !available.canRead) {
-      AppToast.show(context, '第 $target 页暂未准备好，请再滑一次');
-    }
-    _prepareEbookNeighbors();
-  }
-
-  void _trimConvertedPages(int current) {
-    while (_convertedPages.length > 12) {
-      final first = _firstConvertedPage;
-      final last = _lastConvertedPage;
-      _convertedPages.remove(current - first > last - current ? first : last);
-    }
-  }
-
-  void _publishEbookNeighbors() {
-    if (!mounted ||
-        _convertedPage == null ||
-        _ebookScrollActive ||
-        _ebookSwitchPending ||
-        _inkEditing ||
-        _hasActiveSelection ||
-        _stagedConvertedPages.isEmpty) {
-      return;
-    }
-    setState(() {
-      _convertedPages.addAll(_stagedConvertedPages);
-      _stagedConvertedPages.clear();
-      _trimConvertedPages(_convertedPage!.number);
-      _rebuildConvertedDocument();
-    });
+    await _openConvertedPage(target, edge: forward ? 0 : 1);
   }
 
   void _prepareEbookNeighbors() {
-    _publishEbookNeighbors();
-    final revision = _ebookSwitchRevision;
-    if (_continuationRevision == revision ||
-        _convertedPage == null ||
+    final page = _convertedPage?.number;
+    if (page == null ||
+        _ebookScrollActive ||
         _inkEditing ||
-        _hasActiveSelection ||
-        _ebookSwitchPending) {
+        _selectionActive ||
+        _ebookPageTurnMode != ReaderPaginationMode.vertical) {
       return;
     }
-    _continuationRevision = revision;
-    unawaited(_extendEbook(revision));
+    if ((page - _firstConvertedPage <= 1 && _firstConvertedPage > 1) ||
+        (_lastConvertedPage - page <= 1 &&
+            _lastConvertedPage < _pdfPageCount)) {
+      setState(
+        () => _targetEbook(page, previous: _pdfReadingAnchor, recenter: true),
+      );
+    }
   }
 
-  Future<void> _extendEbook(int revision) async {
+  void _paintReturnPreview(Canvas canvas, Rect rect, PdfPage page) {
+    final image = _returnPreview;
+    if (image == null || _returnPreviewPage != page.pageNumber) return;
+    canvas.drawImageRect(
+      image,
+      Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+      rect,
+      Paint()..filterQuality = FilterQuality.medium,
+    );
+  }
+
+  void _releaseReturnPreview() {
+    if (_returnPreview == null) return;
+    _returnPreview?.dispose();
+    _returnPreview = null;
+    _returnPreviewPage = null;
+    if (_pdf.isReady) _pdf.invalidate();
+  }
+
+  Future<void> _returnToPdf() async {
+    if (!_requestedEbook || _returningToPdf) return;
+    final revision = ++_ebookSwitchRevision;
+    setState(() => _returningToPdf = true);
     try {
-      while (mounted &&
-          revision == _ebookSwitchRevision &&
-          _convertedPage != null) {
-        final current = _convertedPage!.number;
-        final after =
-            _stagedConvertedPages.keys.fold(_lastConvertedPage, math.max) + 1;
-        final before =
-            _stagedConvertedPages.keys.fold(_firstConvertedPage, math.min) - 1;
-        final append =
-            after <= _pdfPageCount &&
-            after != _blockedAfter &&
-            after <= current + 3;
-        final prepend =
-            before >= 1 && before != _blockedBefore && before >= current - 2;
-        if ((!append && !prepend) ||
-            _inkEditing ||
-            _hasActiveSelection ||
-            _ebookSwitchPending) {
-          break;
-        }
-        final target = append ? after : before;
-        CompanionReflowPage? page;
+      await _showOriginalPdf(revision);
+    } finally {
+      if (mounted && revision == _ebookSwitchRevision) {
+        setState(() => _returningToPdf = false);
+      }
+    }
+  }
+
+  Future<void> _showOriginalPdf(int revision) async {
+    final converted = _convertedPage;
+    final page = _pdfReadingAnchor?.pageNumber ?? converted?.number ?? _pdfPage;
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (converted != null) {
+      if (_returnPreviewPage != page || _returnPreview == null) {
         try {
-          page = await _pdfReflow.load(_pdf, target, prefetch: true);
+          final original = await _pdf.document.pages[page - 1].waitForLoaded(
+            timeout: const Duration(seconds: 6),
+          );
+          if (!mounted || revision != _ebookSwitchRevision) return;
+          if (original == null) throw const FormatException('原页未能及时加载');
+          final pixels = MediaQuery.devicePixelRatioOf(context);
+          final scale =
+              math.min(
+                _pdf.viewSize.width / original.width,
+                _pdf.viewSize.height / original.height,
+              ) *
+              pixels;
+          final raster = await original.render(
+            fullWidth: original.width * scale,
+            fullHeight: original.height * scale,
+          );
+          if (raster == null) throw const FormatException('无法显示原页');
+          late final ui.Image image;
+          try {
+            image = await raster.createImage();
+          } finally {
+            raster.dispose();
+          }
+          if (!mounted ||
+              revision != _ebookSwitchRevision ||
+              _pdfReadingAnchor?.pageNumber != page &&
+                  _pdfReadingAnchor != null) {
+            image.dispose();
+            return;
+          }
+          _returnPreview?.dispose();
+          _returnPreview = image;
+          _returnPreviewPage = page;
         } on Exception {
-          // An unavailable neighboring page can still be retried on demand.
-        }
-        if (!mounted ||
-            revision != _ebookSwitchRevision ||
-            _convertedPage == null ||
-            _hasActiveSelection ||
-            _inkEditing) {
+          if (mounted && revision == _ebookSwitchRevision) {
+            AppToast.show(context, '暂时无法显示 PDF 原页，请重试');
+          }
           return;
         }
-        if (page == null || !page.canRead) {
-          if (append) {
-            _blockedAfter = target;
-          } else {
-            _blockedBefore = target;
-          }
-          continue;
-        }
-        _stagedConvertedPages[target] = page;
-        // Cached/native pages normally finish together. Publish in one batch
-        // after they have loaded, or before processing an unready neighbor.
-        if (target == current + 1 || target == current - 1) {
-          _publishEbookNeighbors();
-        }
       }
-    } finally {
-      if (_continuationRevision == revision) {
-        _continuationRevision = null;
-        _publishEbookNeighbors();
-      }
-    }
-  }
-
-  void _returnToPdf() {
-    if (!_requestedEbook) return;
-    ++_ebookSwitchRevision;
-    _pdfReflow.cancel();
-    final converted = _convertedPage;
-    final anchor = _flowPosition;
-    if (converted != null) _installPdfText(converted);
-    if (converted != null && _pdf.isReady) {
-      final document = _convertedDocument;
-      final source = document == null
-          ? null
-          : CompanionReflowPage.sourcePosition(
-              document,
-              anchor?.blockId,
-              anchor?.characterOffset ?? 0,
-            );
-      final top = converted.originalTop(
-        source?.blockId ?? anchor?.blockId,
-        source?.offset ?? anchor?.characterOffset,
+      _installPdfText(converted);
+      await _goToPdfReaderPage(
+        page,
+        duration: Duration.zero,
+        recordProgress: false,
       );
-      unawaited(
-        _goToPdfReaderPage(
-          converted.number,
-          duration: Duration.zero,
-          sourceTop: top,
-        ),
-      );
+      if (!mounted || revision != _ebookSwitchRevision) return;
     }
-    FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       _requestedEbook = false;
-      _requestedPdfPage = null;
       _ebookSwitchPending = false;
       _convertedPage = null;
-      _convertedPages.clear();
-      _convertedDocument = null;
-      _convertedEntry = null;
+      _pdfPage = page;
       _visibleBlocks = const [];
+      _targetEbook(page, previous: _pdfReadingAnchor);
     });
     _reportSelection(false);
     _scheduleTranslation();
+    _schedulePdfPageWork(probeText: true);
   }
 
-  Future<void> _savePdfAnchor(int page) => _preferences.saveAnchor(
-    bookId: _source.bookId,
-    anchor: PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page),
-  );
+  void _rememberPdfPosition(
+    int page, {
+    String? blockId,
+    int characterOffset = 0,
+    double? pageFraction,
+  }) {
+    final anchor = PdfReaderAnchor(
+      sourceId: _sourceKey,
+      pageNumber: page,
+      blockId: blockId,
+      characterOffset: characterOffset,
+      pageFraction: pageFraction,
+    );
+    if (anchor == _pdfReadingAnchor) return;
+    _pdfReadingAnchor = anchor;
+    if (_isPdfDocument && _preparedBook != null && !_inkEditing) {
+      _pdfEbookEntryPending = true;
+      _schedulePdfPageWork();
+    }
+    unawaited(_preferences.saveAnchor(bookId: _source.bookId, anchor: anchor));
+  }
+
+  void _rememberConvertedPosition(
+    XiaoqiDocument document,
+    FlowReaderAnchor anchor,
+  ) {
+    final source = CompanionReflowPage.sourcePosition(
+      document,
+      anchor.blockId,
+      anchor.characterOffset,
+    );
+    final blockId = source?.blockId ?? anchor.blockId;
+    final number = CompanionReflowPage.pageForBlock(blockId);
+    final page = _convertedPages[number];
+    if (page == null || blockId == null) return;
+    final offset = source?.offset ?? anchor.characterOffset;
+    _rememberPdfPosition(
+      page.number,
+      blockId: blockId,
+      characterOffset: offset,
+      pageFraction: page.originalTop(blockId, offset),
+    );
+  }
 
   void _installPdfText(CompanionReflowPage result) {
     final document = _pdfDocumentRef;
@@ -1291,9 +1523,17 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       sizing: StackFit.expand,
       index: converted == null ? 0 : 1,
       children: [
-        _pdfDocument(anchor),
-        if (converted != null && document != null)
-          _flow(document, _convertedEntry, originalPage: converted.number)
+        Listener(
+          onPointerDown: (_) => _releaseReturnPreview(),
+          onPointerSignal: (_) => _releaseReturnPreview(),
+          child: _pdfDocument(anchor),
+        ),
+        if (document != null)
+          _flow(
+            document,
+            _convertedEntry,
+            originalPage: converted?.number ?? _requestedPdfPage ?? _pdfPage,
+          )
         else
           const SizedBox.shrink(),
       ],
@@ -1344,13 +1584,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       return;
     }
     _closeReaderPanel();
-    if (_ebookSwitchPending) {
+    if (_ebookSwitchPending || _returningToPdf) {
       ++_ebookSwitchRevision;
-      _pdfReflow.cancel();
+      if (_ebookSwitchPending) _pdfReflow.cancel();
     }
     ++_pdfGestureRevision;
     ++_pdfSwipeRevision;
     _pdfSwipeStart = null;
+    _pdfPanStart = null;
     _pdfGesturePage = null;
     _pdfSnapPending = false;
     if (_pdf.isReady) {
@@ -1367,6 +1608,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         _requestedEbook = _convertedPage != null;
         _requestedPdfPage = _convertedPage?.number;
       }
+      _returningToPdf = false;
       _inkEditing = true;
     });
     widget.onInkEditingChanged?.call(true);
@@ -1461,6 +1703,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       });
       widget.onInkEditingChanged?.call(false);
       _reportSelection(false);
+      if (_isPdfDocument) _schedulePdfPageWork();
       final afterSave = _afterInkSave;
       _afterInkSave = null;
       afterSave?.call();
@@ -1481,6 +1724,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }) => LayoutBuilder(
     builder: (context, bounds) {
       final editing = _inkEditing && editable;
+      if (!editing && _savedInk.isEmpty && _largeDrawings.isEmpty) {
+        return const SizedBox.shrink();
+      }
       final size = bounds.biggest;
       if (size.isEmpty || !size.isFinite) return const SizedBox.shrink();
       final location = _inkLocation(anchor, view);
@@ -1724,14 +1970,29 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       final page = await document.pages[number - 1].waitForLoaded(
         timeout: const Duration(seconds: 6),
       );
-      if (page == null || !mounted || _pdfPage != number) return;
+      if (page == null ||
+          !mounted ||
+          !_isPdfDocument ||
+          _pdfDocumentRef != document ||
+          _pdfPage != number) {
+        return;
+      }
       final text = (await page.loadText())?.fullText.trim() ?? '';
-      if (!mounted || _pdfPage != number) return;
-      final foreign = ReadingCompanionTranslation.isForeign(text);
-      setState(() {
-        _pdfTextAvailable = text.isNotEmpty;
-        _foreignSource = _foreignSource || foreign;
-      });
+      if (!mounted ||
+          !_isPdfDocument ||
+          _pdfDocumentRef != document ||
+          _pdfPage != number) {
+        return;
+      }
+      final available = text.isNotEmpty;
+      final foreign =
+          _foreignSource || ReadingCompanionTranslation.isForeign(text);
+      if (_pdfTextAvailable != available || _foreignSource != foreign) {
+        setState(() {
+          _pdfTextAvailable = available;
+          _foreignSource = foreign;
+        });
+      }
       if (_translationEnabled) _scheduleTranslation();
     } on Exception {
       // A failed or unloaded page can be retried by revisiting it.
@@ -1837,7 +2098,16 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           prefs.getDouble('reading-companion.margin') ?? _defaultMarginFraction;
       _lineScale =
           prefs.getDouble('reading-companion.line') ?? _defaultLineScale;
-      _pageTurnMode = prefs.getString('reading-companion.turn') == 'horizontal'
+      final legacyTurn = prefs.getString('reading-companion.turn');
+      _pdfPageTurnMode =
+          (prefs.getString('reading-companion.pdf-turn') ?? legacyTurn) ==
+              'horizontal'
+          ? ReaderPaginationMode.horizontal
+          : ReaderPaginationMode.vertical;
+      final ebookTurn =
+          prefs.getString('reading-companion.ebook-turn') ?? legacyTurn;
+      _ebookPaperTurn = ebookTurn == 'paper';
+      _ebookPageTurnMode = _ebookPaperTurn || ebookTurn == 'horizontal'
           ? ReaderPaginationMode.horizontal
           : ReaderPaginationMode.vertical;
       final brightness = prefs.getDouble(_brightnessPreference);
@@ -1856,8 +2126,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       await _brightnessChannel.invokeMethod<void>('setCompanionBrightness', {
         'brightness': value,
       });
+      _brightnessErrorReported = false;
     } on PlatformException {
-      if (mounted) AppToast.show(context, '阅读亮度暂时无法调整');
+      if (mounted && !_brightnessErrorReported) {
+        _brightnessErrorReported = true;
+        AppToast.show(context, '阅读亮度暂时无法调整');
+      }
     } on MissingPluginException {
       // Desktop and widget tests do not have the Android window channel.
     }
@@ -1872,8 +2146,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       );
     }
     _drawingTools.dispose();
+    _returnPreview?.dispose();
     _nightShader?.dispose();
     _progressPreview.dispose();
+    _pdfPageWork?.cancel();
     for (final part in _drawingLayers.values) {
       part.layer.dispose();
     }
@@ -1923,11 +2199,18 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       sourceId: source.id,
     );
     if (normalizeBookSourceFormat(source.format) == 'pdf') {
-      return (document: null, anchor: await anchor);
+      final saved = await anchor;
+      if (saved is PdfReaderAnchor && saved.sourceId == _sourceKey) {
+        _pdfReadingAnchor = saved;
+      }
+      return (document: null, anchor: saved);
     }
-    final document =
-        await widget.library.loadBookSourceRevision(source) ??
-        await SourceDocumentLoader.parseBookSourceInBackground(source);
+    final revision = await widget.library.loadBookSourceRevision(source);
+    final parsed = revision == null
+        ? await SourceDocumentLoader.parseBookSourceForReader(source)
+        : null;
+    final document = revision ?? parsed!.document;
+    _epubLayoutCache = parsed?.epubLayoutCache;
     if (document.chapters.isEmpty) {
       throw const FormatException('电子资料没有可读章节');
     }
@@ -1995,6 +2278,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     String? blockId,
     int characterOffset = 0,
   }) {
+    _dismissFlowSelection();
     FocusManager.instance.primaryFocus?.unfocus();
     final next = FlowReaderAnchor(
       sourceId: _sourceKey,
@@ -2068,6 +2352,33 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
   }
 
+  Future<void> _followLink(XiaoqiDocument document, String target) async {
+    if (_inkEditing || _selectionActive) return;
+    final uri = Uri.tryParse(target);
+    if (uri != null &&
+        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        uri.host.isNotEmpty &&
+        uri.userInfo.isEmpty) {
+      try {
+        if (await launchUrl(uri, mode: LaunchMode.externalApplication)) return;
+      } on Exception {
+        /* report below */
+      }
+      if (mounted) AppToast.show(context, '无法打开网页');
+      return;
+    }
+    if (uri?.scheme == 'pdf-page' && _preparedBook != null) {
+      final page = int.tryParse(uri!.path);
+      if (page != null) await _openConvertedPage(page);
+      return;
+    }
+    final destination = document.resolveReadingLink(target);
+    final chapter = document.chapters
+        .where((c) => c.id == destination?.chapterId)
+        .firstOrNull;
+    if (chapter != null) _chapter(chapter, blockId: destination!.blockId);
+  }
+
   Widget _flow(
     XiaoqiDocument document,
     ReaderAnchor? anchor, {
@@ -2100,6 +2411,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final assets = {for (final asset in document.assets) asset.id: asset};
     final chaptersById = {for (final entry in chapters) entry.id: entry};
     return _footerWithBody(
+      showChrome: originalPage == null || _convertedPage != null,
       body: LayoutBuilder(
         builder: (context, dimensions) {
           TextStyle textStyle(TextStyle style) => style.copyWith(
@@ -2119,11 +2431,22 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               dimensions.maxWidth * _marginFraction,
               _readerNavHeight + 8,
             ),
-            key: ValueKey(_navigationRevision),
+            navigationRevision: _navigationRevision,
             sourceId: _sourceKey,
             document: document,
             initialChapterId: chapter.id,
             initialAnchor: current,
+            epubLayoutCache: _epubLayoutCache,
+            pdfLayoutCache: originalPage == null
+                ? null
+                : _preparedBook?.layoutCache,
+            onLayoutReady: originalPage == null
+                ? (ready) {
+                    if (mounted && _ebookLayoutReady != ready) {
+                      setState(() => _ebookLayoutReady = ready);
+                    }
+                  }
+                : (ready) => _ebookLayoutChanged(document, current, ready),
             remapAnchor: originalPage == null
                 ? null
                 : (before, after, anchor) {
@@ -2146,7 +2469,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                             characterOffset: relocated.offset,
                           );
                   },
-            mode: _pageTurnMode,
+            mode: _ebookPageTurnMode,
+            paperTurn:
+                _ebookPaperTurn && (originalPage == null || !_isPdfDocument),
+            previewTypography: _adjustingTypography,
             userNavigationEnabled: !_inkEditing,
             inkCanvasBuilder: (_, position) {
               final origin = originalPage == null
@@ -2175,7 +2501,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       : 'pdf-page-$sourcePage',
                   blockId: blockId,
                 ),
-                'ebook-canvas-${_pageTurnMode.name}-$offset'
+                'ebook-canvas-${_ebookPageTurnMode.name}-$offset'
                 '${_translationEnabled ? '-translated' : ''}',
                 text: translation ?? firstBlock?.text ?? '',
                 adoptsLegacyAnnotations: true,
@@ -2183,6 +2509,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             },
             textStyleBuilder: textStyle,
             translations: _translationEnabled ? _flowTranslations : null,
+            onUserNavigationStart: originalPage == null || !_isPdfDocument
+                ? _hideReaderChrome
+                : null,
             onScrollActivityChanged: originalPage == null
                 ? null
                 : (active) {
@@ -2204,7 +2533,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                           ),
                         )
                       : null
-                : _pageTurnMode == ReaderPaginationMode.vertical &&
+                : _ebookPageTurnMode == ReaderPaginationMode.vertical &&
                       chapterIndex > 0
                 ? () => _chapter(chapters[chapterIndex - 1])
                 : null,
@@ -2219,46 +2548,29 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                           ),
                         )
                       : null
-                : _pageTurnMode == ReaderPaginationMode.vertical &&
+                : _ebookPageTurnMode == ReaderPaginationMode.vertical &&
                       chapterIndex + 1 < chapters.length
                 ? () => _chapter(chapters[chapterIndex + 1])
                 : null,
             verticalBackground: _dark ? _paperDark : Colors.white,
-            onVisibleBlocksChanged: _onVisibleBlocks,
+            onVisibleBlocksChanged: (blocks) {
+              if (originalPage != null) _ebookScreen = blocks;
+              if (originalPage == null || _convertedPage != null) {
+                _onVisibleBlocks(blocks);
+              }
+            },
             chapterTitleAlign: TextAlign.center,
             verticalChapterTitleStyle: TextStyle(
               fontFamily: 'NotoSerifCJKSC',
               fontSize: dimensions.maxWidth >= 600 ? 36 : 26,
               height: 1.4,
               fontWeight: FontWeight.w700,
-              color: _ink,
+              color: _dark ? const Color(0xFF9DC5FF) : const Color(0xFF205493),
             ),
             onAnchorChanged: (value) {
               if (originalPage != null) {
                 if (!identical(document, _convertedDocument)) return;
                 _flowPosition = value;
-                final source = CompanionReflowPage.sourcePosition(
-                  document,
-                  value.blockId,
-                  value.characterOffset,
-                );
-                final number = CompanionReflowPage.pageForBlock(
-                  source?.blockId ?? value.blockId,
-                );
-                final sourceBlock = source?.blockId ?? value.blockId;
-                if (number != null && sourceBlock != null) {
-                  _lastConvertedLocation = (
-                    page: number,
-                    blockId: sourceBlock,
-                    offset: source?.offset ?? value.characterOffset,
-                  );
-                }
-                final page = _convertedPages[number];
-                if (page != null && page.number != _convertedPage?.number) {
-                  setState(() => _convertedPage = page);
-                  unawaited(_savePdfAnchor(page.number));
-                }
-                _prepareEbookNeighbors();
                 return;
               }
               if (value.chapterId == _flowPosition?.chapterId) {
@@ -2270,6 +2582,20 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 _preferences.saveAnchor(bookId: _source.bookId, anchor: value),
               );
             },
+            onUserAnchorChanged: originalPage == null
+                ? null
+                : (value) {
+                    if (_convertedPage == null ||
+                        !identical(document, _convertedDocument)) {
+                      return;
+                    }
+                    _rememberConvertedPosition(document, value);
+                    final page = _convertedPages[_pdfReadingAnchor?.pageNumber];
+                    if (page != null && page.number != _convertedPage?.number) {
+                      setState(() => _convertedPage = page);
+                    }
+                    _prepareEbookNeighbors();
+                  },
             blockBuilder: (context, slice, setSelection) {
               final sliceChapter = chaptersById[slice.chapterId] ?? chapter;
               final origin = originalPage == null
@@ -2290,29 +2616,90 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   ? _flowTranslations[slice.block.id]
                   : null;
               final displayText =
-                  _pageTurnMode == ReaderPaginationMode.horizontal
+                  _ebookPageTurnMode == ReaderPaginationMode.horizontal
                   ? slice.text
                   : translation ?? slice.text;
-              final block = XiaoqiDocumentBlockView(
-                block: slice.block,
-                selectionControls: _companionTextSelectionControls,
-                asset: assets[slice.block.assetId],
-                textOverride: displayText,
-                tableRowsOverride: slice.tableRows,
-                continuation: slice.continuation,
-                onSelectionChanged: (selected) {
-                  setSelection(selected);
-                  _reportSelection(selected);
-                },
-                onTextTap: () {
-                  if (!_selectionActive && !_inkEditing) {
-                    widget.onToggleImmersive?.call();
-                  }
-                },
-                contextMenuBuilder: (context, editable) =>
-                    _flowSelection(editable, sliceChapter, slice, sourcePage),
-                textStyleBuilder: textStyle,
-              );
+              final pdfPage = slice.block.kind == 'image' && sourcePage != null
+                  ? _convertedPages[sourcePage]
+                  : null;
+              final pdfPicture = pdfPage?.pictures
+                  .where((picture) => picture.asset.id == slice.block.assetId)
+                  .firstOrNull;
+              final asset = assets[slice.block.assetId];
+              final previewEpub =
+                  document.format == 'epub' &&
+                  !_inkEditing &&
+                  !_selectionActive &&
+                  (slice.block.kind == 'table' ||
+                      (slice.block.kind == 'image' &&
+                          asset != null &&
+                          asset.bytes.isNotEmpty));
+              final block = pdfPicture != null && pdfPage != null
+                  ? CompanionPdfObjectView(
+                      picture: pdfPicture,
+                      links: pdfPage.links,
+                      onLinkTap: _inkEditing || _selectionActive
+                          ? null
+                          : (target) =>
+                                unawaited(_followLink(document, target)),
+                      pageObjects: pdfPage.keepOriginal
+                          ? pdfPage.selectablePictures
+                          : const [],
+                      isOriginalPage: pdfPage.keepOriginal,
+                      onPreview: _inkEditing || _selectionActive
+                          ? null
+                          : (picture) => unawaited(
+                              _openPdfObjectPreview(pdfPage.number, picture),
+                            ),
+                    )
+                  : XiaoqiDocumentBlockView(
+                      block: slice.block,
+                      darkReader: _dark,
+                      onObjectPreview: previewEpub
+                          ? () {
+                              if (_inkEditing || _hasActiveSelection) return;
+                              unawaited(
+                                showEpubCompanionObjectPreview(
+                                  context: this.context,
+                                  block: slice.block,
+                                  asset: asset,
+                                ),
+                              );
+                            }
+                          : null,
+                      headingColor: _dark
+                          ? const Color(0xFF9DC5FF)
+                          : const Color(0xFF205493),
+                      onLinkTap: _inkEditing || translation != null
+                          ? null
+                          : (target) =>
+                                unawaited(_followLink(document, target)),
+                      selectionControls: _companionTextSelectionControls,
+                      asset: asset,
+                      textOverride: displayText,
+                      textOffset:
+                          (translation == null ||
+                                  translation == slice.block.text) &&
+                              displayText == slice.text
+                          ? slice.startOffset
+                          : null,
+                      tableRowsOverride: slice.tableRows,
+                      continuation: slice.continuation,
+                      onSelectionChanged: (selected) {
+                        setSelection(selected);
+                        _reportSelection(selected);
+                      },
+                      onTextTap: widget.onToggleImmersive == null
+                          ? null
+                          : _toggleReaderChrome,
+                      contextMenuBuilder: (context, editable) => _flowSelection(
+                        editable,
+                        sliceChapter,
+                        slice,
+                        sourcePage,
+                      ),
+                      textStyleBuilder: textStyle,
+                    );
               final location = FlowReaderAnchor(
                 sourceId: _sourceKey,
                 chapterId: sourcePage == null
@@ -2427,6 +2814,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 description: label,
                 defaultValue: defaultValue,
                 onReset: onReset ?? () => onChanged(defaultValue),
+                onDragChanged: label == '亮度'
+                    ? null
+                    : (active) {
+                        if (_adjustingTypography != active) {
+                          setState(() => _adjustingTypography = active);
+                        }
+                      },
               ),
             ),
           ),
@@ -2434,20 +2828,6 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         ],
       ),
       wideHeight: wideHeight,
-    );
-    ButtonStyle readerChoiceStyle({
-      required bool selected,
-      required Size minimumSize,
-      required EdgeInsetsGeometry padding,
-      TextStyle? textStyle,
-    }) => OutlinedButton.styleFrom(
-      foregroundColor: selected ? _readerChrome : _ink,
-      backgroundColor: selected ? _ink : Colors.transparent,
-      side: BorderSide(color: _readerRule),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      minimumSize: minimumSize,
-      padding: padding,
-      textStyle: textStyle,
     );
     Widget themeChoice(bool dark) {
       final selected = _dark == dark;
@@ -2571,34 +2951,61 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             '翻页',
             Wrap(
               spacing: _readerWide ? 15 : 8,
+              runSpacing: 6,
               children: [
-                for (final mode in [
-                  ReaderPaginationMode.vertical,
+                _pageTurnChoice(ReaderPaginationMode.vertical, '上下滑动'),
+                _pageTurnChoice(
                   ReaderPaginationMode.horizontal,
-                ])
-                  Semantics(
-                    selected: _pageTurnMode == mode,
-                    child: OutlinedButton(
-                      style: readerChoiceStyle(
-                        selected: _pageTurnMode == mode,
-                        minimumSize: const Size(64, 40),
-                        padding: EdgeInsets.symmetric(
-                          horizontal: _readerWide ? 14 : 10,
-                        ),
-                      ),
-                      onPressed: () {
-                        if (_pageTurnMode == mode) return;
-                        _changeReaderPageTurnMode(mode);
-                      },
-                      child: Text(
-                        mode == ReaderPaginationMode.vertical ? '上下滑动' : '左右翻页',
-                      ),
-                    ),
+                  _isPdfDocument ? '左右翻页' : '左右平移',
+                ),
+                if (!_isPdfDocument)
+                  _pageTurnChoice(
+                    ReaderPaginationMode.horizontal,
+                    '仿真翻页',
+                    paper: true,
                   ),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  ButtonStyle readerChoiceStyle({
+    required bool selected,
+    required Size minimumSize,
+    required EdgeInsetsGeometry padding,
+    TextStyle? textStyle,
+  }) => OutlinedButton.styleFrom(
+    foregroundColor: selected ? _readerChrome : _ink,
+    backgroundColor: selected ? _ink : Colors.transparent,
+    side: BorderSide(color: _readerRule),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    minimumSize: minimumSize,
+    padding: padding,
+    textStyle: textStyle,
+  );
+
+  Widget _pageTurnChoice(
+    ReaderPaginationMode mode,
+    String label, {
+    bool paper = false,
+  }) {
+    final pdf = _isPdfDocument;
+    final selected =
+        (pdf ? _pdfPageTurnMode : _ebookPageTurnMode) == mode &&
+        paper == (!pdf && _ebookPaperTurn);
+    return Semantics(
+      selected: selected,
+      child: OutlinedButton(
+        style: readerChoiceStyle(
+          selected: selected,
+          minimumSize: const Size(64, 40),
+          padding: EdgeInsets.symmetric(horizontal: _readerWide ? 14 : 10),
+        ),
+        onPressed: () => _changeReaderPageTurnMode(mode, paper: paper),
+        child: Text(label),
       ),
     );
   }
@@ -2610,7 +3017,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       prefs.setDouble('reading-companion.font', _fontScale),
       prefs.setDouble('reading-companion.margin', _marginFraction),
       prefs.setDouble('reading-companion.line', _lineScale),
-      prefs.setString('reading-companion.turn', _pageTurnMode.name),
+      prefs.setString('reading-companion.pdf-turn', _pdfPageTurnMode.name),
+      prefs.setString(
+        'reading-companion.ebook-turn',
+        _ebookPaperTurn ? 'paper' : _ebookPageTurnMode.name,
+      ),
       if (_hasBrightnessOverride)
         prefs.setDouble(_brightnessPreference, _brightness),
     ]);
@@ -2704,15 +3115,32 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         : sha256.convert(utf8.encode(translationSnapshot)).toString(),
   );
 
-  void _changeReaderPageTurnMode(ReaderPaginationMode mode) {
-    if (mode == _pageTurnMode) return;
-    final page = _pdfPage;
+  void _changeReaderPageTurnMode(
+    ReaderPaginationMode mode, {
+    bool paper = false,
+  }) {
+    if (!_isPdfDocument) {
+      final directionChanged = mode != _ebookPageTurnMode;
+      if (!directionChanged && paper == _ebookPaperTurn) return;
+      setState(() {
+        _ebookPageTurnMode = mode;
+        _ebookPaperTurn = paper;
+        if (directionChanged && _preparedBook != null) {
+          _ebookLayoutReady = false;
+          final page = _pdfReadingAnchor?.pageNumber ?? _pdfPage;
+          _targetEbook(page, previous: _pdfReadingAnchor, recenter: true);
+        }
+      });
+      return;
+    }
+    if (mode == _pdfPageTurnMode) return;
+    final page = _pdfReadingAnchor?.pageNumber ?? _pdfPage;
     ++_pdfSwipeRevision;
     _pdfSwipeStart = null;
+    _pdfPanStart = null;
     _pdfGesturePage = null;
     _pdfSnapPending = _isPdfDocument && _pdf.isReady;
-    setState(() => _pageTurnMode = mode);
-    if (!_isPdfDocument) return;
+    setState(() => _pdfPageTurnMode = mode);
     final revision = _pdfSwipeRevision;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // Let pdfrx finish mapping its old viewport into the new layout first.
@@ -2720,28 +3148,39 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         if (!mounted || revision != _pdfSwipeRevision || !_isPdfDocument) {
           return;
         }
-        unawaited(_goToPdfReaderPage(page, duration: Duration.zero));
+        unawaited(
+          _goToPdfReaderPage(
+            page,
+            duration: Duration.zero,
+            recordProgress: false,
+          ),
+        );
       });
     });
   }
 
-  PdfPageLayout _layoutVerticalPdf(
+  PdfPageLayout _layoutCompanionPdf(
     List<PdfPage> pages,
     PdfViewerParams params,
   ) {
     final viewport = _pdf.viewSize;
-    final cached = _verticalLayout;
+    final axis = _pdfPageTurnMode == ReaderPaginationMode.horizontal
+        ? Axis.horizontal
+        : Axis.vertical;
+    final cached = _pdfViewportLayout;
     if (cached != null &&
         identical(cached.pages, pages) &&
         cached.viewport == viewport &&
-        cached.margin == params.margin) {
+        cached.margin == params.margin &&
+        cached.axis == axis) {
       return cached.layout;
     }
-    final layout = verticalPdfPageLayout(pages, viewport, params.margin);
-    _verticalLayout = (
+    final layout = viewportPdfPageLayout(pages, viewport, params.margin, axis);
+    _pdfViewportLayout = (
       pages: pages,
       viewport: viewport,
       margin: params.margin,
+      axis: axis,
       layout: layout,
     );
     return layout;
@@ -2796,7 +3235,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     return controller.calcMatrixFor(position, zoom: zoom, viewSize: viewport);
   }
 
-  void _verticalPdfWheel(PointerSignalEvent event) {
+  void _onPdfWheel(PointerSignalEvent event) {
     if (event is! PointerScrollEvent ||
         !_isPdfDocument ||
         !_pdf.isReady ||
@@ -2806,40 +3245,70 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         HardwareKeyboard.instance.isControlPressed) {
       return;
     }
+    if (event.scrollDelta != Offset.zero) {
+      CompanionPdfReflow.deferBackgroundPreparation();
+    }
+    final before = _pdf.centerPosition;
+    final revision = _pdfSwipeRevision;
+    if (_pdfPageTurnMode == ReaderPaginationMode.horizontal) {
+      // pdfrx handles the wheel after pointer dispatch has finished.
+      scheduleMicrotask(() => _recordPdfPan(before, revision));
+      return;
+    }
     if (_pdf.currentZoom > 1.001) {
       final delta = event.scrollDelta / _pdf.currentZoom;
       _pdf.value = _pdf.calcMatrixFor(_pdf.centerPosition + delta);
+      _recordPdfPan(before, revision);
     } else if (!_pdfSnapPending && event.scrollDelta.dy != 0) {
-      final next = (_pdfPage + event.scrollDelta.dy.sign.toInt()).clamp(
-        1,
-        _pdfPageCount,
-      );
-      if (next != _pdfPage) unawaited(_goToPdfReaderPage(next));
+      final next = (_pdfPage + event.scrollDelta.dy.sign.toInt())
+          .clamp(1, _pdfPageCount)
+          .toInt();
+      if (next != _pdfPage) {
+        _hideReaderChrome();
+        unawaited(_goToPdfReaderPage(next));
+      }
     }
   }
 
-  bool? _verticalPdfKey(
-    PdfViewerKeyHandlerParams params,
-    LogicalKeyboardKey key,
-    bool realPress,
-  ) {
+  bool? _onPdfKey(PdfViewerKeyHandlerParams _, LogicalKeyboardKey key, bool _) {
     if (!_isPdfDocument ||
         !_pdf.isReady ||
         _pdfPageCount < 1 ||
         _inkEditing ||
-        _hasActiveSelection ||
-        _pdf.currentZoom > 1.001) {
+        _hasActiveSelection) {
       return null;
     }
-    final step = switch (key) {
-      LogicalKeyboardKey.arrowDown || LogicalKeyboardKey.pageDown => 1,
-      LogicalKeyboardKey.arrowUp || LogicalKeyboardKey.pageUp => -1,
-      _ => 0,
+    final vertical = _pdfPageTurnMode == ReaderPaginationMode.vertical;
+    final destination = switch (key) {
+      LogicalKeyboardKey.home => 1,
+      LogicalKeyboardKey.end => _pdfPageCount,
+      LogicalKeyboardKey.pageDown => _pdfPage + 1,
+      LogicalKeyboardKey.pageUp => _pdfPage - 1,
+      LogicalKeyboardKey.space =>
+        _pdfPage + (HardwareKeyboard.instance.isShiftPressed ? -1 : 1),
+      LogicalKeyboardKey.arrowDown when vertical && _pdf.currentZoom <= 1.001 =>
+        _pdfPage + 1,
+      LogicalKeyboardKey.arrowUp when vertical && _pdf.currentZoom <= 1.001 =>
+        _pdfPage - 1,
+      _ => null,
     };
-    if (step == 0) return null;
+    if (destination == null) {
+      if (key == LogicalKeyboardKey.arrowDown ||
+          key == LogicalKeyboardKey.arrowUp ||
+          key == LogicalKeyboardKey.arrowLeft ||
+          key == LogicalKeyboardKey.arrowRight) {
+        final before = _pdf.centerPosition;
+        final revision = _pdfSwipeRevision;
+        scheduleMicrotask(() => _recordPdfPan(before, revision));
+      }
+      return null;
+    }
     if (!_pdfSnapPending) {
-      final next = (_pdfPage + step).clamp(1, _pdfPageCount);
-      if (next != _pdfPage) unawaited(_goToPdfReaderPage(next));
+      final next = destination.clamp(1, _pdfPageCount).toInt();
+      if (next != _pdfPage) {
+        _hideReaderChrome();
+        unawaited(_goToPdfReaderPage(next));
+      }
     }
     return true;
   }
@@ -2848,41 +3317,84 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     ++_pdfSwipeRevision;
     // Cancel a settling animation at its currently visible position if the
     // reader catches the page with a new finger before it has come to rest.
-    if (_pdfSnapPending && _pdf.isReady) {
+    final interrupted = _pdfSnapPending;
+    if (interrupted && _pdf.isReady) {
       unawaited(_pdf.goTo(_pdf.value, duration: Duration.zero));
     }
     _pdfSnapPending = false;
     _pdfSwipeStart = null;
-    if (!_pdf.isReady || _inkEditing || _hasActiveSelection) {
+    _pdfPanStart = null;
+    if (!_isPdfDocument ||
+        !_pdf.isReady ||
+        _pdfPageCount == 0 ||
+        _inkEditing ||
+        _hasActiveSelection) {
       return;
     }
-    final horizontal = _pageTurnMode == ReaderPaginationMode.horizontal;
-    final page = horizontal
-        ? _pdf.pageNumber ?? _pdfPage
-        : (_pdf.centerPosition.dy / _pdf.viewSize.height).floor() + 1;
+    final page = _pdfPageAtViewportCenter(
+      _pdf.centerPosition,
+      _pdf.layout.pageLayouts,
+    );
     if (page < 1 || page > _pdf.layout.pageLayouts.length) return;
     _pdfGesturePage = page;
     if (details.pointerCount > 1) return;
-    final fitZoom = horizontal ? horizontalPdfPageWidthZoom(_pdf, page) : 1.0;
-    if (_pdf.currentZoom > fitZoom * (horizontal ? 1.05 : 1.001)) {
+    if (interrupted && page != (_pdfReadingAnchor?.pageNumber ?? _pdfPage)) {
+      _onPdfReaderPageChanged(page, recordProgress: true);
+    }
+    _pdfPanStart = _pdf.centerPosition;
+    final zoomTolerance = _pdfPageTurnMode == ReaderPaginationMode.horizontal
+        ? 1.05
+        : 1.001;
+    if (_pdf.currentZoom > zoomTolerance) {
       return;
     }
     _pdfSwipeStart = (page: page, center: _pdf.centerPosition);
   }
 
   void _updatePdfSwipe(ScaleUpdateDetails details) {
-    if (details.pointerCount > 1) _pdfSwipeStart = null;
+    if (_isPdfDocument &&
+        (details.focalPointDelta != Offset.zero || details.scale != 1)) {
+      CompanionPdfReflow.deferBackgroundPreparation();
+    }
+    if (details.pointerCount > 1) {
+      _pdfSwipeStart = null;
+      _pdfPanStart = null;
+      return;
+    }
+    final start = _pdfSwipeStart;
+    if (start == null || widget.immersive) return;
+    final delta = details.focalPointDelta;
+    final horizontal = _pdfPageTurnMode == ReaderPaginationMode.horizontal;
+    final main = horizontal ? delta.dx : delta.dy;
+    final cross = horizontal ? delta.dy : delta.dx;
+    if (main.abs() > cross.abs() &&
+        (main < 0 ? start.page < _pdfPageCount : start.page > 1)) {
+      _hideReaderChrome();
+    }
   }
 
   void _endPdfSwipe(ScaleEndDetails details) {
     final start = _pdfSwipeStart;
+    final panStart = _pdfPanStart;
     _pdfSwipeStart = null;
+    _pdfPanStart = null;
     _pdfGesturePage = null;
-    if (start == null || !_pdf.isReady) return;
+    if (!_pdf.isReady) return;
+    if (start == null) {
+      if (panStart != null) {
+        final revision = _pdfSwipeRevision;
+        scheduleMicrotask(() {
+          if (_recordPdfPan(panStart, revision)) {
+            unawaited(_pdf.goTo(_pdf.value, duration: Duration.zero));
+          }
+        });
+      }
+      return;
+    }
 
     final travel = (_pdf.centerPosition - start.center) * _pdf.currentZoom;
     final velocity = details.velocity.pixelsPerSecond;
-    final horizontal = _pageTurnMode == ReaderPaginationMode.horizontal;
+    final horizontal = _pdfPageTurnMode == ReaderPaginationMode.horizontal;
     final distance = horizontal ? travel.dx : travel.dy;
     final fingerVelocity = horizontal ? velocity.dx : velocity.dy;
     final crossAxisDistance = horizontal ? travel.dy : travel.dx;
@@ -2893,7 +3405,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             ((distance.abs() < 1 && fingerVelocity.abs() < 650) ||
                 (crossAxisDistance.abs() > distance.abs() &&
                     crossAxisVelocity.abs() >= fingerVelocity.abs())))) {
-      _onPdfReaderPageChanged(_pdf.pageNumber);
+      _recordPdfPan(start.center, _pdfSwipeRevision);
       return;
     }
     final target = horizontal
@@ -2922,79 +3434,123 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         return;
       }
       unawaited(
-        _goToPdfReaderPage(
-          target,
-          keepVerticalPosition: horizontal && target == start.page,
-        ),
+        _goToPdfReaderPage(target, recordProgress: target != start.page),
       );
     });
+  }
+
+  int _pdfPageAtViewportCenter(Offset center, List<Rect> layouts) {
+    final horizontal = _pdfPageTurnMode == ReaderPaginationMode.horizontal;
+    final position = horizontal ? center.dx : center.dy;
+    var first = 0;
+    var last = layouts.length - 1;
+    while (first < last) {
+      final index = (first + last) ~/ 2;
+      final before = layouts[index];
+      final after = layouts[index + 1];
+      final boundary = horizontal
+          ? (before.center.dx + after.center.dx) / 2
+          : (before.center.dy + after.center.dy) / 2;
+      if (position < boundary) {
+        last = index;
+      } else {
+        first = index + 1;
+      }
+    }
+    return first + 1;
+  }
+
+  bool _recordPdfPan(Offset before, int revision) {
+    if (!mounted ||
+        !_isPdfDocument ||
+        !_pdf.isReady ||
+        _pdfPageCount == 0 ||
+        _inkEditing ||
+        _hasActiveSelection ||
+        _pdfSnapPending ||
+        _pdfSwipeRevision != revision) {
+      return false;
+    }
+    final travel = (_pdf.centerPosition - before) * _pdf.currentZoom;
+    if (travel.distanceSquared < 4) return false;
+    final number = _pdfPageAtViewportCenter(
+      _pdf.centerPosition,
+      _pdf.layout.pageLayouts,
+    );
+    if (number != _pdfPage) {
+      _hideReaderChrome();
+      _onPdfReaderPageChanged(number, recordProgress: true);
+    } else if (travel.dy.abs() >= 2) {
+      final layout = _pdf.layout.pageLayouts[number - 1];
+      if (_pdf.visibleRect.height < layout.height) {
+        final fraction = (_pdf.visibleRect.top - layout.top) / layout.height;
+        _rememberPdfPosition(
+          number,
+          pageFraction: fraction.clamp(0.0, 1.0).toDouble(),
+        );
+      }
+    }
+    return true;
   }
 
   Future<void> _goToPdfReaderPage(
     int number, {
     Duration duration = const Duration(milliseconds: 220),
-    bool keepVerticalPosition = false,
-    double? sourceTop,
+    bool recordProgress = true,
   }) async {
     if (!_pdf.isReady) return;
-    if (MediaQuery.disableAnimationsOf(context)) duration = Duration.zero;
+    if ((number - _pdfPage).abs() > 1 ||
+        MediaQuery.disableAnimationsOf(context)) {
+      duration = Duration.zero;
+    }
     if (number < 1 || number > _pdf.layout.pageLayouts.length) {
       _pdfSnapPending = false;
       return;
     }
     final revision = ++_pdfSwipeRevision;
     _pdfSwipeStart = null;
+    _pdfPanStart = null;
     _pdfSnapPending = true;
+    if (_isPdfDocument) CompanionPdfReflow.deferBackgroundPreparation();
+    if (recordProgress) _rememberPdfPosition(number);
     final rect = _pdf.layout.pageLayouts[number - 1];
-    final horizontal = _pageTurnMode == ReaderPaginationMode.horizontal;
-    final fit = horizontal ? horizontalPdfPageWidthZoom(_pdf, number) : 1.0;
-    final zoom = sourceTop == null ? fit : math.max(fit, _pdf.currentZoom);
-    final inset = math.min(rect.height / 2, _pdf.viewSize.height / zoom / 2);
-    final firstY = rect.top + inset;
-    final lastY = math.max(firstY, rect.bottom - inset);
-    final y = sourceTop != null
-        ? (rect.top + sourceTop * rect.height).clamp(firstY, lastY)
-        : horizontal
-        ? keepVerticalPosition
-              ? _pdf.centerPosition.dy.clamp(firstY, lastY)
-              : firstY
-        : rect.center.dy;
     final matrix = _pdf.calcMatrixFor(
-      Offset(rect.center.dx, y.toDouble()),
-      zoom: zoom,
+      rect.center,
+      zoom: 1,
       viewSize: _pdf.viewSize,
     );
     await _pdf.goTo(matrix, duration: duration);
-    if (!mounted || revision != _pdfSwipeRevision) return;
+    if (!mounted || !_pdf.isReady || revision != _pdfSwipeRevision) return;
     _pdfSnapPending = false;
+    _pdf.setCurrentPageNumber(number);
     _onPdfReaderPageChanged(number);
   }
 
-  void _onPdfReaderPageChanged(int? next) {
+  void _onPdfReaderPageChanged(int next, {bool recordProgress = false}) {
     if (!mounted ||
-        next == null ||
-        next == _pdfPage ||
+        !_isPdfDocument ||
         _pdfSwipeStart != null ||
         _pdfSnapPending) {
       return;
     }
+    if (recordProgress) {
+      _releaseReturnPreview();
+      _rememberPdfPosition(next);
+    }
+    if (next == _pdfPage) return;
     ++_pdfGestureRevision;
     setState(() {
       _pdfPage = next;
-      if (_convertedPage != null) return;
       _pdfTextAvailable = false;
       _translationPending = false;
       _translationError = null;
     });
-    if (_convertedPage != null) return;
     if (_requestedEbook && _requestedPdfPage != next) {
-      unawaited(_openConvertedPage(next));
+      unawaited(_openConvertedPage(next, fromPdf: true));
     }
     _reportSelection(false);
     _scheduleTranslation();
-    final document = _pdfDocumentRef;
-    if (document != null) unawaited(_detectPdfPage(document, next));
-    unawaited(_savePdfAnchor(next));
+    _schedulePdfPageWork(probeText: true);
   }
 
   Widget _pdfDocument(ReaderAnchor? anchor) {
@@ -3007,7 +3563,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         ? _translatedPdfPage
         : null;
     final showsOriginalPage = _convertedPage == null && translation == null;
-    final horizontal = _pageTurnMode == ReaderPaginationMode.horizontal;
+    final horizontal = _pdfPageTurnMode == ReaderPaginationMode.horizontal;
     return _footerWithBody(
       showChrome: _convertedPage == null,
       body: ColoredBox(
@@ -3018,7 +3574,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             fit: StackFit.expand,
             children: [
               Listener(
-                onPointerSignal: horizontal ? null : _verticalPdfWheel,
+                onPointerSignal: _onPdfWheel,
                 child: Theme(
                   data: _dark
                       ? Theme.of(context).copyWith(
@@ -3033,27 +3589,28 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                     initialPageNumber: page,
                     params: PdfViewerParams(
                       backgroundColor: surround,
-                      layoutPages: horizontal
-                          ? horizontalPdfPageLayout
-                          : _layoutVerticalPdf,
-                      sizeDelegateProvider: horizontal
-                          ? null
-                          : const PdfViewerSizeDelegateProviderLegacy(
-                              minScale: 1,
-                              useAlternativeFitScaleAsMinScale: false,
-                            ),
+                      layoutPages: _layoutCompanionPdf,
+                      sizeDelegateProvider:
+                          const PdfViewerSizeDelegateProviderLegacy(
+                            minScale: 1,
+                            useAlternativeFitScaleAsMinScale: false,
+                          ),
                       normalizeMatrix: horizontal
                           ? null
                           : _normalizeVerticalPdf,
                       // Handle deltas here while leaving pdfrx's Ctrl+wheel zoom active.
                       scrollByMouseWheel: horizontal ? 0.2 : 0,
-                      onKey: horizontal ? null : _verticalPdfKey,
+                      onKey: _onPdfKey,
                       pageAnchor: PdfPageAnchor.center,
                       pageAnchorEnd: PdfPageAnchor.center,
                       panAxis: horizontal ? PanAxis.aligned : PanAxis.free,
                       onInteractionStart: _startPdfSwipe,
                       onInteractionUpdate: _updatePdfSwipe,
                       onInteractionEnd: _endPdfSwipe,
+                      calculateCurrentPageNumber: (viewport, layouts, _) =>
+                          layouts.isEmpty
+                          ? null
+                          : _pdfPageAtViewportCenter(viewport.center, layouts),
                       margin: 17,
                       pageDropShadow: _dark
                           ? null
@@ -3065,11 +3622,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       pageBackgroundPaintCallbacks: _dark
                           ? [_beginNightPage]
                           : null,
-                      pagePaintCallbacks: _dark
-                          ? [_endNightPage, _paintNightPdfSelection]
-                          : null,
+                      pagePaintCallbacks: [
+                        if (_returnPreview != null) _paintReturnPreview,
+                        if (_dark) ...[_endNightPage, _paintNightPdfSelection],
+                      ],
                       pageOverlaysBuilder: (context, rect, page) => [
-                        if (showsOriginalPage)
+                        if (showsOriginalPage &&
+                            (_inkEditing ||
+                                _savedInk.isNotEmpty ||
+                                _largeDrawings.isNotEmpty))
                           Positioned.fill(
                             child: _inkSurface(
                               PdfReaderAnchor(
@@ -3091,19 +3652,27 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                             : '打开本书资料',
                         onAction: widget.onChooseSource ?? widget.onOpenLibrary,
                       ),
-                      onViewerReady: (document, controller) {
+                      onViewerReady: (document, _) {
                         if (!mounted) return;
                         _pdfDocumentRef = document;
                         setState(() {
                           _pdfPageCount = document.pages.length;
-                          _pdfPage = controller.pageNumber ?? 1;
+                          _pdfPage = page
+                              .clamp(1, math.max(1, _pdfPageCount))
+                              .toInt();
+                          if (_pdfReadingAnchor?.pageNumber != _pdfPage) {
+                            _pdfReadingAnchor = null;
+                          }
                         });
                         unawaited(
-                          _goToPdfReaderPage(_pdfPage, duration: Duration.zero),
+                          _goToPdfReaderPage(
+                            _pdfPage,
+                            duration: Duration.zero,
+                            recordProgress: false,
+                          ),
                         );
-                        unawaited(_detectPdfPage(document, _pdfPage));
+                        _schedulePdfPageWork(probeText: true);
                       },
-                      onPageChanged: _onPdfReaderPageChanged,
                       textSelectionParams: PdfTextSelectionParams(
                         enabled: !_inkEditing,
                         showContextMenuAutomatically: false,
@@ -3132,11 +3701,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         if (details.type == PdfViewerGeneralTapType.tap) {
                           ++_pdfGestureRevision;
                         }
-                        if (!_inkEditing &&
-                            !_selectionActive &&
-                            details.type == PdfViewerGeneralTapType.tap &&
+                        if (details.type == PdfViewerGeneralTapType.tap &&
                             details.tapOn != PdfViewerPart.selectedText) {
-                          widget.onToggleImmersive?.call();
+                          _toggleReaderChrome();
                         }
                         return false;
                       },
@@ -3253,8 +3820,6 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   Widget _pdfTranslationView(String translation) {
     final page = _pdfPage;
-    var overscroll = 0.0;
-    var horizontalDelta = 0.0;
     void turnPage(int delta) {
       final target = page + delta;
       if (!_selectionActive &&
@@ -3270,37 +3835,53 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     return Material(
       color: _dark ? _paperDark : Colors.white,
       child: GestureDetector(
-        onHorizontalDragStart: _pageTurnMode == ReaderPaginationMode.horizontal
-            ? (_) => horizontalDelta = 0
+        onHorizontalDragStart:
+            _pdfPageTurnMode == ReaderPaginationMode.horizontal
+            ? (_) => _pdfTranslationHorizontalDelta = 0
             : null,
-        onHorizontalDragUpdate: _pageTurnMode == ReaderPaginationMode.horizontal
-            ? (details) => horizontalDelta += details.delta.dx
+        onHorizontalDragUpdate:
+            _pdfPageTurnMode == ReaderPaginationMode.horizontal
+            ? (details) {
+                _pdfTranslationHorizontalDelta += details.delta.dx;
+                if ((_pdfTranslationHorizontalDelta < 0 &&
+                        page < _pdfPageCount) ||
+                    (_pdfTranslationHorizontalDelta > 0 && page > 1)) {
+                  _hideReaderChrome();
+                }
+              }
             : null,
-        onHorizontalDragEnd: _pageTurnMode == ReaderPaginationMode.horizontal
+        onHorizontalDragEnd: _pdfPageTurnMode == ReaderPaginationMode.horizontal
             ? (_) => turnPage(
-                horizontalDelta < -44
+                _pdfTranslationHorizontalDelta < -44
                     ? 1
-                    : horizontalDelta > 44
+                    : _pdfTranslationHorizontalDelta > 44
                     ? -1
                     : 0,
               )
             : null,
         child: NotificationListener<ScrollNotification>(
           onNotification: (event) {
+            if (event is ScrollStartNotification && event.dragDetails != null) {
+              _pdfTranslationOverscroll = 0;
+            }
             if (event is OverscrollNotification &&
                 event.dragDetails != null &&
-                _pageTurnMode == ReaderPaginationMode.vertical) {
-              overscroll += event.overscroll;
+                _pdfPageTurnMode == ReaderPaginationMode.vertical) {
+              _pdfTranslationOverscroll += event.overscroll;
+              if ((_pdfTranslationOverscroll > 0 && page < _pdfPageCount) ||
+                  (_pdfTranslationOverscroll < 0 && page > 1)) {
+                _hideReaderChrome();
+              }
             }
             if (event is ScrollEndNotification) {
               turnPage(
-                overscroll > 56
+                _pdfTranslationOverscroll > 56
                     ? 1
-                    : overscroll < -56
+                    : _pdfTranslationOverscroll < -56
                     ? -1
                     : 0,
               );
-              overscroll = 0;
+              _pdfTranslationOverscroll = 0;
             }
             return false;
           },
@@ -3315,9 +3896,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 SelectableText(
                   translation,
                   selectionControls: _companionTextSelectionControls,
-                  onTap: _selectionActive || _inkEditing
+                  onTap: widget.onToggleImmersive == null
                       ? null
-                      : widget.onToggleImmersive,
+                      : _toggleReaderChrome,
                   onSelectionChanged: (selection, _) =>
                       _reportSelection(!selection.isCollapsed),
                   style: TextStyle(
@@ -3405,7 +3986,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         onSelected: (index) {
           final target = pages[index]!;
           if (target != readingPage) {
-            setState(() => _pageBeforeJump = readingPage);
+            setState(() {
+              _pageBeforeJump = readingPage;
+              _pdfPositionBeforeJump = _pdfReadingAnchor;
+              _flowPositionBeforeJump = null;
+            });
           }
           if (_requestedEbook) {
             unawaited(_openConvertedPage(target));
@@ -3629,6 +4214,28 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   Color get _readerMuted =>
       _dark ? const Color(0xFFB8B5AE) : const Color(0xFF595959);
 
+  Future<void> _openPdfObjectPreview(
+    int page,
+    CompanionPagePicture picture,
+  ) async {
+    final document = _pdfDocumentRef;
+    if (document == null || _inkEditing || _selectionActive) return;
+    if (document.permissions?.allowsCopying == false) {
+      AppToast.show(context, '这份 PDF 限制复制内容');
+      return;
+    }
+    final kind = picture.isTable ? 'table' : 'image';
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    await showCompanionPdfObjectPreview(
+      context: context,
+      picture: picture,
+      filename: 'xiaoqi-$kind-p$page-$stamp.png',
+      loadPreview: () => _pdfReflow.renderPicture(document, page, picture),
+      loadExport: () =>
+          _pdfReflow.renderPicture(document, page, picture, forExport: true),
+    );
+  }
+
   void _openReaderPanel(_ReaderPanel panel, {WidgetBuilder? outline}) {
     if (_activePanel == panel) {
       _closeReaderPanel();
@@ -3637,6 +4244,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     if (_activePanel == _ReaderPanel.display) {
       unawaited(_persistDisplaySettings());
     }
+    _dismissFlowSelection();
     FocusManager.instance.primaryFocus?.unfocus();
     final route = ModalRoute.of(context);
     if (_panelHistory == null && route != null) {
@@ -3653,6 +4261,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     }
     setState(() {
       _activePanel = panel;
+      _adjustingTypography = false;
       _outlineExtent = 0;
       _outlineDragging = false;
       _outlinePanel = outline;
@@ -3668,6 +4277,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     history?.remove();
     setState(() {
       _activePanel = null;
+      _adjustingTypography = false;
       _outlinePanel = null;
       _progressPreview.value = null;
     });
@@ -3694,6 +4304,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     SemanticFormatterCallback? formatValue,
     double? defaultValue,
     VoidCallback? onReset,
+    ValueChanged<bool>? onDragChanged,
     bool compact = false,
   }) {
     const trackInset = 7.0;
@@ -3743,7 +4354,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       defaultFraction: (defaultValue - min) / (max - min),
       trackInset: trackInset,
       label: '恢复默认$description',
-      onCommit: onChanged,
+      onChanged: onChanged,
+      onDragChanged: onDragChanged,
       onReset: onReset,
       buildSlider: slider,
     );
@@ -3780,6 +4392,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           if (destination != page) {
             _pageBeforeJump = page;
             _flowPositionBeforeJump = _flowPosition;
+            _pdfPositionBeforeJump = pdf ? _pdfReadingAnchor : null;
           }
         });
       }
@@ -3788,12 +4401,27 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
     void restoreJump(int previous) {
       final position = _flowPositionBeforeJump;
+      final original = _pdfPositionBeforeJump;
       _closeReaderPanel();
       setState(() {
         _pageBeforeJump = null;
         _flowPositionBeforeJump = null;
+        _pdfPositionBeforeJump = null;
       });
-      if (position != null && onRestoreFlow != null) {
+      if (usesOriginalPages && original?.pageNumber == previous) {
+        unawaited(_openConvertedPage(previous, position: original));
+      } else if (_isPdfDocument &&
+          original != null &&
+          original.pageNumber == previous) {
+        if (_inkEditing) return;
+        _rememberPdfPosition(
+          previous,
+          blockId: original.blockId,
+          characterOffset: original.characterOffset,
+          pageFraction: original.pageFraction,
+        );
+        unawaited(_goToPdfReaderPage(previous, recordProgress: false));
+      } else if (position != null && onRestoreFlow != null) {
         onRestoreFlow(position);
       } else {
         onPageSelected(previous);
@@ -3890,7 +4518,21 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         children: [
           ExcludeFocus(
             excluding: panel != null,
-            child: ExcludeSemantics(excluding: panel != null, child: body),
+            child: ExcludeSemantics(
+              excluding: panel != null,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                excludeFromSemantics: true,
+                onTap:
+                    showChrome &&
+                        panel == null &&
+                        !_inkEditing &&
+                        widget.onToggleImmersive != null
+                    ? _toggleReaderChrome
+                    : null,
+                child: body,
+              ),
+            ),
           ),
           if (chromeVisible)
             Positioned(
@@ -3972,7 +4614,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   Widget _outlineSheet(double availableHeight, String location) {
     final full = math.max(0.0, availableHeight);
     final surface = _dark ? _readerPanelSurface : const Color(0xFFF8F9FA);
-    final bookTitle = widget.bookTitle.trim().isEmpty
+    final bookTitle = _source.displayName.trim().isNotEmpty
         ? _source.displayName
         : widget.bookTitle;
     final compact = math.min(
@@ -4309,32 +4951,41 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
   }
 
-  Widget _toolbar(BuildContext context) {
+  Widget _toolbar(BuildContext context, {bool sourceFailed = false}) {
     final wide = MediaQuery.sizeOf(context).width >= 600;
     final showDoodleLabel = MediaQuery.sizeOf(context).width >= 380;
-    final controlColor = _dark
-        ? const Color(0xFF27292B)
-        : const Color(0xFFF0F1F2);
-    final selectedColor = _dark ? const Color(0xFF48494B) : Colors.white;
+    final showPdf = _isCompanionPdf(_source) || widget.onSwitchFormat != null;
+    final selectedColor = _dark
+        ? const Color(0xFFE6E3DC)
+        : const Color(0xFF202020);
+    final loadingColor = _dark
+        ? const Color(0xFF3D3D3D)
+        : const Color(0xFFE4E4E4);
+    final selectedInk = _dark ? const Color(0xFF202020) : Colors.white;
     final library = widget.onChooseSource;
-    Widget segment(bool pdf, String label) {
+    Widget segment(
+      bool pdf,
+      String label, {
+      required bool loading,
+      bool available = true,
+    }) {
       final selected = pdf != _isSelectingEbook;
-      final loading = !pdf && _ebookSwitchPending;
       final retry = !pdf && _canRetryEbook;
-      final VoidCallback? onTap = loading
-          ? null
-          : retry
-          ? () => _switchReaderFormat(false)
-          : selected
-          ? library
-          : (pdf && !_isCompanionPdf(_source) && widget.onSwitchFormat == null
-                ? null
-                : () => _switchReaderFormat(pdf));
+      // A second tap can arrive before this toolbar rebuilds. Keep the
+      // selected PDF/reflow segment listening even in a single-source book.
+      final canActivate = selected
+          ? library != null || _isCompanionPdf(_source)
+          : !pdf || _isCompanionPdf(_source) || widget.onSwitchFormat != null;
+      final VoidCallback? onTap = !loading && available && canActivate
+          ? () => _activateFormatButton(pdf)
+          : null;
       return Tooltip(
         message: loading
-            ? '正在准备电子书'
+            ? '正在载入$label'
             : retry
-            ? '重试电子书'
+            ? '$_ebookError，点此重试'
+            : selected && _hasPendingFormatSwitch
+            ? '取消切换，保留$label'
             : selected && library != null
             ? '切换阅读资料'
             : label,
@@ -4342,6 +4993,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         child: Semantics(
           button: true,
           selected: selected,
+          enabled: onTap != null,
+          value: loading ? '正在载入' : null,
           child: InkWell(
             borderRadius: BorderRadius.circular(9),
             onTap: onTap == null
@@ -4351,43 +5004,64 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                     onTap();
                   },
             child: SizedBox(
-              width: wide ? (pdf ? 61 : 80) : (pdf ? 36 : 68),
+              width: wide ? (pdf ? 64 : 80) : (pdf ? 48 : 70),
               height: 44,
               child: Center(
-                child: Ink(
-                  height: wide ? 29 : 28,
+                child: SizedBox(
+                  height: wide ? 30 : 28,
                   width: double.infinity,
-                  decoration: BoxDecoration(
-                    color: selected ? selectedColor : Colors.transparent,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Center(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (loading) ...[
-                          SizedBox.square(
-                            dimension: wide ? 12 : 10,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 1.5,
-                              color: _ink,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (loading || selected)
+                        IgnorePointer(
+                          child: SvgPicture.asset(
+                            'assets/images/reading_companion_format_fill.svg',
+                            fit: BoxFit.fill,
+                            excludeFromSemantics: true,
+                            colorFilter: ColorFilter.mode(
+                              loading ? loadingColor : selectedColor,
+                              BlendMode.srcIn,
                             ),
                           ),
-                          const SizedBox(width: 4),
-                        ],
-                        Text(
-                          label,
-                          maxLines: 1,
-                          style: TextStyle(
-                            color: selected || onTap != null
-                                ? _ink
-                                : _ink.withValues(alpha: .48),
-                            fontSize: wide ? 14 : 12,
-                            fontWeight: FontWeight.w600,
+                        ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Center(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              retry ? '重试' : label,
+                              maxLines: 1,
+                              style: TextStyle(
+                                color: selected && !loading
+                                    ? selectedInk
+                                    : _ink,
+                                fontSize: wide ? 14 : 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                      if (loading)
+                        PositionedDirectional(
+                          start: 4,
+                          top: 0,
+                          bottom: 0,
+                          child: Center(
+                            child: SizedBox.square(
+                              dimension: 8,
+                              child: ExcludeSemantics(
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.4,
+                                  color: _ink,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ),
@@ -4397,20 +5071,74 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       );
     }
 
+    Widget formats({
+      bool pdfBusy = false,
+      bool ebookBusy = false,
+      bool ebookAvailable = true,
+    }) => Stack(
+      alignment: Alignment.center,
+      children: [
+        Positioned.fill(
+          top: wide ? 5 : 6,
+          bottom: wide ? 5 : 6,
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: _dark ? _paperDark : Colors.white,
+                border: Border.all(color: _ink),
+                borderRadius: BorderRadius.circular(9),
+              ),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (showPdf) ...[
+                segment(true, 'PDF', loading: pdfBusy),
+                const SizedBox(width: 2),
+              ],
+              segment(
+                false,
+                '电子书',
+                loading: ebookBusy,
+                available: ebookAvailable,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    final pdfLoad = _isCompanionPdf(_source)
+        ? _selectablePdfReference.resolveListenable()
+        : null;
     final tools = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         if (!_inkEditing) ...[
           Material(
-            color: controlColor,
-            borderRadius: BorderRadius.circular(10),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 3),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [segment(true, 'PDF'), segment(false, '电子书')],
-              ),
-            ),
+            type: MaterialType.transparency,
+            child: pdfLoad != null
+                ? ListenableBuilder(
+                    listenable: pdfLoad,
+                    builder: (context, _) {
+                      final available = !sourceFailed && pdfLoad.error == null;
+                      return formats(
+                        pdfBusy:
+                            available &&
+                            (_returningToPdf || _pdfDocumentRef == null),
+                        ebookBusy:
+                            available &&
+                            _isPdfDocument &&
+                            _ebookError == null &&
+                            (!_ebookLayoutReady || _ebookSwitchPending),
+                        ebookAvailable: available,
+                      );
+                    },
+                  )
+                : formats(ebookBusy: !sourceFailed && !_ebookLayoutReady),
           ),
           if (wide) ...[
             const SizedBox(width: 16),
@@ -4503,7 +5231,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   right: 0,
                   child: Material(
                     color: _readerChrome,
-                    child: _toolbar(context),
+                    child: _toolbar(context, sourceFailed: snapshot.hasError),
                   ),
                 ),
               if (data != null &&
@@ -4558,7 +5286,8 @@ class _ReaderDisplaySlider extends StatefulWidget {
     required this.defaultFraction,
     required this.trackInset,
     required this.label,
-    required this.onCommit,
+    required this.onChanged,
+    this.onDragChanged,
     required this.onReset,
     required this.buildSlider,
   });
@@ -4567,7 +5296,8 @@ class _ReaderDisplaySlider extends StatefulWidget {
   final double defaultFraction;
   final double trackInset;
   final String label;
-  final ValueChanged<double> onCommit;
+  final ValueChanged<double> onChanged;
+  final ValueChanged<bool>? onDragChanged;
   final VoidCallback onReset;
   final Widget Function(
     double value,
@@ -4581,13 +5311,19 @@ class _ReaderDisplaySlider extends StatefulWidget {
 }
 
 class _ReaderDisplaySliderState extends State<_ReaderDisplaySlider> {
-  double? _dragValue;
   int? _markerPointer;
   Offset? _markerDown;
+  double? _lastValue;
 
   void _reset() {
-    setState(() => _dragValue = null);
+    _lastValue = null;
     widget.onReset();
+  }
+
+  void _update(double value) {
+    if (_markerPointer != null || value == (_lastValue ?? widget.value)) return;
+    _lastValue = value;
+    widget.onChanged(value);
   }
 
   @override
@@ -4607,6 +5343,8 @@ class _ReaderDisplaySliderState extends State<_ReaderDisplaySlider> {
           );
           return Listener(
             onPointerDown: (event) {
+              _lastValue = null;
+              widget.onDragChanged?.call(true);
               final delta = event.localPosition - marker;
               if (_markerPointer == null &&
                   delta.dx.abs() <= 10 &&
@@ -4622,30 +5360,27 @@ class _ReaderDisplaySliderState extends State<_ReaderDisplaySlider> {
               }
             },
             onPointerUp: (event) {
-              if (_markerPointer != event.pointer) return;
-              // Let the slider's gesture recognizer finish the same event.
+              // Let the native slider finish this event before deciding whether
+              // a tap on the default marker should replace its numeric value.
               scheduleMicrotask(() {
-                _markerPointer = null;
-                if (mounted) _reset();
+                if (!mounted) return;
+                if (_markerPointer == event.pointer) {
+                  _markerPointer = null;
+                  _reset();
+                }
+                _lastValue = null;
+                widget.onDragChanged?.call(false);
               });
             },
             onPointerCancel: (event) {
-              if (_markerPointer != event.pointer) return;
-              _markerPointer = null;
-              setState(() => _dragValue = null);
+              if (_markerPointer == event.pointer) _markerPointer = null;
+              _lastValue = null;
+              widget.onDragChanged?.call(false);
             },
             child: Stack(
               fit: StackFit.expand,
               children: [
-                widget.buildSlider(
-                  _dragValue ?? widget.value,
-                  (value) => setState(() => _dragValue = value),
-                  (value) {
-                    if (_markerPointer != null) return;
-                    setState(() => _dragValue = null);
-                    widget.onCommit(value);
-                  },
-                ),
+                widget.buildSlider(widget.value, _update, _update),
                 Positioned(
                   left: marker.dx - 22,
                   top: 0,

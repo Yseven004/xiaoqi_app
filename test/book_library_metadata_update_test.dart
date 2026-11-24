@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -10,6 +11,7 @@ import 'package:xiaoqi_app/models/book_recognition.dart';
 import 'package:xiaoqi_app/services/book_cover_storage.dart';
 import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/services/database_service.dart';
+import 'package:xiaoqi_app/widgets/book_metadata_editor.dart';
 
 class _RecordingCoverStorage extends BookCoverStorage {
   _RecordingCoverStorage({
@@ -58,6 +60,57 @@ void main() {
     databaseService.useDatabaseForTesting(null);
     await db.close();
     await root.delete(recursive: true);
+  });
+
+  testWidgets('original metadata cannot replace fields edited while it loads', (
+    tester,
+  ) async {
+    final original = Completer<BookRecord>();
+    BookRecord? saved;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async {
+                final edited = await showBookMetadataEditor(
+                  context: context,
+                  initial: const BookRecord(
+                    title: '已存书籍',
+                    authors: ['Smith, John'],
+                    edition: 'v1.4',
+                    publishedDate: '2026-08-10',
+                  ),
+                  categories: const [],
+                  initialCategoryIds: const [],
+                  onCreateCategory: (_) async => throw UnimplementedError(),
+                  onReadOriginal: () => original.future,
+                );
+                saved = edited?.book;
+              },
+              child: const Text('编辑资料'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('编辑资料'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('从原书补全'));
+    await tester.pump();
+    final fields = find.byType(TextField);
+    await tester.enterText(fields.at(1), '');
+    await tester.enterText(fields.at(3), 'v1.5 / 2027');
+    original.complete(
+      const BookRecord(title: '原书书名', authors: ['原作者'], publisher: '原出版社'),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(saved?.authors, isEmpty);
+    expect(saved?.publisher, '原出版社');
+    expect(saved?.editionLabel, 'v1.5 / 2027');
+    expect(saved?.publishedDate, isEmpty);
   });
 
   test(

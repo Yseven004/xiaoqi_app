@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -22,7 +23,9 @@ import '../models/reader_pagination.dart';
 import '../models/xiaoqi_document.dart';
 import '../utils/isbn.dart';
 import 'book_cover_storage.dart';
+
 import 'book_source_block_merger.dart';
+import 'companion_pdf_reflow.dart';
 import 'database_service.dart';
 import 'epub_document_service.dart';
 import 'pdf_catalog_service.dart';
@@ -787,7 +790,7 @@ class BookLibraryService {
     required String format,
   }) async {
     final db = await _databaseService.database;
-    return db.transaction(
+    final result = await db.transaction(
       (txn) => _importBookSource(
         txn,
         bookId: bookId,
@@ -796,6 +799,54 @@ class BookLibraryService {
         format: format,
       ),
     );
+    _prepareCompanionPdf(result);
+    return result;
+  }
+
+  Future<BookSourceImportResult> importLocalBookWithSource({
+    required BookRecord book,
+    required String sourcePath,
+    required String displayName,
+    required String format,
+  }) async {
+    final prepared = await _prepareUploadedCover(book);
+    try {
+      final db = await _databaseService.database;
+      final result = await db.transaction((txn) async {
+        final now = DateTime.now().toIso8601String();
+        await txn.insert(
+          'books',
+          prepared.book.copyWith(createdAt: now, updatedAt: now).toMap()
+            ..remove('id'),
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+        final rows = await txn.query(
+          'books',
+          columns: ['id'],
+          where: 'canonical_key = ? AND is_deleted = 0',
+          whereArgs: [prepared.book.canonicalKey],
+          limit: 1,
+        );
+        if (rows.isEmpty) throw StateError('这本书已移至回收站，请先恢复');
+        return _importBookSource(
+          txn,
+          bookId: rows.single['id'] as int,
+          sourcePath: sourcePath,
+          displayName: displayName,
+          format: format,
+        );
+      });
+      _prepareCompanionPdf(result);
+      return result;
+    } finally {
+      await discardUnreferencedBookCover(prepared.createdPath);
+    }
+  }
+
+  void _prepareCompanionPdf(BookSourceImportResult result) {
+    if (result.source.format == 'pdf') {
+      CompanionPdfReflow.prepareInBackground(result.source);
+    }
   }
 
   /// Associates a verified network file and its book in one database write.
@@ -821,7 +872,7 @@ class BookLibraryService {
     }
 
     try {
-      return await db.transaction((txn) async {
+      final result = await db.transaction((txn) async {
         final now = DateTime.now().toUtc().toIso8601String();
         if (bookId == null) {
           final isbn = book.isbn13;
@@ -898,6 +949,8 @@ class BookLibraryService {
         }
         return result;
       });
+      _prepareCompanionPdf(result);
+      return result;
     } catch (_) {
       await discardUnreferencedBookCover(preparedCover?.createdPath);
       rethrow;
@@ -1113,41 +1166,68 @@ class BookLibraryService {
   ) async {
     final document = await _loadStoredRevision(source);
     if (document == null) return null;
-    if (!DerivedDocumentGuard.needsBaselineCheck(document)) return document;
-    final baseline = await _parseSourceDocumentFile(source);
-    if (baseline == null) return document;
-    if (!DerivedDocumentGuard.looksPoisoned(document, baseline: baseline)) {
+    if (DerivedDocumentGuard.needsBaselineCheck(document)) {
+      final baseline = await _parseSourceDocumentFile(source);
+      if (baseline == null) return document;
+      if (DerivedDocumentGuard.looksPoisoned(document, baseline: baseline)) {
+        return _withStoredAnnotations(baseline, document.annotations);
+      }
+    }
+    return _upgradeLegacyEpub(source, document);
+  }
+
+  Future<XiaoqiDocument> _upgradeLegacyEpub(BookSourceRecord source, XiaoqiDocument document) async {
+    if (document.format != 'epub' || document.structureVersion >= EpubDocumentService.structureVersion) return document;
+    try {
+      return await compute(upgradeStoredEpub, (source.filePath, document), debugLabel: 'restore EPUB content');
+    } on Object {
       return document;
     }
-    // 派生版本已经被写坏（每次保存翻倍，正文工作台和编辑页都会卡死）。
-    // 不删除任何数据，也不假装无事发生：直接回退到重新解析的原始文件，并把
-    // 派生版本里保存的标注带回，用户下一次保存就会覆盖掉这条坏版本。
-    return _withStoredAnnotations(baseline, document.annotations);
   }
 
   Future<XiaoqiDocument?> _loadStoredRevision(BookSourceRecord source) async {
     final db = await _databaseService.database;
-    final rows = await db.query(
-      'book_source_document_revisions',
-      columns: ['document_json'],
-      where: 'source_id = ? AND is_active = 1',
-      whereArgs: [source.id],
-      orderBy: 'updated_at DESC, id DESC',
-      limit: 1,
-    );
-    if (rows.isEmpty) return null;
-    final raw = rows.first['document_json']?.toString() ?? '';
-    if (raw.isEmpty) return null;
+    // SQLite stores these revisions as JSON. Read bytes rather than character
+    // substrings so each result fits the Android cursor, even for base64 media.
+    const chunkSize = 384 * 1024;
     try {
-      return await compute(
-        XiaoqiDocument.fromJson,
-        raw,
-        debugLabel: 'decode book source revision',
-      );
-    } on Object catch (_) {
+      // Reads share a snapshot even if another editor saves the same revision.
+      final bytes = await db.transaction((txn) async {
+        final rows = await txn.rawQuery(
+          '''SELECT id, length(CAST(document_json AS BLOB)) AS bytes,
+           substr(CAST(document_json AS BLOB), 1, ?) AS head
+           FROM book_source_document_revisions WHERE source_id = ? AND is_active = 1
+           ORDER BY updated_at DESC, id DESC LIMIT 1''',
+          [chunkSize, source.id],
+        );
+        if (rows.isEmpty) return null;
+        final row = rows.single;
+        final length = row['bytes'] as int;
+        if (length == 0) return null;
+        final buffer = BytesBuilder(copy: false)..add(row['head'] as Uint8List);
+        while (buffer.length < length) {
+          final piece = await txn.rawQuery(
+            '''SELECT substr(CAST(document_json AS BLOB), ?, ?) AS chunk
+               FROM book_source_document_revisions
+               WHERE id = ? AND source_id = ?''',
+            [buffer.length + 1, chunkSize, row['id'], source.id],
+          );
+          if (piece.isEmpty) return null;
+          final chunk = piece.single['chunk'] as Uint8List;
+          if (chunk.isEmpty) return null;
+          buffer.add(chunk);
+        }
+        return buffer.takeBytes();
+      });
+      return bytes == null ? null : await compute(_decodeRevisionBytes, bytes);
+    } on Object {
+      // A corrupt derived revision should not hide a readable original.
       return null;
     }
   }
+
+  static XiaoqiDocument _decodeRevisionBytes(Uint8List bytes) =>
+      XiaoqiDocument.fromJson(utf8.decode(bytes));
 
   /// 重新解析原始资料文件。失败时返回 null，调用方继续使用已有派生版本。
   Future<XiaoqiDocument?> _parseSourceDocumentFile(
@@ -1170,6 +1250,7 @@ class BookLibraryService {
     if (annotations.isEmpty) return document;
     return XiaoqiDocument(
       format: document.format,
+      structureVersion: document.structureVersion,
       title: document.title,
       author: document.author,
       language: document.language,
@@ -1187,13 +1268,16 @@ class BookLibraryService {
   }) async {
     final db = await _databaseService.database;
     // 保存前只比较存下来的那条版本，不触发“重新解析原始文件”的修复路径。
-    final previous = await _loadStoredRevision(source);
+    final stored = await _loadStoredRevision(source);
+    final previous = stored != null && document.format == 'epub' &&
+            document.structureVersion >= EpubDocumentService.structureVersion
+        ? await _upgradeLegacyEpub(source, stored) : stored;
     final rejection = DerivedDocumentGuard.rejectionReason(
       document,
       previous: previous,
     );
     if (rejection != null) throw StateError(rejection);
-    final json = document.toJson(includeAnnotations: true);
+    final json = document.toJson(includeAnnotations:true);
     final documentHash = sha256.convert(utf8.encode(json)).toString();
     final now = DateTime.now().toIso8601String();
     await db.transaction((txn) async {

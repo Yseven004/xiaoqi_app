@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:path/path.dart' as p;
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -10,6 +11,7 @@ import '../models/book_library_item.dart';
 import '../models/book_recognition.dart';
 import '../models/book_source.dart';
 import '../services/book_library_service.dart';
+import '../services/book_source_metadata.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/book_cover_picker_sheet.dart';
@@ -142,45 +144,75 @@ class _BookStudyPageState extends State<BookStudyPage> {
     final item = _item;
     if (item == null) return;
     var categories = await _library.listCategories();
+    final sources = await _library.listSourcesForBook(widget.bookId);
     if (!mounted) return;
+    final source =
+        sources.where((item) => item.isPrimary).firstOrNull ??
+        sources.singleOrNull;
+    Future<BookSourceMetadataPreview>? preview;
+    Future<BookRecord?> readOriginal() async {
+      if (source == null || source.filePath.isEmpty) return null;
+      final filenameTitle = p.basenameWithoutExtension(source.displayName);
+      final loaded = await (preview ??= BookSourceMetadataPreview.read(
+        source.filePath,
+        BookRecord(title: '', source: 'local_${source.format}'),
+      ));
+      final metadata = loaded.book;
+      final original = metadata.copyWith(
+        title: item.book.title == filenameTitle ? metadata.title : '',
+      );
+      return original.title.isEmpty &&
+              original.authors.isEmpty &&
+              original.publisher.isEmpty &&
+              original.editionLabel.isEmpty &&
+              original.coverPath.isEmpty
+          ? null
+          : original;
+    }
+
     var draft = BookMetadataFormResult(
       book: item.book,
       categoryIds: item.categories
           .map((category) => category.id!)
           .toList(growable: false),
     );
-    while (true) {
-      if (!mounted) return;
-      final updated = await showBookMetadataEditor(
-        context: context,
-        initial: draft.book,
-        categories: categories,
-        initialCategoryIds: draft.categoryIds,
-        onCreateCategory: (name) async {
-          final created = await _library.saveCustomCategory(name);
-          if (!categories.any((category) => category.id == created.id)) {
-            categories = [...categories, created];
-          }
-          return created;
-        },
-        saveError: draft.saveError,
-      );
-      if (!mounted || updated == null) return;
-      try {
-        await _library.updateBookMetadataAndCategories(
-          updated.book,
-          updated.categoryIds,
-        );
-        await _load();
-        return;
-      } catch (error) {
+    try {
+      while (true) {
         if (!mounted) return;
-        draft = BookMetadataFormResult(
-          book: updated.book,
-          categoryIds: updated.categoryIds,
-          saveError: error.toString(),
+        final updated = await showBookMetadataEditor(
+          context: context,
+          initial: draft.book,
+          categories: categories,
+          initialCategoryIds: draft.categoryIds,
+          onCreateCategory: (name) async {
+            final created = await _library.saveCustomCategory(name);
+            if (!categories.any((category) => category.id == created.id)) {
+              categories = [...categories, created];
+            }
+            return created;
+          },
+          onReadOriginal: source == null ? null : readOriginal,
+          saveError: draft.saveError,
         );
+        if (!mounted || updated == null) return;
+        try {
+          await _library.updateBookMetadataAndCategories(
+            updated.book,
+            updated.categoryIds,
+          );
+          await _load();
+          return;
+        } catch (error) {
+          if (!mounted) return;
+          draft = BookMetadataFormResult(
+            book: updated.book,
+            categoryIds: updated.categoryIds,
+            saveError: error.toString(),
+          );
+        }
       }
+    } finally {
+      await (await preview)?.dispose();
     }
   }
 

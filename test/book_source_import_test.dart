@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:a2ui_flutter/a2ui_flutter.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -182,7 +181,7 @@ void main() {
     expect(library.importedPath, file.path);
   });
 
-  testWidgets('online search switches modes and closes on a narrow display', (
+  testWidgets('online search submits and closes on a narrow display', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
@@ -207,36 +206,18 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('网上找书'));
     await tester.pumpAndSettle();
-    final dialog = find.byType(Dialog);
-    final dialogBounds = tester.getRect(dialog);
     expect(find.text('想找哪本书？'), findsOneWidget);
-    expect(find.text('帮我找《Hello 算法》中文版 ↗'), findsOneWidget);
-    expect(find.text('查找《测试读本》'), findsOneWidget);
-    expect(find.text('AI 对话'), findsOneWidget);
-    expect(find.text('直接搜索'), findsOneWidget);
+    expect(find.text('帮我找《测试读本》中文版'), findsOneWidget);
     expect(tester.testTextInput.isVisible, isFalse);
-    await tester.enterText(find.byType(TextField), '找中文电子书');
-    await tester.tap(find.text('直接搜索'));
+    await tester.enterText(find.byType(TextField), '9780131103627');
+    await tester.pump();
+    await tester.tap(find.byTooltip('发送'));
     await tester.pumpAndSettle();
-    expect(tester.getRect(dialog), dialogBounds);
-    expect(find.byTooltip('搜索'), findsOneWidget);
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      '测试读本',
-    );
     expect(find.text('想找哪本书？'), findsNothing);
-    expect(tester.testTextInput.isVisible, isFalse);
-    await tester.tap(find.text('AI 对话'));
-    await tester.pumpAndSettle();
-    expect(find.text('找中文电子书'), findsOneWidget);
-    expect(library.sources, isEmpty);
-
-    await tester.tap(find.text('直接搜索'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('搜索'));
-    await tester.pumpAndSettle();
+    expect(find.text('9780131103627'), findsOneWidget);
     expect(find.text('请先登录个人账号'), findsOneWidget);
-    expect(find.byType(A2uiSurface), findsOneWidget);
+    expect(tester.testTextInput.isVisible, isFalse);
+    expect(library.sources, isEmpty);
     await tester.tap(find.byTooltip('关闭'));
     await tester.pumpAndSettle();
     expect(find.text('还没有导入资料'), findsOneWidget);

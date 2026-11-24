@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart' show PlatformException;
-import 'package:image/image.dart' as image;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -14,6 +12,7 @@ import '../models/book_source.dart';
 import '../utils/isbn.dart';
 import 'book_library_service.dart';
 import 'book_download_storage.dart';
+import 'book_source_metadata.dart';
 import 'epub_document_service.dart';
 
 /// The book is safely in the library; publishing the user-visible copy failed.
@@ -191,9 +190,11 @@ Future<String?> _validateBookAndStageCover(
               document.chapters.isEmpty)) {
         throw const FormatException('电子书的书名、署名或正文与选中版本不符');
       }
-      final asset = document.assets.singleOrNull;
+      final asset = document.assets
+          .where((asset) => asset.id == 'epub-cover')
+          .firstOrNull;
       if (asset == null) return null;
-      return _validateEpubCover(asset.bytes, asset.mimeType);
+      return validateEmbeddedBookCover(asset.bytes, asset.mimeType);
     });
     if (cover == null) return null;
     try {
@@ -214,30 +215,4 @@ Future<String?> _validateBookAndStageCover(
     await file.close();
   }
   return null;
-}
-
-({Uint8List bytes, String extension})? _validateEpubCover(
-  List<int> asset,
-  String mimeType,
-) {
-  final bytes = asset is Uint8List ? asset : Uint8List.fromList(asset);
-  final (decoder, extension) = switch (mimeType) {
-    'image/jpeg' => (image.JpegDecoder(), 'jpg'),
-    'image/png' => (image.PngDecoder(), 'png'),
-    'image/webp' => (image.WebPDecoder(), 'webp'),
-    _ => (null, ''),
-  };
-  try {
-    final info = decoder?.startDecode(bytes);
-    if (info == null ||
-        info.width <= 0 ||
-        info.height <= 0 ||
-        info.width * info.height > 16 * 1024 * 1024) {
-      return null;
-    }
-    return (bytes: bytes, extension: extension);
-  } catch (_) {
-    // An invalid raster does not make the main EPUB unreadable.
-    return null;
-  }
 }

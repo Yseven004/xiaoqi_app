@@ -179,6 +179,12 @@ void main() {
     final pager = find.byType(ReflowDocumentPager);
     final initialPager = tester.state(pager);
     final immersiveBodyRect = tester.getRect(body);
+    final blank = tester.getRect(pager).center;
+    expect(find.text('目录'), findsOneWidget);
+    expect(find.byTooltip('AI 问答'), findsOneWidget);
+    expect(find.bySemanticsLabel('打开侧边栏'), findsOneWidget);
+    await tester.tapAt(blank);
+    await tester.pumpAndSettle();
     expect(find.text('目录'), findsNothing);
     expect(tester.state(pager), same(initialPager));
     expect(find.byTooltip('AI 问答'), findsNothing);
@@ -188,6 +194,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('目录'), findsOneWidget);
     expect(tester.getRect(body), immersiveBodyRect);
+    await tester.tapAt(blank);
+    await tester.pumpAndSettle();
+    expect(find.text('目录'), findsNothing);
+    await tester.tapAt(blank);
+    await tester.pumpAndSettle();
+    expect(find.text('目录'), findsOneWidget);
     expect(find.byTooltip('AI 问答'), findsOneWidget);
     expect(tester.state(reader), same(initialReader));
     expect(tester.state(pager), same(initialPager));
@@ -339,16 +351,54 @@ void main() {
             widget is ReadingCompanion &&
             widget.target?.source.displayName == '第三份资料.epub',
       ),
+      settle: false,
     );
+    // Wait for the real file and database work before settling animations.
+    await _waitFor(tester, body);
     await _waitFor(tester, find.text('目录'));
     expect(
       find.descendant(of: reader, matching: find.text('阅读空间')),
       findsOneWidget,
     );
 
-    await tester.tap(find.descendant(of: reader, matching: find.text('阅读空间')));
+    final spaceButton = find.descendant(
+      of: reader,
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics && widget.properties.label == '切换空间，当前为阅读空间',
+      ),
+    );
+    final buttonRect = tester.getRect(spaceButton);
+    await tester.tap(spaceButton);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('退出伴读'));
+    final exitLabel = find.text('退出伴读');
+    final menu = find
+        .ancestor(of: exitLabel, matching: find.byType(SingleChildScrollView))
+        .first;
+    final menuRect = tester.getRect(menu);
+    expect(menuRect.center.dx, closeTo(buttonRect.center.dx, 1));
+    expect(menuRect.top, closeTo(buttonRect.bottom + 6, 1));
+    expect(
+      tester.getTopLeft(exitLabel).dx,
+      closeTo(tester.getTopLeft(find.text('学习空间')).dx, 1),
+    );
+    Finder menuIcon(IconData icon) =>
+        find.descendant(of: menu, matching: find.byIcon(icon));
+    expect(
+      tester.getCenter(menuIcon(Icons.exit_to_app)).dx,
+      closeTo(tester.getCenter(menuIcon(Icons.check)).dx, 1),
+    );
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    await tester.pumpAndSettle();
+    final compactMenu = tester.getRect(menu);
+    final idealLeft = tester.getCenter(spaceButton).dx - compactMenu.width / 2;
+    expect(
+      compactMenu.left,
+      closeTo(idealLeft.clamp(8, 382 - compactMenu.width), 1),
+    );
+    await tester.binding.setSurfaceSize(const Size(800, 1280));
+    await tester.pumpAndSettle();
+    await tester.tap(exitLabel);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(tester.getTopLeft(reader).dx, greaterThan(0));
@@ -365,9 +415,7 @@ void main() {
     await _waitFor(tester, reader, settle: false);
     expect(tester.getTopLeft(reader).dx, 0);
     await _waitFor(tester, body);
-    expect(find.text('目录'), findsNothing);
-    await tester.tap(body);
-    await _waitFor(tester, find.text('目录'));
+    expect(find.text('目录'), findsOneWidget);
     await tester.tap(find.text('阅读空间'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('学习空间'));

@@ -7,8 +7,10 @@ import '../config/note_page_theme.dart';
 import '../models/ocr_layout.dart';
 import 'book_page_document_view.dart';
 
-typedef PdfPageTextFocusCallback =
-    void Function(int pageNumber, PdfRect pageRect);
+typedef PdfPageTextFocusCallback = void Function(
+  int pageNumber,
+  PdfRect pageRect,
+);
 
 TextStyle pdfPageTextStyle(OcrBlock block, double height, {Color? color}) {
   final base = BookPageDocumentView.styleFor(block);
@@ -61,21 +63,23 @@ double horizontalPdfPageWidthZoom(PdfViewerController controller, int page) {
 
 /// A viewport-sized slot per original page. At zoom 1 every page is fully
 /// visible and the viewport never includes a strip from either neighbour.
-PdfPageLayout verticalPdfPageLayout(
+PdfPageLayout viewportPdfPageLayout(
   List<PdfPage> pages,
   Size viewport,
   double margin,
+  Axis axis,
 ) {
   final width = math.max(1.0, viewport.width - 2 * margin);
   final height = math.max(1.0, viewport.height - 2 * margin);
   final layouts = <Rect>[];
+  final horizontal = axis == Axis.horizontal;
   for (final page in pages) {
     final scale = math.min(width / page.width, height / page.height);
     layouts.add(
       Rect.fromCenter(
         center: Offset(
-          viewport.width / 2,
-          (layouts.length + .5) * viewport.height,
+          (horizontal ? layouts.length + .5 : .5) * viewport.width,
+          (horizontal ? .5 : layouts.length + .5) * viewport.height,
         ),
         width: page.width * scale,
         height: page.height * scale,
@@ -84,7 +88,10 @@ PdfPageLayout verticalPdfPageLayout(
   }
   return PdfPageLayout(
     pageLayouts: layouts,
-    documentSize: Size(viewport.width, viewport.height * pages.length),
+    documentSize: Size(
+      horizontal ? viewport.width * pages.length : viewport.width,
+      horizontal ? viewport.height : viewport.height * pages.length,
+    ),
   );
 }
 

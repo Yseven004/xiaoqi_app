@@ -16,8 +16,6 @@ import 'app_toast.dart';
 import 'book_pdf_import_sheet.dart';
 import 'online_book_search_dialog.dart';
 
-typedef _BookSourceFile = ({XFile file, String name});
-
 /// Imports one source into a known book and returns its durable record.
 Future<BookSourceImportResult?> showExistingBookSourceImport(
   BuildContext context, {
@@ -57,9 +55,9 @@ Future<BookSourceImportResult?> showExistingBookSourceImport(
   try {
     final file = await switch (action) {
       BookAddAction.importPdf => _pickBookSource(),
-      BookAddAction.importFromWechat => _pickWechatSource(context),
+      BookAddAction.importFromWechat => pickWechatBookSource(context),
       BookAddAction.findOnline ||
-      BookAddAction.scan => Future<_BookSourceFile?>.value(),
+      BookAddAction.scan => Future<PlatformFile?>.value(),
     };
     if (!context.mounted || file == null) return null;
     final format = _bookFileFormat(file.name);
@@ -68,14 +66,14 @@ Future<BookSourceImportResult?> showExistingBookSourceImport(
       return null;
     }
     startImport();
-    var path = file.file.path;
+    var path = file.xFile.path;
     if (path.isEmpty || !await File(path).exists()) {
       final directory = await (await getTemporaryDirectory()).createTemp(
         'book-source-',
       );
       staging = directory;
       path = p.join(directory.path, 'upload.$format');
-      await file.file.saveTo(path);
+      await file.xFile.saveTo(path);
     }
     if (!context.mounted) return null;
     final result = await library.importBookSourceForBook(
@@ -106,13 +104,10 @@ Future<BookSourceImportResult?> showExistingBookSourceImport(
   }
 }
 
-Future<_BookSourceFile?> _pickBookSource() async {
-  final file = await FilePicker.pickFile(
-    type: FileType.custom,
-    allowedExtensions: supportedBookSourceFileExtensions,
-  );
-  return file == null ? null : (file: file.xFile, name: file.name);
-}
+Future<PlatformFile?> _pickBookSource() => FilePicker.pickFile(
+  type: FileType.custom,
+  allowedExtensions: supportedBookSourceFileExtensions,
+);
 
 String? _bookFileFormat(String name) {
   final extension = p.extension(name).toLowerCase();
@@ -121,7 +116,7 @@ String? _bookFileFormat(String name) {
   return null;
 }
 
-bool Function(_BookSourceFile)? _pendingWechatSource;
+bool Function(PlatformFile)? _pendingWechatSource;
 
 /// Gives one compatible file to the currently visible book import guide.
 /// Unconsumed shares keep following the ordinary attachment handler.
@@ -157,18 +152,18 @@ List<SharedMediaFile> routeExistingBookSharedMedia(
     final name = _bookFileFormat(basename) != null
         ? basename
         : '$basename.$format';
-    if (receive((name: name, file: XFile(path)))) {
+    if (receive(_SharedBookFile(path, name))) {
       return [...shared.take(index), ...shared.skip(index + 1)];
     }
   }
   return shared;
 }
 
-Future<_BookSourceFile?> _pickWechatSource(BuildContext context) async {
+Future<PlatformFile?> pickWechatBookSource(BuildContext context) async {
   final acceptSystemShare =
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-  _BookSourceFile? sharedFile;
-  bool Function(_BookSourceFile)? handler;
+  PlatformFile? sharedFile;
+  bool Function(PlatformFile)? handler;
   final bool? picked;
   try {
     picked = await showDialog<bool>(
@@ -212,4 +207,37 @@ Future<_BookSourceFile?> _pickWechatSource(BuildContext context) async {
   }
   if (!context.mounted || picked != true) return null;
   return sharedFile ?? await _pickBookSource();
+}
+
+final class _SharedBookFile extends PlatformFile {
+  _SharedBookFile(String path, this.name)
+    : uri = Uri.file(path),
+      xFile = XFile(path, name: name);
+
+  @override
+  final String name;
+
+  @override
+  final Uri uri;
+
+  @override
+  final XFile xFile;
+
+  @override
+  int? lengthSync() {
+    try {
+      return File.fromUri(uri).lengthSync();
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  @override
+  Future<int?> length() async => lengthSync();
+
+  @override
+  Future<Uint8List> readAsBytes() => xFile.readAsBytes();
+
+  @override
+  Stream<Uint8List> readAsByteStream() => xFile.openRead();
 }

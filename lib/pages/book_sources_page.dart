@@ -9,7 +9,6 @@ import '../config/book_flow_theme.dart';
 import '../models/book_source.dart';
 import '../models/xiaoqi_document.dart';
 import '../services/book_library_service.dart';
-import '../services/epub_document_service.dart';
 import '../services/source_document_loader.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/book_editor_dialog.dart';
@@ -976,7 +975,7 @@ class _EpubSourceReaderPageState extends State<EpubSourceReaderPage> {
       widget.source,
     );
     return revision ??
-        await EpubDocumentService().parseFile(widget.source.filePath);
+        await SourceDocumentLoader.parseBookSourceInBackground(widget.source);
   }
 
   @override

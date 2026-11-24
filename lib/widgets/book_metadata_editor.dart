@@ -4,6 +4,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../config/book_flow_theme.dart';
 import '../models/book_category.dart';
 import '../models/book_recognition.dart';
+import 'app_toast.dart';
 import 'book_cover.dart';
 import 'book_cover_picker_sheet.dart';
 import 'book_editor_dialog.dart';
@@ -19,6 +20,7 @@ Future<BookMetadataFormResult?> showBookMetadataEditor({
   required List<BookCategory> categories,
   required List<int> initialCategoryIds,
   required Future<BookCategory> Function(String) onCreateCategory,
+  Future<BookRecord?> Function()? onReadOriginal,
   String? saveError,
 }) => showBookEditorDialog<BookMetadataFormResult>(
   context: context,
@@ -28,6 +30,7 @@ Future<BookMetadataFormResult?> showBookMetadataEditor({
     categories: categories,
     initialCategoryIds: initialCategoryIds,
     onCreateCategory: onCreateCategory,
+    onReadOriginal: onReadOriginal,
     saveError: saveError,
   ),
 );
@@ -50,6 +53,7 @@ class _MetadataEditor extends StatefulWidget {
     required this.categories,
     required this.initialCategoryIds,
     required this.onCreateCategory,
+    this.onReadOriginal,
     this.saveError,
   });
 
@@ -57,6 +61,7 @@ class _MetadataEditor extends StatefulWidget {
   final List<BookCategory> categories;
   final List<int> initialCategoryIds;
   final Future<BookCategory> Function(String) onCreateCategory;
+  final Future<BookRecord?> Function()? onReadOriginal;
   final String? saveError;
 
   @override
@@ -74,7 +79,7 @@ class _MetadataEditorState extends State<_MetadataEditor>
     '出版社': (FocusNode(), TextEditingController(text: widget.initial.publisher)),
     '版本 / 出版年份': (
       FocusNode(),
-      TextEditingController(text: widget.initial.edition),
+      TextEditingController(text: widget.initial.editionLabel),
     ),
   };
   late final _categories = [...widget.categories];
@@ -82,6 +87,8 @@ class _MetadataEditorState extends State<_MetadataEditor>
   late var _description = widget.initial.description;
   late var _cover = widget.initial;
   bool _showingChild = false;
+  bool _readingOriginal = false;
+  final _editedMetadataFields = <String>{};
   String? _titleError;
   String? _categoryError;
 
@@ -111,13 +118,15 @@ class _MetadataEditorState extends State<_MetadataEditor>
       return;
     }
     final author = value('作者');
-    final authors = author == widget.initial.authorLabel
-        ? widget.initial.authors
+    final authors = author == _cover.authorLabel
+        ? _cover.authors
         : author
               .split(RegExp(r'[、,，/]'))
               .map((name) => name.trim())
               .where((name) => name.isNotEmpty)
               .toList(growable: false);
+    final edition = value('版本 / 出版年份');
+    final editionChanged = edition != _cover.editionLabel;
     Navigator.pop(
       context,
       BookMetadataFormResult(
@@ -125,7 +134,8 @@ class _MetadataEditorState extends State<_MetadataEditor>
           title: title,
           authors: authors,
           publisher: value('出版社'),
-          edition: value('版本 / 出版年份'),
+          edition: editionChanged ? edition : _cover.edition,
+          publishedDate: editionChanged ? '' : _cover.publishedDate,
           description: _description,
         ),
         categoryIds: _categoryIds.toList(growable: false),
@@ -142,6 +152,57 @@ class _MetadataEditorState extends State<_MetadataEditor>
       maxWidth: 520,
     );
     if (mounted && cover != null) setState(() => _cover = cover);
+  }
+
+  Future<void> _readOriginal() async {
+    FocusScope.of(context).unfocus();
+    setState(() => _readingOriginal = true);
+    try {
+      final original = await widget.onReadOriginal?.call();
+      if (!mounted) return;
+      if (original == null) {
+        AppToast.show(context, '原文件没有可补全的书籍资料');
+        return;
+      }
+      final title = _fields['书名 *']!.$2;
+      final author = _fields['作者']!.$2;
+      final publisher = _fields['出版社']!.$2;
+      final edition = _fields['版本 / 出版年份']!.$2;
+      bool canFill(String label, TextEditingController controller) =>
+          !_editedMetadataFields.contains(label) &&
+          controller.text.trim().isEmpty;
+      setState(() {
+        if (!_editedMetadataFields.contains('书名 *') &&
+            title.text == widget.initial.title &&
+            original.title.isNotEmpty) {
+          title.text = original.title;
+        }
+        if (canFill('作者', author) && original.authors.isNotEmpty) {
+          author.text = original.authorLabel;
+          _cover = _cover.copyWith(authors: original.authors);
+        }
+        if (canFill('出版社', publisher)) publisher.text = original.publisher;
+        if (canFill('版本 / 出版年份', edition) && original.editionLabel.isNotEmpty) {
+          edition.text = original.editionLabel;
+          _cover = _cover.copyWith(
+            edition: original.edition,
+            publishedDate: original.publishedDate,
+          );
+        }
+        if (_cover.coverType == 'auto' &&
+            _cover.coverUrl.isEmpty &&
+            _cover.coverPath.isEmpty &&
+            original.coverPath.isNotEmpty) {
+          _cover = _cover.copyWith(
+            coverPath: original.coverPath,
+            coverType: original.coverType,
+          );
+        }
+        _cover = _cover.copyWith(title: title.text);
+      });
+    } finally {
+      if (mounted) setState(() => _readingOriginal = false);
+    }
   }
 
   // The detail page is the backdrop for these two editors. Keep their parent
@@ -252,14 +313,14 @@ class _MetadataEditorState extends State<_MetadataEditor>
                 : TextInputAction.next,
             style: _inputStyle,
             onTapOutside: (_) => focus.unfocus(),
-            onChanged: isTitle
-                ? (title) {
-                    setState(() {
-                      _cover = _cover.copyWith(title: title);
-                      _titleError = null;
-                    });
-                  }
-                : null,
+            onChanged: (value) {
+              _editedMetadataFields.add(label);
+              if (!isTitle) return;
+              setState(() {
+                _cover = _cover.copyWith(title: value);
+                _titleError = null;
+              });
+            },
             decoration: bookEditorInput(
               error: isTitle ? _titleError : null,
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -314,6 +375,14 @@ class _MetadataEditorState extends State<_MetadataEditor>
                       _buildField(label),
                       SizedBox(height: label == _fields.keys.last ? 4 : 12),
                     ],
+                    if (widget.onReadOriginal != null)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: _readingOriginal ? null : _readOriginal,
+                          child: Text(_readingOriginal ? '正在读取原书…' : '从原书补全'),
+                        ),
+                      ),
                     Wrap(
                       spacing: 8,
                       runSpacing: 4,

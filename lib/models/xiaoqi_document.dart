@@ -15,16 +15,34 @@ class XiaoqiDocument {
     this.assets = const [],
     this.originalPageCount,
     this.annotations = const {},
+    this.structureVersion = 0,
   });
 
   final String format;
   final String title;
   final String author;
   final String language;
+  final int structureVersion;
   final List<XiaoqiDocumentChapter> chapters;
   final List<XiaoqiDocumentOutlineEntry> outline;
   final List<XiaoqiDocumentAsset> assets;
   final Map<String, Object?> annotations;
+
+  /// Target paths have already been resolved against their owning XHTML file.
+  XiaoqiDocumentOutlineEntry? resolveReadingLink(String target) {
+    final hash = target.indexOf('#');
+    final path = hash < 0 ? target : target.substring(0, hash);
+    final chapter = chapters.where((c) => c.href == path).firstOrNull;
+    if (chapter == null) return null;
+    final fragment = hash < 0 ? '' : target.substring(hash + 1);
+    final block = chapter.fragmentBlocks[fragment];
+    if (fragment.isNotEmpty && block == null) return null;
+    return XiaoqiDocumentOutlineEntry(
+      title: chapter.title,
+      chapterId: chapter.id,
+      blockId: block,
+    );
+  }
 
   /// Number of pages from the source publication, when the source carries
   /// explicit pagination markers. This is intentionally nullable: reflowable
@@ -37,6 +55,7 @@ class XiaoqiDocument {
     'title': title,
     'author': author,
     'language': language,
+    if (structureVersion != 0) 'structureVersion': structureVersion,
     'chapters': chapters.map((chapter) => chapter.toMap()).toList(),
     if (outline.isNotEmpty)
       'outline': outline.map((entry) => entry.toMap()).toList(),
@@ -54,6 +73,7 @@ class XiaoqiDocument {
     title: map['title'] as String? ?? '',
     author: map['author'] as String? ?? '',
     language: map['language'] as String? ?? '',
+    structureVersion: _optionalInt(map['structureVersion']) ?? 0,
     chapters: (map['chapters'] as List? ?? const [])
         .whereType<Map>()
         .map(
@@ -135,6 +155,7 @@ class XiaoqiDocumentChapter {
     required this.order,
     this.blocks = const [],
     this.sourceLocator = '',
+    this.fragmentBlocks = const {},
   });
 
   final String id;
@@ -145,6 +166,7 @@ class XiaoqiDocumentChapter {
   final int order;
   final List<XiaoqiDocumentBlock> blocks;
   final String sourceLocator;
+  final Map<String, String> fragmentBlocks;
 
   Map<String, dynamic> toMap() => {
     'id': id,
@@ -155,6 +177,7 @@ class XiaoqiDocumentChapter {
     'order': order,
     'blocks': blocks.map((block) => block.toMap()).toList(),
     'sourceLocator': sourceLocator,
+    if (fragmentBlocks.isNotEmpty) 'fragmentBlocks': fragmentBlocks,
   };
 
   factory XiaoqiDocumentChapter.fromMap(Map<String, dynamic> map) =>
@@ -173,8 +196,14 @@ class XiaoqiDocumentChapter {
             )
             .toList(growable: false),
         sourceLocator: map['sourceLocator'] as String? ?? '',
+        fragmentBlocks: Map<String, String>.from(
+          map['fragmentBlocks'] as Map? ?? const {},
+        ),
       );
 }
+
+typedef DocumentBoldRange = ({int start, int end});
+typedef DocumentLinkRange = ({int start, int end, String target});
 
 class XiaoqiDocumentBlock {
   const XiaoqiDocumentBlock({
@@ -197,6 +226,45 @@ class XiaoqiDocumentBlock {
   final String sourceLocator;
   final String assetId;
   final Map<String, String> attributes;
+
+  List<DocumentLinkRange> get linkRanges {
+    final value = attributes['linkRanges'];
+    if (value == null) return const [];
+    try {
+      final rows = jsonDecode(value);
+      if (rows is! List) return const [];
+      return [
+        for (final row in rows)
+          if (row case [final int start, final int end, final String target]
+              when start >= 0 &&
+                  start < end &&
+                  end <= text.length &&
+                  target.isNotEmpty)
+            (start: start, end: end, target: target),
+      ];
+    } on FormatException {
+      return const [];
+    }
+  }
+
+  List<DocumentBoldRange> get boldRanges {
+    final encoded = attributes['boldRanges'];
+    if (encoded == null) return const [];
+    try {
+      final decoded = jsonDecode(encoded);
+      if (decoded is! List) return const [];
+      return [
+        for (final row in decoded)
+          if (row case [
+            final int start,
+            final int end,
+          ] when start >= 0 && end > start && end <= text.length)
+            (start: start, end: end),
+      ];
+    } on FormatException {
+      return const [];
+    }
+  }
 
   /// Label of the source page introduced by a `page_break` block. Labels are
   /// strings because print editions may use Roman numerals or other schemes.

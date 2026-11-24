@@ -14,13 +14,37 @@ import 'package:xiaoqi_app/widgets/reading_companion.dart';
 import 'package:xiaoqi_app/widgets/reflow_document_pager.dart';
 
 void main() {
+  test(
+    'PDF progress retains the source position and accepts page-only records',
+    () {
+      const detailed = PdfReaderAnchor(
+        sourceId: '2',
+        pageNumber: 42,
+        blockId: 'pdf-page-42-line-8',
+        characterOffset: 12,
+        pageFraction: .55,
+      );
+      expect(readerAnchorFromJson(readerAnchorJson(detailed)), detailed);
+      expect(
+        readerAnchorFromJson('{"kind":"pdf","source_id":"2","page":42}'),
+        const PdfReaderAnchor(sourceId: '2', pageNumber: 42),
+      );
+    },
+  );
+
   testWidgets('task PDF is preferred and its restored page is shown', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
+    const savedPosition = PdfReaderAnchor(
+      sourceId: '2',
+      pageNumber: 2,
+      blockId: 'pdf-page-2-line-0',
+      characterOffset: 6,
+    );
     await const ReaderPaginationPreferences().saveAnchor(
       bookId: 1,
-      anchor: const PdfReaderAnchor(sourceId: '2', pageNumber: 2),
+      anchor: savedPosition,
     );
     final directory = (await tester.runAsync(
       () => Directory.systemTemp.createTemp('companion-pdf-'),
@@ -66,6 +90,19 @@ void main() {
     );
 
     final viewer = find.byType(PdfViewer);
+    final ebook = find.text('电子书');
+    final ebookButton = find
+        .ancestor(of: ebook, matching: find.byType(InkWell))
+        .first;
+    bool ebookReady() =>
+        ebook.evaluate().isNotEmpty &&
+        tester.widget<InkWell>(ebookButton).onTap != null;
+    final ebookSpinner = find.descendant(
+      of: ebookButton,
+      matching: find.byType(CircularProgressIndicator),
+    );
+    Rect? waitingSegment;
+    Rect? waitingLabel;
     final progress = find.ancestor(
       of: find.text('进度'),
       matching: find.byType(InkWell),
@@ -76,13 +113,23 @@ void main() {
         tester
             .widgetList<InkWell>(progress)
             .any((button) => button.onTap != null);
-    for (var frame = 0; frame < 100 && !ready(); frame++) {
+    for (var frame = 0; frame < 300 && (!ready() || !ebookReady()); frame++) {
+      if (ebook.evaluate().isNotEmpty && ebookSpinner.evaluate().isNotEmpty) {
+        waitingSegment = tester.getRect(ebookButton);
+        waitingLabel = tester.getRect(ebook);
+        expect(ebookReady(), isFalse);
+        expect(find.text('准备中'), findsNothing);
+        expect(find.byType(ReflowDocumentPager), findsNothing);
+      }
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
       );
       await tester.pump(const Duration(milliseconds: 20));
     }
     expect(ready(), isTrue);
+    expect(ebookReady(), isTrue);
+    expect(tester.getRect(ebookButton), waitingSegment);
+    expect(tester.getRect(ebook), waitingLabel);
     expect(find.byType(Slider), findsNothing);
     final viewport = tester.getRect(viewer);
     await tester.tap(find.text('进度'));
@@ -102,40 +149,134 @@ void main() {
     final controller = tester
         .widget<PdfViewer>(find.byType(PdfViewer))
         .controller!;
-    final ebook = find.text('电子书');
-    await tester.tap(ebook);
-    await tester.pump();
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(ebook, findsOneWidget);
     expect(viewer, findsOneWidget);
-    await tester.tap(find.text('PDF'));
-    await tester.pump();
-    expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.byType(ReflowDocumentPager), findsNothing);
     await tester.tap(ebook);
-    for (
-      var frame = 0;
-      frame < 120 && find.byType(ReflowDocumentPager).evaluate().isEmpty;
-      frame++
-    ) {
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 15)),
-      );
-      await tester.pump(const Duration(milliseconds: 24));
-    }
-    expect(find.text('Read this page.'), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(find.text('Read this page.').hitTestable(), findsWidgets);
+    final restored = tester
+        .widget<ReflowDocumentPager>(find.byType(ReflowDocumentPager))
+        .initialAnchor;
+    expect(restored?.blockId, savedPosition.blockId);
+    expect(restored?.characterOffset, savedPosition.characterOffset);
+    await tester.tap(find.text('进度'));
+    await tester.pumpAndSettle();
+    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(3);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('进度'));
+    await tester.pumpAndSettle();
+    expect(find.text('第 3 页 / 共 3 页'), findsOneWidget);
+    await tester.tap(find.text('返回第 2 页'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<ReflowDocumentPager>(find.byType(ReflowDocumentPager))
+          .initialAnchor,
+      restored,
+    );
     expect(find.byType(CircularProgressIndicator), findsNothing);
     await tester.tap(find.text('显示'));
     await tester.pumpAndSettle();
-    for (final label in ['字号', '边距', '行距', '左右翻页']) {
+    for (final label in ['字号', '边距', '行距', '左右平移', '仿真翻页']) {
       expect(find.text(label), findsOneWidget);
+    }
+    for (final label in ['字号', '边距', '行距']) {
+      final control = find.descendant(
+        of: find.byKey(ValueKey(label)),
+        matching: find.byType(Slider),
+      );
+      await tester.ensureVisible(control);
+      double actualSetting() {
+        final pager = tester.widget<ReflowDocumentPager>(
+          find.byType(ReflowDocumentPager),
+        );
+        final style = pager.textStyleBuilder!(
+          const TextStyle(fontSize: 17, height: 1.7),
+        );
+        return switch (label) {
+          '字号' => style.fontSize!,
+          '行距' => style.height!,
+          _ => pager.verticalPadding.left,
+        };
+      }
+
+      final before = actualSetting();
+      final marker = tester.getCenter(find.bySemanticsLabel('恢复默认$label'));
+      final gesture = await tester.startGesture(marker);
+      await gesture.moveBy(const Offset(32, 0));
+      await gesture.moveBy(const Offset(36, 0));
+      await tester.pump();
+      expect(
+        actualSetting(),
+        greaterThan(before),
+        reason: '$label changes the live page before release',
+      );
+      await gesture.up();
+      await tester.pump();
+      await tester.tapAt(marker);
+      await tester.pumpAndSettle();
+      expect(actualSetting(), before);
+      expect(
+        tester
+            .widget<ReflowDocumentPager>(find.byType(ReflowDocumentPager))
+            .initialAnchor,
+        restored,
+      );
     }
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
-    await tester.tap(find.text('PDF'));
-    await tester.pumpAndSettle();
+    final pdf = find.text('PDF');
+    final pdfButton = find
+        .ancestor(of: pdf, matching: find.byType(InkWell))
+        .first;
+    final pdfRect = tester.getRect(pdfButton);
+    await tester.tap(pdf);
+    await tester.pump();
+    expect(tester.getRect(pdfButton), pdfRect);
+    if (viewer.evaluate().isEmpty) {
+      expect(
+        find.descendant(
+          of: pdfButton,
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsOneWidget,
+      );
+      expect(tester.widget<InkWell>(pdfButton).onTap, isNull);
+    }
+    for (var frame = 0; frame < 120 && viewer.evaluate().isEmpty; frame++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 12)),
+      );
+      await tester.pump(const Duration(milliseconds: 20));
+    }
     expect(find.byType(ReflowDocumentPager), findsNothing);
     expect(tester.widget<PdfViewer>(viewer).controller, same(controller));
     expect(controller.pageNumber, 2);
+    expect(
+      await const ReaderPaginationPreferences().loadAnchor(
+        bookId: 1,
+        sourceId: 2,
+      ),
+      savedPosition,
+    );
+    await tester.tap(find.text('进度'));
+    await tester.pumpAndSettle();
+    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(3);
+    await tester.pumpAndSettle();
+    expect(controller.pageNumber, 3);
+    await tester.tap(find.text('进度'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('返回第 2 页'));
+    await tester.pumpAndSettle();
+    expect(controller.pageNumber, 2);
+    expect(
+      await const ReaderPaginationPreferences().loadAnchor(
+        bookId: 1,
+        sourceId: 2,
+      ),
+      savedPosition,
+    );
     for (
       var frame = 0;
       frame < 100 && !controller.document.pages[1].isLoaded;

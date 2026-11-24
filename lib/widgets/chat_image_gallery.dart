@@ -7,12 +7,12 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart' as svg;
-import 'package:photo_manager/photo_manager.dart';
 
 import '../models/chat_annotation.dart';
 import '../models/home_chat_attachment.dart';
 import '../pages/drawing_board_page.dart';
 import '../services/home_chat_drawing_draft_store.dart';
+import '../services/image_gallery_save.dart';
 import 'app_toast.dart';
 import 'chat_annotation_controls.dart';
 
@@ -557,26 +557,6 @@ class _ChatImageGalleryState extends State<ChatImageGallery> {
     final original = _current!.original;
     setState(() => _downloading = true);
     try {
-      const permissionRequest = PermissionRequestOption(
-        iosAccessLevel: IosAccessLevel.addOnly,
-        androidPermission: AndroidPermission(
-          type: RequestType.image,
-          mediaLocation: false,
-        ),
-      );
-      var permission = await PhotoManager.getPermissionState(
-        requestOption: permissionRequest,
-      );
-      if (!permission.hasAccess) {
-        permission = await PhotoManager.requestPermissionExtend(
-          requestOption: permissionRequest,
-        );
-      }
-      if (!permission.hasAccess) {
-        if (mounted) AppToast.show(context, '请在系统设置中允许小七保存图片到相册');
-        return;
-      }
-
       final name = source.name.replaceAll(
         RegExp(r'[\\/:*?"<>|\u0000-\u001F]'),
         '_',
@@ -584,13 +564,13 @@ class _ChatImageGalleryState extends State<ChatImageGallery> {
       final filename = name.trim().isEmpty
           ? 'xiaoqi-image-${DateTime.now().millisecondsSinceEpoch}'
           : name;
-      await PhotoManager.editor.saveImage(
-        original,
+      final saved = await saveImageToGallery(
+        loadImage: () async => original,
         filename: filename,
-        title: filename,
-        relativePath: Platform.isAndroid ? 'Pictures/Xiaoqi' : null,
       );
-      if (mounted) AppToast.show(context, '原图已保存到相册');
+      if (mounted) {
+        AppToast.show(context, saved ? '原图已保存到相册' : '请在系统设置中允许小七保存图片到相册');
+      }
     } catch (_) {
       if (mounted) AppToast.show(context, '原图保存失败，请重试');
     } finally {

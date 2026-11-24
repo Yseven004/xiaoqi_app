@@ -19,6 +19,7 @@ import '../widgets/app_toast.dart';
 import '../widgets/book_learning_bottom_bar.dart';
 import '../widgets/book_metadata_form_sheet.dart';
 import '../widgets/book_pdf_import_sheet.dart';
+import '../widgets/book_source_import.dart';
 import '../widgets/online_book_search_dialog.dart';
 import 'book_isbn_scanner_page.dart';
 import '../widgets/book_keyboard_layout.dart';
@@ -94,8 +95,11 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
       });
       return;
     }
-    if (action == BookAddAction.importPdf) {
-      await _importBookSource();
+    if (action == BookAddAction.importPdf ||
+        action == BookAddAction.importFromWechat) {
+      await _importBookSource(
+        fromWechat: action == BookAddAction.importFromWechat,
+      );
       return;
     }
     await _scanBook();
@@ -145,8 +149,10 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
     }
   }
 
-  Future<void> _importBookSource() async {
-    var file = await _pickBookSource();
+  Future<void> _importBookSource({required bool fromWechat}) async {
+    Future<PlatformFile?> pick() =>
+        fromWechat ? pickWechatBookSource(context) : _pickBookSource();
+    var file = await pick();
     while (mounted && file != null) {
       final selectedFile = file;
       final books = await _library.listBooks();
@@ -156,25 +162,33 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
         file: selectedFile,
         books: books,
       );
-      if (!mounted || selection == null) return;
+      if (selection == null) return;
+      if (!mounted) {
+        await selection.metadataPreview?.dispose();
+        return;
+      }
       if (selection.shouldReselect) {
-        file = await _pickBookSource();
+        file = await pick();
         continue;
       }
 
       try {
         final sourcePath = await _ensurePickedFilePath(selectedFile);
-        var bookId = selection.bookId;
-        if (bookId == null && selection.newBook != null) {
-          bookId = await _library.saveBook(selection.newBook!);
-        }
-        if (bookId == null) return;
-        final outcome = await _library.importBookSourceForBook(
-          bookId: bookId,
-          sourcePath: sourcePath,
-          displayName: selectedFile.name,
-          format: inferBookSourceFormat(selectedFile.name),
-        );
+        final format = inferBookSourceFormat(selectedFile.name);
+        final newBook = selection.newBook;
+        final outcome = newBook != null
+            ? await _library.importLocalBookWithSource(
+                book: newBook,
+                sourcePath: sourcePath,
+                displayName: selectedFile.name,
+                format: format,
+              )
+            : await _library.importBookSourceForBook(
+                bookId: selection.bookId!,
+                sourcePath: sourcePath,
+                displayName: selectedFile.name,
+                format: format,
+              );
         if (outcome.source.format == 'pdf' &&
             outcome.source.catalogStatus != 'processing' &&
             outcome.source.catalogStatus != 'confirmed' &&
@@ -190,13 +204,15 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
         }
         setState(() {
           _destination = BookLearningDestination.books;
-          _openBookId = bookId;
+          _openBookId = outcome.source.bookId;
           _bookDetailVersion++;
         });
       } catch (error) {
         if (mounted) {
-          AppToast.show(context, '资料导入失败，已保留书籍资料：$error');
+          AppToast.show(context, '资料导入失败：$error');
         }
+      } finally {
+        await selection.metadataPreview?.dispose();
       }
       return;
     }

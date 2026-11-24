@@ -10,6 +10,7 @@ class ReaderPaginationPreferences {
 
   static const _prefix = 'book_reader.pagination_mode.v1';
   static const _anchorPrefix = 'book_reader.anchor.v1';
+  static final _anchorWrites = <String, Future<void>>{};
 
   Future<ReaderPaginationMode> load({
     required int bookId,
@@ -45,10 +46,10 @@ class ReaderPaginationPreferences {
     required int sourceId,
   }) async {
     try {
+      final key = _anchorKey(bookId, sourceId);
+      await _anchorWrites[key];
       final preferences = await SharedPreferences.getInstance();
-      return readerAnchorFromJson(
-        preferences.getString(_anchorKey(bookId, sourceId)),
-      );
+      return readerAnchorFromJson(preferences.getString(key));
     } catch (_) {
       return null;
     }
@@ -58,15 +59,20 @@ class ReaderPaginationPreferences {
     required int bookId,
     required ReaderAnchor anchor,
   }) async {
-    try {
-      final preferences = await SharedPreferences.getInstance();
-      await preferences.setString(
-        _anchorKey(bookId, int.tryParse(anchor.sourceId) ?? 0),
-        readerAnchorJson(anchor),
-      );
-    } catch (_) {
-      // Position persistence must never interrupt reading.
-    }
+    final key = _anchorKey(bookId, int.tryParse(anchor.sourceId) ?? 0);
+    final previous = _anchorWrites[key];
+    final write = () async {
+      try {
+        await previous;
+        final preferences = await SharedPreferences.getInstance();
+        await preferences.setString(key, readerAnchorJson(anchor));
+      } catch (_) {
+        // Position persistence must never interrupt reading.
+      }
+    }();
+    _anchorWrites[key] = write;
+    await write;
+    if (identical(_anchorWrites[key], write)) _anchorWrites.remove(key);
   }
 
   String _key(int bookId, String format) =>

@@ -9,6 +9,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:xiaoqi_app/models/book_recognition.dart';
 import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/services/book_download_storage.dart';
+import 'package:xiaoqi_app/services/book_source_metadata.dart';
 import 'package:xiaoqi_app/services/database_service.dart';
 import 'package:xiaoqi_app/services/online_book_import.dart';
 
@@ -30,7 +31,7 @@ List<int> _minimalEpub() {
       ArchiveFile.bytes(
         'OEBPS/content.opf',
         utf8.encode(
-          '<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Hello 算法</dc:title><dc:creator>靳宇栋</dc:creator><dc:language>zh-CN</dc:language></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>',
+          '<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Hello 算法</dc:title><dc:creator>靳宇栋</dc:creator><dc:publisher>测试出版社</dc:publisher><dc:date>2024-04-03</dc:date><dc:language>zh-CN</dc:language></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>',
         ),
       ),
     )
@@ -107,6 +108,41 @@ void main() {
     expect(DateTime.tryParse(record.capturedAt), isNotNull);
     expect(await File(record.filePath).readAsString(), 'staged');
   });
+
+  test(
+    'local prefill reads the EPUB and failed import commits no book',
+    () async {
+      const fallback = BookRecord(title: 'download', source: 'local_epub');
+      final file = File('${root.path}/download.epub')
+        ..writeAsBytesSync(_minimalEpub());
+      final preview = await BookSourceMetadataPreview.read(file.path, fallback);
+      addTearDown(preview.dispose);
+      expect(preview.book.title, 'Hello 算法');
+      expect(preview.book.authors, ['靳宇栋']);
+      expect(preview.book.publisher, '测试出版社');
+      expect(preview.book.editionLabel, startsWith('2024'));
+      await expectLater(
+        library.importLocalBookWithSource(
+          book: preview.book,
+          sourcePath: '${root.path}/missing.epub',
+          displayName: 'download.epub',
+          format: 'epub',
+        ),
+        throwsStateError,
+      );
+      expect(await library.listBooks(), isEmpty);
+      final imported = await library.importLocalBookWithSource(
+        book: preview.book,
+        sourcePath: file.path,
+        displayName: 'download.epub',
+        format: 'epub',
+      );
+      expect(
+        (await library.getBook(imported.source.bookId))?.publisher,
+        '测试出版社',
+      );
+    },
+  );
 
   test('failed file import rolls back the new book', () async {
     await expectLater(

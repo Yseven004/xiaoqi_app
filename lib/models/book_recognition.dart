@@ -214,6 +214,14 @@ class BookRecord {
   final String updatedAt;
 
   String get authorLabel => authors.join('、');
+  String get editionLabel {
+    final date = publishedDate.trim();
+    final year = RegExp(r'^\d{4}').stringMatch(date);
+    if (edition.trim().isEmpty) return year ?? date;
+    return year == null || edition.contains(year)
+        ? edition
+        : '$edition / $year';
+  }
 
   String get metadataLabel => [
     authorLabel,

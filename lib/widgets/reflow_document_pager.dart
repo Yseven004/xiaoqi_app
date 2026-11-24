@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -7,6 +9,10 @@ import 'package:flutter/rendering.dart';
 
 import '../models/reader_pagination.dart';
 import '../models/xiaoqi_document.dart';
+import 'document_text_style.dart';
+import 'reader_paper_turn.dart';
+
+part 'companion_pdf_pagination_cache.dart';
 
 typedef ReaderBlockSliceBuilder =
     Widget Function(
@@ -31,6 +37,20 @@ final _chapterHeadingWhitespace = RegExp(r'[\s　]+');
 String _chapterHeadingText(String value) =>
     value.replaceAll(_chapterHeadingWhitespace, ' ').trim();
 
+bool _coverChapter(List<XiaoqiDocumentBlock> blocks) =>
+    blocks.length == 1 &&
+    blocks.first.kind == 'image' &&
+    (blocks.first.assetId == 'epub-cover' ||
+        blocks.first.attributes['coverPage'] == 'true');
+
+XiaoqiDocumentBlock _plainChapterBlock(XiaoqiDocumentChapter chapter) =>
+    XiaoqiDocumentBlock(
+      id: '${chapter.id}:plain',
+      kind: 'paragraph',
+      text: chapter.plainText,
+      sourceLocator: chapter.sourceLocator,
+    );
+
 class ReflowDocumentPager extends StatefulWidget {
   const ReflowDocumentPager({
     super.key,
@@ -42,8 +62,13 @@ class ReflowDocumentPager extends StatefulWidget {
     this.initialAnchor,
     this.remapAnchor,
     this.onAnchorChanged,
+    this.onUserAnchorChanged,
     this.onChapterChanged,
     this.onProgressChanged,
+    this.onLayoutReady,
+    this.pdfLayoutCache,
+    this.epubLayoutCache,
+    this.navigationRevision = 0,
     this.verticalChapterTitleStyle,
     this.chapterTitleAlign = TextAlign.start,
     this.verticalPadding = const EdgeInsets.fromLTRB(24, 18, 24, 28),
@@ -54,7 +79,10 @@ class ReflowDocumentPager extends StatefulWidget {
     this.onPreviousDocument,
     this.onNextDocument,
     this.onScrollActivityChanged,
+    this.onUserNavigationStart,
     this.userNavigationEnabled = true,
+    this.previewTypography = false,
+    this.paperTurn = false,
     this.inkCanvasBuilder,
   });
 
@@ -66,8 +94,13 @@ class ReflowDocumentPager extends StatefulWidget {
   final ReaderAnchorRemapper? remapAnchor;
   final ReaderBlockSliceBuilder blockBuilder;
   final ValueChanged<FlowReaderAnchor>? onAnchorChanged;
+  final ValueChanged<FlowReaderAnchor>? onUserAnchorChanged;
   final ValueChanged<String>? onChapterChanged;
   final ValueChanged<ReaderPaginationProgress>? onProgressChanged;
+  final ValueChanged<bool>? onLayoutReady;
+  final File? pdfLayoutCache;
+  final File? epubLayoutCache;
+  final int navigationRevision;
   final TextStyle? verticalChapterTitleStyle;
   final TextAlign chapterTitleAlign;
   final EdgeInsets verticalPadding;
@@ -78,7 +111,13 @@ class ReflowDocumentPager extends StatefulWidget {
   final VoidCallback? onPreviousDocument;
   final VoidCallback? onNextDocument;
   final ValueChanged<bool>? onScrollActivityChanged;
+  final VoidCallback? onUserNavigationStart;
   final bool userNavigationEnabled;
+
+  /// The controls are moving. Rewrap the visible content and defer indexing
+  /// the whole book until the reader releases the slider.
+  final bool previewTypography;
+  final bool paperTurn;
   final Widget Function(BuildContext, FlowReaderAnchor)? inkCanvasBuilder;
 
   @override
@@ -99,10 +138,11 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   bool _refreshingContinuousDocument = false;
   bool _seekOnPublish = false;
   int? _publishedLayout;
+  Object? _reportedReadiness;
   bool _jumpPending = false;
   int _jumpRevision = 0;
   Timer? _continuousPublishDelay;
-  int _dragStartPage = 0;
+  int? _dragStartPage;
   final Map<String, GlobalKey> _verticalBlockKeys = {};
   final _verticalCanvasPosition =
       ValueNotifier<({FlowReaderAnchor anchor, double scrollOffset})?>(null);
@@ -111,7 +151,13 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   int? _edgePointer;
   bool _startedAtFirst = false;
   bool _startedAtLast = false;
-  TextStyle? _lastBlockStyle;
+  int? _verticalLayout;
+  bool _adjustingVerticalPosition = false;
+  bool _verticalUserMoved = false;
+  bool _userScrollReported = false;
+  bool _paperTurnActive = false;
+  ({Object signature, int epoch, int layout, _PaginationPublish publish})?
+  _deferredPaperPublish;
 
   /// Chapter whose pages are currently published on their own, before the
   /// chapters in front of it have been paginated.
@@ -137,6 +183,13 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   @override
   void didUpdateWidget(covariant ReflowDocumentPager oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final explicitNavigation =
+        oldWidget.navigationRevision != widget.navigationRevision;
+    if (explicitNavigation) {
+      _selectionActive = false;
+      _jumpRevision++;
+      _jumpPending = false;
+    }
     if (oldWidget.userNavigationEnabled && !widget.userNavigationEnabled) {
       final controller = widget.mode == ReaderPaginationMode.vertical
           ? _verticalController
@@ -194,6 +247,10 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       } else {
         _invalidatePagination(clearVerticalKeys: true);
         _requestedAnchor = widget.initialAnchor;
+        // Switching from the full horizontal PDF to its vertical page window
+        // replaces the document and mode in the same widget update.
+        _verticalRestoreScheduled =
+            widget.mode == ReaderPaginationMode.vertical;
       }
       _isPreparing = false;
     } else if (oldWidget.mode != widget.mode) {
@@ -205,27 +262,45 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       _isPreparing = false;
       _requestedAnchor = currentAnchor ?? widget.initialAnchor;
       _verticalRestoreScheduled = widget.mode == ReaderPaginationMode.vertical;
-    } else if (oldWidget.initialAnchor != widget.initialAnchor) {
+    } else if (oldWidget.initialAnchor != widget.initialAnchor ||
+        explicitNavigation) {
       _requestedAnchor = widget.initialAnchor;
       if (widget.mode == ReaderPaginationMode.vertical) {
         _verticalRestoreScheduled = true;
-      }
-      final provisionalChapterId = _provisionalChapterId;
-      if (_isPreparing &&
-          provisionalChapterId != null &&
-          provisionalChapterId != _preferredChapterId()) {
-        // Only the previous anchor chapter has been published so far: restart
-        // the pass so the newly requested chapter is paginated first.
-        _restartPrepare();
-      } else if (_pages.isNotEmpty) {
-        final target = _resolveTargetPage();
-        _currentPage = target;
-        _scheduleJump(target);
+      } else {
+        _seekHorizontalAnchor(explicitNavigation: explicitNavigation);
       }
     }
-    if (oldWidget.verticalPadding != widget.verticalPadding &&
-        widget.mode == ReaderPaginationMode.vertical) {
-      _verticalRestoreScheduled = true;
+    if (widget.previewTypography &&
+        !oldWidget.previewTypography &&
+        _isPreparing &&
+        _pages.isNotEmpty) {
+      ++_paginationEpoch;
+      _preparingSignature = null;
+    }
+  }
+
+  void _seekHorizontalAnchor({required bool explicitNavigation}) {
+    final target =
+        _findAnchorPage(_pages, complete: !_isPreparing) ??
+        (_requestedAnchor?.blockId == null
+            ? _chapterFirstPages[_preferredChapterId()]
+            : null);
+    if (target != null || (!_isPreparing && _pages.isNotEmpty)) {
+      _seekOnPublish = false;
+      _currentPage = target ?? _resolveTargetPage();
+      _scheduleJump(_currentPage);
+      return;
+    }
+    if (explicitNavigation && _isPreparing) {
+      // Retain the visible page while the new target takes priority. The
+      // old pass cannot publish its earlier chapter over this request.
+      _seekOnPublish = true;
+      _restartPrepare();
+    } else if (_isPreparing &&
+        _provisionalChapterId != null &&
+        _provisionalChapterId != _preferredChapterId()) {
+      _restartPrepare();
     }
   }
 
@@ -240,10 +315,13 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   }
 
   void _invalidatePagination({bool clearVerticalKeys = false}) {
+    _dragStartPage = null;
     _paginationEpoch++;
     _jumpRevision++;
     _jumpPending = false;
+    _verticalUserMoved = false;
     _continuousPublishDelay?.cancel();
+    _deferredPaperPublish = null;
     _layoutSignature = null;
     _preparingSignature = null;
     _pages = const [];
@@ -256,6 +334,19 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     if (clearVerticalKeys) _verticalBlockKeys.clear();
   }
 
+  // Notify after the frame in which the requested position is installed.
+  void _reportReadiness(Object signature, bool ready) {
+    if (widget.onLayoutReady == null) return;
+    final stamp = (signature, widget.mode, widget.initialAnchor, ready);
+    if (_reportedReadiness == stamp) return;
+    _reportedReadiness = stamp;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _reportedReadiness == stamp) {
+        widget.onLayoutReady?.call(ready);
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final layoutBuilder = LayoutBuilder(
@@ -264,12 +355,6 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         final blockStyle = widget.textStyleBuilder?.call(
           _styleForBlock(_headingBlock),
         );
-        if (_lastBlockStyle != blockStyle &&
-            _lastBlockStyle != null &&
-            widget.mode == ReaderPaginationMode.vertical) {
-          _verticalRestoreScheduled = true;
-        }
-        _lastBlockStyle = blockStyle;
         final width = math
             .max(1.0, constraints.maxWidth - widget.verticalPadding.horizontal)
             .toDouble();
@@ -281,8 +366,11 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
           width.round(),
           height.round(),
           textScaler.hashCode,
-          blockStyle,
-          widget.verticalChapterTitleStyle,
+          blockStyle?.copyWith(color: Colors.black),
+          widget.verticalChapterTitleStyle?.copyWith(color: Colors.black),
+          Localizations.maybeLocaleOf(context),
+          Directionality.maybeOf(context),
+          WidgetsBinding.instance.platformDispatcher.locale,
           Object.hashAll(
             (widget.translations ?? const <String, String>{}).entries.map(
               (entry) => Object.hash(entry.key, entry.value),
@@ -291,7 +379,8 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         );
         final signature = Object.hash(widget.document, layout);
         if (widget.mode == ReaderPaginationMode.horizontal &&
-            _layoutSignature != signature &&
+            (_layoutSignature != signature || _isPreparing) &&
+            (!widget.previewTypography || _pages.isEmpty) &&
             _preparingSignature != signature) {
           _schedulePrepare(
             signature,
@@ -302,9 +391,23 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
           );
         }
         if (widget.mode == ReaderPaginationMode.vertical) {
-          return _buildVertical(context);
+          if (_verticalLayout != null &&
+              _verticalLayout != layout &&
+              _verticalController.hasClients &&
+              _verticalController.offset > 0) {
+            _verticalRestoreScheduled = true;
+          }
+          _verticalLayout = layout;
+          final body = _buildVertical(context);
+          _reportReadiness(signature, true);
+          return body;
         }
 
+        final ready =
+            _pages.isNotEmpty &&
+            (!_isPreparing || widget.document.format != 'pdf-reflow') &&
+            _layoutSignature == signature;
+        _reportReadiness(signature, ready);
         if (_pages.isEmpty) {
           return Center(
             child: Text(_isPreparing ? '正在准备阅读页面' : '资料暂时没有可读取的内容'),
@@ -313,9 +416,14 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
 
         final safePage = _currentPage.clamp(0, _pages.length - 1).toInt();
         final canPage =
-            (!_isPreparing || _refreshingContinuousDocument) &&
+            (!_isPreparing ||
+                _refreshingContinuousDocument ||
+                widget.document.format != 'pdf-reflow') &&
+            !_seekOnPublish &&
             !_selectionActive &&
             widget.userNavigationEnabled;
+        final curl =
+            widget.paperTurn && !MediaQuery.disableAnimationsOf(context);
         return Semantics(
           container: true,
           label: _pageSemantics(_pages[safePage], safePage),
@@ -329,37 +437,86 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
             onNotification: (notification) {
               if (notification.metrics.axis == Axis.horizontal &&
                   notification is ScrollStartNotification) {
-                _dragStartPage =
-                    (_pageController.page ?? _currentPage.toDouble()).round();
+                if (notification.depth == 0 &&
+                    notification.dragDetails != null) {
+                  _dragStartPage =
+                      (_pageController.page ?? _currentPage.toDouble()).round();
+                } else if (notification.dragDetails != null) {
+                  _edgeStart = null;
+                }
+              } else if (notification.depth == 0 &&
+                  notification.metrics.axis == Axis.horizontal &&
+                  notification is ScrollEndNotification) {
+                _dragStartPage = null;
               }
               return false;
             },
-            child: KeyedSubtree(
-              key: ObjectKey(_pageController),
-              child: PageView.builder(
-                key: const Key('book_body_document_pager'),
-                controller: _pageController,
-                // pageSnapping adds Flutter's PageScrollPhysics above the
-                // supplied physics. The reader owns the threshold below.
-                pageSnapping: false,
-                allowImplicitScrolling: canPage,
-                physics: !canPage
-                    ? const NeverScrollableScrollPhysics()
-                    : _ReaderPageScrollPhysics(
-                        dragStartPage: () => _dragStartPage,
-                      ),
-                itemCount: _pages.length,
-                onPageChanged: (index) {
-                  if (!mounted || _jumpPending) return;
-                  setState(() => _currentPage = index);
-                  _emitAnchor(index);
-                  _emitProgress(index);
-                },
-                itemBuilder: (context, index) => _buildPage(
-                  context,
-                  _pages[index],
-                  index,
-                  pageHeight: constraints.maxHeight,
+            child: ReaderPaperTurn(
+              enabled: canPage && curl,
+              onTurnStart: widget.onUserNavigationStart,
+              onTurnActivityChanged: _onPaperTurnActivityChanged,
+              revision: (
+                _pageController,
+                _pages[safePage],
+                safePage,
+                layout,
+                widget.navigationRevision,
+              ),
+              page: safePage,
+              pageCount: _pages.length,
+              paper: widget.verticalBackground,
+              buildAdjacentPage: (context, index) => _buildPage(
+                context,
+                _pages[index],
+                index,
+                viewport: constraints.biggest,
+                preview: false,
+                interactive: false,
+              ),
+              onTurn: (index) {
+                if (!_jumpPending &&
+                    _pageController.hasClients &&
+                    (index - _currentPage).abs() == 1 &&
+                    index >= 0 &&
+                    index < _pages.length) {
+                  _pageController.jumpToPage(index);
+                }
+              },
+              child: KeyedSubtree(
+                key: ObjectKey(_pageController),
+                child: PageView.builder(
+                  key: const Key('book_body_document_pager'),
+                  controller: _pageController,
+                  // pageSnapping adds Flutter's PageScrollPhysics above the
+                  // supplied physics. The reader owns the threshold below.
+                  pageSnapping: false,
+                  allowImplicitScrolling: canPage,
+                  physics: !canPage || curl
+                      ? const NeverScrollableScrollPhysics()
+                      : _ReaderPageScrollPhysics(
+                          dragStartPage: () => _dragStartPage,
+                        ),
+                  itemCount: _pages.length,
+                  onPageChanged: (index) {
+                    // Attaching the replacement controller reports its initial
+                    // index too. Only a different index is a new reading position.
+                    if (!mounted || _jumpPending || index == _currentPage) {
+                      return;
+                    }
+                    setState(() => _currentPage = index);
+                    _emitAnchor(index, userNavigation: true);
+                    _emitProgress(index);
+                  },
+                  itemBuilder: (context, index) => _buildPage(
+                    context,
+                    _pages[index],
+                    index,
+                    viewport: constraints.biggest,
+                    preview:
+                        index == _currentPage &&
+                        _publishedLayout != null &&
+                        _publishedLayout != layout,
+                  ),
                 ),
               ),
             ),
@@ -371,8 +528,16 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       onNotification: (event) {
         if (event.depth == 0) {
           if (event is ScrollStartNotification) {
+            _userScrollReported = event.dragDetails != null;
+            if (_userScrollReported) widget.onUserNavigationStart?.call();
             widget.onScrollActivityChanged?.call(true);
+          } else if (event is ScrollUpdateNotification &&
+              event.dragDetails != null &&
+              !_userScrollReported) {
+            _userScrollReported = true;
+            widget.onUserNavigationStart?.call();
           } else if (event is ScrollEndNotification) {
+            _userScrollReported = false;
             widget.onScrollActivityChanged?.call(false);
           }
         }
@@ -426,8 +591,14 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         final main = horizontal ? delta.dx : delta.dy;
         final cross = horizontal ? delta.dy : delta.dx;
         if (main.abs() < 42 || main.abs() <= cross.abs() * 1.4) return;
-        if (main < 0 && _startedAtLast) widget.onNextDocument?.call();
-        if (main > 0 && _startedAtFirst) widget.onPreviousDocument?.call();
+        final turn = main < 0 && _startedAtLast
+            ? widget.onNextDocument
+            : main > 0 && _startedAtFirst
+            ? widget.onPreviousDocument
+            : null;
+        if (turn == null) return;
+        if (!_userScrollReported) widget.onUserNavigationStart?.call();
+        turn();
       },
       child: pager,
     );
@@ -487,6 +658,9 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     final translations = Map.of(
       widget.translations ?? const <String, String>{},
     );
+    final epub = widget.document.format == 'epub';
+    final locale = epub ? Localizations.maybeLocaleOf(context) : null;
+    final direction = epub ? Directionality.maybeOf(context) : null;
     if (_refreshingContinuousDocument && _publishedLayout == layout) {
       final publish = await _extendPdfPagination(
         widget.document.chapters.first,
@@ -502,6 +676,41 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         return;
       }
     }
+    final file = translations.isEmpty
+        ? (epub ? widget.epubLayoutCache : widget.pdfLayoutCache)
+        : null;
+    final font = widget.textStyleBuilder?.call(_styleForBlock(_headingBlock));
+    // These are the actual effective content bounds and typography. Theme
+    // colours never invalidate a geometrically identical layout.
+    final key = jsonEncode([
+      2,
+      width,
+      height,
+      font?.fontFamily,
+      font?.fontSize,
+      font?.height,
+      widget.verticalChapterTitleStyle?.fontSize,
+      for (final size in [14.0, 17.0, 24.0, 32.0]) textScaler.scale(size),
+      if (epub) ...[
+        locale?.toLanguageTag(),
+        direction?.name,
+        WidgetsBinding.instance.platformDispatcher.locale.toLanguageTag(),
+      ],
+    ]);
+    if (file != null) {
+      final restored = await _loadReaderLayout(
+        file,
+        key,
+        widget.document,
+        gate,
+        epub: epub,
+      );
+      if (isCancelled()) return;
+      if (restored != null) {
+        _applyPublish(signature, epoch, layout, restored);
+        return;
+      }
+    }
     await _paginateDocumentProgressive(
       widget.document,
       width: width,
@@ -512,7 +721,12 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       textStyleBuilder: widget.textStyleBuilder,
       translations: translations,
       gate: gate,
-      onPublish: (publish) => _applyPublish(signature, epoch, layout, publish),
+      onPublish: (publish) {
+        _applyPublish(signature, epoch, layout, publish);
+        if (publish.complete && file != null && !isCancelled()) {
+          unawaited(_saveReaderLayout(file, key, publish.pages, epub: epub));
+        }
+      },
     );
   }
 
@@ -626,7 +840,22 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         return;
       }
     }
-    final anchorPage = _findAnchorPage(publish.pages);
+    final anchorPage = _findAnchorPage(
+      publish.pages,
+      complete: publish.complete,
+    );
+    // A partial prefix can precede a restored chapter or character.
+    if (!publish.complete &&
+        ((anchorPage == null &&
+                !_anchorIsForeign &&
+                (_requestedAnchor?.blockId != null ||
+                    (_seekOnPublish &&
+                        !publish.chapterFirstPages.containsKey(
+                          _preferredChapterId(),
+                        )))) ||
+            (_pages.isEmpty && widget.document.format == 'pdf-reflow'))) {
+      return;
+    }
     final visiblePage = _currentPage < _pages.length
         ? _pages[_currentPage]
         : null;
@@ -648,12 +877,29 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     // A page that is still ahead of the requested anchor can move again later,
     // so the parent is only told about a page that will not be replaced.
     final reportable =
-        publish.complete || anchorPage != null || _anchorIsForeign;
+        publish.complete ||
+        anchorPage != null ||
+        _anchorIsForeign ||
+        (_requestedAnchor?.blockId == null &&
+            publish.chapterFirstPages.containsKey(_preferredChapterId()));
     final moved = shiftOffset != null || target != _currentPage;
-    if (moved && widget.document.format == 'pdf-reflow') {
+    if (_paperTurnActive && (moved || publish.complete)) {
+      // A shifted or completed snapshot can install a new page position.
+      // Finish the gesture first so its new anchor wins the repositioning.
+      _deferredPaperPublish = (
+        signature: signature,
+        epoch: epoch,
+        layout: layout,
+        publish: publish,
+      );
+      return;
+    }
+    _deferredPaperPublish = null;
+    if (moved) {
       // Insertions before the viewport change screen indices. Start at the
       // new index before layout so no frame paints an unrelated screen.
       final previous = _pageController;
+      _dragStartPage = null;
       _pageController = PageController(initialPage: target, keepPage: false);
       WidgetsBinding.instance.addPostFrameCallback((_) => previous.dispose());
     }
@@ -680,6 +926,22 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     }
   }
 
+  void _onPaperTurnActivityChanged(bool active) {
+    _paperTurnActive = active;
+    if (active || _deferredPaperPublish == null) return;
+    scheduleMicrotask(() {
+      final pending = _deferredPaperPublish;
+      if (!mounted || _paperTurnActive || pending == null) return;
+      _deferredPaperPublish = null;
+      _applyPublish(
+        pending.signature,
+        pending.epoch,
+        pending.layout,
+        pending.publish,
+      );
+    });
+  }
+
   /// Page offset the reader moves by when a provisionally published chapter is
   /// placed at its real index, or null when the snapshot moves no page.
   int? _shiftOffsetFor(_PaginationPublish publish) {
@@ -700,14 +962,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       orElse: () => widget.document.chapters.first,
     );
     final blocks = chapter.blocks.isEmpty
-        ? [
-            XiaoqiDocumentBlock(
-              id: '${chapter.id}:plain',
-              kind: 'paragraph',
-              text: chapter.plainText,
-              sourceLocator: chapter.sourceLocator,
-            ),
-          ]
+        ? [_plainChapterBlock(chapter)]
         : chapter.blocks;
     final blockKeys = <String, GlobalKey>{
       for (var index = 0; index < blocks.length; index++)
@@ -718,6 +973,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
             ),
     };
     final showTitle =
+        !_coverChapter(blocks) &&
         chapter.title.trim().isNotEmpty &&
         (blocks.isEmpty ||
             blocks.first.kind != 'heading' ||
@@ -725,10 +981,23 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
                 _chapterHeadingText(chapter.title));
     final result = ColoredBox(
       color: widget.verticalBackground,
-      child: NotificationListener<ScrollEndNotification>(
+      child: NotificationListener<ScrollNotification>(
         onNotification: (notification) {
-          if (notification.depth == 0) {
-            _emitVerticalAnchor(chapter.id, blocks, blockKeys);
+          if (notification.depth != 0 || _adjustingVerticalPosition) {
+            return false;
+          }
+          if (notification is ScrollUpdateNotification) {
+            _verticalUserMoved = widget.userNavigationEnabled;
+          } else if (notification is ScrollEndNotification) {
+            final moved = _verticalUserMoved;
+            _verticalUserMoved = false;
+            _emitVerticalAnchor(
+              chapter.id,
+              blocks,
+              blockKeys,
+              preserveRequested: !moved,
+              userNavigation: moved,
+            );
           }
           return false;
         },
@@ -787,8 +1056,13 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       _verticalRestoreScheduled = false;
       _scheduleVerticalRestore(chapter.id, blocks, blockKeys);
       if (widget.onVisibleBlocksChanged != null) {
+        final anchor = _requestedAnchor;
+        final revision = widget.navigationRevision;
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
+          if (mounted &&
+              widget.mode == ReaderPaginationMode.vertical &&
+              _requestedAnchor == anchor &&
+              widget.navigationRevision == revision) {
             _emitVerticalAnchor(
               chapter.id,
               blocks,
@@ -857,12 +1131,17 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     if (previous is! RenderBox || !previous.hasSize) return;
     final before = previous.localToGlobal(Offset.zero).dy;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_verticalController.hasClients) return;
+      if (!mounted ||
+          anchor != _requestedAnchor ||
+          widget.mode != ReaderPaginationMode.vertical ||
+          !_verticalController.hasClients) {
+        return;
+      }
       final next = key?.currentContext?.findRenderObject();
       if (next is! RenderBox || !next.hasSize) return;
       final delta = next.localToGlobal(Offset.zero).dy - before;
       final position = _verticalController.position;
-      _verticalController.jumpTo(
+      _jumpVerticalTo(
         (position.pixels + delta)
             .clamp(position.minScrollExtent, position.maxScrollExtent)
             .toDouble(),
@@ -876,12 +1155,24 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     Map<String, GlobalKey> blockKeys,
   ) {
     final anchor = _requestedAnchor;
-    final targetBlockId = anchor?.blockId;
-    if (targetBlockId == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted ||
+          anchor != _requestedAnchor ||
+          widget.mode != ReaderPaginationMode.vertical ||
+          !_verticalController.hasClients) {
+        return;
+      }
+      if (anchor == null) return;
+      final targetBlockId = anchor.blockId;
+      if (targetBlockId == null) {
+        _jumpVerticalTo(0);
+        return;
+      }
       final index = blocks.indexWhere((block) => block.id == targetBlockId);
-      if (index < 0) return;
+      if (index < 0) {
+        _jumpVerticalTo(0);
+        return;
+      }
       final target = blockKeys[_verticalKey(chapterId, targetBlockId, index)]
           ?.currentContext;
       final box = target?.findRenderObject();
@@ -891,7 +1182,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
           !_verticalController.hasClients) {
         return;
       }
-      final offset = anchor?.characterOffset ?? 0;
+      final offset = anchor.characterOffset;
       final render = _textRenderOf(box);
       final canResolveText =
           offset > 0 &&
@@ -910,7 +1201,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       final position = _verticalController.position;
       final readingLine =
           viewport.localToGlobal(Offset.zero).dy + widget.verticalPadding.top;
-      _verticalController.jumpTo(
+      _jumpVerticalTo(
         (_verticalController.offset + targetY - readingLine)
             .clamp(position.minScrollExtent, position.maxScrollExtent)
             .toDouble(),
@@ -918,11 +1209,21 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     });
   }
 
+  void _jumpVerticalTo(double offset) {
+    _adjustingVerticalPosition = true;
+    try {
+      _verticalController.jumpTo(offset);
+    } finally {
+      _adjustingVerticalPosition = false;
+    }
+  }
+
   void _emitVerticalAnchor(
     String chapterId,
     List<XiaoqiDocumentBlock> blocks,
     Map<String, GlobalKey> blockKeys, {
     bool preserveRequested = false,
+    bool userNavigation = false,
   }) {
     final viewport = context.findRenderObject();
     final viewportBox = viewport is RenderBox ? viewport : null;
@@ -985,6 +1286,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       );
     }
     widget.onAnchorChanged?.call(anchor);
+    if (userNavigation) widget.onUserAnchorChanged?.call(anchor);
     widget.onChapterChanged?.call(chapterId);
   }
 
@@ -995,12 +1297,198 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     return result;
   }
 
+  /// Draw just the viewport from its reading anchor. The
+  /// normal page index may still be measuring chapters before this one.
+  Widget _buildTypographyPreview(
+    ReaderPageSlice page,
+    int index,
+    Size viewport,
+  ) {
+    final anchor = _requestedAnchor;
+    final anchoredSlice = anchor == null
+        ? null
+        : page.blocks
+              .where(
+                (slice) =>
+                    slice.block.id == anchor.blockId &&
+                    anchor.characterOffset >= slice.startOffset &&
+                    anchor.characterOffset <=
+                        (slice.endOffset ?? slice.startOffset),
+              )
+              .firstOrNull;
+    final first = anchoredSlice ?? page.blocks.first;
+    var firstOffset =
+        anchoredSlice == null || anchor!.characterOffset == first.endOffset
+        ? first.startOffset
+        : anchor.characterOffset;
+    final localStart = firstOffset - first.startOffset;
+    if (first.tableRows == null &&
+        localStart > 0 &&
+        localStart < first.text.length &&
+        _isLowSurrogate(first.text.codeUnitAt(localStart))) {
+      // Older saved anchors could point into the middle of an emoji.
+      firstOffset--;
+    }
+    final style = widget.textStyleBuilder?.call(
+      const TextStyle(fontSize: 17, height: 1.7),
+    );
+    final em = MediaQuery.textScalerOf(context).scale(style?.fontSize ?? 17);
+    final line = em * (style?.height ?? 1.7);
+    final visibleLines = math.max<int>(
+      1,
+      ((viewport.height - widget.verticalPadding.vertical) / line).ceil(),
+    );
+    // Narrow Latin glyphs can fit several to an em. Adjacent measured pieces
+    // are joined so shrinking type does not insert old page breaks in a paragraph.
+    final characters =
+        visibleLines *
+        math.max<int>(
+          1,
+          ((viewport.width - widget.verticalPadding.horizontal) * 4 / em)
+              .ceil(),
+        );
+    final fragments = _previewSlices(
+      index,
+      page.blocks.indexOf(first),
+      firstOffset,
+      characters,
+      visibleLines,
+    ).iterator;
+    final visible = <ReaderBlockSlice>[];
+    final heading =
+        page.showChapterTitle && first == page.blocks.first && firstOffset == 0
+        ? 1
+        : 0;
+    return Semantics(
+      key: Key('book_body_document_page_$index'),
+      label: _pageSemantics(page, index),
+      child: ColoredBox(
+        color: widget.verticalBackground,
+        child: ListView.builder(
+          primary: false,
+          physics: const NeverScrollableScrollPhysics(),
+          padding: widget.verticalPadding,
+          itemBuilder: (context, row) {
+            if (row < heading) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 18),
+                child: Text(
+                  page.chapterTitle,
+                  textAlign: widget.chapterTitleAlign,
+                  style: widget.verticalChapterTitleStyle,
+                ),
+              );
+            }
+            final offset = row - heading;
+            while (visible.length <= offset) {
+              if (!fragments.moveNext()) return null;
+              visible.add(fragments.current);
+            }
+            return widget.blockBuilder(context, visible[offset], (_) {});
+          },
+        ),
+      ),
+    );
+  }
+
+  /// Reuse already measured source spans, including text-only legacy chapters
+  /// and row ranges of split tables. Never decode a whole table in a slider frame.
+  Iterable<ReaderBlockSlice> _previewSlices(
+    int pageIndex,
+    int firstIndex,
+    int firstOffset,
+    int maxChars,
+    int maxRows,
+  ) sync* {
+    final chapter = _pages[pageIndex].chapterId;
+    Iterable<ReaderBlockSlice> following() sync* {
+      for (
+        var i = pageIndex;
+        i < _pages.length && _pages[i].chapterId == chapter;
+        i++
+      ) {
+        yield* _pages[i].blocks.skip(i == pageIndex ? firstIndex : 0);
+      }
+    }
+
+    final pieces = following().iterator;
+    var more = pieces.moveNext();
+    var from = firstOffset;
+    while (more) {
+      final first = pieces.current;
+      if (first.endOffset == null) {
+        yield first;
+        more = pieces.moveNext();
+      } else {
+        final table = first.tableRows != null;
+        final rows = <List<String>>[];
+        final text = StringBuffer();
+        final start = from;
+        var end = start;
+        do {
+          final part = pieces.current;
+          final available = table
+              ? maxRows - rows.length
+              : maxChars - text.length;
+          end = math.min(part.endOffset!, from + available);
+          final left = from - part.startOffset;
+          var right = end - part.startOffset;
+          if (table) {
+            for (final row in part.tableRows!.getRange(left, right)) {
+              rows.add([
+                for (final cell in row)
+                  cell.length <= maxChars
+                      ? cell
+                      : cell.substring(0, _afterSurrogatePair(cell, maxChars)),
+              ]);
+            }
+          } else {
+            right = _afterSurrogatePair(part.text, right);
+            end = part.startOffset + right;
+            text.write(part.text.substring(left, right));
+          }
+          if (end < part.endOffset!) {
+            from = end;
+            break;
+          }
+          more = pieces.moveNext();
+          if (more) from = pieces.current.startOffset;
+        } while (more &&
+            pieces.current.block.id == first.block.id &&
+            pieces.current.endOffset != null &&
+            from == end &&
+            rows.length < maxRows &&
+            text.length < maxChars);
+        if (end > start) {
+          yield ReaderBlockSlice(
+            block: first.block,
+            chapterId: chapter,
+            text: table
+                ? rows.map((row) => row.join(' ')).join('\n')
+                : text.toString(),
+            startOffset: start,
+            endOffset: end,
+            continuation: start > 0,
+            tableRows: table ? rows : null,
+          );
+        }
+        continue;
+      }
+      if (more) from = pieces.current.startOffset;
+    }
+  }
+
   Widget _buildPage(
     BuildContext context,
     ReaderPageSlice page,
     int index, {
-    required double pageHeight,
+    required Size viewport,
+    required bool preview,
+    bool interactive = true,
   }) {
+    if (preview && page.blocks.isNotEmpty) {
+      return _buildTypographyPreview(page, index, viewport);
+    }
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1021,7 +1509,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         ],
         for (final slice in page.blocks)
           widget.blockBuilder(context, slice, (active) {
-            if (!mounted || _selectionActive == active) return;
+            if (!interactive || !mounted || _selectionActive == active) return;
             setState(() => _selectionActive = active);
           }),
       ],
@@ -1035,7 +1523,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       child: ConstrainedBox(
         constraints: BoxConstraints(
           minHeight: math
-              .max(0, pageHeight - widget.verticalPadding.vertical)
+              .max(0, viewport.height - widget.verticalPadding.vertical)
               .toDouble(),
         ),
         child: content,
@@ -1094,21 +1582,34 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   }
 
   void _goToPage(int index) {
-    if (index < 0 || index >= _pages.length || index == _currentPage) return;
+    if (!_pageController.hasClients ||
+        index < 0 ||
+        index >= _pages.length ||
+        index == _currentPage) {
+      return;
+    }
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _pageController.jumpToPage(index);
+      return;
+    }
     _pageController.animateToPage(
       index,
-      duration: MediaQuery.disableAnimationsOf(context)
-          ? Duration.zero
-          : const Duration(milliseconds: 220),
+      duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
     );
   }
 
-  void _emitAnchor(int index, {bool preserveRequested = false}) {
+  void _emitAnchor(
+    int index, {
+    bool preserveRequested = false,
+    bool userNavigation = false,
+  }) {
     if (index < 0 || index >= _pages.length) return;
     final page = _pages[index];
     final first = page.blocks.isEmpty ? null : page.blocks.first;
-    final anchor = preserveRequested && _findAnchorPage(_pages) == index
+    final anchor =
+        preserveRequested &&
+            _findAnchorPage(_pages, complete: !_isPreparing) == index
         ? _requestedAnchor!
         : FlowReaderAnchor(
             sourceId: widget.sourceId,
@@ -1121,6 +1622,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
           );
     _requestedAnchor = anchor;
     widget.onAnchorChanged?.call(anchor);
+    if (userNavigation) widget.onUserAnchorChanged?.call(anchor);
     widget.onChapterChanged?.call(page.chapterId);
     widget.onVisibleBlocksChanged?.call(
       page.blocks.map((slice) => slice.block).toSet().toList(),
@@ -1141,24 +1643,30 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   }
 
   int _resolveTargetPage() =>
-      _findAnchorPage(_pages) ?? _chapterFirstPages[_preferredChapterId()] ?? 0;
+      _findAnchorPage(_pages, complete: !_isPreparing) ??
+      _chapterFirstPages[_preferredChapterId()] ??
+      0;
 
   /// Page that holds [_requestedAnchor], or null while that block has not been
   /// paginated yet.
-  int? _findAnchorPage(List<ReaderPageSlice> pages) {
+  int? _findAnchorPage(List<ReaderPageSlice> pages, {required bool complete}) {
     final anchor = _requestedAnchor;
     if (anchor == null || anchor.sourceId != widget.sourceId) return null;
     // A split block uses [startOffset, endOffset). Search from the end so an
     // offset exactly at a page boundary belongs to the new continuation page,
-    // not the page that just ended. The inclusive check still keeps EOF
-    // anchors resolvable to the final slice.
+    // not the page that just ended. Wait for the continuation when the index
+    // is partial, and accept real EOF on the final complete snapshot.
     for (var i = pages.length - 1; i >= 0; i--) {
       final page = pages[i];
       if (page.chapterId != anchor.chapterId) continue;
       for (final slice in page.blocks) {
+        final end = slice.endOffset;
+        final offset = anchor.characterOffset;
         if (slice.block.id == anchor.blockId &&
-            anchor.characterOffset >= slice.startOffset &&
-            anchor.characterOffset <= (slice.endOffset ?? slice.startOffset)) {
+            offset >= slice.startOffset &&
+            (end == null
+                ? offset == slice.startOffset
+                : offset < end || (complete && offset == end))) {
           return i;
         }
       }
@@ -1183,7 +1691,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
 class _ReaderPageScrollPhysics extends ScrollPhysics {
   const _ReaderPageScrollPhysics({required this.dragStartPage, super.parent});
 
-  final int Function() dragStartPage;
+  final int? Function() dragStartPage;
 
   static const _minDistance = 48.0;
   static const _distanceFraction = .16;
@@ -1201,6 +1709,14 @@ class _ReaderPageScrollPhysics extends ScrollPhysics {
     ScrollMetrics position,
     double velocity,
   ) {
+    // Flutter also asks for a simulation when new extents attach or resize.
+    // At rest, snap to the actual viewport, never an earlier gesture's page.
+    final gestureStart = dragStartPage();
+    if (gestureStart == null) {
+      return PageScrollPhysics(
+        parent: parent,
+      ).createBallisticSimulation(position, velocity);
+    }
     if ((velocity <= 0.0 && position.pixels <= position.minScrollExtent) ||
         (velocity >= 0.0 && position.pixels >= position.maxScrollExtent)) {
       return super.createBallisticSimulation(position, velocity);
@@ -1213,7 +1729,7 @@ class _ReaderPageScrollPhysics extends ScrollPhysics {
     final maxPage =
         ((position.maxScrollExtent - position.minScrollExtent) / viewport)
             .round();
-    final startPage = dragStartPage().clamp(0, maxPage).toInt();
+    final startPage = gestureStart.clamp(0, maxPage).toInt();
     final startPixels = position.minScrollExtent + startPage * viewport;
     final delta = position.pixels - startPixels;
     final distanceThreshold = math.max(
@@ -1387,7 +1903,7 @@ Future<void> _paginateDocumentProgressive(
       gate: gate,
       onPageFlushed: (List<ReaderPageSlice> chapterPages, int count) {
         if (gate.cancelled) return;
-        if (publishedPageCount >= 0 &&
+        if (publishedPageCount >= 2 &&
             count - publishedPageCount < _pagesPerPublish) {
           return;
         }
@@ -1449,7 +1965,7 @@ Future<void> _paginateDocumentProgressive(
             ? (List<ReaderPageSlice> chapterPages, int count) {
                 if (gate.cancelled) return;
                 final total = base + count;
-                if (publishedPageCount >= 0 &&
+                if (publishedPageCount >= 2 &&
                     total - publishedPageCount < _pagesPerPublish) {
                   return;
                 }
@@ -1549,16 +2065,10 @@ Future<_ChapterPaginationResult?> _paginateChapter(
   ({int block, int offset})? until,
 }) async {
   final blocks = chapter.blocks.isEmpty
-      ? [
-          XiaoqiDocumentBlock(
-            id: '${chapter.id}:plain',
-            kind: 'paragraph',
-            text: chapter.plainText,
-            sourceLocator: chapter.sourceLocator,
-          ),
-        ]
+      ? [_plainChapterBlock(chapter)]
       : chapter.blocks;
   final showTitle =
+      !_coverChapter(blocks) &&
       (showUntitledHeading || chapter.title.trim().isNotEmpty) &&
       (blocks.isEmpty ||
           blocks.first.kind != 'heading' ||
@@ -1624,28 +2134,41 @@ Future<_ChapterPaginationResult?> _paginateChapter(
       currentOriginalPageLabel = block.originalPageLabel;
       continue;
     }
-    final tableRows = _decodeTableRows(block);
-    if (block.kind == 'table' && tableRows != null && tableRows.isNotEmpty) {
+    final tableRows = block.kind == 'table' ? _decodeTableRows(block) : null;
+    if (tableRows != null && tableRows.isNotEmpty) {
+      final columns = tableRows.fold<int>(1, (n, r) => math.max(n, r.length));
+      final cellWidth = math.max(96.0, width / columns) - 20;
+      const baseStyle = TextStyle(fontSize: 15, height: 1.45);
+      final style = textStyleBuilder?.call(baseStyle) ?? baseStyle;
+      final headerRows =
+          int.tryParse(block.attributes['headerRows'] ?? '') ?? 0;
+      final rowHeights = <double>[];
+      for (final (index, row) in tableRows.indexed) {
+        final measured = index < headerRows
+            ? style.copyWith(fontWeight: FontWeight.w700)
+            : style;
+        double rowHeight = 0;
+        for (final cell in row) {
+          await gate.tick();
+          if (gate.cancelled) return null;
+          rowHeight = math.max(
+            rowHeight,
+            _measureText(cell, block, cellWidth, textScaler, style: measured) +
+                20,
+          );
+        }
+        rowHeights.add(rowHeight);
+      }
       var rowStart = 0;
       while (rowStart < tableRows.length) {
-        if (gate.cancelled) return null;
-        var rowEnd = rowStart + 1;
-        while (rowEnd < tableRows.length) {
-          final candidate = tableRows.sublist(rowStart, rowEnd + 1);
-          final candidateHeight = await _tableHeight(
-            candidate,
-            width,
-            textScaler,
-            gate,
-          );
-          if (used + candidateHeight > height) break;
-          rowEnd++;
-        }
-        final rows = tableRows.sublist(rowStart, rowEnd);
-        final blockHeight = await _tableHeight(rows, width, textScaler, gate);
-        if (current.isNotEmpty && used + blockHeight > height) {
+        if (current.isNotEmpty && used + rowHeights[rowStart] + 14 > height) {
           flush();
-          continue;
+        }
+        var rowEnd = rowStart + 1;
+        var tableHeight = rowHeights[rowStart] + 14;
+        while (rowEnd < tableRows.length &&
+            used + tableHeight + rowHeights[rowEnd] <= height) {
+          tableHeight += rowHeights[rowEnd++];
         }
         put(
           ReaderBlockSlice(
@@ -1654,10 +2177,10 @@ Future<_ChapterPaginationResult?> _paginateChapter(
             text: text,
             startOffset: rowStart,
             endOffset: rowEnd,
-            tableRows: rows,
+            tableRows: tableRows.sublist(rowStart, rowEnd),
             continuation: rowStart > 0,
           ),
-          blockHeight,
+          tableHeight,
         );
         rowStart = rowEnd;
       }
@@ -1666,9 +2189,17 @@ Future<_ChapterPaginationResult?> _paginateChapter(
 
     if (block.kind == 'image') {
       final ratio = double.tryParse(block.attributes['aspectRatio'] ?? '');
+      final minimumWidth = double.tryParse(
+        block.attributes['minimumReadableWidth'] ?? '',
+      );
+      final imageWidth = minimumWidth != null && minimumWidth.isFinite
+          ? math.max(width, minimumWidth)
+          : width;
       put(
         ReaderBlockSlice(chapterId: chapter.id, block: block, text: text),
-        ratio != null && ratio.isFinite && ratio > 0 ? width / ratio + 12 : 430,
+        ratio != null && ratio.isFinite && ratio > 0
+            ? imageWidth / ratio + 12
+            : 430,
       );
       continue;
     }
@@ -1682,6 +2213,9 @@ Future<_ChapterPaginationResult?> _paginateChapter(
     if (text.trim().isEmpty) continue;
 
     final blockStyle = textStyleBuilder?.call(_styleForBlock(block));
+    final boldRanges = text == block.text
+        ? block.boldRanges
+        : const <DocumentBoldRange>[];
     var start = index == from?.block ? from!.offset : 0;
     final textEnd = index == until?.block
         ? math.min(until!.offset, text.length)
@@ -1691,44 +2225,65 @@ Future<_ChapterPaginationResult?> _paginateChapter(
       final continuation = start > 0;
       final overhead = _blockOverhead(block, continuation);
       final available = math.max(1.0, height - used - overhead).toDouble();
-      var count = await _fitTextPrefix(
+      final prefix = documentListPrefix(block, continuation);
+      final prefixWidth = prefix.isEmpty
+          ? 0.0
+          : TextPainter.computeWidth(
+              text: TextSpan(
+                text: prefix,
+                style: blockStyle ?? _styleForBlock(block),
+              ),
+              textDirection: TextDirection.ltr,
+              textScaler: textScaler,
+            );
+      final textWidth = math.max(1.0, width - prefixWidth);
+      var fit = await _fitTextPrefix(
         text.substring(start, textEnd),
         block,
-        width,
+        textWidth,
         available,
         textScaler,
         gate: gate,
-        continuation: continuation,
         style: blockStyle,
+        boldRanges: boldRanges,
+        textOffset: start,
       );
-      if (count <= 0) {
+      if (gate.cancelled) return null;
+      if (fit.count <= 0) {
         if (current.isNotEmpty) {
           flush();
           continue;
         }
-        count = await _fitTextPrefix(
+        fit = await _fitTextPrefix(
           text.substring(start, textEnd),
           block,
-          width,
+          textWidth,
           math.max(1.0, height - overhead).toDouble(),
           textScaler,
           gate: gate,
-          continuation: continuation,
           style: blockStyle,
+          boldRanges: boldRanges,
+          textOffset: start,
         );
-        if (count <= 0) count = 1;
+        if (gate.cancelled) return null;
         mayOverflow = true;
       }
+      final count = fit.count > 0
+          ? fit.count
+          : _afterSurrogatePair(text, start + 1) - start;
       final end = math.min(textEnd, start + count).toInt();
       final part = text.substring(start, end);
       final blockHeight =
-          _measureText(
-            _textForMeasure(block, part, continuation),
-            block,
-            width,
-            textScaler,
-            style: blockStyle,
-          ) +
+          (fit.height ??
+              _measureText(
+                part,
+                block,
+                textWidth,
+                textScaler,
+                style: blockStyle,
+                boldRanges: boldRanges,
+                textOffset: start,
+              )) +
           overhead;
       put(
         ReaderBlockSlice(
@@ -1794,7 +2349,7 @@ TextStyle _styleForBlock(XiaoqiDocumentBlock block) {
     case 'heading':
       return TextStyle(
         color: const Color(0xFF252525),
-        fontSize: block.level <= 1 ? 21 : 18,
+        fontSize: documentHeadingFontSize(block),
         height: 1.35,
         fontWeight: FontWeight.w700,
       );
@@ -1803,6 +2358,12 @@ TextStyle _styleForBlock(XiaoqiDocumentBlock block) {
         color: Color(0xFF343434),
         fontSize: 17,
         height: 1.6,
+      );
+    case 'caption':
+      return const TextStyle(
+        color: Color(0xFF636363),
+        fontSize: 14,
+        height: 1.45,
       );
     case 'quote':
       return const TextStyle(
@@ -1826,25 +2387,31 @@ TextStyle _styleForBlock(XiaoqiDocumentBlock block) {
   }
 }
 
-String _textForMeasure(
-  XiaoqiDocumentBlock block,
-  String text,
-  bool continuation,
-) => block.kind == 'list_item' && !continuation ? '• $text' : text;
-
 double _measureText(
   String text,
   XiaoqiDocumentBlock block,
   double width,
   TextScaler scaler, {
   TextStyle? style,
+  List<DocumentBoldRange> boldRanges = const [],
+  int textOffset = 0,
 }) {
   final painter = TextPainter(
-    text: TextSpan(text: text, style: style ?? _styleForBlock(block)),
+    text: documentTextSpan(
+      text,
+      style ?? _styleForBlock(block),
+      boldRanges,
+      textOffset,
+    ),
     textDirection: TextDirection.ltr,
     textScaler: scaler,
-  )..layout(maxWidth: width);
-  return painter.height;
+  );
+  try {
+    painter.layout(maxWidth: width);
+    return painter.height;
+  } finally {
+    painter.dispose();
+  }
 }
 
 double _blockOverhead(XiaoqiDocumentBlock block, bool continuation) {
@@ -1862,93 +2429,74 @@ double _blockOverhead(XiaoqiDocumentBlock block, bool continuation) {
   }
 }
 
-Future<int> _fitTextPrefix(
+Future<({int count, double? height})> _fitTextPrefix(
   String text,
   XiaoqiDocumentBlock block,
   double width,
   double maxHeight,
   TextScaler scaler, {
   required _PageYieldGate gate,
-  required bool continuation,
   required TextStyle? style,
+  required List<DocumentBoldRange> boldRanges,
+  required int textOffset,
 }) async {
-  if (text.isEmpty) return 0;
-  await gate.tick();
-  final full = _measureText(
-    _textForMeasure(block, text, continuation),
+  const none = (count: 0, height: null);
+  if (text.isEmpty) return none;
+  double measure(String part) => _measureText(
+    part,
     block,
     width,
     scaler,
     style: style,
+    boldRanges: boldRanges,
+    textOffset: textOffset,
   );
-  if (full <= maxHeight) return text.length;
+  await gate.tick();
+  if (gate.cancelled) return none;
+  final full = measure(text);
+  if (full <= maxHeight) return (count: text.length, height: full);
   var low = 1;
   var high = text.length;
   var best = 0;
+  double? bestHeight;
   while (low <= high) {
     await gate.tick();
+    if (gate.cancelled) return none;
     final middle = (low + high) ~/ 2;
-    final candidate = text.substring(0, middle);
-    final measured = _measureText(
-      _textForMeasure(block, candidate, continuation),
-      block,
-      width,
-      scaler,
-      style: style,
-    );
+    final end = _afterSurrogatePair(text, middle);
+    final measured = end == text.length
+        ? full
+        : measure(text.substring(0, end));
     if (measured <= maxHeight) {
-      best = middle;
-      low = middle + 1;
+      best = end;
+      bestHeight = measured;
+      low = end + 1;
     } else {
       high = middle - 1;
     }
   }
-  if (best <= 0) return 0;
-  while (best > 1 &&
-      best < text.length &&
-      _isLowSurrogate(text.codeUnitAt(best))) {
-    best--;
-  }
+  if (best <= 0) return none;
   if (block.kind == 'code') {
     final lineBreak = text.substring(0, best).lastIndexOf('\n');
-    if (lineBreak > 0) return lineBreak + 1;
+    if (lineBreak > 0) {
+      return (
+        count: lineBreak + 1,
+        height: lineBreak + 1 == best ? bestHeight : null,
+      );
+    }
   }
   final whitespace = text.substring(0, best).lastIndexOf(RegExp(r'\s'));
-  if (whitespace > best * .65) return whitespace + 1;
-  return best;
+  if (whitespace > best * .65 && whitespace + 1 < best) {
+    return (count: whitespace + 1, height: null);
+  }
+  return (count: best, height: bestHeight);
 }
 
 bool _isLowSurrogate(int codeUnit) => codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
 
-Future<double> _tableHeight(
-  List<List<String>> rows,
-  double width,
-  TextScaler scaler,
-  _PageYieldGate gate,
-) async {
-  var height = 20.0;
-  for (final row in rows) {
-    var rowHeight = 42.0;
-    for (final cell in row) {
-      await gate.tick();
-      rowHeight = math
-          .max(
-            rowHeight,
-            _measureText(
-                  cell,
-                  const XiaoqiDocumentBlock(
-                    id: 'reader:table',
-                    kind: 'table',
-                    text: '',
-                  ),
-                  width / math.max(1, row.length),
-                  scaler,
-                ) +
-                20,
-          )
-          .toDouble();
-    }
-    height += rowHeight;
-  }
-  return height + 14;
-}
+int _afterSurrogatePair(String text, int offset) =>
+    offset > 0 &&
+        offset < text.length &&
+        _isLowSurrogate(text.codeUnitAt(offset))
+    ? offset + 1
+    : offset;

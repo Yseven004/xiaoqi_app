@@ -77,12 +77,12 @@ void main() {
         expect(tester.getRect(card), menu);
         await tester.tap(online);
         await tester.pumpAndSettle();
-        expect(find.text('AI 对话'), findsOneWidget);
-        expect(find.text('直接搜索'), findsOneWidget);
+        expect(find.text('想找哪本书？'), findsOneWidget);
+        expect(find.byTooltip('发送'), findsOneWidget);
         expect(pointer, findsNothing);
         await tester.binding.handlePopRoute();
         await tester.pumpAndSettle();
-        expect(find.text('AI 对话'), findsNothing);
+        expect(find.text('想找哪本书？'), findsNothing);
         expect(tester.takeException(), isNull);
         return;
       }

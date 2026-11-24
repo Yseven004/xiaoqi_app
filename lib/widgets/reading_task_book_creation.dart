@@ -17,6 +17,7 @@ import '../services/pdf_catalog_service.dart';
 import '../pages/book_isbn_scanner_page.dart';
 import 'book_metadata_form_sheet.dart';
 import 'book_pdf_import_sheet.dart';
+import 'book_source_import.dart';
 import 'app_toast.dart';
 import 'online_book_search_dialog.dart';
 
@@ -37,7 +38,11 @@ Future<BookLibraryItem?> createBookForReadingTask(
     ))?.source.bookId;
   } else {
     if (!context.mounted) return null;
-    bookId = await _importBook(context, library);
+    bookId = await _importBook(
+      context,
+      library,
+      fromWechat: action == BookAddAction.importFromWechat,
+    );
   }
   if (!context.mounted || bookId == null) return null;
   return library.getBookLibraryItem(bookId);
@@ -81,9 +86,12 @@ Future<int?> _scanAndSaveBook(
 
 Future<int?> _importBook(
   BuildContext context,
-  BookLibraryService library,
-) async {
-  PlatformFile? file = await _pickBookSource(context);
+  BookLibraryService library, {
+  required bool fromWechat,
+}) async {
+  Future<PlatformFile?> pick() =>
+      fromWechat ? pickWechatBookSource(context) : _pickBookSource(context);
+  PlatformFile? file = await pick();
   while (context.mounted && file != null) {
     final books = await library.listBooks();
     if (!context.mounted) return null;
@@ -92,26 +100,33 @@ Future<int?> _importBook(
       file: file,
       books: books,
     );
-    if (!context.mounted || selection == null) return null;
+    if (selection == null) return null;
+    if (!context.mounted) {
+      await selection.metadataPreview?.dispose();
+      return null;
+    }
     if (selection.shouldReselect) {
-      file = await _pickBookSource(context);
+      file = await pick();
       continue;
     }
 
     try {
       final sourcePath = await _ensurePickedFilePath(file);
-      var bookId = selection.bookId;
-      if (bookId == null && selection.newBook != null) {
-        bookId = await library.saveBook(selection.newBook!);
-      }
-      if (bookId == null) return null;
-
-      final outcome = await library.importBookSourceForBook(
-        bookId: bookId,
-        sourcePath: sourcePath,
-        displayName: file.name,
-        format: inferBookSourceFormat(file.name),
-      );
+      final format = inferBookSourceFormat(file.name);
+      final newBook = selection.newBook;
+      final outcome = newBook != null
+          ? await library.importLocalBookWithSource(
+              book: newBook,
+              sourcePath: sourcePath,
+              displayName: file.name,
+              format: format,
+            )
+          : await library.importBookSourceForBook(
+              bookId: selection.bookId!,
+              sourcePath: sourcePath,
+              displayName: file.name,
+              format: format,
+            );
       if (outcome.source.format == 'pdf' &&
           outcome.source.catalogStatus != 'processing' &&
           outcome.source.catalogStatus != 'confirmed' &&
@@ -124,12 +139,14 @@ Future<int?> _importBook(
       if (outcome.reusedExisting && context.mounted) {
         AppToast.show(context, '这份资料已经在本书资料中，不会重复添加');
       }
-      return bookId;
+      return outcome.source.bookId;
     } catch (error) {
       if (context.mounted) {
-        AppToast.show(context, '资料导入失败，书籍资料已保留：$error');
+        AppToast.show(context, '资料导入失败：$error');
       }
       return null;
+    } finally {
+      await selection.metadataPreview?.dispose();
     }
   }
   return null;

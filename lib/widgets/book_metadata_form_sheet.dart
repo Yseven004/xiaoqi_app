@@ -86,7 +86,7 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet>
     );
     _author = TextEditingController(text: widget.initial.authorLabel);
     _publisher = TextEditingController(text: widget.initial.publisher);
-    _edition = TextEditingController(text: widget.initial.edition);
+    _edition = TextEditingController(text: widget.initial.editionLabel);
     _titleFocus = FocusNode();
     _authorFocus = FocusNode();
     _publisherFocus = FocusNode();
@@ -140,18 +140,24 @@ class _BookMetadataFormSheetState extends State<BookMetadataFormSheet>
       setState(() => _categoryError = '一本书最多选择 3 个分类');
       return;
     }
-    final authors = _author.text
-        .split(RegExp(r'[、,，/]'))
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty)
-        .toList(growable: false);
+    final author = _author.text.trim();
+    final authors = author == widget.initial.authorLabel
+        ? widget.initial.authors
+        : author
+              .split(RegExp(r'[、,，/]'))
+              .map((item) => item.trim())
+              .where((item) => item.isNotEmpty)
+              .toList(growable: false);
+    final edition = _edition.text.trim();
+    final editionChanged = edition != widget.initial.editionLabel;
     Navigator.of(context).pop(
       BookMetadataFormResult(
         book: widget.initial.copyWith(
           title: title,
           authors: authors,
           publisher: _publisher.text.trim(),
-          edition: _edition.text.trim(),
+          edition: editionChanged ? edition : widget.initial.edition,
+          publishedDate: editionChanged ? '' : widget.initial.publishedDate,
           coverUrl: _cover.coverUrl,
           coverPath: _cover.coverPath,
           coverType: _cover.coverType,

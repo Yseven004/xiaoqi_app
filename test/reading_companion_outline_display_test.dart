@@ -15,6 +15,8 @@ import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/services/reader_pagination_preferences.dart';
 import 'package:xiaoqi_app/widgets/reading_companion.dart';
 
+import 'companion_pdf_preparation_support.dart';
+
 const _paperCapture = ValueKey('companion-pdf-paper-capture');
 
 void main() {
@@ -56,7 +58,8 @@ void main() {
 
       final heading = find.bySemanticsLabel('收起目录');
       final top = tester.getTopLeft(heading);
-      final title = find.text('测试目录');
+      final title = find.text('outline.pdf');
+      expect(find.text('测试目录'), findsNothing);
       final titlePosition = tester.getTopLeft(title);
       final list = find.ancestor(
         of: secondChapter,
@@ -133,10 +136,15 @@ void main() {
       await tester.pump();
       final draft = tester.widget<Slider>(slider).value;
       expect(draft, greaterThan(.65));
-      expect(brightnessChanges, [.8, null]);
+      expect(
+        brightnessChanges.last,
+        draft,
+        reason: 'Window brightness changes before the finger lifts',
+      );
+      final updatesBeforeRelease = brightnessChanges.length;
       await gesture.up();
       await tester.pumpAndSettle();
-      expect(brightnessChanges, [.8, null, draft]);
+      expect(brightnessChanges.length, updatesBeforeRelease);
 
       await tester.tapAt(markerCenter);
       await tester.pumpAndSettle();
@@ -222,12 +230,23 @@ Future<void> _openReader(WidgetTester tester, BookSourceRecord source) async {
     await tester.pump(const Duration(milliseconds: 20));
   }
   expect(ready(), isTrue);
+  // Native PDF work needs wall time. A spinning toolbar keeps scheduling
+  // frames, so pumpAndSettle alone can exhaust its fake clock first.
+  final loading = find.byType(CircularProgressIndicator);
+  for (var frame = 0; frame < 600 && loading.evaluate().isNotEmpty; frame++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 15)),
+    );
+    await tester.pump(const Duration(milliseconds: 30));
+  }
+  expect(loading, findsNothing);
 }
 
 Future<void> _closeReader(WidgetTester tester) async {
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump(const Duration(seconds: 6));
   await tester.pumpAndSettle();
+  await finishCompanionPdfPreparation(tester);
   for (var index = 0; index < 5; index++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),

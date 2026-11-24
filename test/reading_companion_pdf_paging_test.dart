@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'companion_pdf_preparation_support.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -8,6 +10,7 @@ import 'package:xiaoqi_app/models/book_library_item.dart';
 import 'package:xiaoqi_app/models/book_source.dart';
 import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/widgets/reading_companion.dart';
+import 'package:xiaoqi_app/widgets/reflow_document_pager.dart';
 
 void main() {
   for (final vertical in [false, true]) {
@@ -40,7 +43,7 @@ void main() {
         });
         final file = File('${directory.path}/pages.pdf');
         await tester.runAsync(
-          () => file.writeAsString(_fourPagePdf(mixed: vertical)),
+          () => file.writeAsString(_pagingPdf(mixed: vertical)),
         );
         final reply = ValueNotifier('');
         addTearDown(reply.dispose);
@@ -48,7 +51,7 @@ void main() {
           MaterialApp(
             home: ReadingCompanion(
               bookId: 1,
-              library: _PagingLibrary(file.path),
+              library: _PagingLibrary(file.path, hasAlternate: vertical),
               messages: const [],
               streamingReply: reply,
               composerBuilder: (history) => history,
@@ -58,6 +61,13 @@ void main() {
         );
 
         final viewer = find.byType(PdfViewer);
+        final ebook = find.text('电子书');
+        final ebookButton = find
+            .ancestor(of: ebook, matching: find.byType(InkWell))
+            .first;
+        bool ebookReady() =>
+            ebook.evaluate().isNotEmpty &&
+            tester.widget<InkWell>(ebookButton).onTap != null;
         PdfViewerController? readyController() {
           if (viewer.evaluate().isEmpty) return null;
           final controller = tester.widget<PdfViewer>(viewer).controller!;
@@ -68,13 +78,38 @@ void main() {
               : null;
         }
 
-        for (var frame = 0; frame < 120 && readyController() == null; frame++) {
+        for (
+          var frame = 0;
+          frame < 450 && (readyController() == null || !ebookReady());
+          frame++
+        ) {
           await tester.runAsync(
             () => Future<void>.delayed(const Duration(milliseconds: 10)),
           );
           await tester.pump(const Duration(milliseconds: 20));
         }
         final controller = readyController()!;
+        expect(ebookReady(), isTrue);
+        final segment = tester.getRect(ebookButton);
+        Future<void> expectStableFrames() async {
+          for (var frame = 0; frame < 48; frame++) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              ebookReady(),
+              isTrue,
+              reason: 'The prepared format changed on frame $frame',
+            );
+            expect(tester.getRect(ebookButton), segment);
+            expect(
+              find.descendant(
+                of: ebookButton,
+                matching: find.byType(CircularProgressIndicator),
+              ),
+              findsNothing,
+            );
+          }
+        }
+
         final viewport = tester.getRect(viewer);
         void expectSettledPage(int number) {
           expect(controller.pageNumber, number);
@@ -107,22 +142,73 @@ void main() {
           swipe(vertical ? -420 : -570),
           3000,
         );
+        final pdf = find.text('PDF');
+        // Request the newly paged location, then keep the original format
+        // before a frame can install that location in the hidden reader.
+        expect(ebook.hitTestable(), findsOneWidget);
+        expect(pdf.hitTestable(), findsOneWidget);
+        await tester.tap(ebook);
+        await tester.tap(pdf);
+        await expectStableFrames();
         await tester.pumpAndSettle();
         expectSettledPage(2);
+        expect(find.text('阅读资料'), findsNothing);
+        expect(find.byType(ReflowDocumentPager), findsNothing);
 
         await tester.timedDragFrom(
           viewport.center,
           swipe(245),
           const Duration(milliseconds: 500),
         );
+        await expectStableFrames();
         await tester.pumpAndSettle();
         expectSettledPage(1);
+
+        // Page 11 is outside the original vertical window. Both formats have
+        // already been prepared; only the hidden reader's location changes.
+        await tester.tap(find.text('进度'));
+        await tester.pump();
+        final slider = tester.widget<Slider>(find.byType(Slider));
+        slider.onChanged!(11);
+        slider.onChangeEnd!(11);
+        await expectStableFrames();
+        expectSettledPage(11);
+        await tester.tap(ebook);
+        await tester.pumpAndSettle();
+        expect(find.byType(PdfViewer), findsNothing);
+        final installed = tester
+            .widget<ReflowDocumentPager>(find.byType(ReflowDocumentPager))
+            .initialAnchor;
+        expect(installed?.blockId, startsWith('pdf-page-11-'));
+
+        // The old native PDF raster may still complete after this cancellation.
+        await tester.tap(pdf);
+        await tester.tap(ebook);
+        for (var frame = 0; frame < 30; frame++) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(viewer, findsNothing);
+          expect(find.text('阅读资料'), findsNothing);
+        }
+        await tester.tap(ebook);
+        await tester.pumpAndSettle();
+        if (vertical) {
+          expect(find.text('阅读资料'), findsOneWidget);
+          await tester.binding.handlePopRoute();
+          await tester.pumpAndSettle();
+        } else {
+          expect(find.text('阅读资料'), findsNothing);
+          expect(viewer, findsNothing);
+        }
 
         await tester.pumpWidget(const SizedBox.shrink());
         // Page detection may still be waiting for an early progressive load.
         // Advance its timeout in the test clock before releasing the PDF file.
         await tester.pump(const Duration(seconds: 7));
         await tester.pumpAndSettle();
+        await finishCompanionPdfPreparation(tester);
         for (var frame = 0; frame < 5; frame++) {
           await tester.runAsync(
             () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -135,17 +221,19 @@ void main() {
   }
 }
 
-String _fourPagePdf({required bool mixed}) {
+String _pagingPdf({required bool mixed}) {
+  const pages = 12;
+  const firstPage = 3;
+  const font = firstPage + pages;
+  const stream = 'BT /F1 16 Tf 18 110 Td (Prepared PDF page.) Tj ET\n';
   final objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Count 4 /Kids [3 0 R 4 0 R 5 0 R 6 0 R] >>',
-    for (final size in [
-      '400 600',
-      mixed ? '620 220' : '400 600',
-      '400 600',
-      '400 600',
-    ])
-      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 $size] >>',
+    '<< /Type /Pages /Count $pages /Kids [${List.generate(pages, (i) => "${i + firstPage} 0 R").join(" ")}] >>',
+    for (var i = 0; i < pages; i++)
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${mixed && i == 1 ? "620 220" : "400 600"}] '
+          '/Resources << /Font << /F1 $font 0 R >> >> /Contents ${font + 1} 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    '<< /Length ${stream.length} >>\nstream\n${stream}endstream',
   ];
   final output = StringBuffer('%PDF-1.4\n');
   final offsets = <int>[];
@@ -166,27 +254,29 @@ String _fourPagePdf({required bool mixed}) {
 }
 
 class _PagingLibrary extends BookLibraryService {
-  _PagingLibrary(this.path);
+  _PagingLibrary(this.path, {required this.hasAlternate});
 
   final String path;
+  final bool hasAlternate;
 
   @override
   Future<BookLibraryItem?> getBookLibraryItem(int bookId) async => null;
 
   @override
   Future<List<BookSourceRecord>> listSourcesForBook(int bookId) async => [
-    BookSourceRecord(
-      id: 1,
-      bookId: bookId,
-      kind: 'book_file',
-      displayName: 'pages.pdf',
-      filePath: path,
-      fileSize: 0,
-      contentHash: '',
-      status: 'ready',
-      isPrimary: true,
-      createdAt: '',
-      updatedAt: '',
-    ),
+    for (final id in [1, if (hasAlternate) 2])
+      BookSourceRecord(
+        id: id,
+        bookId: bookId,
+        kind: 'book_file',
+        displayName: 'pages-$id.pdf',
+        filePath: path,
+        fileSize: 0,
+        contentHash: '',
+        status: 'ready',
+        isPrimary: id == 1,
+        createdAt: '',
+        updatedAt: '',
+      ),
   ];
 }
