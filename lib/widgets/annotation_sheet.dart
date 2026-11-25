@@ -171,11 +171,13 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
                           child: Material(
                             color: Colors.white,
                             clipBehavior: Clip.antiAlias,
-                            shape: const RoundedRectangleBorder(
+                            shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.vertical(
-                                top: Radius.circular(16),
+                                top: Radius.circular(
+                                  widget.matchReferenceProportions ? 12 : 16,
+                                ),
                               ),
-                              side: BorderSide(color: Color(0xFFE6E7E9)),
+                              side: const BorderSide(color: Color(0xFFE6E7E9)),
                             ),
                             child: Builder(builder: widget.builder),
                           ),
