@@ -8,6 +8,9 @@ Future<T?> showAnnotationSheet<T>(
   BuildContext context, {
   required WidgetBuilder builder,
   bool editing = false,
+  Rect? Function()? resolveAnchor,
+  ScrollPosition? scrollPosition,
+  ValueChanged<double>? onViewportChanged,
 }) {
   FocusManager.instance.primaryFocus?.unfocus();
   return showModalBottomSheet<T>(
@@ -19,34 +22,140 @@ Future<T?> showAnnotationSheet<T>(
     useSafeArea: true,
     backgroundColor: Colors.transparent,
     barrierColor: const Color(0x38000000),
-    constraints: const BoxConstraints(maxWidth: 720),
-    builder: (context) {
-      final media = MediaQuery.of(context);
-      final keyboard = media.viewInsets.bottom;
-      final maxHeight = math.max(
-        0.0,
-        media.size.height - media.padding.top - keyboard,
+    constraints: BoxConstraints(
+      maxWidth: math.min(MediaQuery.sizeOf(context).width, 800),
+    ),
+    builder: (context) => _AnnotationSheetSurface(
+      resolveAnchor: resolveAnchor,
+      scrollPosition: scrollPosition,
+      onViewportChanged: onViewportChanged,
+      builder: builder,
+    ),
+  ).whenComplete(() => onViewportChanged?.call(double.infinity));
+}
+
+/// The confirmed component drawings use a 390-wide composition. Keep their
+/// proportions on the portrait tablet instead of shrinking the controls inside
+/// a desktop-width sheet. The reader and Android IME retain their own scale.
+double annotationVisualScaleOf(BuildContext context) =>
+    context
+        .dependOnInheritedWidgetOfExactType<_AnnotationVisualScale>()
+        ?.scale ??
+    1;
+
+class _AnnotationVisualScale extends InheritedWidget {
+  const _AnnotationVisualScale({required this.scale, required super.child});
+  final double scale;
+  @override
+  bool updateShouldNotify(_AnnotationVisualScale oldWidget) =>
+      scale != oldWidget.scale;
+}
+
+class _AnnotationSheetSurface extends StatefulWidget {
+  const _AnnotationSheetSurface({
+    required this.builder,
+    this.resolveAnchor,
+    this.scrollPosition,
+    this.onViewportChanged,
+  });
+  final WidgetBuilder builder;
+  final Rect? Function()? resolveAnchor;
+  final ScrollPosition? scrollPosition;
+  final ValueChanged<double>? onViewportChanged;
+  @override
+  State<_AnnotationSheetSurface> createState() =>
+      _AnnotationSheetSurfaceState();
+}
+
+class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
+  final _surfaceKey = GlobalKey();
+  bool _scheduled = false;
+  double? _lastTop;
+
+  void _reportViewport() {
+    if (_scheduled) return;
+    _scheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scheduled = false;
+      if (!mounted) return;
+      final box = _surfaceKey.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.hasSize) return;
+      final top = box.localToGlobal(Offset.zero).dy;
+      if (_lastTop != top) {
+        _lastTop = top;
+        widget.onViewportChanged?.call(top);
+      }
+      final anchor = widget.resolveAnchor?.call();
+      final scroll = widget.scrollPosition;
+      if (anchor == null || scroll == null || !scroll.hasContentDimensions) {
+        return;
+      }
+      final overlap = anchor.bottom + 12 - top;
+      if (overlap <= 1) return;
+      final delta = scroll.axisDirection == AxisDirection.up
+          ? -overlap
+          : overlap;
+      final target = (scroll.pixels + delta).clamp(
+        scroll.minScrollExtent,
+        scroll.maxScrollExtent,
       );
-      return Padding(
-        padding: EdgeInsets.only(bottom: keyboard),
-        child: Material(
-          color: Colors.white,
-          clipBehavior: Clip.antiAlias,
-          shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-            side: BorderSide(color: Color(0xFFE6E7E9)),
-          ),
-          child: SafeArea(
-            top: false,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxHeight: maxHeight),
-              child: builder(context),
-            ),
-          ),
+      if ((target - scroll.pixels).abs() > 1) scroll.jumpTo(target);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final keyboard = media.viewInsets.bottom;
+    final availableHeight = math.max(
+      0.0,
+      media.size.height - media.padding.top - keyboard - media.padding.bottom,
+    );
+    _reportViewport();
+    return Padding(
+      padding: EdgeInsets.only(bottom: keyboard),
+      child: SafeArea(
+        top: false,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth;
+            final designWidth = math.min(width, 390.0);
+            final scale = width / designWidth;
+            return SizedBox(
+              key: _surfaceKey,
+              width: width,
+              child: FittedBox(
+                fit: BoxFit.contain,
+                alignment: Alignment.bottomCenter,
+                child: SizedBox(
+                  width: designWidth,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: availableHeight / scale,
+                    ),
+                    child: _AnnotationVisualScale(
+                      scale: scale,
+                      child: Material(
+                        color: Colors.white,
+                        clipBehavior: Clip.antiAlias,
+                        shape: const RoundedRectangleBorder(
+                          borderRadius: BorderRadius.vertical(
+                            top: Radius.circular(16),
+                          ),
+                          side: BorderSide(color: Color(0xFFE6E7E9)),
+                        ),
+                        child: Builder(builder: widget.builder),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
         ),
-      );
-    },
-  );
+      ),
+    );
+  }
 }
 
 class AnnotationQuoteLine extends StatelessWidget {
@@ -228,9 +337,10 @@ class AnnotationThumbnails extends StatelessWidget {
 
 /// Releases an empty editor when Android hides the keyboard via system Back.
 class AnnotationTextField extends StatefulWidget {
-  const AnnotationTextField({required this.controller, super.key});
+  const AnnotationTextField({required this.controller, this.style, super.key});
 
   final TextEditingController controller;
+  final TextStyle? style;
 
   @override
   State<AnnotationTextField> createState() => _AnnotationTextFieldState();
@@ -273,13 +383,16 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
     maxLines: 5,
     maxLength: 4000,
     onTapOutside: (_) => _focus.unfocus(),
-    style: const TextStyle(
-      color: Color(0xFF202124),
-      fontSize: 15,
-      height: 1.45,
-    ),
+    style:
+        widget.style ??
+        const TextStyle(color: Color(0xFF202124), fontSize: 16, height: 1.45),
     decoration: const InputDecoration(
       border: InputBorder.none,
+      enabledBorder: InputBorder.none,
+      focusedBorder: InputBorder.none,
+      disabledBorder: InputBorder.none,
+      errorBorder: InputBorder.none,
+      focusedErrorBorder: InputBorder.none,
       counterText: '',
       hintText: '写下注释…',
       hintStyle: TextStyle(color: Color(0xFF60646A)),
