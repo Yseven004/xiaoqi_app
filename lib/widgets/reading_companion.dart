@@ -567,6 +567,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
         scope: _annotationScope!,
         selection: selection,
         initial: initial,
+        onDeleted: _loadBookAnnotations,
         onViewportChanged: document?._annotationViewportChanged,
       );
       if (result != null && mounted) await _loadBookAnnotations();
@@ -621,63 +622,83 @@ class ReadingCompanionState extends State<ReadingCompanion> {
         .firstOrNull;
     if (current == null) return;
     final document = _documentKey?.currentState;
-    final restoreOutline = document?._activePanel == _ReaderPanel.outline;
-    final outline = document?._outlinePanel;
-    final outlineExtent = document?._outlineExtent ?? 0;
-    final generation = CapabilityCloudSync.instance.emailSessionRevision.value;
-    if (restoreOutline) document?._closeReaderPanel();
-    try {
-      await viewCompanionAnnotation(
-        context,
-        initial: current,
-        onEdit: (current) =>
-            _editAnnotation(current.selection, initial: current),
-      );
-    } finally {
-      if (mounted &&
-          document?.mounted == true &&
-          restoreOutline &&
-          generation ==
-              CapabilityCloudSync.instance.emailSessionRevision.value) {
-        document!._openReaderPanel(
-          _ReaderPanel.outline,
-          outline: outline,
-          outlineExtent: outlineExtent,
-        );
-      }
+    if (document?._activePanel == _ReaderPanel.annotations) {
+      document?._closeReaderPanel();
     }
+    await _editAnnotation(current.selection, initial: current);
   }
 
   Future<void> _deleteAnnotation(CompanionAnnotation entry) async {
     if (!await _canOpenAnnotations() || !mounted) return;
     final scope = _annotationScope!;
-    final action = await showMenu<String>(
-      context: context,
-      position: RelativeRect.fromSize(
-        Rect.fromCenter(
-          center: MediaQuery.sizeOf(context).center(Offset.zero),
-          width: 1,
-          height: 1,
-        ),
-        MediaQuery.sizeOf(context),
-      ),
-      items: const [PopupMenuItem(value: 'delete', child: Text('删除注释'))],
-    );
-    if (action != 'delete' || !mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('删除这条注释？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
+      barrierColor: const Color(0x33000000),
+      builder: (context) => Dialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: Color(0xFFE6E7E9)),
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 340),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '删除注释',
+                  style: TextStyle(
+                    color: Color(0xFF232427),
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '删除后无法恢复，确定删除这条注释吗？',
+                  style: TextStyle(
+                    color: Color(0xFF5D626A),
+                    fontSize: 14,
+                    height: 1.45,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      style: TextButton.styleFrom(
+                        foregroundColor: const Color(0xFF5D626A),
+                        minimumSize: const Size(64, 40),
+                      ),
+                      child: const Text('取消'),
+                    ),
+                    FilledButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF232427),
+                        foregroundColor: Colors.white,
+                        minimumSize: const Size(64, 40),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(9),
+                        ),
+                      ),
+                      child: const Text('删除'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('删除'),
-          ),
-        ],
+        ),
       ),
     );
     if (confirmed != true || !mounted) return;
@@ -689,71 +710,93 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     }
   }
 
-  Widget _annotationList(BuildContext context, {VoidCallback? onReturn}) =>
-      Column(
-        children: [
-          ValueListenableBuilder<String?>(
-            valueListenable: CompanionAnnotationSync.instance.syncFailure,
-            builder: (context, error, _) => error == null
-                ? const SizedBox.shrink()
-                : TextButton(
-                    onPressed: () =>
-                        unawaited(CompanionAnnotationSync.instance.syncNow()),
-                    child: Text(error),
-                  ),
-          ),
-          Expanded(child: _annotationItems(context, onReturn: onReturn)),
-        ],
-      );
-
-  Widget _annotationItems(BuildContext context, {VoidCallback? onReturn}) =>
-      ListView.builder(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        itemCount: _bookAnnotations.isEmpty ? 1 : _bookAnnotations.length,
-        itemBuilder: (context, index) {
-          if (_bookAnnotations.isEmpty) {
-            return const ListTile(title: Text('暂无本书注释'));
-          }
-          final entry = _bookAnnotations[index];
-          Future<void> remove() async {
-            await _deleteAnnotation(entry);
-            onReturn?.call();
-          }
-
-          return Semantics(
-            customSemanticsActions: {
-              const CustomSemanticsAction(label: '删除注释'): () =>
-                  unawaited(remove()),
-            },
-            child: ListTile(
-              onTap: () async {
-                await _openAnnotation(entry);
-                onReturn?.call();
-              },
-              onLongPress: () => unawaited(remove()),
-              title: Text(
-                entry.text.isNotEmpty
-                    ? entry.text
-                    : entry.audio.isNotEmpty
-                    ? '录音'
-                    : '图片',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+  Widget _annotationList(
+    BuildContext context, {
+    VoidCallback? onReturn,
+    ValueChanged<CompanionAnnotation>? onSelect,
+  }) => Column(
+    children: [
+      ValueListenableBuilder<String?>(
+        valueListenable: CompanionAnnotationSync.instance.syncFailure,
+        builder: (context, error, _) => error == null
+            ? const SizedBox.shrink()
+            : TextButton(
+                onPressed: () =>
+                    unawaited(CompanionAnnotationSync.instance.syncNow()),
+                child: Text(error),
               ),
-              subtitle: Text(
-                entry.selection.quote.replaceAll(RegExp(r'\s+'), ' '),
-                maxLines: 1,
-                overflow: TextOverflow.clip,
-              ),
-            ),
-          );
+      ),
+      Expanded(
+        child: _annotationItems(
+          context,
+          onReturn: onReturn,
+          onSelect: onSelect,
+        ),
+      ),
+    ],
+  );
+
+  Widget _annotationItems(
+    BuildContext context, {
+    VoidCallback? onReturn,
+    ValueChanged<CompanionAnnotation>? onSelect,
+  }) => ListView.separated(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    itemCount: _bookAnnotations.isEmpty ? 1 : _bookAnnotations.length,
+    separatorBuilder: (context, _) =>
+        Divider(height: 1, color: Theme.of(context).dividerColor),
+    itemBuilder: (context, index) {
+      if (_bookAnnotations.isEmpty) {
+        return const ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text('暂无注释'),
+        );
+      }
+      final entry = _bookAnnotations[index];
+      Future<void> remove() async {
+        await _deleteAnnotation(entry);
+        onReturn?.call();
+      }
+
+      return Semantics(
+        customSemanticsActions: {
+          const CustomSemanticsAction(label: '删除注释'): () => unawaited(remove()),
         },
+        child: ListTile(
+          contentPadding: EdgeInsets.zero,
+          onTap: onSelect == null
+              ? () => unawaited(_openAnnotation(entry))
+              : () => onSelect(entry),
+          onLongPress: () => unawaited(remove()),
+          title: Text(
+            entry.text.isNotEmpty
+                ? entry.text
+                : entry.audio.isNotEmpty
+                ? '录音'
+                : '图片',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: Text(
+            entry.selection.quote.replaceAll(RegExp(r'\s+'), ' '),
+            maxLines: 1,
+            overflow: TextOverflow.clip,
+          ),
+          trailing: switch (entry.selection.anchor) {
+            PdfReaderAnchor(:final pageNumber) when pageNumber > 0 => Text(
+              '第$pageNumber页',
+            ),
+            _ => null,
+          },
+        ),
       );
+    },
+  );
 
   Future<void> _openAnnotationList() async {
     if (!await _canOpenAnnotations() || !mounted) return;
     final revision = CapabilityCloudSync.instance.emailSessionRevision.value;
-    await showAnnotationSheet<void>(
+    final entry = await showAnnotationSheet<CompanionAnnotation>(
       context,
       builder: (context) => guardPrivateAnnotationContent(
         revision,
@@ -765,16 +808,20 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                 const Padding(
                   padding: EdgeInsets.all(14),
                   child: Text(
-                    '本书注释',
+                    '注释',
                     style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
                 Expanded(
-                  child: _annotationList(
-                    context,
-                    onReturn: () {
-                      if (context.mounted) update(() {});
-                    },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: _annotationList(
+                      context,
+                      onSelect: (entry) => Navigator.pop(context, entry),
+                      onReturn: () {
+                        if (context.mounted) update(() {});
+                      },
+                    ),
                   ),
                 ),
               ],
@@ -783,6 +830,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
         ),
       ),
     );
+    if (entry != null && mounted) await _openAnnotation(entry);
   }
 
   Widget _bookFallback(BuildContext context, Widget content) {
@@ -838,7 +886,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                       onAction:
                           chooseBook ??
                           (widget.onOpenLibrary == null ? null : _openLibrary),
-                      secondaryAction: _bookAnnotations.isEmpty ? null : '本书注释',
+                      secondaryAction: _bookAnnotations.isEmpty ? null : '注释',
                       onSecondaryAction: _bookAnnotations.isEmpty
                           ? null
                           : () => unawaited(_openAnnotationList()),
@@ -1089,7 +1137,16 @@ class _CompanionDocument extends StatefulWidget {
 bool _isCompanionPdf(BookSourceRecord source) =>
     normalizeBookSourceFormat(source.format) == 'pdf';
 
-enum _ReaderPanel { outline, progress, display }
+enum _ReaderPanel {
+  outline('目录'),
+  annotations('注释'),
+  progress('阅读进度'),
+  display('显示');
+
+  const _ReaderPanel(this.title);
+
+  final String title;
+}
 
 class _CompanionDocumentState extends State<_CompanionDocument> {
   final _annotationViewportKey = GlobalKey();
@@ -1300,6 +1357,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   PdfReaderAnchor? _pdfReadingAnchor;
   XiaoqiDocument? _convertedDocument;
   FlowReaderAnchor? _convertedEntry;
+  bool _restoringEbook = false;
   bool _requestedEbook = false;
   bool _ebookSwitchPending = false;
   int? _requestedPdfPage;
@@ -1313,9 +1371,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   int _pdfPageCount = 0;
   int? _pageBeforeJump;
   _ReaderPanel? _activePanel;
-  double _outlineExtent = 0;
-  bool _outlineShowsAnnotations = false;
-  bool _outlineDragging = false;
+  double _listPanelExtent = 0;
+  bool _listPanelDragging = false;
   LocalHistoryEntry? _panelHistory;
   WidgetBuilder? _outlinePanel;
   Future<List<PdfCatalogEntry>>? _pdfBookmarkOutline;
@@ -1496,7 +1553,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   bool get _isPdfDocument => _isCompanionPdf(_source) && _convertedPage == null;
   bool get _isSelectingEbook =>
-      !_isCompanionPdf(_source) || _convertedPage != null;
+      !_isCompanionPdf(_source) || _restoringEbook || _convertedPage != null;
   bool get _canRetryEbook =>
       _isPdfDocument && _ebookError != null && !_preparingBook;
   bool get _hasPendingFormatSwitch =>
@@ -1590,14 +1647,37 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         _preparingBook = false;
         _pdfEbookEntryPending = true;
       });
-      _schedulePdfPageWork();
+      if (_restoringEbook) {
+        await _openConvertedPage(
+          _pdfReadingAnchor?.pageNumber ?? _pdfPage,
+          fromPdf: true,
+        );
+      } else {
+        _schedulePdfPageWork();
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _preparingBook = false;
+        _restoringEbook = false;
         _ebookError = error is FormatException ? error.message : '电子书准备失败，请重试';
       });
     }
+  }
+
+  void _rememberPdfView({required bool ebook}) {
+    final book = _preparedBook;
+    if (ebook && book != null) {
+      _readyAnnounced = true;
+      _pdfReflow.retainOpenedEbook(book);
+    }
+    unawaited(
+      _preferences.saveCompanionEbook(
+        bookId: _source.bookId,
+        sourceId: _source.id,
+        ebook: ebook,
+      ),
+    );
   }
 
   void _schedulePdfPageWork({bool probeText = false}) {
@@ -1634,6 +1714,16 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       return;
     }
     if (pdf) {
+      if (_restoringEbook) {
+        setState(() {
+          _restoringEbook = false;
+          _requestedEbook = false;
+          _ebookSwitchPending = false;
+        });
+        _rememberPdfView(ebook: false);
+        _schedulePdfPageWork(probeText: true);
+        return;
+      }
       unawaited(_returnToPdf());
     } else if (_canRetryEbook) {
       unawaited(_prepareBook());
@@ -1648,6 +1738,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }
 
   void _activateFormatButton(bool pdf) {
+    if (_restoringEbook && !pdf) return;
     if (pdf == _isSelectingEbook) {
       _switchReaderFormat(pdf);
       return;
@@ -1732,7 +1823,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }) async {
     if (_preparedBook?.pages.containsKey(number) != true || _inkEditing) return;
     final page = _preparedBook!.pages[number]!;
-    FocusManager.instance.primaryFocus?.unfocus();
+    final wasPdf = _convertedPage == null;
+    if (!_restoringEbook) FocusManager.instance.primaryFocus?.unfocus();
     if (_pdf.isReady && _pdf.textSelectionDelegate.hasSelectedText) {
       unawaited(_pdf.textSelectionDelegate.clearTextSelection());
     }
@@ -1748,10 +1840,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       _requestedEbook = true;
       _ebookSwitchPending =
           !_ebookLayoutReady || _positionedEbookEntry != _convertedEntry;
-      if (!fromPdf || !_ebookSwitchPending) _convertedPage = page;
+      if (!fromPdf || !_ebookSwitchPending) {
+        _convertedPage = page;
+        _restoringEbook = false;
+      }
       _foreignSource =
           _foreignSource || ReadingCompanionTranslation.isForeign(page.text);
     });
+    if (wasPdf && _convertedPage != null) _rememberPdfView(ebook: true);
     if (position != null && position.pageNumber == number) {
       _rememberPdfPosition(
         number,
@@ -1815,6 +1911,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             _convertedDocument = null;
             _ebookLayoutReady = false;
             _positionedEbookEntry = null;
+            _restoringEbook = false;
             _requestedEbook = false;
             _ebookSwitchPending = false;
             _ebookError = '当前页图片暂不可读，请重试';
@@ -1823,14 +1920,18 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         }
       }
     }
+    final switching =
+        ready && _requestedEbook && _ebookSwitchPending && !_inkEditing;
     setState(() {
       _ebookLayoutReady = ready;
       _positionedEbookEntry = ready ? target : null;
-      if (ready && _requestedEbook && _ebookSwitchPending && !_inkEditing) {
+      if (switching) {
         _convertedPage = _preparedBook?.pages[_requestedPdfPage];
+        _restoringEbook = false;
         _ebookSwitchPending = false;
       }
     });
+    if (switching && _convertedPage != null) _rememberPdfView(ebook: true);
     if (ready && !_readyAnnounced && _convertedPage == null) {
       _readyAnnounced = true;
       AppToast.show(context, '电子书已就绪');
@@ -1996,6 +2097,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       _visibleBlocks = const [];
       _targetEbook(page, previous: _pdfReadingAnchor);
     });
+    _rememberPdfView(ebook: false);
     _reportSelection(false);
     _scheduleTranslation();
     _schedulePdfPageWork(probeText: true);
@@ -2124,24 +2226,34 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   Widget _readerBody(ReaderAnchor? anchor) {
     final converted = _convertedPage;
     final document = _convertedDocument;
-    return IndexedStack(
-      sizing: StackFit.expand,
-      index: converted == null ? 0 : 1,
-      children: [
-        Listener(
-          onPointerDown: (_) => _releaseReturnPreview(),
-          onPointerSignal: (_) => _releaseReturnPreview(),
-          child: _pdfDocument(anchor),
-        ),
-        if (document != null)
-          _flow(
-            document,
-            _convertedEntry,
-            originalPage: converted?.number ?? _requestedPdfPage ?? _pdfPage,
-          )
-        else
-          const SizedBox.shrink(),
-      ],
+    final pdfLoad = _selectablePdfReference.resolveListenable();
+    final children = [
+      Listener(
+        onPointerDown: (_) => _releaseReturnPreview(),
+        onPointerSignal: (_) => _releaseReturnPreview(),
+        child: _pdfDocument(anchor),
+      ),
+      if (document != null)
+        _flow(
+          document,
+          _convertedEntry,
+          originalPage: converted?.number ?? _requestedPdfPage ?? _pdfPage,
+        )
+      else
+        const SizedBox.shrink(),
+      const _ReadingPlaceholder(),
+    ];
+    return ListenableBuilder(
+      listenable: pdfLoad,
+      builder: (context, _) => IndexedStack(
+        sizing: StackFit.expand,
+        index: _restoringEbook && pdfLoad.error == null
+            ? 2
+            : converted == null
+            ? 0
+            : 1,
+        children: children,
+      ),
     );
   }
 
@@ -2833,7 +2945,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       sourceId: source.id,
     );
     if (normalizeBookSourceFormat(source.format) == 'pdf') {
+      final restoreEbook = widget.initialAnnotationSelection == null
+          ? _preferences.loadCompanionEbook(
+              bookId: source.bookId,
+              sourceId: source.id,
+            )
+          : null;
       final saved = await anchor;
+      _restoringEbook = await restoreEbook ?? false;
       if (saved is PdfReaderAnchor && saved.sourceId == _sourceKey) {
         _pdfReadingAnchor = saved;
       }
@@ -3283,7 +3402,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     _renderedChapter = true;
     final assets = {for (final asset in document.assets) asset.id: asset};
     final chaptersById = {for (final entry in chapters) entry.id: entry};
-    final bottomPadding = originalPage != null &&
+    final bottomPadding =
+        originalPage != null &&
             _ebookPageTurnMode == ReaderPaginationMode.horizontal
         ? _readerFooterHeight
         : _readerNavHeight;
@@ -4638,7 +4758,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final showsOriginalPage = _convertedPage == null && translation == null;
     final horizontal = _pdfPageTurnMode == ReaderPaginationMode.horizontal;
     return _footerWithBody(
-      showChrome: _convertedPage == null,
+      showChrome: _convertedPage == null && !_restoringEbook,
       body: ColoredBox(
         color: surround,
         child: Padding(
@@ -4757,6 +4877,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         });
                         final initial = widget.initialAnnotationSelection;
                         final restoredPage = _pdfPage;
+                        if (_restoringEbook) {
+                          unawaited(_prepareBook());
+                          return;
+                        }
                         unawaited(() async {
                           if (initial != null &&
                               !_handledInitialPdfAnnotation) {
@@ -5499,7 +5623,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   void _openReaderPanel(
     _ReaderPanel panel, {
     WidgetBuilder? outline,
-    double outlineExtent = 0,
+    double listExtent = 0,
   }) {
     if (_activePanel == panel) {
       _closeReaderPanel();
@@ -5526,8 +5650,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     setState(() {
       _activePanel = panel;
       _adjustingTypography = false;
-      _outlineExtent = outlineExtent;
-      _outlineDragging = false;
+      _listPanelExtent = listExtent;
+      _listPanelDragging = false;
       _outlinePanel = outline;
       _progressPreview.value = null;
     });
@@ -5873,16 +5997,16 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 constraints: BoxConstraints(
                   maxHeight: math.max(0, dimensions.maxHeight - panelBottom),
                 ),
-                child: panel == _ReaderPanel.outline
-                    ? _outlineSheet(
-                        dimensions.maxHeight - panelBottom,
-                        locationLabel(page),
-                      )
-                    : _readerPanel(panel, switch (panel) {
-                        _ReaderPanel.outline => const SizedBox.shrink(),
-                        _ReaderPanel.progress => progressPanel(),
-                        _ReaderPanel.display => _displayPanel(),
-                      }),
+                child: switch (panel) {
+                  _ReaderPanel.outline ||
+                  _ReaderPanel.annotations => _readerListSheet(
+                    panel,
+                    dimensions.maxHeight - panelBottom,
+                    locationLabel(page),
+                  ),
+                  _ReaderPanel.progress => _readerPanel(panel, progressPanel()),
+                  _ReaderPanel.display => _readerPanel(panel, _displayPanel()),
+                },
               ),
             ),
           ],
@@ -5891,7 +6015,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
   }
 
-  Widget _outlineSheet(double availableHeight, String location) {
+  Widget _readerListSheet(
+    _ReaderPanel panel,
+    double availableHeight,
+    String location,
+  ) {
+    final isOutline = panel == _ReaderPanel.outline;
+    final title = panel.title;
     final full = math.max(0.0, availableHeight);
     final surface = _dark ? _readerPanelSurface : const Color(0xFFF8F9FA);
     final bookTitle = _source.displayName.trim().isNotEmpty
@@ -5903,15 +6033,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
     final travel = full - compact;
     void snap(bool expand) => setState(() {
-      _outlineDragging = false;
-      _outlineExtent = expand ? 1 : 0;
+      _listPanelDragging = false;
+      _listPanelExtent = expand ? 1 : 0;
     });
     return AnimatedContainer(
-      duration: _outlineDragging
+      duration: _listPanelDragging
           ? Duration.zero
           : const Duration(milliseconds: 170),
       curve: Curves.easeOut,
-      height: compact + travel * _outlineExtent,
+      height: compact + travel * _listPanelExtent,
       child: Material(
         color: surface,
         clipBehavior: Clip.antiAlias,
@@ -5925,29 +6055,29 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               color: surface,
               child: Semantics(
                 button: true,
-                label: _outlineExtent >= .5 ? '收起目录' : '展开目录',
-                onTap: () => snap(_outlineExtent < .5),
+                label: _listPanelExtent >= .5 ? '收起$title' : '展开$title',
+                onTap: () => snap(_listPanelExtent < .5),
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: () => snap(_outlineExtent < .5),
+                  onTap: () => snap(_listPanelExtent < .5),
                   onVerticalDragStart: (_) =>
-                      setState(() => _outlineDragging = true),
+                      setState(() => _listPanelDragging = true),
                   onVerticalDragUpdate: (details) {
                     if (travel > 0) {
                       setState(
-                        () => _outlineExtent =
-                            (_outlineExtent - details.delta.dy / travel).clamp(
-                              0.0,
-                              1.0,
-                            ),
+                        () => _listPanelExtent =
+                            (_listPanelExtent - details.delta.dy / travel)
+                                .clamp(0.0, 1.0),
                       );
                     }
                   },
                   onVerticalDragEnd: (details) {
                     final speed = details.primaryVelocity ?? 0;
-                    snap(speed.abs() > 250 ? speed < 0 : _outlineExtent >= .5);
+                    snap(
+                      speed.abs() > 250 ? speed < 0 : _listPanelExtent >= .5,
+                    );
                   },
-                  onVerticalDragCancel: () => snap(_outlineExtent >= .5),
+                  onVerticalDragCancel: () => snap(_listPanelExtent >= .5),
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(
                       _readerSideInset,
@@ -5970,7 +6100,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                           children: [
                             Expanded(
                               child: Text(
-                                '目录',
+                                title,
                                 style: TextStyle(
                                   color: _ink,
                                   fontSize: _readerWide ? 23 : 18,
@@ -6018,45 +6148,41 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 ],
               ),
             ),
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: _readerSideInset),
-              child: Row(
-                children: [
-                  TextButton(
-                    onPressed: () =>
-                        setState(() => _outlineShowsAnnotations = false),
+            if (isOutline)
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: _readerSideInset,
+                    vertical: _readerWide ? 12 : 9,
+                  ),
+                  child: Semantics(
+                    header: true,
                     child: Text(
                       '章节',
                       style: TextStyle(
-                        color: _outlineShowsAnnotations ? _readerMuted : _ink,
+                        color: _ink,
+                        fontSize: _readerWide ? 15 : 13,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ),
-                  TextButton(
-                    onPressed: () =>
-                        setState(() => _outlineShowsAnnotations = true),
-                    child: Text(
-                      '本书注释',
-                      style: TextStyle(
-                        color: _outlineShowsAnnotations ? _ink : _readerMuted,
-                      ),
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
             Expanded(
               child: ClipRect(
                 child: Material(
                   color: surface,
                   child: Padding(
                     padding: EdgeInsets.symmetric(
-                      horizontal: _readerSideInset * .6,
+                      horizontal: isOutline
+                          ? _readerSideInset * .6
+                          : _readerSideInset,
                     ),
                     child: Builder(
-                      builder: _outlineShowsAnnotations
-                          ? widget.annotationList
-                          : _outlinePanel!,
+                      builder: isOutline
+                          ? _outlinePanel!
+                          : widget.annotationList,
                     ),
                   ),
                 ),
@@ -6145,6 +6271,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             ),
             divider(),
             action(
+              _ReaderPanel.annotations,
+              'assets/icons/chat_annotations/comment.svg',
+              '注释',
+              () => _openReaderPanel(_ReaderPanel.annotations),
+            ),
+            divider(),
+            action(
               _ReaderPanel.progress,
               'assets/images/reading_companion_progress.svg',
               '进度',
@@ -6164,12 +6297,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }
 
   Widget _readerPanel(_ReaderPanel panel, Widget content) {
-    final title = switch (panel) {
-      _ReaderPanel.outline => '目录',
-      _ReaderPanel.progress => '阅读进度',
-      _ReaderPanel.display => '显示',
-    };
-    final outline = panel == _ReaderPanel.outline;
+    final title = panel.title;
     return Material(
       color: _readerPanelSurface,
       clipBehavior: Clip.antiAlias,
@@ -6178,9 +6306,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         side: BorderSide(color: _readerRule),
       ),
       child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: outline ? _readerSideInset - 12 : _readerSideInset,
-        ),
+        padding: EdgeInsets.symmetric(horizontal: _readerSideInset),
         child: DefaultTextStyle.merge(
           style: TextStyle(color: _ink, fontSize: _readerWide ? 18 : 14),
           child: Column(
@@ -6188,40 +6314,35 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             children: [
               ConstrainedBox(
                 constraints: BoxConstraints(
-                  minHeight: _readerWide
-                      ? switch (panel) {
-                          _ReaderPanel.outline => 72,
-                          _ReaderPanel.display => _isPdfDocument ? 54 : 66,
-                          _ReaderPanel.progress => 54,
-                        }
-                      : 46,
+                  minHeight: !_readerWide
+                      ? 46
+                      : panel == _ReaderPanel.display && !_isPdfDocument
+                      ? 66
+                      : 54,
                 ),
-                child: Padding(
-                  padding: EdgeInsetsDirectional.only(start: outline ? 9 : 0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Semantics(
-                          header: true,
-                          child: Text(
-                            title,
-                            style: TextStyle(
-                              fontSize: _readerWide ? 23 : 18,
-                              fontWeight: FontWeight.w600,
-                            ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          title,
+                          style: TextStyle(
+                            fontSize: _readerWide ? 23 : 18,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
-                      IconButton(
-                        tooltip: '关闭$title',
-                        onPressed: _closeReaderPanel,
-                        icon: _readerIcon(
-                          'assets/icons/extension_market/detail/close.svg',
-                          _readerWide ? 25 : 21,
-                        ),
+                    ),
+                    IconButton(
+                      tooltip: '关闭$title',
+                      onPressed: _closeReaderPanel,
+                      icon: _readerIcon(
+                        'assets/icons/extension_market/detail/close.svg',
+                        _readerWide ? 25 : 21,
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
               if (panel != _ReaderPanel.progress)
@@ -6262,7 +6383,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
   }
 
-  Widget _toolbar(BuildContext context, {bool sourceFailed = false}) {
+  Widget _toolbar(
+    BuildContext context, {
+    bool sourceFailed = false,
+    bool sourceLoading = false,
+  }) {
     final wide = MediaQuery.sizeOf(context).width >= 600;
     final showDoodleLabel = MediaQuery.sizeOf(context).width >= 380;
     final showPdf = _isCompanionPdf(_source) || widget.onSwitchFormat != null;
@@ -6429,29 +6554,32 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (!_inkEditing) ...[
-          Material(
-            type: MaterialType.transparency,
-            child: pdfLoad != null
-                ? ListenableBuilder(
-                    listenable: pdfLoad,
-                    builder: (context, _) {
-                      final available = !sourceFailed && pdfLoad.error == null;
-                      return formats(
-                        pdfBusy:
-                            available &&
-                            (_returningToPdf || _pdfDocumentRef == null),
-                        ebookBusy:
-                            available &&
-                            _isPdfDocument &&
-                            _ebookError == null &&
-                            (!_ebookLayoutReady || _ebookSwitchPending),
-                        ebookAvailable: available,
-                      );
-                    },
-                  )
-                : formats(ebookBusy: !sourceFailed && !_ebookLayoutReady),
-          ),
-          if (wide) ...[
+          if (!sourceLoading)
+            Material(
+              type: MaterialType.transparency,
+              child: pdfLoad != null
+                  ? ListenableBuilder(
+                      listenable: pdfLoad,
+                      builder: (context, _) {
+                        final available =
+                            !sourceFailed && pdfLoad.error == null;
+                        return formats(
+                          pdfBusy:
+                              available &&
+                              !_restoringEbook &&
+                              (_returningToPdf || _pdfDocumentRef == null),
+                          ebookBusy:
+                              available &&
+                              _isPdfDocument &&
+                              _ebookError == null &&
+                              (!_ebookLayoutReady || _ebookSwitchPending),
+                          ebookAvailable: available,
+                        );
+                      },
+                    )
+                  : formats(ebookBusy: !sourceFailed && !_ebookLayoutReady),
+            ),
+          if (wide && !sourceLoading) ...[
             const SizedBox(width: 16),
             SizedBox(
               height: 19,
@@ -6463,7 +6591,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             const SizedBox(width: 8),
           ],
           TextButton(
-            onPressed: !_inkLoaded && !_inkLoadFailed ? null : _startInk,
+            onPressed: _restoringEbook || (!_inkLoaded && !_inkLoadFailed)
+                ? null
+                : _startInk,
             style: TextButton.styleFrom(
               foregroundColor: _ink,
               minimumSize: const Size(44, 44),
@@ -6536,17 +6666,25 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             fit: StackFit.expand,
             children: [
               body,
-              if (data == null && !widget.immersive && !_inkEditing)
+              if ((data == null || _restoringEbook) &&
+                  !widget.immersive &&
+                  !_inkEditing)
                 Positioned(
                   top: 0,
                   left: 0,
                   right: 0,
                   child: Material(
                     color: _readerChrome,
-                    child: _toolbar(context, sourceFailed: snapshot.hasError),
+                    child: _toolbar(
+                      context,
+                      sourceFailed: snapshot.hasError,
+                      sourceLoading:
+                          snapshot.connectionState != ConnectionState.done,
+                    ),
                   ),
                 ),
               if (data != null &&
+                  !_restoringEbook &&
                   !widget.immersive &&
                   !_readerPanelOpen &&
                   !_inkEditing)

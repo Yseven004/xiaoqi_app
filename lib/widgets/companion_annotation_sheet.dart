@@ -4,7 +4,9 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../features/capabilities/data/capability_cloud_sync.dart';
@@ -19,8 +21,8 @@ const _ink = Color(0xFF232427);
 const _quiet = Color(0xFF5D626A);
 const _rule = Color(0xFFE6E7E9);
 const _plusAsset = 'assets/images/reading_task_plus.svg';
-const _pencilAsset = 'assets/icons/extension_market/detail/pencil.svg';
 const _micAsset = 'assets/icons/chat_note_editor/microphone.svg';
+const _companionAnnotationPlusSize = 27.0;
 
 String _audioTime(Duration duration) {
   final seconds = (duration.inMilliseconds / 1000).ceil();
@@ -46,13 +48,19 @@ Future<CompanionAnnotation?> editCompanionAnnotation(
   required String scope,
   required CompanionAnnotationSelection selection,
   CompanionAnnotation? initial,
+  Future<void> Function()? onDeleted,
   ValueChanged<double>? onViewportChanged,
 }) {
   final revision = CapabilityCloudSync.instance.emailSessionRevision.value;
-  return showAnnotationSheet(
+  return showAnnotationSheet<CompanionAnnotation>(
     context,
     editing: true,
+    barrierDismissible: true,
     matchReferenceProportions: true,
+    sheetAnimationStyle: const AnimationStyle(reverseDuration: Duration.zero),
+    barrierColor: initial == null
+        ? const Color(0x38000000)
+        : Colors.transparent,
     onViewportChanged: onViewportChanged,
     builder: (_) => _AnnotationAccountGuard(
       revision: revision,
@@ -60,133 +68,9 @@ Future<CompanionAnnotation?> editCompanionAnnotation(
         scope: scope,
         selection: selection,
         initial: initial,
+        onDeleted: onDeleted,
         guardContent: (child) =>
             _AnnotationAccountGuard(revision: revision, child: child),
-      ),
-    ),
-  );
-}
-
-Future<void> viewCompanionAnnotation(
-  BuildContext context, {
-  required CompanionAnnotation initial,
-  required Future<CompanionAnnotation?> Function(CompanionAnnotation) onEdit,
-}) async {
-  final revision = CapabilityCloudSync.instance.emailSessionRevision.value;
-  Widget guard(Widget child) =>
-      _AnnotationAccountGuard(revision: revision, child: child);
-  var annotation = initial;
-  var addingToLibrary = false;
-  await showAnnotationSheet<void>(
-    context,
-    matchReferenceProportions: true,
-    barrierColor: Colors.transparent,
-    builder: (_) => guard(
-      StatefulBuilder(
-        builder: (context, update) => SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(18, 4, 18, 4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AnnotationQuoteLine(
-                annotation.selection.quote,
-                guardContent: guard,
-                verticalPadding: 4,
-              ),
-              _AnnotationBody(text: annotation.text, audio: annotation.audio),
-              if (annotation.images.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                AnnotationThumbnails(
-                  paths: annotation.images,
-                  guardContent: guard,
-                  mediaChanges: CompanionAnnotationSync.instance.changes,
-                  onMissing: (path) =>
-                      unawaited(_fetchMissingAnnotationMedia(context, path)),
-                ),
-              ],
-              const SizedBox(height: 8),
-              const Divider(height: 1, color: _rule),
-              Wrap(
-                alignment: WrapAlignment.spaceBetween,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  const _AnnotationPrivacy(),
-                  Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      IconButton(
-                        tooltip: '编辑注释',
-                        onPressed: addingToLibrary
-                            ? null
-                            : () async {
-                                final revised = await onEdit(annotation);
-                                if (revised != null && context.mounted) {
-                                  update(() => annotation = revised);
-                                }
-                              },
-                        icon: annotationAsset(_pencilAsset, color: _ink),
-                      ),
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          foregroundColor: _ink,
-                          disabledForegroundColor: _quiet,
-                        ),
-                        onPressed: addingToLibrary
-                            ? null
-                            : () async {
-                                update(() => addingToLibrary = true);
-                                final version = annotation;
-                                try {
-                                  final scope =
-                                      await const CompanionAnnotationStore()
-                                          .accountScope();
-                                  if (!context.mounted ||
-                                      revision !=
-                                          CapabilityCloudSync
-                                              .instance
-                                              .emailSessionRevision
-                                              .value) {
-                                    return;
-                                  }
-                                  await const CompanionAnnotationLibrary()
-                                      .copyToLibrary(version, scope: scope);
-                                  if (context.mounted &&
-                                      revision ==
-                                          CapabilityCloudSync
-                                              .instance
-                                              .emailSessionRevision
-                                              .value) {
-                                    AppToast.show(
-                                      context,
-                                      '已加入笔记库',
-                                      leading: annotationAsset(
-                                        'assets/icons/drawing/check.svg',
-                                        color: Colors.white,
-                                        size: 18,
-                                      ),
-                                    );
-                                  }
-                                } on FormatException catch (error) {
-                                  if (context.mounted)
-                                    AppToast.show(context, error.message);
-                                } catch (_) {
-                                  if (context.mounted)
-                                    AppToast.show(context, '加入笔记库失败，请重试');
-                                } finally {
-                                  if (context.mounted)
-                                    update(() => addingToLibrary = false);
-                                }
-                              },
-                        child: Text(addingToLibrary ? '正在加入' : '加入笔记库'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
       ),
     ),
   );
@@ -416,29 +300,6 @@ class _AnnotationPrivacyState extends State<_AnnotationPrivacy> {
   );
 }
 
-class _AnnotationBody extends StatelessWidget {
-  const _AnnotationBody({required this.text, required this.audio});
-
-  final String text;
-  final List<String> audio;
-
-  @override
-  Widget build(BuildContext context) => Wrap(
-    spacing: 8,
-    runSpacing: 6,
-    crossAxisAlignment: WrapCrossAlignment.center,
-    children: [
-      if (text.isNotEmpty)
-        Text(
-          text,
-          style: const TextStyle(color: _ink, fontSize: 16, height: 1.5),
-        ),
-      for (final path in audio)
-        _AnnotationAudio(key: ValueKey(path), path: path),
-    ],
-  );
-}
-
 class _AnnotationAudio extends StatefulWidget {
   const _AnnotationAudio({required this.path, this.onRemove, super.key});
 
@@ -527,9 +388,11 @@ class _AnnotationAudioState extends State<_AnnotationAudio> {
   }
 
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: CompanionAnnotationSync.instance.changes,
-    builder: (context, _) => _buildPlayer(context),
+  Widget build(BuildContext context) => TextFieldTapRegion(
+    child: ListenableBuilder(
+      listenable: CompanionAnnotationSync.instance.changes,
+      builder: (context, _) => _buildPlayer(context),
+    ),
   );
 
   Widget _buildPlayer(BuildContext context) => StreamBuilder<PlayerState>(
@@ -617,11 +480,13 @@ class _CompanionAnnotationEditor extends StatefulWidget {
     required this.selection,
     required this.guardContent,
     this.initial,
+    this.onDeleted,
   });
 
   final String scope;
   final CompanionAnnotationSelection selection;
   final CompanionAnnotation? initial;
+  final Future<void> Function()? onDeleted;
   final Widget Function(Widget) guardContent;
 
   @override
@@ -632,18 +497,25 @@ class _CompanionAnnotationEditor extends StatefulWidget {
 class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
     with WidgetsBindingObserver {
   static const _store = CompanionAnnotationStore();
+  static const _runtimeConfig = MethodChannel('xiaoqi_app/runtime_config');
   final _speech = SpeechRecognitionService.instance;
   final _recordingOwner = Object();
   final _textFieldKey = GlobalKey();
   late final _controller = TextEditingController(text: widget.initial?.text);
+  late final _commitInputGuard = TextInputFormatter.withFunction(
+    (oldValue, newValue) => _committing ? oldValue : newValue,
+  );
   late final _images = [...?widget.initial?.images];
   late final _audio = [...?widget.initial?.audio];
+  late final _committed = widget.initial;
   final _newPaths = <String>{};
   final _recordingClock = Stopwatch();
   Timer? _recordingTicker;
   String? _recording;
   bool _busy = false;
-  bool _saved = false;
+  bool _committing = false;
+  bool _handlesAndroidBack = false;
+  bool _copyingToLibrary = false;
   Future<CompanionAnnotation>? _pendingSave;
 
   bool get _compactNew =>
@@ -652,10 +524,46 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
       _images.isEmpty &&
       _recording == null;
 
+  bool _hasChanges(String text) {
+    final committed = _committed;
+    return committed == null ||
+        text.trim() != committed.text ||
+        !listEquals(_images, committed.images) ||
+        !listEquals(_audio, committed.audio);
+  }
+
+  bool _hasContent(String text) =>
+      text.trim().isNotEmpty || _images.isNotEmpty || _audio.isNotEmpty;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _setAndroidBackEnabled(ModalRoute.isCurrentOf(context) == true);
+  }
+
+  void _setAndroidBackEnabled(bool enabled) {
+    if (!Platform.isAndroid || enabled == _handlesAndroidBack) return;
+    _handlesAndroidBack = enabled;
+    unawaited(_sendAndroidBackState(enabled));
+  }
+
+  Future<void> _sendAndroidBackState(bool enabled) async {
+    try {
+      await _runtimeConfig.invokeMethod<void>(
+        'setAnnotationEditorBackEnabled',
+        {'enabled': enabled},
+      );
+    } on MissingPluginException {
+      // The regular Flutter back handler remains available.
+    } on PlatformException catch (error) {
+      debugPrint('Unable to update annotation back handling: ${error.code}');
+    }
   }
 
   @override
@@ -688,9 +596,17 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
     }
   }
 
-  Future<void> _pickImages() async {
-    FocusManager.instance.primaryFocus?.unfocus();
+  Future<void> _runMediaAction(Future<void> Function() action) async {
+    if (_busy) return;
     setState(() => _busy = true);
+    try {
+      await withAnnotationKeyboard(_textFieldKey, action);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _pickImages() async {
     try {
       final files = await ImagePicker().pickMultiImage();
       for (final file in files) {
@@ -727,8 +643,6 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
       }
     } catch (_) {
       if (mounted) AppToast.show(context, '无法打开图片，请重试');
-    } finally {
-      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -755,8 +669,6 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   }
 
   Future<void> _toggleRecording() async {
-    FocusManager.instance.primaryFocus?.unfocus();
-    setState(() => _busy = true);
     var path = _recording;
     try {
       if (path != null) {
@@ -803,8 +715,6 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
         setState(() => _recording = null);
         AppToast.show(context, '录音未保存，请检查麦克风权限后重试');
       }
-    } finally {
-      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -825,8 +735,11 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   }
 
   Future<void> _save() async {
-    FocusManager.instance.primaryFocus?.unfocus();
-    setState(() => _busy = true);
+    if (_busy || _recording != null) return;
+    setState(() {
+      _busy = true;
+      _committing = true;
+    });
     try {
       final pending = _pendingSave = _store.save(
         scope: widget.scope,
@@ -834,22 +747,113 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
         text: _controller.text,
         images: _images,
         audio: _audio,
-        initial: widget.initial,
+        initial: _committed,
       );
       final record = await pending;
-      _saved = true;
       _newPaths.removeAll([...record.images, ...record.audio]);
-      if (mounted) Navigator.pop(context, record);
+      if (!mounted) return;
+      _closeEditor(record);
     } catch (_) {
       if (mounted) AppToast.show(context, '注释保存失败，请重试');
     } finally {
       _pendingSave = null;
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _committing = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _deleteCurrentAnnotation() async {
+    final committed = _committed;
+    if (committed == null || _busy || _recording != null) return;
+    setState(() {
+      _busy = true;
+      _committing = true;
+    });
+    try {
+      await _store.remove(widget.scope, committed);
+      if (!mounted) return;
+      unawaited(widget.onDeleted?.call());
+      _closeEditor();
+    } catch (_) {
+      if (mounted) AppToast.show(context, '注释删除失败，请重试');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _committing = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _exitEditor() async {
+    if (!mounted || _busy || _recording != null) return;
+    final text = _controller.text;
+    if (_committed == null || !_hasChanges(text)) {
+      _closeEditor();
+    } else if (_hasContent(text)) {
+      await _save();
+    } else {
+      await _deleteCurrentAnnotation();
+    }
+  }
+
+  void _closeEditor([CompanionAnnotation? saved]) {
+    final route = ModalRoute.of<CompanionAnnotation>(context);
+    final navigator = route?.navigator;
+    if (route == null || navigator == null || !route.isActive) return;
+    if (route.isCurrent) {
+      navigator.pop(saved);
+    } else {
+      navigator.removeRoute(route, saved);
+    }
+  }
+
+  Future<void> _copyToLibrary(CompanionAnnotation annotation) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _busy = true;
+      _copyingToLibrary = true;
+    });
+    try {
+      final scope = await _store.accountScope();
+      if (!mounted || scope != widget.scope) return;
+      await const CompanionAnnotationLibrary().copyToLibrary(
+        annotation,
+        scope: scope,
+      );
+      final currentScope = await _store.accountScope();
+      if (!mounted || currentScope != scope) return;
+      AppToast.show(
+        context,
+        '已加入笔记库',
+        leading: annotationAsset(
+          'assets/icons/drawing/check.svg',
+          color: Colors.white,
+          size: 18,
+        ),
+      );
+    } on FormatException catch (error) {
+      if (mounted) AppToast.show(context, error.message);
+    } catch (_) {
+      if (mounted) AppToast.show(context, '加入笔记库失败，请重试');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _copyingToLibrary = false;
+        });
+      }
     }
   }
 
   @override
   void dispose() {
+    _setAndroidBackEnabled(false);
     WidgetsBinding.instance.removeObserver(this);
     _stopRecordingClock();
     _controller.dispose();
@@ -877,6 +881,14 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
       await _discard(path);
     }
   }
+
+  Widget _textField({TextStyle? style}) => AnnotationTextField(
+    key: _textFieldKey,
+    controller: _controller,
+    style: style,
+    autofocus: widget.initial == null,
+    inputFormatters: [_commitInputGuard],
+  );
 
   Widget _editableBody() => LayoutBuilder(
     builder: (context, constraints) => ValueListenableBuilder<TextEditingValue>(
@@ -909,11 +921,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
           children: [
             SizedBox(
               width: textWidth,
-              child: AnnotationTextField(
-                key: _textFieldKey,
-                controller: _controller,
-                style: style,
-              ),
+              child: _textField(style: style),
             ),
             for (final path in _audio)
               _AnnotationAudio(
@@ -933,41 +941,150 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
       ValueListenableBuilder<TextEditingValue>(
         valueListenable: _controller,
         builder: (context, value, _) {
-          final hasContent =
-              value.text.trim().isNotEmpty ||
-              _images.isNotEmpty ||
-              _audio.isNotEmpty;
+          final hasContent = _hasContent(value.text);
+          final deleting =
+              _committed != null && !hasContent && _hasChanges(value.text);
+          final canCommit = (hasContent || deleting) && _hasChanges(value.text);
           final size = compact ? const Size(52, 26) : const Size(56, 30);
-          return FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: _ink,
-              foregroundColor: Colors.white,
-              minimumSize: size,
-              fixedSize: size,
-              padding: EdgeInsets.zero,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(7),
+          return TextFieldTapRegion(
+            child: FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: _ink,
+                foregroundColor: Colors.white,
+                minimumSize: size,
+                fixedSize: size,
+                padding: EdgeInsets.zero,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                textStyle: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(fontSize: 14),
               ),
-              textStyle: Theme.of(
-                context,
-              ).textTheme.labelLarge?.copyWith(fontSize: 14),
+              onPressed: _busy || _recording != null || !canCommit
+                  ? null
+                  : deleting
+                  ? _deleteCurrentAnnotation
+                  : _save,
+              child: Text(deleting ? '删除' : '保存'),
             ),
-            onPressed: _saved || _busy || _recording != null || !hasContent
-                ? null
-                : _save,
-            child: const Text('保存'),
           );
         },
       );
 
+  Widget _libraryButton(CompanionAnnotation annotation) =>
+      ValueListenableBuilder<TextEditingValue>(
+        valueListenable: _controller,
+        builder: (context, value, _) => TextButton(
+          onPressed: _busy || _hasChanges(value.text)
+              ? null
+              : () => _copyToLibrary(annotation),
+          style: TextButton.styleFrom(
+            foregroundColor: _ink,
+            disabledForegroundColor: _quiet,
+          ),
+          child: Text(_copyingToLibrary ? '正在加入' : '加入笔记库'),
+        ),
+      );
+
+  Widget _plusButton() {
+    final enabled = !_busy && _recording == null;
+    return TextFieldTapRegion(
+      child: IconButton(
+        tooltip: '添加图片',
+        constraints: const BoxConstraints.tightFor(
+          width: annotationComposerActionSize,
+          height: annotationComposerActionSize,
+        ),
+        style: annotationComposerActionStyle,
+        padding: EdgeInsets.zero,
+        onPressed: enabled ? () => _runMediaAction(_pickImages) : null,
+        icon: annotationAsset(
+          _plusAsset,
+          size: _companionAnnotationPlusSize,
+          color: enabled ? _ink : const Color(0xFF9B9DA1),
+        ),
+      ),
+    );
+  }
+
+  Widget _micButton() => TextFieldTapRegion(
+    child: IconButton(
+      tooltip: '开始录音',
+      onPressed: _busy ? null : () => _runMediaAction(_toggleRecording),
+      icon: annotationAsset(_micAsset, color: _quiet),
+    ),
+  );
+
+  Widget _recordingControl() {
+    const blue = Color(0xFF0863E8);
+    final duration = Duration(seconds: _recordingClock.elapsed.inSeconds);
+    final elapsed = _audioTime(duration).padLeft(5, '0');
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        const Positioned.fill(
+          top: 6,
+          bottom: 6,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Color(0xFFEBF3FF),
+              borderRadius: BorderRadius.all(Radius.circular(24)),
+              boxShadow: [
+                BoxShadow(
+                  color: Color(0x10085FCE),
+                  blurRadius: 4,
+                  offset: Offset(0, 1),
+                ),
+              ],
+            ),
+          ),
+        ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(width: 14),
+            Flexible(
+              child: Text(
+                '录音中 $elapsed',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: blue,
+                  fontSize: 13,
+                  fontFeatures: [ui.FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+            TextFieldTapRegion(
+              child: IconButton(
+                tooltip: '停止录音',
+                constraints: const BoxConstraints.tightFor(
+                  width: annotationComposerActionSize,
+                  height: annotationComposerActionSize,
+                ),
+                style: annotationComposerActionStyle,
+                padding: EdgeInsets.zero,
+                onPressed: _busy
+                    ? null
+                    : () => _runMediaAction(_toggleRecording),
+                icon: annotationAsset(
+                  'assets/icons/note_format/stop.svg',
+                  size: 20,
+                  color: blue,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _compactComposer() => Row(
     crossAxisAlignment: CrossAxisAlignment.center,
     children: [
-      IconButton(
-        tooltip: '添加图片',
-        onPressed: _busy ? null : _pickImages,
-        icon: annotationAsset(_plusAsset),
-      ),
+      _plusButton(),
       Expanded(
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -975,26 +1092,59 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
             color: const Color(0xFFF3F4F5),
             borderRadius: BorderRadius.circular(20),
           ),
-          child: AnnotationTextField(
-            key: _textFieldKey,
-            controller: _controller,
-          ),
+          child: _textField(),
         ),
       ),
-      IconButton(
-        tooltip: '开始录音',
-        onPressed: _busy ? null : _toggleRecording,
-        icon: annotationAsset(_micAsset, color: _quiet),
-      ),
+      _micButton(),
       _saveButton(compact: true),
     ],
   );
 
+  Widget _editorActions() {
+    final committed = _committed;
+    return Row(
+      children: [
+        _plusButton(),
+        const _AnnotationPrivacy(),
+        const SizedBox(width: 8),
+        if (_recording != null) ...[
+          Expanded(
+            child: Align(
+              alignment: AlignmentDirectional.centerEnd,
+              child: _recordingControl(),
+            ),
+          ),
+          const SizedBox(width: 12),
+          _saveButton(),
+        ] else
+          Expanded(
+            child: Wrap(
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                _micButton(),
+                if (committed != null) _libraryButton(committed),
+                _saveButton(),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !_busy && _recording == null,
+  Widget build(BuildContext context) => PopScope<CompanionAnnotation>(
+    canPop: false,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop) unawaited(_exitEditor());
+    },
     child: SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 1),
+      padding: const EdgeInsets.fromLTRB(
+        annotationComposerInset,
+        5,
+        annotationComposerInset,
+        1,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -1002,17 +1152,19 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
           if (_compactNew)
             _compactComposer()
           else ...[
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                onPressed: _busy ? null : () => Navigator.pop(context),
-                child: const Text('取消', style: TextStyle(color: _quiet)),
+            Padding(
+              padding: const EdgeInsetsDirectional.only(
+                start: annotationQuoteInset,
               ),
+              child: _editableBody(),
             ),
-            _editableBody(),
             if (_images.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(top: 9, bottom: 4),
+                padding: const EdgeInsetsDirectional.only(
+                  start: annotationQuoteInset,
+                  top: 9,
+                  bottom: 4,
+                ),
                 child: AnnotationThumbnails(
                   paths: _images,
                   guardContent: widget.guardContent,
@@ -1024,60 +1176,26 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
                       : (index) => setState(() => _images.removeAt(index)),
                 ),
               ),
-            const Divider(height: 1, color: _rule),
-            Row(
+            _editorActions(),
+          ],
+          Padding(
+            padding: const EdgeInsetsDirectional.only(
+              start: annotationQuoteInset,
+            ),
+            child: Row(
               children: [
-                IconButton(
-                  tooltip: '添加图片',
-                  onPressed: _busy || _recording != null ? null : _pickImages,
-                  icon: annotationAsset(_plusAsset),
+                Expanded(
+                  child: AnnotationQuoteLine(
+                    widget.selection.quote,
+                    guardContent: widget.guardContent,
+                  ),
                 ),
-                if (_recording != null) ...[
-                  Expanded(
-                    child: Text(
-                      '录音中 ${_audioTime(_recordingClock.elapsed)}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Color(0xFF9D3A35),
-                        fontSize: 13,
-                        fontFeatures: [ui.FontFeature.tabularFigures()],
-                      ),
-                    ),
-                  ),
-                  TextButton.icon(
-                    onPressed: _busy ? null : _toggleRecording,
-                    style: TextButton.styleFrom(foregroundColor: _ink),
-                    icon: annotationAsset(
-                      'assets/icons/note_format/stop.svg',
-                      size: 18,
-                      color: const Color(0xFF9D3A35),
-                    ),
-                    label: const Text('停止'),
-                  ),
-                ] else ...[
-                  const Spacer(),
-                  IconButton(
-                    tooltip: '开始录音',
-                    onPressed: _busy ? null : _toggleRecording,
-                    icon: annotationAsset(_micAsset, color: _quiet),
-                  ),
+                if (_compactNew) ...[
+                  const SizedBox(width: 8),
+                  const _AnnotationPrivacy(),
                 ],
-                _saveButton(),
               ],
             ),
-          ],
-          Row(
-            children: [
-              Expanded(
-                child: AnnotationQuoteLine(
-                  widget.selection.quote,
-                  guardContent: widget.guardContent,
-                ),
-              ),
-              const SizedBox(width: 8),
-              const _AnnotationPrivacy(),
-            ],
           ),
         ],
       ),

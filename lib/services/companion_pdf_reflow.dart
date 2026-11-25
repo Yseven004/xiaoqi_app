@@ -769,6 +769,10 @@ class CompanionPdfReflow {
     allowsCopying: allowsCopying,
   );
 
+  void retainOpenedEbook(PreparedCompanionPdf book) {
+    _recentlyOpenedEbook = (key: _cacheKey, book: book);
+  }
+
   final _ocr = NativeFastOcrPlugin();
   final _results = <int, CompanionReflowPage>{};
   int _cachedImageBytes = 0;
@@ -800,6 +804,7 @@ class CompanionPdfReflow {
 
   Future<void> invalidatePage(int number) async {
     if (number < 1) return;
+    if (_recentlyOpenedEbook?.key == _cacheKey) _recentlyOpenedEbook = null;
     final previous = _results.remove(number);
     _cachedImageBytes -= previous?.imageByteCount ?? 0;
     final directory = await _directory;

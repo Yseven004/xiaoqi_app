@@ -2,13 +2,16 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 Future<T?> showAnnotationSheet<T>(
   BuildContext context, {
   required WidgetBuilder builder,
   bool editing = false,
+  bool? barrierDismissible,
   bool matchReferenceProportions = false,
+  AnimationStyle? sheetAnimationStyle,
   Color barrierColor = const Color(0x38000000),
   Rect? Function()? resolveAnchor,
   ScrollPosition? scrollPosition,
@@ -19,8 +22,10 @@ Future<T?> showAnnotationSheet<T>(
     context: context,
     useRootNavigator: true,
     isScrollControlled: true,
-    isDismissible: !editing,
+    isDismissible: barrierDismissible ?? !editing,
     enableDrag: !editing,
+    showDragHandle: editing ? false : null,
+    sheetAnimationStyle: sheetAnimationStyle,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
     barrierColor: barrierColor,
@@ -34,6 +39,17 @@ Future<T?> showAnnotationSheet<T>(
       builder: builder,
     ),
   ).whenComplete(() => onViewportChanged?.call(double.infinity));
+}
+
+/// Preserves the editor's keyboard while a native media window has focus.
+Future<T> withAnnotationKeyboard<T>(
+  GlobalKey editorKey,
+  Future<T> Function() action,
+) {
+  final editor = editorKey.currentState;
+  return editor is _AnnotationTextFieldState
+      ? editor._withKeyboard(action)
+      : action();
 }
 
 class _AnnotationSheetSurface extends StatefulWidget {
@@ -58,7 +74,17 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
   final _surfaceKey = GlobalKey();
   bool _scheduled = false;
   double? _lastTop;
+  double _heldKeyboardInset = 0;
   Animation<double>? _routeAnimation;
+
+  VoidCallback _holdKeyboard() {
+    final inset = MediaQuery.viewInsetsOf(context).bottom;
+    if (inset == 0) return () {};
+    setState(() => _heldKeyboardInset = inset);
+    return () {
+      if (mounted) setState(() => _heldKeyboardInset = 0);
+    };
+  }
 
   @override
   void didChangeDependencies() {
@@ -110,7 +136,7 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
   @override
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
-    final keyboard = media.viewInsets.bottom;
+    final keyboard = math.max(media.viewInsets.bottom, _heldKeyboardInset);
     final availableHeight = math.max(
       0.0,
       media.size.height - media.padding.top - keyboard - media.padding.bottom,
@@ -145,7 +171,10 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
                         ),
                         side: const BorderSide(color: Color(0xFFE6E7E9)),
                       ),
-                      child: Builder(builder: widget.builder),
+                      child: Theme(
+                        data: annotationPanelTheme(context),
+                        child: Builder(builder: widget.builder),
+                      ),
                     ),
                   ),
                 ),
@@ -158,16 +187,60 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
   }
 }
 
+ThemeData annotationPanelTheme(BuildContext context) {
+  final theme = Theme.of(context);
+  final flatButtons = ButtonStyle(
+    elevation: const WidgetStatePropertyAll(0.0),
+    splashFactory: NoSplash.splashFactory,
+    overlayColor: WidgetStateProperty.resolveWith(
+      (states) => states.contains(WidgetState.focused)
+          ? theme.colorScheme.onSurface.withValues(alpha: .10)
+          : Colors.transparent,
+    ),
+  );
+  return theme.copyWith(
+    splashFactory: NoSplash.splashFactory,
+    splashColor: Colors.transparent,
+    highlightColor: Colors.transparent,
+    iconButtonTheme: IconButtonThemeData(
+      style: (theme.iconButtonTheme.style ?? const ButtonStyle()).merge(
+        flatButtons,
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: (theme.textButtonTheme.style ?? const ButtonStyle()).merge(
+        flatButtons,
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: (theme.filledButtonTheme.style ?? const ButtonStyle()).merge(
+        flatButtons,
+      ),
+    ),
+  );
+}
+
+const annotationComposerInset = 12.0;
+const annotationComposerActionSize = 44.0;
+const annotationPlusSize = 30.0;
+const annotationQuoteInset = 12.0;
+const annotationComposerActionStyle = ButtonStyle(
+  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  visualDensity: VisualDensity.standard,
+);
+
 class AnnotationQuoteLine extends StatelessWidget {
   const AnnotationQuoteLine(
     this.quote, {
     this.guardContent,
+    this.showLabel = false,
     this.verticalPadding = 11,
     super.key,
   });
 
   final String quote;
   final Widget Function(Widget)? guardContent;
+  final bool showLabel;
   final double verticalPadding;
 
   @override
@@ -226,7 +299,7 @@ class AnnotationQuoteLine extends StatelessWidget {
       child: Padding(
         padding: EdgeInsets.symmetric(vertical: verticalPadding),
         child: Text(
-          '引文  ${quote.replaceAll(RegExp(r"\s+"), " ")}',
+          '${showLabel ? '引文  ' : ''}${quote.replaceAll(RegExp(r'\s+'), ' ')}',
           maxLines: 1,
           overflow: TextOverflow.clip,
           softWrap: false,
@@ -356,22 +429,24 @@ class AnnotationThumbnails extends StatelessWidget {
                 right: 0,
                 child: SizedBox.square(
                   dimension: 44,
-                  child: IconButton(
-                    tooltip: '移除图片 ${index + 1}',
-                    onPressed: () => onRemove!(index),
-                    alignment: Alignment.topRight,
-                    padding: EdgeInsets.zero,
-                    icon: DecoratedBox(
-                      decoration: const BoxDecoration(
-                        color: Color(0xB3343740),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(3),
-                        child: annotationAsset(
-                          'assets/icons/chat_note_editor/x.svg',
-                          size: 12,
-                          color: Colors.white,
+                  child: TextFieldTapRegion(
+                    child: IconButton(
+                      tooltip: '移除图片 ${index + 1}',
+                      onPressed: () => onRemove!(index),
+                      alignment: Alignment.topRight,
+                      padding: EdgeInsets.zero,
+                      icon: DecoratedBox(
+                        decoration: const BoxDecoration(
+                          color: Color(0xB3343740),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(3),
+                          child: annotationAsset(
+                            'assets/icons/chat_note_editor/x.svg',
+                            size: 12,
+                            color: Colors.white,
+                          ),
                         ),
                       ),
                     ),
@@ -386,10 +461,22 @@ class AnnotationThumbnails extends StatelessWidget {
 
 /// Releases an empty editor when Android hides the keyboard via system Back.
 class AnnotationTextField extends StatefulWidget {
-  const AnnotationTextField({required this.controller, this.style, super.key});
+  const AnnotationTextField({
+    required this.controller,
+    this.style,
+    this.autofocus = true,
+    this.readOnly = false,
+    this.onFocusChange,
+    this.inputFormatters,
+    super.key,
+  });
 
   final TextEditingController controller;
   final TextStyle? style;
+  final bool autofocus;
+  final bool readOnly;
+  final ValueChanged<bool>? onFocusChange;
+  final List<TextInputFormatter>? inputFormatters;
 
   @override
   State<AnnotationTextField> createState() => _AnnotationTextFieldState();
@@ -404,13 +491,86 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _focus.addListener(_reportFocus);
+  }
+
+  void _reportFocus() => widget.onFocusChange?.call(_focus.hasFocus);
+
+  Future<T> _withKeyboard<T>(Future<T> Function() action) async {
+    final view = View.of(context);
+    final originalInset = view.viewInsets.bottom;
+    if (originalInset == 0 || !_focus.hasPrimaryFocus) return action();
+    final release = context
+        .findAncestorStateOfType<_AnnotationSheetSurfaceState>()
+        ?._holdKeyboard();
+    try {
+      return await action();
+    } finally {
+      try {
+        await _restoreKeyboard(() => view.viewInsets.bottom, originalInset);
+      } finally {
+        release?.call();
+      }
+    }
+  }
+
+  Future<void> _restoreKeyboard(
+    double Function() keyboardInset,
+    double originalInset,
+  ) async {
+    bool stillEditing() =>
+        mounted &&
+        _focus.hasPrimaryFocus &&
+        ModalRoute.isCurrentOf(context) == true;
+    if (!stillEditing() || keyboardInset() >= originalInset) return;
+
+    final deadline = DateTime.now().add(const Duration(milliseconds: 500));
+    final binding = WidgetsBinding.instance;
+    const interval = Duration(milliseconds: 20);
+    while (stillEditing() &&
+        binding.lifecycleState != null &&
+        binding.lifecycleState != AppLifecycleState.resumed &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(interval);
+    }
+    if (!stillEditing()) return;
+    if (keyboardInset() == 0) _findEditableText(context)?.requestKeyboard();
+
+    while (stillEditing() &&
+        keyboardInset() < originalInset &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(interval);
+    }
+    if (stillEditing() &&
+        keyboardInset() == 0 &&
+        widget.controller.text.isEmpty) {
+      _focus.unfocus();
+    }
+  }
+
+  EditableTextState? _findEditableText(BuildContext context) {
+    if (context is StatefulElement && context.state is EditableTextState) {
+      return context.state as EditableTextState;
+    }
+    EditableTextState? editable;
+    context.visitChildElements((child) {
+      editable ??= _findEditableText(child);
+    });
+    return editable;
   }
 
   @override
   void didChangeMetrics() {
     if (!mounted) return;
     final inset = View.of(context).viewInsets.bottom;
-    if (_lastInset > 0 && inset == 0 && widget.controller.text.isEmpty) {
+    if (_lastInset > 0 &&
+        inset == 0 &&
+        widget.controller.text.isEmpty &&
+        (context
+                    .findAncestorStateOfType<_AnnotationSheetSurfaceState>()
+                    ?._heldKeyboardInset ??
+                0) ==
+            0) {
       _focus.unfocus();
     }
     _lastInset = inset;
@@ -419,6 +579,7 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _focus.removeListener(_reportFocus);
     _focus.dispose();
     super.dispose();
   }
@@ -427,11 +588,15 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
   Widget build(BuildContext context) => TextField(
     controller: widget.controller,
     focusNode: _focus,
-    autofocus: true,
+    autofocus: widget.autofocus,
+    readOnly: widget.readOnly,
+    inputFormatters: widget.inputFormatters,
     minLines: 1,
     maxLines: 5,
     maxLength: 4000,
-    onTapOutside: (_) => _focus.unfocus(),
+    // Keep the panel in place until the tapped control receives pointer up.
+    onTapOutside: (_) {},
+    onTapUpOutside: (_) => _focus.unfocus(),
     style:
         widget.style ??
         const TextStyle(color: Color(0xFF202124), fontSize: 16, height: 1.45),

@@ -116,6 +116,7 @@ class _CompanionNoteOriginState extends State<CompanionNoteOrigin> {
               Expanded(
                 child: AnnotationQuoteLine(
                   origin.selection.quote,
+                  showLabel: true,
                   guardContent: (child) =>
                       guardPrivateAnnotationContent(revision, child),
                 ),

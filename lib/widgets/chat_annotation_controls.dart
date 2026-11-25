@@ -299,16 +299,23 @@ class _TextAnnotationComposer extends StatefulWidget {
 }
 
 class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
+  final _textFieldKey = GlobalKey();
   late final _controller = TextEditingController(text: widget.initialText);
   late final _images = List<HomeChatAttachment>.of(widget.initialImages);
   bool _picking = false;
+  bool _hasEditorFocus = false;
 
   Future<void> _pickImages() async {
-    FocusManager.instance.primaryFocus?.unfocus();
+    if (_picking) return;
+    final pickImages = widget.onPickImages;
+    final available = widget.imageLimit - _images.length;
+    if (pickImages == null || available <= 0) return;
     setState(() => _picking = true);
     try {
-      final available = widget.imageLimit - _images.length;
-      final picked = await widget.onPickImages!(available);
+      final picked = await withAnnotationKeyboard(
+        _textFieldKey,
+        () => pickImages(available),
+      );
       if (mounted) setState(() => _images.addAll(picked.take(available)));
     } finally {
       if (mounted) setState(() => _picking = false);
@@ -332,30 +339,54 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
   }
 
   @override
-  Widget build(BuildContext context) => ColoredBox(
+  Widget build(BuildContext context) => PopScope<ChatAnnotationComposerResult>(
+    canPop: !_hasEditorFocus,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop && _hasEditorFocus) {
+        FocusManager.instance.primaryFocus?.unfocus();
+      }
+    },
+    child: _composer(),
+  );
+
+  Widget _composer() => ColoredBox(
     color: _images.isEmpty ? Colors.white : const Color(0xFFF4F4F5),
     child: SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
+      padding: const EdgeInsets.fromLTRB(
+        annotationComposerInset,
+        6,
+        annotationComposerInset,
+        0,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+            crossAxisAlignment: _images.isEmpty
+                ? CrossAxisAlignment.center
+                : CrossAxisAlignment.end,
             children: [
               if (widget.onPickImages != null)
-                IconButton(
-                  tooltip: '添加解释图',
-                  constraints: const BoxConstraints.tightFor(
-                    width: 48,
-                    height: 48,
-                  ),
-                  onPressed: _picking || _images.length >= widget.imageLimit
-                      ? null
-                      : _pickImages,
-                  icon: annotationAsset(
-                    'assets/images/reading_task_plus.svg',
-                    size: 16,
+                TextFieldTapRegion(
+                  child: IconButton(
+                    tooltip: '添加解释图',
+                    constraints: const BoxConstraints.tightFor(
+                      width: annotationComposerActionSize,
+                      height: annotationComposerActionSize,
+                    ),
+                    style: annotationComposerActionStyle,
+                    padding: EdgeInsets.zero,
+                    onPressed: _picking || _images.length >= widget.imageLimit
+                        ? null
+                        : _pickImages,
+                    icon: annotationAsset(
+                      'assets/images/reading_task_plus.svg',
+                      size: annotationPlusSize,
+                      color: _picking || _images.length >= widget.imageLimit
+                          ? const Color(0xFF9B9DA1)
+                          : const Color(0xFF252932),
+                    ),
                   ),
                 ),
               Expanded(
@@ -372,7 +403,12 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        AnnotationTextField(controller: _controller),
+                        AnnotationTextField(
+                          key: _textFieldKey,
+                          controller: _controller,
+                          onFocusChange: (focused) =>
+                              setState(() => _hasEditorFocus = focused),
+                        ),
                         if (_images.isNotEmpty)
                           Padding(
                             padding: const EdgeInsets.only(bottom: 8),
@@ -401,9 +437,11 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                   return IconButton(
                     tooltip: '加入待发送注释',
                     constraints: const BoxConstraints.tightFor(
-                      width: 48,
-                      height: 48,
+                      width: annotationComposerActionSize,
+                      height: annotationComposerActionSize,
                     ),
+                    style: annotationComposerActionStyle,
+                    padding: EdgeInsets.zero,
                     onPressed: canSubmit
                         ? () => Navigator.pop(context, (
                             comment: comment,
@@ -419,9 +457,11 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                             ? const Color(0xFF252525)
                             : const Color(0xFF777B83),
                       ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(6),
-                        child: chatAnnotationIcon('arrow-up', size: 16),
+                      child: SizedBox.square(
+                        dimension: 36,
+                        child: Center(
+                          child: chatAnnotationIcon('arrow-up', size: 24),
+                        ),
                       ),
                     ),
                   );
@@ -429,7 +469,15 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
               ),
             ],
           ),
-          AnnotationQuoteLine(widget.quote),
+          Padding(
+            padding: EdgeInsetsDirectional.only(
+              start: widget.onPickImages == null ? 0 : annotationQuoteInset,
+            ),
+            child: AnnotationQuoteLine(
+              widget.quote,
+              guardContent: widget.guardContent,
+            ),
+          ),
         ],
       ),
     ),
@@ -854,7 +902,10 @@ Future<void> showChatAnnotationReview(
                                     ),
                                   )
                                 else
-                                  AnnotationQuoteLine(a.quote),
+                                  AnnotationQuoteLine(
+                                    a.quote,
+                                    guardContent: guardContent,
+                                  ),
                                 const SizedBox(height: 14),
                                 const Text(
                                   '评论：',
@@ -896,7 +947,10 @@ Future<void> showChatAnnotationReview(
           ),
         ),
       );
-      return guardContent?.call(review) ?? review;
+      return Theme(
+        data: annotationPanelTheme(dialogContext),
+        child: guardContent?.call(review) ?? review,
+      );
     },
   );
 }

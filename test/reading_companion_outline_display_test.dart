@@ -59,6 +59,14 @@ void main() {
       final heading = find.bySemanticsLabel('收起目录');
       final top = tester.getTopLeft(heading);
       final title = find.text('outline.pdf');
+      final outlineTitle = find.descendant(
+        of: heading,
+        matching: find.text('目录'),
+      );
+      expect(
+        tester.getTopLeft(find.text('章节')).dx,
+        tester.getTopLeft(outlineTitle).dx,
+      );
       expect(find.text('测试目录'), findsNothing);
       final titlePosition = tester.getTopLeft(title);
       final list = find.ancestor(
@@ -72,6 +80,12 @@ void main() {
       expect(position.pixels, greaterThan(offset));
       expect(tester.getTopLeft(heading), top);
       expect(tester.getTopLeft(title), titlePosition);
+
+      await tester.tap(find.text('注释'));
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('展开注释'), findsOneWidget);
+      expect(find.text('章节'), findsNothing);
+      expect(find.text('暂无注释'), findsOneWidget);
     } finally {
       await _closeReader(tester);
     }

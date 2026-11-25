@@ -10,7 +10,37 @@ class ReaderPaginationPreferences {
 
   static const _prefix = 'book_reader.pagination_mode.v1';
   static const _anchorPrefix = 'book_reader.anchor.v1';
+  static const _companionEbookPrefix = 'reading-companion.pdf-ebook.v1';
   static final _anchorWrites = <String, Future<void>>{};
+
+  Future<bool> loadCompanionEbook({
+    required int bookId,
+    required int sourceId,
+  }) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      return preferences.getBool('$_companionEbookPrefix.$bookId.$sourceId') ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> saveCompanionEbook({
+    required int bookId,
+    required int sourceId,
+    required bool ebook,
+  }) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool(
+        '$_companionEbookPrefix.$bookId.$sourceId',
+        ebook,
+      );
+    } catch (_) {
+      // View preference storage must never interrupt reading.
+    }
+  }
 
   Future<ReaderPaginationMode> load({
     required int bookId,

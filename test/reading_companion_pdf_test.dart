@@ -326,7 +326,13 @@ void main() {
     );
     expect(find.byType(MessageSelectionActionCard), findsOneWidget);
     expect(find.text('复制'), findsOneWidget);
-    expect(find.text('注释'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(MessageSelectionActionCard),
+        matching: find.text('注释'),
+      ),
+      findsOneWidget,
+    );
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 3));
     await tester.pumpAndSettle();

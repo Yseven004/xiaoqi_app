@@ -176,7 +176,7 @@ void _expectSingleLineQuote(WidgetTester tester, [String quote = _quote]) {
   );
   expect(text.maxLines, 1);
   expect(text.softWrap, isFalse);
-  expect(text.data, contains(quote));
+  expect(text.data, quote.replaceAll(RegExp(r'\s+'), ' '));
 }
 
 void main() {
@@ -291,10 +291,11 @@ void main() {
       );
       await _host(tester, size, (context) {
         unawaited(
-          viewCompanionAnnotation(
+          editCompanionAnnotation(
             context,
+            scope: 'local',
+            selection: selection,
             initial: entry,
-            onEdit: (_) async => null,
           ),
         );
       });
@@ -305,7 +306,11 @@ void main() {
         0,
         reason: 'Reading duration metadata must never autoplay.',
       );
-      final body = tester.getRect(find.text(_shortText));
+      final field = find.byType(TextField);
+      final body = tester.getRect(field);
+      expect(tester.widget<TextField>(field).controller?.text, _shortText);
+      expect(tester.widget<TextField>(field).focusNode?.hasFocus, isFalse);
+      expect(find.byTooltip('编辑注释'), findsNothing);
       final audio = tester.getRect(find.text('0:14'));
       expect((body.center.dy - audio.center.dy).abs(), lessThan(10));
       final thumbnail = tester.getRect(find.byType(AnnotationThumbnails));
@@ -392,8 +397,10 @@ void main() {
       );
       await _host(tester, size, (context) {
         unawaited(
-          viewCompanionAnnotation(
+          editCompanionAnnotation(
             context,
+            scope: 'local',
+            selection: longSelection,
             initial: CompanionAnnotation(
               id: 'long-quote-fixture',
               revision: 'fixture-v1',
@@ -402,7 +409,6 @@ void main() {
               images: const [],
               audio: const [],
             ),
-            onEdit: (_) async => null,
           ),
         );
       });
@@ -425,7 +431,7 @@ void main() {
     });
 
     testWidgets(
-      'editor keeps short text and audio inline and cancellation intact at $width',
+      'editor keeps text and audio inline and saves existing edits on Back at $width',
       (tester) async {
         final entry = (await tester.runAsync(
           () => store.save(
@@ -462,15 +468,20 @@ void main() {
         final quoteRect = tester.getRect(find.byType(AnnotationQuoteLine));
         expect(quoteRect.bottom, lessThanOrEqualTo(size.height - 300 + 1));
         await _capture(tester, 'companion-editor-inset300-$width');
-        await tester.enterText(find.byType(TextField), '取消这次修改');
-        await tester.tap(find.text('取消'));
+        const editedText = '返回时保存这次修改';
+        await tester.enterText(find.byType(TextField), editedText);
+        await _settle(tester);
+        expect(find.text('取消'), findsNothing);
+        await tester.binding.handlePopRoute();
         await _settle(tester);
         expect(closed, isTrue);
-        expect(result, isNull);
+        expect(result?.id, entry.id);
+        expect(result?.text, editedText);
+        expect(find.byType(TextField), findsNothing);
         final saved = await tester.runAsync(
           () => store.list('local', selection.bookId),
         );
-        expect(saved!.single.text, _shortText);
+        expect(saved!.single.text, editedText);
         expect(saved.single.images, [imagePath]);
         expect(saved.single.audio, [audioPath]);
         await tester.pumpWidget(const SizedBox());
@@ -482,16 +493,20 @@ void main() {
   for (final size in [const Size(390, 844), const Size(800, 1280)]) {
     final width = size.width.toInt();
     testWidgets(
-      'compact new text saves without creating a library note at $width',
+      'new annotation requires Save and does not create a library note at $width',
       (tester) async {
         CompanionAnnotation? result;
+        var closed = false;
         await _host(tester, size, (context) {
           unawaited(
             editCompanionAnnotation(
               context,
               scope: 'local',
               selection: selection,
-            ).then((value) => result = value),
+            ).then((value) {
+              result = value;
+              closed = true;
+            }),
           );
         });
         expect(
@@ -510,6 +525,25 @@ void main() {
         expect((input.center.dy - plus.center.dy).abs(), lessThan(1));
         final quote = tester.getRect(find.byType(AnnotationQuoteLine));
         expect(quote.top, greaterThan(input.bottom));
+        await tester.enterText(find.byType(TextField), '尚未保存的新注释');
+        await _settle(tester);
+        await tester.binding.handlePopRoute();
+        await _settle(tester);
+        expect(closed, isTrue);
+        expect(result, isNull);
+        expect(find.byType(TextField), findsNothing);
+        expect(
+          await tester.runAsync(() => store.list('local', selection.bookId)),
+          isEmpty,
+        );
+        tester.view.resetViewInsets();
+        await _settle(tester);
+        await tester.tap(find.text('打开注释'));
+        await _settle(tester);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller?.text,
+          '',
+        );
         await tester.enterText(find.byType(TextField), '独立保存的阅读注释');
         await _settle(tester);
         await _capture(tester, 'companion-new-inset300-$width');

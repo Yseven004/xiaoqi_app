@@ -33,6 +33,8 @@ Future<bool> _hasCompleteManifest(File marker, int pages) async {
 }
 
 final _preparingBooks = <String, Future<PreparedCompanionPdf>>{};
+// Keep the last ebook that was opened. Its figure pixels remain on disk.
+({String key, PreparedCompanionPdf book})? _recentlyOpenedEbook;
 Future<void>? _extractionTail;
 const _pdfMetadataSlice = Duration(milliseconds: 50);
 final _preparationClock = Stopwatch()..start();
@@ -64,15 +66,29 @@ Future<PreparedCompanionPdf?> _restorePreparedBook(
   }
   try {
     final pages = <int, CompanionReflowPage>{};
-    for (var number = 1; number <= pageCount; number++) {
+    Future<CompanionReflowPage> loadPage(int number) async {
       final file = File('$directory/$number.json');
-      final page = await CompanionPdfReflow._decodePageCache(
+      return CompanionPdfReflow._decodePageCache(
         await file.readAsString(),
         file.path,
         number,
       );
-      if (!page.canRead) return null;
-      pages[number] = page;
+    }
+
+    const readBatchSize = 8;
+    for (var start = 1; start <= pageCount; start += readBatchSize) {
+      final batch = await Future.wait([
+        for (
+          var number = start;
+          number < start + readBatchSize && number <= pageCount;
+          number++
+        )
+          loadPage(number),
+      ]);
+      for (final page in batch) {
+        if (!page.canRead) return null;
+        pages[page.number] = page;
+      }
     }
     return _preparedBook(pages, File('$directory/layout.json'));
   } on Object {
@@ -90,6 +106,13 @@ Future<PreparedCompanionPdf> _prepareCompanionBook(
     return Future.error(const FormatException('这份 PDF 限制复制内容'));
   }
   final key = reflow._cacheKey;
+  final recent = _recentlyOpenedEbook;
+  if (allowsCopying == true &&
+      recent != null &&
+      recent.key == key &&
+      recent.book.pages.length == loadedPageCount) {
+    return Future.value(recent.book);
+  }
   final current = _preparingBooks[key];
   if (current != null) return current;
   final result =

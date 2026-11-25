@@ -499,7 +499,7 @@ void main() {
 
       await tester.tap(find.text('写注释'));
       await tester.pumpAndSettle();
-      final quoteLine = tester.widget<Text>(find.text('引文  所选引文第一行 完整引文第二行'));
+      final quoteLine = tester.widget<Text>(find.text('所选引文第一行 完整引文第二行'));
       expect(quoteLine.maxLines, 1);
       expect(quoteLine.overflow, TextOverflow.clip);
       await tester.tap(find.byWidget(quoteLine));
@@ -507,6 +507,13 @@ void main() {
       expect(find.text(quote), findsOneWidget);
       await tester.tap(find.text('关闭'));
       await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '这段还要补充');
+      await tester.pumpAndSettle();
+      await tester.tapAt(const Offset(6, 6));
+      await tester.pumpAndSettle();
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.controller?.text, '这段还要补充');
+      expect(field.focusNode?.hasFocus, isFalse);
       await tester.tapAt(const Offset(6, 6));
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsNothing);
