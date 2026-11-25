@@ -620,11 +620,32 @@ class ReadingCompanionState extends State<ReadingCompanion> {
         .where((item) => item.id == entry.id)
         .firstOrNull;
     if (current == null) return;
-    await viewCompanionAnnotation(
-      context,
-      initial: current,
-      onEdit: (current) => _editAnnotation(current.selection, initial: current),
-    );
+    final document = _documentKey?.currentState;
+    final restoreOutline = document?._activePanel == _ReaderPanel.outline;
+    final outline = document?._outlinePanel;
+    final outlineExtent = document?._outlineExtent ?? 0;
+    final generation = CapabilityCloudSync.instance.emailSessionRevision.value;
+    if (restoreOutline) document?._closeReaderPanel();
+    try {
+      await viewCompanionAnnotation(
+        context,
+        initial: current,
+        onEdit: (current) =>
+            _editAnnotation(current.selection, initial: current),
+      );
+    } finally {
+      if (mounted &&
+          document?.mounted == true &&
+          restoreOutline &&
+          generation ==
+              CapabilityCloudSync.instance.emailSessionRevision.value) {
+        document!._openReaderPanel(
+          _ReaderPanel.outline,
+          outline: outline,
+          outlineExtent: outlineExtent,
+        );
+      }
+    }
   }
 
   Future<void> _deleteAnnotation(CompanionAnnotation entry) async {
@@ -5461,7 +5482,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     );
   }
 
-  void _openReaderPanel(_ReaderPanel panel, {WidgetBuilder? outline}) {
+  void _openReaderPanel(
+    _ReaderPanel panel, {
+    WidgetBuilder? outline,
+    double outlineExtent = 0,
+  }) {
     if (_activePanel == panel) {
       _closeReaderPanel();
       return;
@@ -5487,7 +5512,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     setState(() {
       _activePanel = panel;
       _adjustingTypography = false;
-      _outlineExtent = 0;
+      _outlineExtent = outlineExtent;
       _outlineDragging = false;
       _outlinePanel = outline;
       _progressPreview.value = null;
