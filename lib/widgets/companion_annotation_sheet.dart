@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
@@ -795,6 +796,53 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
     }
   }
 
+  Widget _editableBody() => LayoutBuilder(
+    builder: (context, constraints) => ValueListenableBuilder<TextEditingValue>(
+      valueListenable: _controller,
+      builder: (context, value, _) {
+        const style = TextStyle(color: _ink, fontSize: 16, height: 1.45);
+        var textWidth = constraints.maxWidth;
+        if (_audio.isNotEmpty && !value.text.contains('\n')) {
+          final painter = TextPainter(
+            text: TextSpan(
+              text: value.text.isEmpty ? '写下注释…' : value.text,
+              style: style,
+            ),
+            maxLines: 1,
+            textDirection: Directionality.of(context),
+            textScaler: MediaQuery.textScalerOf(context),
+          )..layout(maxWidth: constraints.maxWidth);
+          if (!painter.didExceedMaxLines) {
+            textWidth = math.min(
+              constraints.maxWidth,
+              math.max(72, painter.width + 16),
+            );
+          }
+          painter.dispose();
+        }
+        return Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            SizedBox(
+              width: textWidth,
+              child: AnnotationTextField(controller: _controller, style: style),
+            ),
+            for (final path in _audio)
+              _AnnotationAudio(
+                key: ValueKey(path),
+                path: path,
+                onRemove: _busy
+                    ? null
+                    : () => setState(() => _audio.remove(path)),
+              ),
+          ],
+        );
+      },
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => PopScope(
     canPop: !_busy && _recording == null,
@@ -811,22 +859,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
               child: const Text('取消', style: TextStyle(color: _quiet)),
             ),
           ),
-          AnnotationTextField(controller: _controller),
-          if (_audio.isNotEmpty)
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              children: [
-                for (final path in _audio)
-                  _AnnotationAudio(
-                    key: ValueKey(path),
-                    path: path,
-                    onRemove: _busy
-                        ? null
-                        : () => setState(() => _audio.remove(path)),
-                  ),
-              ],
-            ),
+          _editableBody(),
           if (_images.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 9, bottom: 4),
