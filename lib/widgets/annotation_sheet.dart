@@ -196,10 +196,16 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
 }
 
 class AnnotationQuoteLine extends StatelessWidget {
-  const AnnotationQuoteLine(this.quote, {this.guardContent, super.key});
+  const AnnotationQuoteLine(
+    this.quote, {
+    this.guardContent,
+    this.verticalPadding = 11,
+    super.key,
+  });
 
   final String quote;
   final Widget Function(Widget)? guardContent;
+  final double verticalPadding;
 
   @override
   Widget build(BuildContext context) => InkWell(
@@ -255,7 +261,7 @@ class AnnotationQuoteLine extends StatelessWidget {
       button: true,
       label: '查看完整引文',
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 11),
+        padding: EdgeInsets.symmetric(vertical: verticalPadding),
         child: Text(
           '引文  ${quote.replaceAll(RegExp(r"\s+"), " ")}',
           maxLines: 1,
