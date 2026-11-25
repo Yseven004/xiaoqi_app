@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart'
     show PointerScrollEvent, PointerSignalEvent;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderEditable;
 import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_painter/flutter_painter.dart' show FreeStyleDrawable;
@@ -216,6 +217,7 @@ class ReadingCompanion extends StatefulWidget {
     this.onPassageClosed,
     this.onChatVisibilityChanged,
     this.onInkEditingChanged,
+    this.onAnnotationEditingChanged,
     this.onChooseBook,
     this.onOpenLibrary,
     this.loadPreferredSourceId,
@@ -241,6 +243,7 @@ class ReadingCompanion extends StatefulWidget {
   final VoidCallback? onPassageClosed;
   final ValueChanged<bool>? onChatVisibilityChanged;
   final ValueChanged<bool>? onInkEditingChanged;
+  final ValueChanged<bool>? onAnnotationEditingChanged;
   final AsyncCallback? onChooseBook;
   final AsyncCallback? onOpenLibrary;
   final Future<int?> Function(int bookId)? loadPreferredSourceId;
@@ -550,23 +553,44 @@ class ReadingCompanionState extends State<ReadingCompanion> {
             ))) {
       return null;
     }
-    final result = await editCompanionAnnotation(
-      context,
-      scope: _annotationScope!,
-      selection: selection,
-      initial: initial,
-    );
-    if (result != null && mounted) await _loadBookAnnotations();
-    return result;
+    final document = _documentKey?.currentState;
+    await document?._beginAnnotationEditing(selection);
+    if (!mounted ||
+        generation != CapabilityCloudSync.instance.emailSessionRevision.value) {
+      document?._endAnnotationEditing();
+      return null;
+    }
+    widget.onAnnotationEditingChanged?.call(true);
+    try {
+      final result = await editCompanionAnnotation(
+        context,
+        scope: _annotationScope!,
+        selection: selection,
+        initial: initial,
+        onViewportChanged: document?._annotationViewportChanged,
+      );
+      if (result != null && mounted) await _loadBookAnnotations();
+      return result;
+    } finally {
+      document?._endAnnotationEditing();
+      if (mounted) widget.onAnnotationEditingChanged?.call(false);
+    }
   }
 
   Future<void> _annotate(ReadingCompanionPassage passage) async {
-    if (!await _canOpenAnnotations() || !mounted) return;
     final selection = passage.annotationSelection;
     final existing = _bookAnnotations
         .where((entry) => _sameAnnotationRange(entry.selection, selection))
         .firstOrNull;
-    await _editAnnotation(existing?.selection ?? selection, initial: existing);
+    try {
+      await _editAnnotation(
+        existing?.selection ?? selection,
+        initial: existing,
+      );
+    } finally {
+      // Also discard captured geometry if account validation prevented opening.
+      _documentKey?.currentState?._endAnnotationEditing();
+    }
   }
 
   bool _sameAnnotationRange(
@@ -1037,6 +1061,165 @@ bool _isCompanionPdf(BookSourceRecord source) =>
 enum _ReaderPanel { outline, progress, display }
 
 class _CompanionDocumentState extends State<_CompanionDocument> {
+  final _annotationViewportKey = GlobalKey();
+  List<Rect> _annotationSelectionRects = const [];
+  bool _annotationEditorActive = false;
+  double _annotationShift = 0;
+  EditableTextState? _annotationTextEditor;
+
+  void _captureAnnotationSelection(EditableTextState editor) {
+    final viewport = _annotationViewportKey.currentContext?.findRenderObject();
+    if (viewport is! RenderBox) return;
+    final render = editor.renderEditable;
+    final selection = editor.textEditingValue.selection;
+    _annotationSelectionRects = [
+      for (final box in render.getBoxesForSelection(selection))
+        box.toRect().shift(
+          render.localToGlobal(Offset.zero, ancestor: viewport),
+        ),
+    ];
+    _annotationTextEditor = editor;
+    editor.hideToolbar();
+  }
+
+  Future<void> _beginAnnotationEditing(
+    CompanionAnnotationSelection selection,
+  ) async {
+    if (!mounted) return;
+    if (_annotationSelectionRects.isEmpty &&
+        _sourceMatches(selection) &&
+        _pdf.isReady &&
+        _isPdfDocument &&
+        !_translationEnabled) {
+      final document = _pdf.document;
+      ({int page, PdfRect rect, List<PdfRect> bounds})? origin;
+      try {
+        origin = await _verifiedPdfOrigin(document, selection);
+      } on Exception {
+        // A missing/unavailable PDF text layer must not block note editing.
+      }
+      final viewport = _annotationViewportKey.currentContext
+          ?.findRenderObject();
+      if (!mounted) return;
+      if (origin != null &&
+          viewport is RenderBox &&
+          _pdf.isReady &&
+          identical(_pdf.document, document)) {
+        final rects = <Rect>[];
+        for (final bounds in origin.bounds) {
+          final rect = _pdf.calcRectForRectInsidePage(
+            pageNumber: origin.page,
+            rect: bounds,
+          );
+          final topLeft = _pdf.localToGlobal(
+            _pdf.documentToLocal(rect.topLeft),
+          );
+          final bottomRight = _pdf.localToGlobal(
+            _pdf.documentToLocal(rect.bottomRight),
+          );
+          if (topLeft != null && bottomRight != null) {
+            rects.add(
+              Rect.fromPoints(
+                viewport.globalToLocal(topLeft),
+                viewport.globalToLocal(bottomRight),
+              ),
+            );
+          }
+        }
+        if (rects.any((rect) => rect.overlaps(Offset.zero & viewport.size))) {
+          _annotationSelectionRects = rects;
+        }
+      }
+    }
+    // On re-edit, recover geometry only when this visible reader has one exact
+    // occurrence. An ambiguous quote must not move to a different paragraph.
+    if (_annotationSelectionRects.isEmpty && _sourceMatches(selection)) {
+      final viewport = _annotationViewportKey.currentContext
+          ?.findRenderObject();
+      final matches = <List<Rect>>[];
+      if (viewport is RenderBox) {
+        void visit(RenderObject object) {
+          if (object is RenderEditable) {
+            final text = object.text?.toPlainText() ?? '';
+            final start = text.indexOf(selection.quote);
+            if (selection.quote.isNotEmpty && start >= 0) {
+              if (text.indexOf(selection.quote, start + 1) >= 0) {
+                matches.add(const []);
+              }
+              matches.add([
+                for (final box in object.getBoxesForSelection(
+                  TextSelection(
+                    baseOffset: start,
+                    extentOffset: start + selection.quote.length,
+                  ),
+                ))
+                  box.toRect().shift(
+                    object.localToGlobal(Offset.zero, ancestor: viewport),
+                  ),
+              ]);
+            }
+          } else {
+            object.visitChildren(visit);
+          }
+        }
+
+        viewport.visitChildren(visit);
+        if (matches.length == 1 &&
+            matches.single.any(
+              (rect) => rect.overlaps(Offset.zero & viewport.size),
+            )) {
+          _annotationSelectionRects = matches.single;
+        }
+      }
+    }
+    setState(() {
+      _annotationEditorActive = true;
+      _pdfToolbarVisible = false;
+    });
+  }
+
+  void _annotationViewportChanged(double panelTop) {
+    if (!mounted || !_annotationEditorActive || !panelTop.isFinite) return;
+    final viewport = _annotationViewportKey.currentContext?.findRenderObject();
+    if (viewport is! RenderBox || _annotationSelectionRects.isEmpty) return;
+    final origin = viewport.localToGlobal(Offset.zero).dy;
+    final selected = _annotationSelectionRects.reduce(
+      (a, b) => a.expandToInclude(b),
+    );
+    final availableTop = widget.immersive
+        ? 12.0
+        : readingCompanionToolbarHeight(context) + 12;
+    final requested = math.min(0.0, panelTop - origin - 12 - selected.bottom);
+    final shift = math.max(
+      requested,
+      math.min(0.0, availableTop - selected.top),
+    );
+    if ((shift - _annotationShift).abs() > .5) {
+      setState(() => _annotationShift = shift);
+    }
+  }
+
+  void _endAnnotationEditing() {
+    if (!mounted) return;
+    if (!_annotationEditorActive &&
+        _annotationSelectionRects.isEmpty &&
+        _annotationTextEditor == null) {
+      return;
+    }
+    final editor = _annotationTextEditor;
+    _annotationTextEditor = null;
+    if (editor?.mounted == true) _collapseReaderTextSelection(editor!);
+    if (_pdf.isReady) {
+      unawaited(_pdf.textSelectionDelegate.clearTextSelection());
+    }
+    setState(() {
+      _annotationEditorActive = false;
+      _annotationSelectionRects = const [];
+      _annotationShift = 0;
+    });
+    _reportSelection(false);
+  }
+
   static const _preferences = ReaderPaginationPreferences();
   late Future<({XiaoqiDocument? document, ReaderAnchor? anchor})> _loading;
   File? _epubLayoutCache;
@@ -1288,6 +1471,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   bool get _hasPendingFormatSwitch =>
       _isPdfDocument ? _ebookSwitchPending && _requestedEbook : _returningToPdf;
   bool get _hasActiveSelection =>
+      _annotationEditorActive ||
       _selectionActive ||
       (_isPdfDocument &&
           _pdf.isReady &&
@@ -2484,7 +2668,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   void _reportSelection(bool active) {
     _selectionActive = active;
     if (!active) _prepareEbookNeighbors();
-    if (active || _inkEditing || _applyDeferredTranslation == null) return;
+    if (active ||
+        _annotationEditorActive ||
+        _inkEditing ||
+        _applyDeferredTranslation == null) {
+      return;
+    }
     final apply = _applyDeferredTranslation;
     final revision = _translationRevision;
     _applyDeferredTranslation = null;
@@ -2492,6 +2681,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       if (mounted &&
           revision == _translationRevision &&
           !_selectionActive &&
+          !_annotationEditorActive &&
           !_inkEditing &&
           _translationEnabled) {
         apply?.call();
@@ -3798,7 +3988,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         _copy(text);
       },
       onAnnotate: () {
-        _collapseReaderTextSelection(editable);
+        _captureAnnotationSelection(editable);
         widget.onAnnotate(passage);
       },
       onAsk: () =>
@@ -4697,6 +4887,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     if (!mounted) return;
     final visible =
         _pdf.isReady &&
+        !_annotationEditorActive &&
         !_pdfHandleMoving &&
         _pdf.textSelectionDelegate.isCopyAllowed &&
         _pdf.textSelectionDelegate.hasSelectedText;
@@ -4885,7 +5076,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         _copy(text);
                       },
                       onAnnotate: () {
-                        _collapseReaderTextSelection(editable);
+                        _captureAnnotationSelection(editable);
                         widget.onAnnotate(passage);
                       },
                       onAsk: () {
@@ -5113,6 +5304,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       final pieces = <String>[];
       final pageHashes = <int, String>{};
       final sourceRanges = <CompanionPdfRange>[];
+      final previewRects = <Rect>[];
+      final viewport = _annotationViewportKey.currentContext
+          ?.findRenderObject();
       var nativeCoordinates = true;
       try {
         for (var number = page; number <= endPage; number++) {
@@ -5131,6 +5325,34 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               : text.fullText.length;
           if (start < 0 || start > end || end > text.fullText.length) return;
           pieces.add(text.fullText.substring(start, end));
+          if (!ask && viewport is RenderBox) {
+            final selectedRange = PdfPageTextRange(
+              pageText: text,
+              start: start,
+              end: end,
+            );
+            for (final fragment
+                in selectedRange.enumerateFragmentBoundingRects()) {
+              final documentRect = _pdf.calcRectForRectInsidePage(
+                pageNumber: number,
+                rect: fragment.bounds,
+              );
+              final topLeft = _pdf.localToGlobal(
+                _pdf.documentToLocal(documentRect.topLeft),
+              );
+              final bottomRight = _pdf.localToGlobal(
+                _pdf.documentToLocal(documentRect.bottomRight),
+              );
+              if (topLeft != null && bottomRight != null) {
+                previewRects.add(
+                  Rect.fromPoints(
+                    viewport.globalToLocal(topLeft),
+                    viewport.globalToLocal(bottomRight),
+                  ),
+                );
+              }
+            }
+          }
           final hash = companionTextHash(text.fullText);
           pageHashes[number] = hash;
           final span = trimCompanionRange(text.fullText, start, end);
@@ -5149,6 +5371,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       }
       final text = pieces.join('\n').trim();
       if (!mounted || text.isEmpty) return;
+      if (!ask) _annotationSelectionRects = previewRects;
       await delegate.clearTextSelection();
       if (!mounted) return;
       final passage = _passage(
@@ -5532,7 +5755,23 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         widget.onToggleImmersive != null
                     ? _toggleReaderChrome
                     : null,
-                child: body,
+                child: Transform.translate(
+                  offset: Offset(0, _annotationShift),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      body,
+                      if (_annotationEditorActive)
+                        for (final rect in _annotationSelectionRects)
+                          Positioned.fromRect(
+                            rect: rect,
+                            child: const IgnorePointer(
+                              child: ColoredBox(color: Color(0x333B82F6)),
+                            ),
+                          ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -6254,6 +6493,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         return Material(
           color: _dark ? _paperDark : Colors.white,
           child: Stack(
+            key: _annotationViewportKey,
             fit: StackFit.expand,
             children: [
               body,
