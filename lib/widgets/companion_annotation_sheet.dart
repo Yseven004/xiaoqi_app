@@ -513,46 +513,71 @@ class _AnnotationAudioState extends State<_AnnotationAudio> {
       final playing = snapshot.data == PlayerState.playing;
       final pending = !File(widget.path).existsSync();
       return Material(
-        color: const Color(0xFFF0F1F3),
-        borderRadius: BorderRadius.circular(24),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
+        color: Colors.transparent,
+        child: Stack(
+          alignment: Alignment.center,
           children: [
-            Semantics(
-              label: pending
-                  ? '下载并播放录音'
-                  : playing
-                  ? '暂停录音'
-                  : '播放录音',
-              child: TextButton.icon(
-                onPressed: _toggle,
-                icon: annotationAsset(
-                  'assets/icons/note_format/${playing ? 'pause' : 'play_arrow'}.svg',
-                  size: 16,
-                  color: _ink,
-                ),
-                label: Text(
-                  pending
-                      ? '录音待下载'
-                      : _duration == null
-                      ? '录音'
-                      : _audioTime(_duration!),
-                  style: const TextStyle(
-                    color: _ink,
-                    fontFeatures: [ui.FontFeature.tabularFigures()],
-                  ),
+            Positioned.fill(
+              top: 8,
+              bottom: 8,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF0F1F3),
+                  borderRadius: BorderRadius.circular(14),
                 ),
               ),
             ),
-            if (widget.onRemove != null)
-              IconButton(
-                tooltip: '移除录音',
-                onPressed: widget.onRemove,
-                icon: annotationAsset(
-                  'assets/icons/chat_note_editor/x.svg',
-                  size: 15,
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Semantics(
+                  label: pending
+                      ? '下载并播放录音'
+                      : playing
+                      ? '暂停录音'
+                      : '播放录音',
+                  child: TextButton.icon(
+                    onPressed: _toggle,
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 44),
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    icon: annotationAsset(
+                      'assets/icons/note_format/${playing ? 'pause' : 'play_arrow'}.svg',
+                      size: 16,
+                      color: _ink,
+                    ),
+                    label: Text(
+                      pending
+                          ? '录音待下载'
+                          : _duration == null
+                          ? '录音'
+                          : _audioTime(_duration!),
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 14,
+                        fontFeatures: [ui.FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+                if (widget.onRemove != null)
+                  IconButton(
+                    tooltip: '移除录音',
+                    onPressed: widget.onRemove,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 44,
+                      height: 44,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: annotationAsset(
+                      'assets/icons/chat_note_editor/x.svg',
+                      size: 15,
+                    ),
+                  ),
+              ],
+            ),
           ],
         ),
       );
@@ -583,6 +608,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   static const _store = CompanionAnnotationStore();
   final _speech = SpeechRecognitionService.instance;
   final _recordingOwner = Object();
+  final _textFieldKey = GlobalKey();
   late final _controller = TextEditingController(text: widget.initial?.text);
   late final _images = [...?widget.initial?.images];
   late final _audio = [...?widget.initial?.audio];
@@ -593,6 +619,12 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   bool _busy = false;
   bool _saved = false;
   Future<CompanionAnnotation>? _pendingSave;
+
+  bool get _compactNew =>
+      widget.initial == null &&
+      _audio.isEmpty &&
+      _images.isEmpty &&
+      _recording == null;
 
   @override
   void initState() {
@@ -851,7 +883,11 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
           children: [
             SizedBox(
               width: textWidth,
-              child: AnnotationTextField(controller: _controller, style: style),
+              child: AnnotationTextField(
+                key: _textFieldKey,
+                controller: _controller,
+                style: style,
+              ),
             ),
             for (final path in _audio)
               _AnnotationAudio(
@@ -867,6 +903,65 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
     ),
   );
 
+  Widget _saveButton({bool compact = false}) =>
+      ValueListenableBuilder<TextEditingValue>(
+        valueListenable: _controller,
+        builder: (context, value, _) {
+          final hasContent =
+              value.text.trim().isNotEmpty ||
+              _images.isNotEmpty ||
+              _audio.isNotEmpty;
+          final size = compact ? const Size(52, 26) : const Size(56, 30);
+          return FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: _ink,
+              foregroundColor: Colors.white,
+              minimumSize: size,
+              fixedSize: size,
+              padding: EdgeInsets.zero,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(7),
+              ),
+              textStyle: const TextStyle(fontSize: 14),
+            ),
+            onPressed: _saved || _busy || _recording != null || !hasContent
+                ? null
+                : _save,
+            child: const Text('保存'),
+          );
+        },
+      );
+
+  Widget _compactComposer() => Row(
+    crossAxisAlignment: CrossAxisAlignment.center,
+    children: [
+      IconButton(
+        tooltip: '添加图片',
+        onPressed: _busy ? null : _pickImages,
+        icon: annotationAsset(_plusAsset),
+      ),
+      Expanded(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF3F4F5),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: AnnotationTextField(
+            key: _textFieldKey,
+            controller: _controller,
+          ),
+        ),
+      ),
+      IconButton(
+        tooltip: '开始录音',
+        onPressed: _busy ? null : _toggleRecording,
+        icon: annotationAsset(_micAsset, color: _quiet),
+      ),
+      _saveButton(compact: true),
+    ],
+  );
+
   @override
   Widget build(BuildContext context) => PopScope(
     canPop: !_busy && _recording == null,
@@ -876,86 +971,74 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton(
-              onPressed: _busy ? null : () => Navigator.pop(context),
-              child: const Text('取消', style: TextStyle(color: _quiet)),
-            ),
-          ),
-          _editableBody(),
-          if (_images.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 9, bottom: 4),
-              child: AnnotationThumbnails(
-                paths: _images,
-                guardContent: widget.guardContent,
-                mediaChanges: CompanionAnnotationSync.instance.changes,
-                onMissing: (path) =>
-                    unawaited(_fetchMissingAnnotationMedia(context, path)),
-                onRemove: _busy
-                    ? null
-                    : (index) => setState(() => _images.removeAt(index)),
+          if (_compactNew)
+            _compactComposer()
+          else ...[
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: _busy ? null : () => Navigator.pop(context),
+                child: const Text('取消', style: TextStyle(color: _quiet)),
               ),
             ),
-          const Divider(height: 1, color: _rule),
-          Row(
-            children: [
-              IconButton(
-                tooltip: '添加图片',
-                onPressed: _busy || _recording != null ? null : _pickImages,
-                icon: annotationAsset(_plusAsset),
+            _editableBody(),
+            if (_images.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 9, bottom: 4),
+                child: AnnotationThumbnails(
+                  paths: _images,
+                  guardContent: widget.guardContent,
+                  mediaChanges: CompanionAnnotationSync.instance.changes,
+                  onMissing: (path) =>
+                      unawaited(_fetchMissingAnnotationMedia(context, path)),
+                  onRemove: _busy
+                      ? null
+                      : (index) => setState(() => _images.removeAt(index)),
+                ),
               ),
-              if (_recording != null) ...[
-                Expanded(
-                  child: Text(
-                    '录音中 ${_audioTime(_recordingClock.elapsed)}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Color(0xFF9D3A35),
-                      fontSize: 13,
-                      fontFeatures: [ui.FontFeature.tabularFigures()],
+            const Divider(height: 1, color: _rule),
+            Row(
+              children: [
+                IconButton(
+                  tooltip: '添加图片',
+                  onPressed: _busy || _recording != null ? null : _pickImages,
+                  icon: annotationAsset(_plusAsset),
+                ),
+                if (_recording != null) ...[
+                  Expanded(
+                    child: Text(
+                      '录音中 ${_audioTime(_recordingClock.elapsed)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF9D3A35),
+                        fontSize: 13,
+                        fontFeatures: [ui.FontFeature.tabularFigures()],
+                      ),
                     ),
                   ),
-                ),
-                TextButton.icon(
-                  onPressed: _busy ? null : _toggleRecording,
-                  style: TextButton.styleFrom(foregroundColor: _ink),
-                  icon: annotationAsset(
-                    'assets/icons/note_format/stop.svg',
-                    size: 18,
-                    color: const Color(0xFF9D3A35),
+                  TextButton.icon(
+                    onPressed: _busy ? null : _toggleRecording,
+                    style: TextButton.styleFrom(foregroundColor: _ink),
+                    icon: annotationAsset(
+                      'assets/icons/note_format/stop.svg',
+                      size: 18,
+                      color: const Color(0xFF9D3A35),
+                    ),
+                    label: const Text('停止'),
                   ),
-                  label: const Text('停止'),
-                ),
-              ] else ...[
-                const Spacer(),
-                IconButton(
-                  tooltip: '开始录音',
-                  onPressed: _busy ? null : _toggleRecording,
-                  icon: annotationAsset(_micAsset, color: _quiet),
-                ),
+                ] else ...[
+                  const Spacer(),
+                  IconButton(
+                    tooltip: '开始录音',
+                    onPressed: _busy ? null : _toggleRecording,
+                    icon: annotationAsset(_micAsset, color: _quiet),
+                  ),
+                ],
+                _saveButton(),
               ],
-              ValueListenableBuilder<TextEditingValue>(
-                valueListenable: _controller,
-                builder: (context, value, _) {
-                  final hasContent =
-                      value.text.trim().isNotEmpty ||
-                      _images.isNotEmpty ||
-                      _audio.isNotEmpty;
-                  return FilledButton(
-                    style: FilledButton.styleFrom(backgroundColor: _ink),
-                    onPressed:
-                        _saved || _busy || _recording != null || !hasContent
-                        ? null
-                        : _save,
-                    child: const Text('保存'),
-                  );
-                },
-              ),
-            ],
-          ),
+            ),
+          ],
           Row(
             children: [
               Expanded(
