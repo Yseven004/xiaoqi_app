@@ -45,11 +45,13 @@ Future<CompanionAnnotation?> editCompanionAnnotation(
   required String scope,
   required CompanionAnnotationSelection selection,
   CompanionAnnotation? initial,
+  ValueChanged<double>? onViewportChanged,
 }) {
   final revision = CapabilityCloudSync.instance.emailSessionRevision.value;
   return showAnnotationSheet(
     context,
     editing: true,
+    onViewportChanged: onViewportChanged,
     builder: (_) => _AnnotationAccountGuard(
       revision: revision,
       child: _CompanionAnnotationEditor(
