@@ -116,6 +116,10 @@ Future<void> viewCompanionAnnotation(
                         icon: annotationAsset(_pencilAsset, color: _ink),
                       ),
                       TextButton(
+                        style: TextButton.styleFrom(
+                          foregroundColor: _ink,
+                          disabledForegroundColor: _quiet,
+                        ),
                         onPressed: addingToLibrary
                             ? null
                             : () async {
