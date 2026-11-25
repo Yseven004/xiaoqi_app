@@ -8,6 +8,8 @@ Future<T?> showAnnotationSheet<T>(
   BuildContext context, {
   required WidgetBuilder builder,
   bool editing = false,
+  bool matchReferenceProportions = false,
+  Color barrierColor = const Color(0x38000000),
   Rect? Function()? resolveAnchor,
   ScrollPosition? scrollPosition,
   ValueChanged<double>? onViewportChanged,
@@ -21,14 +23,18 @@ Future<T?> showAnnotationSheet<T>(
     enableDrag: !editing,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
-    barrierColor: const Color(0x38000000),
+    barrierColor: barrierColor,
     constraints: BoxConstraints(
-      maxWidth: math.min(MediaQuery.sizeOf(context).width, 800),
+      maxWidth: math.min(
+        MediaQuery.sizeOf(context).width,
+        matchReferenceProportions ? 800 : 720,
+      ),
     ),
     builder: (context) => _AnnotationSheetSurface(
       resolveAnchor: resolveAnchor,
       scrollPosition: scrollPosition,
       onViewportChanged: onViewportChanged,
+      matchReferenceProportions: matchReferenceProportions,
       builder: builder,
     ),
   ).whenComplete(() => onViewportChanged?.call(double.infinity));
@@ -54,11 +60,13 @@ class _AnnotationVisualScale extends InheritedWidget {
 class _AnnotationSheetSurface extends StatefulWidget {
   const _AnnotationSheetSurface({
     required this.builder,
+    required this.matchReferenceProportions,
     this.resolveAnchor,
     this.scrollPosition,
     this.onViewportChanged,
   });
   final WidgetBuilder builder;
+  final bool matchReferenceProportions;
   final Rect? Function()? resolveAnchor;
   final ScrollPosition? scrollPosition;
   final ValueChanged<double>? onViewportChanged;
@@ -136,7 +144,9 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final width = constraints.maxWidth;
-            final designWidth = math.min(width, 390.0);
+            final designWidth = widget.matchReferenceProportions
+                ? math.min(width, 390.0)
+                : width;
             final scale = width / designWidth;
             return NotificationListener<SizeChangedLayoutNotification>(
               onNotification: (_) {
