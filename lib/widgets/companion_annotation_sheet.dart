@@ -241,41 +241,54 @@ class _AnnotationPrivacy extends StatelessWidget {
               rootNavigator: true,
             ).overlay!.context.findRenderObject()!
             as RenderBox;
-    final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    final visualScale = annotationVisualScaleOf(context);
+    final scale =
+        visualScale *
+        (MediaQuery.textScalerOf(context).scale(14) / 14).clamp(
+          1.0,
+          double.infinity,
+        );
     final headerHeight = 32.0 * scale.clamp(1.0, double.infinity);
     final privateHeight = 44.0 * scale.clamp(1.0, double.infinity);
     final disabledHeight = 36.0 * scale.clamp(1.0, double.infinity);
-    final menuHeight = 16 + headerHeight + privateHeight + disabledHeight * 3;
+    final menuHeight =
+        16 * visualScale + headerHeight + privateHeight + disabledHeight * 3;
+    final itemPadding = EdgeInsets.symmetric(horizontal: 16 * visualScale);
     await showMenu<String>(
       context: context,
       useRootNavigator: true,
       color: Colors.white,
       surfaceTintColor: Colors.transparent,
       elevation: 4,
-      menuPadding: const EdgeInsets.symmetric(vertical: 8),
-      constraints: const BoxConstraints.tightFor(width: 208),
+      menuPadding: EdgeInsets.symmetric(vertical: 8 * visualScale),
+      constraints: BoxConstraints.tightFor(width: 208 * visualScale),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(12 * visualScale),
         side: const BorderSide(color: _rule),
       ),
       positionBuilder: (context, constraints) {
         final topLeft = anchor.localToGlobal(Offset.zero, ancestor: overlay);
+        final bottomRight = anchor.localToGlobal(
+          anchor.size.bottomRight(Offset.zero),
+          ancestor: overlay,
+        );
         return RelativeRect.fromLTRB(
           topLeft.dx,
-          topLeft.dy - menuHeight - 8,
-          overlay.size.width - topLeft.dx - anchor.size.width,
-          overlay.size.height - topLeft.dy + 8,
+          topLeft.dy - menuHeight - 8 * visualScale,
+          overlay.size.width - bottomRight.dx,
+          overlay.size.height - topLeft.dy + 8 * visualScale,
         );
       },
       items: [
         PopupMenuItem<String>(
           enabled: false,
           height: headerHeight,
-          child: const Text(
+          padding: itemPadding,
+          child: Text(
             '可见范围',
             style: TextStyle(
               color: _ink,
-              fontSize: 14,
+              fontSize: 14 * visualScale,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -283,17 +296,22 @@ class _AnnotationPrivacy extends StatelessWidget {
         PopupMenuItem<String>(
           value: 'private',
           height: privateHeight,
+          padding: itemPadding,
           child: Semantics(
             selected: true,
             child: Row(
               children: [
-                const Expanded(
+                Expanded(
                   child: Text(
                     '私密',
-                    style: TextStyle(color: _ink, fontSize: 14),
+                    style: TextStyle(color: _ink, fontSize: 14 * visualScale),
                   ),
                 ),
-                annotationAsset('assets/icons/drawing/check.svg', color: _ink),
+                annotationAsset(
+                  'assets/icons/drawing/check.svg',
+                  color: _ink,
+                  size: 20 * visualScale,
+                ),
               ],
             ),
           ),
@@ -302,17 +320,18 @@ class _AnnotationPrivacy extends StatelessWidget {
           PopupMenuItem<String>(
             enabled: false,
             height: disabledHeight,
+            padding: itemPadding,
             child: Row(
               children: [
                 Expanded(
                   child: Text(
                     label,
-                    style: const TextStyle(color: _quiet, fontSize: 14),
+                    style: TextStyle(color: _quiet, fontSize: 14 * visualScale),
                   ),
                 ),
-                const Text(
+                Text(
                   '暂未开放',
-                  style: TextStyle(color: _quiet, fontSize: 13),
+                  style: TextStyle(color: _quiet, fontSize: 13 * visualScale),
                 ),
               ],
             ),
