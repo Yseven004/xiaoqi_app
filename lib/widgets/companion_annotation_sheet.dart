@@ -221,38 +221,115 @@ class _AnnotationAccountGuardState extends State<_AnnotationAccountGuard> {
 class _AnnotationPrivacy extends StatelessWidget {
   const _AnnotationPrivacy();
 
-  @override
-  Widget build(BuildContext context) => PopupMenuButton<String>(
-    tooltip: '可见范围，当前私密',
-    color: Colors.white,
-    surfaceTintColor: Colors.transparent,
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-    itemBuilder: (context) => [
-      const PopupMenuItem(
-        enabled: false,
-        child: Text('可见范围', style: TextStyle(color: _ink)),
+  Future<void> _showMenu(BuildContext context) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    final anchor = context.findRenderObject()! as RenderBox;
+    final overlay =
+        Navigator.of(
+              context,
+              rootNavigator: true,
+            ).overlay!.context.findRenderObject()!
+            as RenderBox;
+    final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    final headerHeight = 32.0 * scale.clamp(1.0, double.infinity);
+    final privateHeight = 44.0 * scale.clamp(1.0, double.infinity);
+    final disabledHeight = 36.0 * scale.clamp(1.0, double.infinity);
+    final menuHeight = 16 + headerHeight + privateHeight + disabledHeight * 3;
+    await showMenu<String>(
+      context: context,
+      useRootNavigator: true,
+      color: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      elevation: 4,
+      menuPadding: const EdgeInsets.symmetric(vertical: 8),
+      constraints: const BoxConstraints.tightFor(width: 208),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: _rule),
       ),
-      CheckedPopupMenuItem(
-        value: 'private',
-        checked: true,
-        child: const Text('私密'),
-      ),
-      for (final label in ['公开', '好友', '共读小组'])
-        PopupMenuItem(enabled: false, child: Text('$label　暂未开放')),
-    ],
-    child: Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          annotationAsset(
-            'assets/icons/chat_annotations/lock-outline.svg',
-            size: 17,
-            color: _quiet,
+      positionBuilder: (context, constraints) {
+        final topLeft = anchor.localToGlobal(Offset.zero, ancestor: overlay);
+        return RelativeRect.fromLTRB(
+          topLeft.dx,
+          topLeft.dy - menuHeight - 8,
+          overlay.size.width - topLeft.dx - anchor.size.width,
+          overlay.size.height - topLeft.dy + 8,
+        );
+      },
+      items: [
+        PopupMenuItem<String>(
+          enabled: false,
+          height: headerHeight,
+          child: const Text(
+            '可见范围',
+            style: TextStyle(
+              color: _ink,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-          const SizedBox(width: 5),
-          const Text('私密', style: TextStyle(color: _quiet)),
-        ],
+        ),
+        PopupMenuItem<String>(
+          value: 'private',
+          height: privateHeight,
+          child: Semantics(
+            selected: true,
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    '私密',
+                    style: TextStyle(color: _ink, fontSize: 14),
+                  ),
+                ),
+                annotationAsset('assets/icons/drawing/check.svg', color: _ink),
+              ],
+            ),
+          ),
+        ),
+        for (final label in ['公开', '好友', '共读小组'])
+          PopupMenuItem<String>(
+            enabled: false,
+            height: disabledHeight,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    label,
+                    style: const TextStyle(color: _quiet, fontSize: 14),
+                  ),
+                ),
+                const Text(
+                  '暂未开放',
+                  style: TextStyle(color: _quiet, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+    message: '可见范围，当前私密',
+    child: InkWell(
+      onTap: () => _showMenu(context),
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            annotationAsset(
+              'assets/icons/chat_annotations/lock-outline.svg',
+              size: 17,
+              color: _quiet,
+            ),
+            const SizedBox(width: 5),
+            const Text('私密', style: TextStyle(color: _quiet)),
+          ],
+        ),
       ),
     ),
   );
