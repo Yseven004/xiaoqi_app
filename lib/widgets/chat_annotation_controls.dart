@@ -330,87 +330,95 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
   }
 
   @override
-  Widget build(BuildContext context) => SingleChildScrollView(
-    padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          children: [
-            if (widget.onPickImages != null)
-              IconButton(
-                tooltip: '添加解释图',
-                onPressed: _picking || _images.length >= widget.imageLimit
-                    ? null
-                    : _pickImages,
-                icon: annotationAsset('assets/images/reading_task_plus.svg'),
-              ),
-            Expanded(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF4F4F5),
-                  borderRadius: BorderRadius.circular(16),
+  Widget build(BuildContext context) => ColoredBox(
+    color: _images.isEmpty ? Colors.white : const Color(0xFFF4F4F5),
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (widget.onPickImages != null)
+                IconButton(
+                  tooltip: '添加解释图',
+                  onPressed: _picking || _images.length >= widget.imageLimit
+                      ? null
+                      : _pickImages,
+                  icon: annotationAsset('assets/images/reading_task_plus.svg'),
                 ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      AnnotationTextField(controller: _controller),
-                      if (_images.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: AnnotationThumbnails(
-                            paths: _images.map((image) => image.path).toList(),
-                            guardContent: widget.guardContent,
-                            onRemove: _picking
-                                ? null
-                                : (index) =>
-                                      setState(() => _images.removeAt(index)),
-                          ),
-                        ),
-                    ],
+              Expanded(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: _images.isEmpty
+                        ? const Color(0xFFF4F4F5)
+                        : Colors.white,
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                ),
-              ),
-            ),
-            ValueListenableBuilder(
-              valueListenable: _controller,
-              builder: (context, value, _) {
-                final comment = value.text.trim();
-                final canSubmit =
-                    !_picking && (comment.isNotEmpty || _images.isNotEmpty);
-                return IconButton(
-                  tooltip: '加入待发送注释',
-                  onPressed: canSubmit
-                      ? () => Navigator.pop(context, (
-                          comment: comment,
-                          images: List<HomeChatAttachment>.unmodifiable(
-                            _images,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AnnotationTextField(controller: _controller),
+                        if (_images.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: AnnotationThumbnails(
+                              paths: _images
+                                  .map((image) => image.path)
+                                  .toList(),
+                              guardContent: widget.guardContent,
+                              onRemove: _picking
+                                  ? null
+                                  : (index) =>
+                                        setState(() => _images.removeAt(index)),
+                            ),
                           ),
-                        ))
-                      : null,
-                  icon: DecoratedBox(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: canSubmit
-                          ? const Color(0xFF252525)
-                          : const Color(0xFF777B83),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: chatAnnotationIcon('arrow-up', size: 18),
+                      ],
                     ),
                   ),
-                );
-              },
-            ),
-          ],
-        ),
-        AnnotationQuoteLine(widget.quote),
-      ],
+                ),
+              ),
+              ValueListenableBuilder(
+                valueListenable: _controller,
+                builder: (context, value, _) {
+                  final comment = value.text.trim();
+                  final canSubmit =
+                      !_picking && (comment.isNotEmpty || _images.isNotEmpty);
+                  return IconButton(
+                    tooltip: '加入待发送注释',
+                    onPressed: canSubmit
+                        ? () => Navigator.pop(context, (
+                            comment: comment,
+                            images: List<HomeChatAttachment>.unmodifiable(
+                              _images,
+                            ),
+                          ))
+                        : null,
+                    icon: DecoratedBox(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: canSubmit
+                            ? const Color(0xFF252525)
+                            : const Color(0xFF777B83),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: chatAnnotationIcon('arrow-up', size: 18),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+          AnnotationQuoteLine(widget.quote),
+        ],
+      ),
     ),
   );
 }
