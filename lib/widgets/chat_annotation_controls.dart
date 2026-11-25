@@ -256,6 +256,7 @@ Future<ChatAnnotationComposerResult?> showChatAnnotationComposer(
   ScrollPosition? scrollPosition,
 }) => showAnnotationSheet<ChatAnnotationComposerResult>(
   context,
+  matchReferenceProportions: true,
   resolveAnchor: resolveAnchor,
   scrollPosition: scrollPosition,
   builder: (context) {
@@ -344,10 +345,17 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
               if (widget.onPickImages != null)
                 IconButton(
                   tooltip: '添加解释图',
+                  constraints: const BoxConstraints.tightFor(
+                    width: 48,
+                    height: 48,
+                  ),
                   onPressed: _picking || _images.length >= widget.imageLimit
                       ? null
                       : _pickImages,
-                  icon: annotationAsset('assets/images/reading_task_plus.svg'),
+                  icon: annotationAsset(
+                    'assets/images/reading_task_plus.svg',
+                    size: 16,
+                  ),
                 ),
               Expanded(
                 child: DecoratedBox(
@@ -391,6 +399,10 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                       !_picking && (comment.isNotEmpty || _images.isNotEmpty);
                   return IconButton(
                     tooltip: '加入待发送注释',
+                    constraints: const BoxConstraints.tightFor(
+                      width: 48,
+                      height: 48,
+                    ),
                     onPressed: canSubmit
                         ? () => Navigator.pop(context, (
                             comment: comment,
@@ -407,8 +419,8 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                             : const Color(0xFF777B83),
                       ),
                       child: Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: chatAnnotationIcon('arrow-up', size: 18),
+                        padding: const EdgeInsets.all(6),
+                        child: chatAnnotationIcon('arrow-up', size: 16),
                       ),
                     ),
                   );
