@@ -60,6 +60,7 @@ import '../services/home_chat_attachment_preparer.dart';
 import '../services/home_chat_drawing_draft_store.dart';
 import '../models/chat_annotation.dart';
 import '../widgets/chat_annotation_controls.dart';
+import '../widgets/chat_annotated_markdown.dart';
 import '../widgets/companion_annotation_sheet.dart'
     show guardPrivateAnnotationContent;
 import '../services/companion_annotation_store.dart';
@@ -15438,7 +15439,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
       alignment: Alignment.centerLeft,
       child: Theme(
         data: _assistantMarkdownTheme,
-        child: GptMarkdown(
+        child: ChatAnnotatedMarkdown(markdown: GptMarkdown(
           markdownText,
           style: const TextStyle(
             color: Color(0xFF303134),
@@ -15484,7 +15485,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
               _showAgentSourcesSheet(sources, selectedId: content),
           inlineSourceTagBuilder: (details) => details.defaultSpan(),
           useDollarSignsForLatex: false,
-        ),
+        )),
       ),
     );
   }

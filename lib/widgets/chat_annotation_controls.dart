@@ -9,6 +9,7 @@ import 'package:gpt_markdown/gpt_markdown.dart';
 import '../models/chat_annotation.dart';
 import '../models/home_chat_attachment.dart';
 import 'annotation_sheet.dart';
+import 'chat_annotated_markdown.dart';
 
 /// Keep source links selectable, with an explicit blue independent of theme.
 InlineSpan chatAnnotationLinkSpan(LinkBuildDetails link) {
@@ -997,13 +998,37 @@ class ChatAnnotationCountChip extends StatelessWidget {
 
 /// Measures the quote against the rendered paragraphs, in the root's coordinates.
 List<Rect> chatTextQuoteBoxes(RenderBox root, ChatAnnotation annotation) {
-  final paragraphs = <({RenderParagraph box, String text, int start})>[];
+  final paragraphs =
+      <({RenderParagraph box, String text, int start, int offset})>[];
   var plain = '';
   void visit(RenderObject object) {
+    if (object is RenderChatInlineAnnotationPin) return;
     if (object is RenderParagraph) {
-      final text = object.text.toPlainText(includePlaceholders: false);
-      paragraphs.add((box: object, text: text, start: plain.length));
-      plain += '$text\n';
+      final children = <RenderObject>[];
+      object.visitChildren(children.add);
+      var childIndex = 0;
+      var offset = 0;
+      void span(InlineSpan current) {
+        if (current is TextSpan) {
+          final text = current.text ?? '';
+          if (text.isNotEmpty) {
+            paragraphs.add((
+              box: object,
+              text: text,
+              start: plain.length,
+              offset: offset,
+            ));
+            plain += text;
+            offset += text.length;
+          }
+          current.children?.forEach(span);
+        } else if (current is PlaceholderSpan) {
+          if (childIndex < children.length) visit(children[childIndex++]);
+          offset++;
+        }
+      }
+
+      span(object.text);
     } else {
       object.visitChildren(visit);
     }
@@ -1022,7 +1047,7 @@ List<Rect> chatTextQuoteBoxes(RenderBox root, ChatAnnotation annotation) {
     final end = (range.end - p.start).clamp(0, p.text.length);
     if (end <= start) continue;
     for (final box in p.box.getBoxesForSelection(
-      TextSelection(baseOffset: start, extentOffset: end),
+      TextSelection(baseOffset: p.offset + start, extentOffset: p.offset + end),
     )) {
       boxes.add(
         box.toRect().shift(p.box.localToGlobal(Offset.zero, ancestor: root)),
@@ -1058,6 +1083,15 @@ class _ChatTextAnnotationLayerState extends State<ChatTextAnnotationLayer> {
   List<({ChatAnnotation annotation, List<Rect> boxes})> _marks = [];
   Size _contentSize = Size.zero;
   bool _scheduled = false;
+  bool _usesInlineLayout = false;
+
+  void _onInlineAnnotationsRendered(Set<String> ids) {
+    if (!mounted || _usesInlineLayout) return;
+    // Opaque Markdown blocks cannot reserve a text slot through the public
+    // renderer. Keep their quote highlight and pending-list edit entry, rather
+    // than falling back to painting a pin over the code/table contents.
+    setState(() => _usesInlineLayout = true);
+  }
 
   void _measure() {
     if (_scheduled) return;
@@ -1099,7 +1133,13 @@ class _ChatTextAnnotationLayerState extends State<ChatTextAnnotationLayer> {
       return Stack(
         clipBehavior: Clip.none,
         children: [
-          Container(key: _contentKey, child: widget.child),
+          ChatInlineAnnotationScope(
+            annotations: widget.annotations,
+            numbers: widget.annotationNumbers,
+            onTap: widget.onTapAnnotation,
+            onRendered: _onInlineAnnotationsRendered,
+            child: Container(key: _contentKey, child: widget.child),
+          ),
           for (final mark in _marks) ...[
             for (final box in mark.boxes)
               Positioned.fromRect(
@@ -1109,6 +1149,7 @@ class _ChatTextAnnotationLayerState extends State<ChatTextAnnotationLayer> {
                 ),
               ),
             if (mark.annotation.id != widget.draft?.id &&
+                !_usesInlineLayout &&
                 mark.annotation.id != widget.highlight?.id)
               Positioned(
                 left: mark.boxes.last.right - ChatAnnotationPin.textAnchor.dx,
