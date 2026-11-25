@@ -197,6 +197,8 @@ Future<String?> showChatAnnotationComment(
       context,
       initialText: initialText,
       quote: quote,
+      resolveAnchor: resolveAnchor,
+      scrollPosition: scrollPosition,
       onDismissReady: onDismissReady,
     );
     return result?.comment;
@@ -250,8 +252,12 @@ Future<ChatAnnotationComposerResult?> showChatAnnotationComposer(
   Future<List<HomeChatAttachment>> Function(int limit)? onPickImages,
   ValueChanged<VoidCallback>? onDismissReady,
   Widget Function(Widget)? guardContent,
+  Rect? Function()? resolveAnchor,
+  ScrollPosition? scrollPosition,
 }) => showAnnotationSheet<ChatAnnotationComposerResult>(
   context,
+  resolveAnchor: resolveAnchor,
+  scrollPosition: scrollPosition,
   builder: (context) {
     final composer = _TextAnnotationComposer(
       initialText: initialText,
@@ -1043,7 +1049,7 @@ class _ChatTextAnnotationLayerState extends State<ChatTextAnnotationLayer> {
       if (root is! RenderBox || !root.hasSize) return;
       final marks = <({ChatAnnotation annotation, List<Rect> boxes})>[];
       for (final a in [
-        ...widget.annotations,
+        ...widget.annotations.where((a) => a.id != widget.draft?.id),
         if (widget.draft != null) widget.draft!,
         if (widget.highlight != null &&
             !widget.annotations.any((a) => a.id == widget.highlight!.id))

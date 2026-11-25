@@ -1913,7 +1913,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  Future<void> _annotateText(ChatAnnotation annotation, Offset anchor) async {
+  Future<void> _annotateText(
+    ChatAnnotation annotation,
+    Offset anchor, {
+    Rect? Function()? resolveAnchor,
+  }) async {
     if (_pendingAnnotationBatch != null && (_isGenerating || _isPreparingToSend)) return;
     if (_editingQuestion != null) {
       _showReplyError('请先完成当前消息修改');
@@ -1922,7 +1926,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final conversationId = _conversation?.id;
     if (conversationId == null) return;
     final existing = _annotations.where((a) => a.id == annotation.id).firstOrNull;
-    final updated = await _editAnnotationDraft(existing ?? annotation);
+    final updated = await _editAnnotationDraft(
+      existing ?? annotation,
+      resolveAnchor: resolveAnchor,
+    );
     if (!mounted || _conversation?.id != conversationId || updated == null) {
       return;
     }
@@ -1936,6 +1943,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<ChatAnnotation?> _editAnnotationDraft(
     ChatAnnotation annotation, {
     BuildContext? editorContext,
+    Rect? Function()? resolveAnchor,
   }) async {
     if (annotation.isImage) {
       final value = await _showAnnotationComment(
@@ -1973,7 +1981,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _annotationCommentOwnsLayoutLock = true;
     }
     _unlockKeyboardOverlayLayoutAfterImeHides = false;
-    setState(() => _keyboardOverlayLayoutLocked = true);
+    setState(() {
+      _keyboardOverlayLayoutLocked = true;
+      _textAnnotationEditorVisible = resolveAnchor != null;
+    });
     final staged = <HomeChatAttachment>[];
     var retained = const <HomeChatAttachment>[];
     try {
@@ -1985,6 +1996,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         editorContext ?? context,
         initialText: annotation.comment,
         quote: annotation.quote,
+        resolveAnchor: resolveAnchor,
+        scrollPosition:
+            resolveAnchor != null && _messagesScrollController.hasClients
+            ? _messagesScrollController.position
+            : null,
         initialImages: existing,
         imageLimit: imageLimit,
         guardContent: (child) => guardPrivateAnnotationContent(revision, child),
@@ -2057,6 +2073,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (epoch == _annotationCommentEpoch) {
         ++_annotationCommentEpoch;
         _dismissAnnotationComment = null;
+        if (mounted) setState(() => _textAnnotationEditorVisible = false);
         if (_annotationCommentOwnsLayoutLock) {
           _annotationCommentOwnsLayoutLock = false;
           _releaseKeyboardOverlayLayoutLockSafely();
@@ -13799,7 +13816,11 @@ class _ConversationMessages extends StatefulWidget {
   final ValueChanged<String> onOpenDraftReview;
   final List<ChatAnnotation> annotations;
   final double annotationBottomPadding;
-  final Future<void> Function(ChatAnnotation, Offset) onAnnotate;
+  final Future<void> Function(
+    ChatAnnotation,
+    Offset, {
+    Rect? Function()? resolveAnchor,
+  }) onAnnotate;
   final VoidCallback onAnnotationNavigation;
   final Future<void> Function(List<ChatImageSource>, int) onPreviewImages;
 
@@ -15176,7 +15197,21 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                   sha256.convert(utf8.encode(message.text)).toString(),
         )
         .toList(),
-    onAnnotate: widget.onAnnotate,
+    onAnnotate: (annotation, anchor) => widget.onAnnotate(
+      annotation,
+      anchor,
+      resolveAnchor: () {
+        if (!mounted) return null;
+        final root = _messageContentKeys[message.id]?.currentContext
+            ?.findRenderObject();
+        if (root is! RenderBox || !root.hasSize || !root.attached) return null;
+        final boxes = chatTextQuoteBoxes(root, annotation);
+        if (boxes.isEmpty) return null;
+        return boxes
+            .reduce((a, b) => a.expandToInclude(b))
+            .shift(root.localToGlobal(Offset.zero));
+      },
+    ),
     highlight: _annotationHighlight?.messageId == message.id
         ? _annotationHighlight
         : null,
@@ -16049,6 +16084,16 @@ class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
   final _selectionListener = SelectionListenerNotifier();
   String _selectedText = '';
   bool _hasSelection = false;
+  ChatAnnotation? _annotationDraft;
+
+  Future<void> _editAnnotation(ChatAnnotation annotation, Offset anchor) async {
+    setState(() => _annotationDraft = annotation);
+    try {
+      await widget.onAnnotate(annotation, anchor);
+    } finally {
+      if (mounted) setState(() => _annotationDraft = null);
+    }
+  }
 
   void _clearSelection() {
     final region = _selectionAreaKey.currentState?.selectableRegion;
@@ -16102,7 +16147,7 @@ class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
                   region.hideToolbar();
                   region.clearSelection();
                   unawaited(
-                    widget.onAnnotate(
+                    _editAnnotation(
                       annotation,
                       anchors.secondaryAnchor ?? anchors.primaryAnchor,
                     ),
@@ -16138,10 +16183,11 @@ class _MessageSelectionAreaState extends State<_MessageSelectionArea> {
       },
       child: ChatTextAnnotationLayer(
         annotations: widget.annotations,
+        draft: _annotationDraft,
         highlight: widget.highlight,
         annotationNumbers: widget.annotationNumbers,
         onTapAnnotation: (annotation, anchor) =>
-            unawaited(widget.onAnnotate(annotation, anchor)),
+            unawaited(_editAnnotation(annotation, anchor)),
         child: SelectionArea(
           key: _selectionAreaKey,
           contextMenuBuilder: _buildContextMenu,
