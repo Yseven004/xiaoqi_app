@@ -27,6 +27,7 @@ import 'book_cover_storage.dart';
 import 'book_source_block_merger.dart';
 import 'companion_pdf_reflow.dart';
 import 'database_service.dart';
+import 'companion_annotation_sync.dart';
 import 'epub_document_service.dart';
 import 'pdf_catalog_service.dart';
 import 'source_document_loader.dart';
@@ -256,7 +257,10 @@ class BookLibraryService {
       DateTime.now().subtract(const Duration(days: 29)),
     );
     final where = <String>['b.is_deleted = 0'];
-    final whereArgs = <Object?>[threshold];
+    final whereArgs = <Object?>[
+      await DatabaseService.visibleNoteScope(),
+      threshold,
+    ];
     final normalizedSearch = query.searchText.trim().toLowerCase();
     if (normalizedSearch.isNotEmpty) {
       final pattern = '%$normalizedSearch%';
@@ -292,7 +296,8 @@ class BookLibraryService {
         '''
       SELECT b.*,
         (SELECT COUNT(*) FROM notes n
-         WHERE n.is_deleted = 0 AND (n.book_id = b.id OR EXISTS (
+         WHERE n.is_deleted = 0 AND ${DatabaseService.visibleNote('n')}
+         AND (n.book_id = b.id OR EXISTS (
            SELECT 1 FROM note_book_references nref
            WHERE nref.note_id = n.id AND nref.book_id = b.id
          ))) AS note_count,
@@ -339,7 +344,8 @@ class BookLibraryService {
     final rows = await db.rawQuery(
       '''SELECT b.*,
           (SELECT COUNT(*) FROM notes n
-           WHERE n.is_deleted = 0 AND (n.book_id = b.id OR EXISTS (
+           WHERE n.is_deleted = 0 AND ${DatabaseService.visibleNote('n')}
+           AND (n.book_id = b.id OR EXISTS (
              SELECT 1 FROM note_book_references nref
              WHERE nref.note_id = n.id AND nref.book_id = b.id
            ))) AS note_count,
@@ -350,7 +356,7 @@ class BookLibraryService {
           (SELECT COUNT(*) FROM book_study_activity a
            WHERE a.book_id = b.id AND a.activity_date >= ?) AS active_days
         FROM books b WHERE b.id = ? AND b.is_deleted = 0 LIMIT 1''',
-      [threshold, bookId],
+      [await DatabaseService.visibleNoteScope(), threshold, bookId],
     );
     if (rows.isEmpty) return null;
     final row = rows.first;
@@ -371,10 +377,11 @@ class BookLibraryService {
     final db = await _databaseService.database;
     final rows = await db.query(
       'notes',
-      where: '''is_deleted = 0 AND (book_id = ? OR id IN (
+      where: '''is_deleted = 0 AND ${DatabaseService.visibleNote('notes')}
+        AND (book_id = ? OR id IN (
         SELECT note_id FROM note_book_references WHERE book_id = ?
       ))''',
-      whereArgs: [bookId, bookId],
+      whereArgs: [await DatabaseService.visibleNoteScope(), bookId, bookId],
       orderBy: 'is_pinned DESC, pinned_at DESC, updated_at DESC, id DESC',
     );
     return rows.map(Note.fromMap).toList(growable: false);
@@ -690,12 +697,15 @@ class BookLibraryService {
               .toMap()
             ..remove('id')
             ..remove('created_at');
-      final updated = await db.update(
-        'books',
-        values,
-        where: 'id = ? AND is_deleted = 0',
-        whereArgs: [id],
-      );
+      final updated = await db.transaction((txn) async {
+        await CompanionAnnotationSync.instance.freezeBookIdentity(txn, id);
+        return txn.update(
+          'books',
+          values,
+          where: 'id = ? AND is_deleted = 0',
+          whereArgs: [id],
+        );
+      });
       if (updated == 0) throw StateError('这本书已经不存在');
       if (preparedBook.coverPath.isEmpty && preparedBook.coverUrl.isNotEmpty) {
         unawaited(_persistCatalogueCover(id, preparedBook));
@@ -742,6 +752,7 @@ class BookLibraryService {
         final values = preparedBook.copyWith(updatedAt: now).toMap()
           ..remove('id')
           ..remove('created_at');
+        await CompanionAnnotationSync.instance.freezeBookIdentity(txn, id);
         final updated = await txn.update(
           'books',
           values,
@@ -1176,10 +1187,18 @@ class BookLibraryService {
     return _upgradeLegacyEpub(source, document);
   }
 
-  Future<XiaoqiDocument> _upgradeLegacyEpub(BookSourceRecord source, XiaoqiDocument document) async {
-    if (document.format != 'epub' || document.structureVersion >= EpubDocumentService.structureVersion) return document;
+  Future<XiaoqiDocument> _upgradeLegacyEpub(
+    BookSourceRecord source,
+    XiaoqiDocument document,
+  ) async {
+    if (document.format != 'epub' ||
+        document.structureVersion >= EpubDocumentService.structureVersion)
+      return document;
     try {
-      return await compute(upgradeStoredEpub, (source.filePath, document), debugLabel: 'restore EPUB content');
+      return await compute(upgradeStoredEpub, (
+        source.filePath,
+        document,
+      ), debugLabel: 'restore EPUB content');
     } on Object {
       return document;
     }
@@ -1269,15 +1288,18 @@ class BookLibraryService {
     final db = await _databaseService.database;
     // 保存前只比较存下来的那条版本，不触发“重新解析原始文件”的修复路径。
     final stored = await _loadStoredRevision(source);
-    final previous = stored != null && document.format == 'epub' &&
+    final previous =
+        stored != null &&
+            document.format == 'epub' &&
             document.structureVersion >= EpubDocumentService.structureVersion
-        ? await _upgradeLegacyEpub(source, stored) : stored;
+        ? await _upgradeLegacyEpub(source, stored)
+        : stored;
     final rejection = DerivedDocumentGuard.rejectionReason(
       document,
       previous: previous,
     );
     if (rejection != null) throw StateError(rejection);
-    final json = document.toJson(includeAnnotations:true);
+    final json = document.toJson(includeAnnotations: true);
     final documentHash = sha256.convert(utf8.encode(json)).toString();
     final now = DateTime.now().toIso8601String();
     await db.transaction((txn) async {
@@ -1787,11 +1809,13 @@ class BookLibraryService {
 
   Future<void> _softDeleteBooks(List<int> ids) async {
     final db = await _databaseService.database;
+    final annotationScope = await DatabaseService.currentPrivateNoteScope();
     final placeholders = List.filled(ids.length, '?').join(',');
     final now = DateTime.now();
     final deletedAt = now.toIso8601String();
     final expiresAt = now.add(const Duration(days: 30)).toIso8601String();
     await db.transaction((txn) async {
+      await _databaseService.detachPrivateNotesForDeletedBooks(txn, ids);
       final batchId = await txn.insert('note_recycle_batches', {
         'deleted_at': deletedAt,
         'expires_at': expiresAt,
@@ -1868,13 +1892,23 @@ class BookLibraryService {
         where: 'id IN ($placeholders)',
         whereArgs: ids,
       );
+      if (annotationScope != null) {
+        await CompanionAnnotationSync.instance.enqueueBookLifecycle(
+          txn,
+          annotationScope,
+          ids,
+          deleted: true,
+        );
+      }
     });
+    CompanionAnnotationSync.instance.schedule();
   }
 
   Future<void> restoreDeletedBooks(Iterable<int> bookIds) async {
     final ids = bookIds.toSet().toList(growable: false);
     if (ids.isEmpty) return;
     final db = await _databaseService.database;
+    final annotationScope = await DatabaseService.currentPrivateNoteScope();
     final placeholders = List.filled(ids.length, '?').join(',');
     await db.transaction((txn) async {
       await txn.update(
@@ -1902,7 +1936,16 @@ class BookLibraryService {
           whereArgs: [item['note_id']],
         );
       }
+      if (annotationScope != null) {
+        await CompanionAnnotationSync.instance.enqueueBookLifecycle(
+          txn,
+          annotationScope,
+          ids,
+          deleted: false,
+        );
+      }
     });
+    CompanionAnnotationSync.instance.schedule();
   }
 
   Future<void> deleteBooks(Iterable<int> bookIds) async {

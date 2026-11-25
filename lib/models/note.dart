@@ -31,6 +31,7 @@ class Note {
   final bool isPinned;
   final String? pinnedAt;
   final int isDeleted;
+  final String privateAccountScope;
 
   const Note({
     this.id,
@@ -63,6 +64,7 @@ class Note {
     this.isPinned = false,
     this.pinnedAt,
     this.isDeleted = 0,
+    this.privateAccountScope = '',
   });
 
   factory Note.fromMap(Map<String, dynamic> map) {
@@ -111,6 +113,7 @@ class Note {
       isPinned: (map['is_pinned'] as int? ?? 0) == 1,
       pinnedAt: map['pinned_at'] as String?,
       isDeleted: map['is_deleted'] as int? ?? 0,
+      privateAccountScope: map['private_account_scope'] as String? ?? '',
     );
   }
 
@@ -146,6 +149,8 @@ class Note {
       'is_pinned': isPinned ? 1 : 0,
       'pinned_at': pinnedAt,
       'is_deleted': isDeleted,
+      if (privateAccountScope.isNotEmpty)
+        'private_account_scope': privateAccountScope,
     };
   }
 
@@ -216,6 +221,7 @@ class Note {
           ? this.pinnedAt
           : pinnedAt as String?,
       isDeleted: isDeleted ?? this.isDeleted,
+      privateAccountScope: privateAccountScope,
     );
   }
 

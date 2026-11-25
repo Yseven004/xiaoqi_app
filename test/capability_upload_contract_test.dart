@@ -25,6 +25,32 @@ void main() {
     200,
   );
 
+  test('annotation upload owner is verified for the exact bearer', () async {
+    var accountRequests = 0;
+    final cloud = CapabilityCloudSync.forTesting(
+      MockClient((request) async {
+        if (request.url.path == '/health') return health();
+        ++accountRequests;
+        expect(request.url.path, endsWith('/auth/me'));
+        expect(request.headers['Authorization'], 'Bearer test-token');
+        return http.Response(
+          '{"authenticated":true,"email":" Verified@Example.COM "}',
+          200,
+        );
+      }),
+    );
+
+    expect(
+      await cloud.emailForAuthorization('Bearer test-token'),
+      'verified@example.com',
+    );
+    await expectLater(
+      cloud.emailForAuthorization('Bearer another-token'),
+      throwsA(isA<AttachmentCloudException>()),
+    );
+    expect(accountRequests, 1);
+  });
+
   test(
     'upload API sends one source and retains the existing job contract',
     () async {

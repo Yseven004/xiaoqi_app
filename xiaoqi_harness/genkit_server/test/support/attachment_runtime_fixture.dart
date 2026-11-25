@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:genkit/genkit.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/attachment_service.dart';
+import 'package:xiaoqi_genkit_server/src/chat_annotation_images.dart';
 import 'package:xiaoqi_genkit_server/src/image_service.dart';
 import 'package:xiaoqi_genkit_server/src/store.dart';
 
@@ -66,7 +67,11 @@ class RecordingAttachments extends AttachmentService {
   }
 
   @override
-  Future<Map<String, dynamic>> imagePart(String tenant, String id) async {
+  Future<Map<String, dynamic>> imagePart(
+    String tenant,
+    String id, {
+    int? maxBytes,
+  }) async {
     if (tenant != 'personal' || id != 'image-resource') {
       throw const AttachmentFailure(
         '附件不存在或已过期',
@@ -94,6 +99,7 @@ Future<void> main(List<String> args) async {
     attachments: attachments,
   );
   final scenario = args.single;
+  final followup = scenario == 'followup';
   // The real API calls _ensureRemoteAgentTask before invoking this runtime.
   store.put('task/personal/attachment-$scenario', {
     'task_id': 'attachment-$scenario',
@@ -108,21 +114,72 @@ Future<void> main(List<String> args) async {
       taskId: 'attachment-$scenario',
       request: {
         'model_id': 'mimo-v2.6-flash',
-        'intent_mode': 'attachment_only',
-        'current_turn_text': scenario == 'full' ? '请逐页分析全文' : '',
-        'materials': [
-          {
-            'id': 'local-id',
-            'name': '附件',
-            'attachment_id': scenario == 'image'
-                ? 'image-resource'
-                : 'document-resource',
-          },
-        ],
+        if (!followup) 'intent_mode': 'attachment_only',
+        'current_turn_text': switch (scenario) {
+          'full' => '请逐页分析全文',
+          'followup' => '请解释之前的这张图片',
+          _ => '',
+        },
+        if (scenario == 'mixed')
+          'annotation_groups': [
+            {
+              'id': 'first',
+              'number': 1,
+              'text': '解释图',
+              'image_ids': ['fixture-image'],
+            },
+          ],
+        if (!followup)
+          'materials': [
+            {
+              'id': 'local-id',
+              'name': '附件',
+              'attachment_id': scenario == 'image'
+                  ? 'image-resource'
+                  : 'document-resource',
+            },
+          ],
       },
-      messages: agentMessagesFromRequest([
-        {'role': 'user', 'content': '我上传了附件'},
-      ]),
+      messages: followup
+          ? [
+              Message(
+                role: Role.user,
+                content: [
+                  TextPart(text: '[注释 1] 解释图'),
+                  MediaPart(
+                    media: Media(
+                      url: 'data:image/png;base64,aW1hZ2U=',
+                      contentType: 'image/png',
+                    ),
+                    metadata: {groupedAnnotationMediaMarker: true},
+                  ),
+                ],
+              ),
+              Message(
+                role: Role.model,
+                content: [TextPart(text: '已看过注释图片。')],
+              ),
+              Message(
+                role: Role.user,
+                content: [TextPart(text: '请解释之前的这张图片')],
+              ),
+            ]
+          : agentMessagesFromRequest([
+              {
+                'role': 'user',
+                'content': scenario == 'mixed'
+                    ? [
+                        {'type': 'text', 'text': '[注释 1] 解释图'},
+                        {
+                          'type': 'image_url',
+                          'image_url': {
+                            'url': 'data:image/png;base64,aW1hZ2U=',
+                          },
+                        },
+                      ]
+                    : '我上传了附件',
+              },
+            ]),
       onChunk: (_) {},
       onProcessEvent: events.add,
       cancellation: CancellationController().token,

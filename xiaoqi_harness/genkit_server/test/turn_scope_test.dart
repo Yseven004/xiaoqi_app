@@ -243,6 +243,27 @@ void main() {
         ]),
         isEmpty,
       );
+      final prior = store.get('task/personal/prior')!;
+      store.put('task/personal/prior', {
+        ...prior.value,
+        'annotation_account': 'private-owner',
+      }, prior.revision);
+      final referencesToPrivate = [
+        {'id': 'prior/cat'},
+      ];
+      expect(
+        validateArtifactReferences(store, 'personal', referencesToPrivate),
+        isEmpty,
+      );
+      expect(
+        validateArtifactReferences(
+          store,
+          'personal',
+          referencesToPrivate,
+          annotationAccount: 'private-owner',
+        ),
+        hasLength(1),
+      );
     },
   );
   test(

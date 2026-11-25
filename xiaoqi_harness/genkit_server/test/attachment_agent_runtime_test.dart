@@ -184,9 +184,16 @@ void main() {
     },
   );
 
-  for (final scenario in ['overview', 'image', 'full']) {
+  for (final scenario in ['overview', 'image', 'full', 'mixed', 'followup']) {
     test(
-      '$scenario streams real attachment content without unrelated tools',
+      switch (scenario) {
+        'mixed' =>
+          'explanation image and normal attachment keep the clarification tool',
+        'followup' =>
+          'followup can inspect a numbered image in the authorized history',
+        _ =>
+          '$scenario streams real attachment content without unrelated tools',
+      },
       () async {
         final requests = <Map<String, dynamic>>[];
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -282,6 +289,20 @@ void main() {
               .firstWhere((line) => line.startsWith('RUNTIME_RESULT:'));
           final output =
               jsonDecode(line.substring('RUNTIME_RESULT:'.length)) as Map;
+          if (scenario == 'mixed' || scenario == 'followup') {
+            expect(requests, hasLength(1));
+            final model = requests.single;
+            if (scenario == 'mixed') {
+              expect(jsonEncode(model['tools']), contains('ask_user'));
+            }
+            expect(jsonEncode(model['messages']), contains('[注释 1] 解释图'));
+            expect(
+              jsonEncode(model['messages']),
+              contains('data:image/png;base64,aW1hZ2U='),
+            );
+            expect(output['text'], contains('光合作用'));
+            return;
+          }
           expect(requests, hasLength(scenario == 'full' ? 4 : 1));
           for (final request in requests) {
             expect(request['tools'] ?? const [], isEmpty);

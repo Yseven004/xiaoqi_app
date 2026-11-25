@@ -10,6 +10,7 @@ import 'artifact_context.dart';
 import 'release.dart';
 import 'execution_limits.dart';
 import 'skill_market.dart';
+import 'companion_annotation_sync.dart';
 import 'package:yaml/yaml.dart';
 
 import 'package:crypto/crypto.dart';
@@ -54,6 +55,7 @@ import 'book_search_service.dart';
 import 'public_agent_process.dart';
 import 'public_agent_transport.dart';
 import 'attachment_service.dart';
+import 'chat_annotation_images.dart';
 import 'chat_completion_service.dart';
 import 'code_execution_service.dart';
 import 'web_service.dart';
@@ -409,6 +411,7 @@ class XiaoqiApi {
     _ => BookSearchPlugin(store),
   };
   final ChatCompletionService chatCompletions;
+  late final _companionAnnotationSync = CompanionAnnotationSyncService(store);
   final WebService webFetch;
   AttachmentService? _attachments;
   final Future<Map<String, dynamic>> Function(CloudStore)
@@ -431,6 +434,35 @@ class XiaoqiApi {
 
   Router get router {
     final router = Router()
+      ..get(
+        '/v1/companion-annotations',
+        (Request request) => _annotationAuthenticated(
+          request,
+          (account) => _companionAnnotationSync.pull(request, account),
+        ),
+      )
+      ..post(
+        '/v1/companion-annotations',
+        (Request request) => _annotationAuthenticated(
+          request,
+          (account) => _companionAnnotationSync.push(request, account),
+        ),
+      )
+      ..put(
+        '/v1/companion-annotations/media/<digest>',
+        (Request request, String digest) => _annotationAuthenticated(
+          request,
+          (account) =>
+              _companionAnnotationSync.upload(request, account, digest),
+        ),
+      )
+      ..get(
+        '/v1/companion-annotations/media/<digest>',
+        (Request request, String digest) => _annotationAuthenticated(
+          request,
+          (account) => _companionAnnotationSync.download(account, digest),
+        ),
+      )
       ..post(
         '/v1/capabilities/import-jobs/<id>/cancel',
         (Request r, String id) => _authenticated(r, (d) async {
@@ -520,6 +552,24 @@ class XiaoqiApi {
           request,
           (device) => attachments.cancel(device.tenant, id),
         ),
+      )
+      ..post(
+        '/v1/annotation-images/<messageId>',
+        (Request request, String messageId) =>
+            _authenticated(request, (device) {
+              final account = device.annotationAccount;
+              if (account == null) return Future.value(_error('请先登录个人账号', 403));
+              try {
+                final id = _safeId(messageId, '消息 ID');
+                return attachments.upload(
+                  request,
+                  annotationImageNamespace(account, id),
+                  annotationImage: true,
+                );
+              } on FormatException catch (error) {
+                return Future.value(_error(error.message, 400));
+              }
+            }),
       )
       ..post(
         '/v1/capabilities/imports',
@@ -1154,6 +1204,8 @@ class XiaoqiApi {
       'tenant_id': device.tenant,
       'device_id': device.value['device_id'],
       '_authenticated_device_key': key,
+      if (device.annotationAccount case final account?)
+        '_annotation_account': account,
     };
   }
 
@@ -1163,6 +1215,7 @@ class XiaoqiApi {
   ) async {
     String? executedTenantId;
     String? executedTaskId;
+    String? executedSnapshotId;
     await session.run((input, turnContext) async {
       final context = options.context ?? const <String, dynamic>{};
       final tenantId = context['tenant_id']?.toString() ?? '';
@@ -1222,7 +1275,34 @@ class XiaoqiApi {
         currentUser = messages[currentUserIndex];
       }
       final taskId = _safeId(config['task_id'], '任务 ID');
-      executedTaskId = taskId;
+      final annotationGroups = parseAnnotationGroups(
+        config['annotation_groups'],
+      );
+      final isAnnotationBatch =
+          config['annotation_batch'] == true || annotationGroups.isNotEmpty;
+      final annotationAccount = context['_annotation_account'] as String?;
+      final sessionStore = CloudSessionStore(store);
+      final sessionId = session.session.sessionId;
+      final sessionOwner = sessionStore.annotationSessionOwner(
+        tenantId,
+        sessionId,
+      );
+      if (sessionOwner != null && sessionOwner != annotationAccount) {
+        throw GenkitException('会话不存在', status: StatusCode.notFound);
+      }
+      if (isAnnotationBatch) {
+        if (annotationAccount == null) {
+          throw GenkitException(
+            '注释批次须使用个人账号发送',
+            status: StatusCode.permissionDenied,
+          );
+        }
+        sessionStore.claimAnnotationSession(
+          tenantId,
+          sessionId,
+          annotationAccount,
+        );
+      }
 
       final rawLegacyHistory = config['legacy_history'];
       if (messages.length == 1 && rawLegacyHistory is List) {
@@ -1362,11 +1442,18 @@ class XiaoqiApi {
               .map((m) => m.metadata?[_remoteAgentTurnMetadataKey])
               .whereType<Map>()
               .map((m) => m['task_id']?.toString() ?? ''),
+          annotationAccount: annotationAccount,
         );
       if (resumeControl != null) {
         request['_continue_aborted_turn'] = true;
       }
-      _ensureRemoteAgentTask(tenantId, taskId, context['device_id']);
+      _ensureRemoteAgentTask(
+        tenantId,
+        taskId,
+        context['device_id'],
+        annotationAccount: annotationAccount,
+        privateAnnotations: isAnnotationBatch || sessionOwner != null,
+      );
       try {
         _bindRemoteUserMessage(tenantId, taskId, request);
       } on FormatException catch (error) {
@@ -1391,7 +1478,11 @@ class XiaoqiApi {
       final hasResumeAction =
           input.resume?.respond?.isNotEmpty == true ||
           input.resume?.restart?.isNotEmpty == true;
-      if (input.message == null &&
+      final isDuplicateAnnotationSubmission =
+          isAnnotationBatch &&
+          resumeControl == null &&
+          cleanConfig['a2ui_action'] == null;
+      if ((input.message == null || isDuplicateAnnotationSubmission) &&
           !hasResumeAction &&
           replayableStatuses.contains(settled['status'])) {
         session.addArtifacts(_remoteAgentArtifacts(tenantId, taskId));
@@ -1443,6 +1534,8 @@ class XiaoqiApi {
         if (checkpointId.isEmpty) {
           throw StateError('Genkit 没有为本轮预留恢复快照');
         }
+        executedTaskId = taskId;
+        executedSnapshotId = checkpointId;
         final acceptedTask = store.get(executionKey);
         if (resumeControl == null &&
             input.message != null &&
@@ -1564,9 +1657,77 @@ class XiaoqiApi {
           );
         }
 
-        final modelMessages = messages.map(_withoutTurnMetadata).toList();
         late final XiaoqiAgentTurnResult result;
         try {
+          if (annotationGroups.isNotEmpty) {
+            // A suspended Genkit turn already owns the prepared media in its
+            // snapshot. Reattach only when the original parts are absent.
+            final storedMediaIndex = messages.lastIndexWhere(
+              (item) =>
+                  item.role == Role.user &&
+                  (item.metadata?[_remoteAgentTurnMetadataKey]
+                          as Map?)?['user_message_id'] ==
+                      request['user_message_id'] &&
+                  item.content.any(
+                    (part) =>
+                        part.isMedia &&
+                        part.metadata?[groupedAnnotationMediaMarker] == true,
+                  ),
+            );
+            final userIndex = messages.lastIndexWhere(
+              (item) =>
+                  item.role == Role.user &&
+                  (item.metadata?[_remoteAgentTurnMetadataKey]
+                          as Map?)?['user_message_id'] ==
+                      request['user_message_id'],
+            );
+            final fromSnapshot =
+                input.message == null ||
+                resumeControl != null ||
+                (cleanConfig['a2ui_action'] != null &&
+                    storedMediaIndex >= 0 &&
+                    storedMediaIndex < currentUserIndex);
+            final index = fromSnapshot && storedMediaIndex >= 0
+                ? storedMediaIndex
+                : userIndex < 0
+                ? currentUserIndex
+                : userIndex;
+            final original = messages[index];
+            if (!fromSnapshot ||
+                !original.content.any(
+                  (part) =>
+                      part.isMedia &&
+                      part.metadata?[groupedAnnotationMediaMarker] == true,
+                )) {
+              if (!fromSnapshot &&
+                  original.content.any((part) => part.isMedia)) {
+                throw const FormatException('解释图必须按本轮消息上传');
+              }
+              final ordinaryImageBytes = original.content
+                  .where((part) => part.isMedia)
+                  .fold<int>(
+                    0,
+                    (total, part) =>
+                        total + inlineAgentImageBytes(part.media!.url),
+                  );
+              final parts = await buildAnnotationGroupParts(
+                annotationGroups,
+                attachments: attachments,
+                namespace: annotationImageNamespace(
+                  annotationAccount!,
+                  _safeId(request['user_message_id'], '消息 ID'),
+                ),
+                byteBudget: 5 * 1024 * 1024 - ordinaryImageBytes,
+              );
+              messages[index] = Message(
+                role: original.role,
+                content: [...original.content, ...parts],
+                metadata: original.metadata,
+              );
+              session.setMessages(messages);
+            }
+          }
+          final modelMessages = messages.map(_withoutTurnMetadata).toList();
           final activeRuntime = runtime;
           if (activeRuntime is XiaoqiStreamingAgentRuntime) {
             result = await (activeRuntime as XiaoqiStreamingAgentRuntime)
@@ -1790,10 +1951,18 @@ class XiaoqiApi {
             : result.text;
         final pauseRequested = taskValue['cancel_requested'] == true;
         final problemLimitReached = taskValue['problem_attempt_limit'] is Map;
+        final annotationVisionFailed =
+            isAnnotationBatch &&
+            const {
+              AgentFinishReason.failed,
+              AgentFinishReason.blocked,
+            }.contains(result.finishReason);
         final finalTaskStatus = result.finishReason == AgentFinishReason.aborted
             ? pauseRequested
                   ? 'pausing'
                   : 'failed'
+            : annotationVisionFailed
+            ? 'failed'
             : result.finishReason == AgentFinishReason.interrupted
             ? interruptType == 'user_questions'
                   ? 'waiting_for_user'
@@ -1809,7 +1978,7 @@ class XiaoqiApi {
           tenantId,
           taskId,
           finalTaskStatus,
-          result: resultText,
+          result: annotationVisionFailed ? null : resultText,
           pendingQuestion: finalTaskStatus == 'waiting_for_user'
               ? pendingQuestion
               : null,
@@ -1874,7 +2043,8 @@ class XiaoqiApi {
         executedTenantId != null) {
       final taskKey = 'task/$executedTenantId/$lastTaskId';
       final currentTask = store.get(taskKey)?.value;
-      if (currentTask != null) {
+      if (currentTask != null &&
+          currentTask['agent_snapshot_id'] == executedSnapshotId) {
         final finishReason = session.lastTurnFinishReason;
         final pending = currentTask['status']?.toString();
         final settledStatus = pending == 'pausing'
@@ -1921,6 +2091,9 @@ class XiaoqiApi {
               request['materials'] ?? const [],
               request['selected_capabilities'] ?? const [],
               request['selected_mcp_connections'] ?? const [],
+              if (request.containsKey('annotation_groups'))
+                request['annotation_groups'],
+              if (request['annotation_batch'] == true) true,
             ]),
           ),
         )
@@ -1962,11 +2135,18 @@ class XiaoqiApi {
   void _ensureRemoteAgentTask(
     String tenantId,
     String taskId,
-    Object? deviceId,
-  ) {
+    Object? deviceId, {
+    String? annotationAccount,
+    bool privateAnnotations = false,
+  }) {
     final key = 'task/$tenantId/$taskId';
     final current = store.get(key);
     if (current != null) {
+      final owner = current.value['annotation_account'];
+      if ((owner != null && owner != annotationAccount) ||
+          (privateAnnotations && owner != annotationAccount)) {
+        throw GenkitException('任务不存在', status: StatusCode.notFound);
+      }
       if (current.value['remote_agent_turn'] != true) {
         throw StateError('任务 ID 已用于其他任务');
       }
@@ -1976,6 +2156,7 @@ class XiaoqiApi {
       'task_id': taskId,
       'tenant_id': tenantId,
       'device_id': deviceId,
+      if (privateAnnotations) 'annotation_account': annotationAccount,
       'remote_agent_turn': true,
       'status': 'running',
       'authorized_network_domains': <String>[],
@@ -3408,6 +3589,15 @@ class XiaoqiApi {
         'error': value['error'],
         'error_code': value['error_code'],
         'error_details': value['error_details'],
+        if (value['annotation_account'] != null)
+          'annotation_retry_safe':
+              (value['scope_operations'] as Map? ?? const {}).values
+                  .whereType<Map>()
+                  .every(
+                    (operation) =>
+                        operation['effect'] == 'read' ||
+                        operation['status'] == 'not_submitted',
+                  ),
         'partial_reason': value['partial_reason'],
         'image_failure': value['image_failure'],
         'problem_attempt_limit': value['problem_attempt_limit'],
@@ -3804,6 +3994,22 @@ class XiaoqiApi {
     }
   }
 
+  Future<Response> _annotationAuthenticated(
+    Request request,
+    Future<Response> Function(String) action,
+  ) => _authenticated(request, (device) async {
+    final email =
+        device.value['account_email']?.toString().trim().toLowerCase() ?? '';
+    if (device.value['auth_method'] != 'email' || email.isEmpty) {
+      return _error('请先登录个人账号', 403);
+    }
+    final account = sha256.convert(utf8.encode(email)).toString();
+    if (request.headers['x-xiaoqi-annotation-scope'] != account) {
+      return _error('私密注释账号已变更', 403);
+    }
+    return action(account);
+  });
+
   Future<Response> _authenticated(
     Request request,
     Future<Response> Function(_Device) action,
@@ -3823,7 +4029,20 @@ class XiaoqiApi {
     final record = store.get(key);
     if (record == null || record.value['revoked_at'] != null)
       return _error('登录状态已失效，请重新登录', 401);
-    return action(_Device(key, record.value));
+    final device = _Device(key, record.value);
+    final route = request.url.pathSegments;
+    if (route.length >= 4 &&
+        route[0] == 'v1' &&
+        route[1] == 'agent' &&
+        route[2] == 'tasks') {
+      final owner = store
+          .get('task/${device.tenant}/${route[3]}')
+          ?.value['annotation_account'];
+      if (owner != null && owner != device.annotationAccount) {
+        return _error('任务不存在', 404);
+      }
+    }
+    return action(device);
   }
 
   Future<Response> _bookSearchCall(
@@ -4583,6 +4802,11 @@ class _Device {
   final String key;
   final Map<String, dynamic> value;
   String get tenant => value['tenant_id']?.toString() ?? 'personal';
+  String? get annotationAccount {
+    final email = value['account_email']?.toString().trim().toLowerCase() ?? '';
+    if (value['auth_method'] != 'email' || email.isEmpty) return null;
+    return sha256.convert(utf8.encode(email)).toString();
+  }
 }
 
 class _EmailConfig {

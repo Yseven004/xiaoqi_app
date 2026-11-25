@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'config/colors.dart';
 import 'pages/home_page.dart';
+import 'services/companion_annotation_sync.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -11,6 +12,7 @@ Future<void> main() async {
     DeviceOrientation.portraitUp,
   ]);
   runApp(const MyApp());
+  CompanionAnnotationSync.instance.start();
 }
 
 class MyApp extends StatelessWidget {

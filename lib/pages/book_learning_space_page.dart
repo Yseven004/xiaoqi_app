@@ -714,7 +714,7 @@ class _BookLearningSpacePageState extends State<BookLearningSpacePage> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(count == 1 ? '删除这本书？' : '删除$count本书籍？'),
-        content: const Text('书籍、关联笔记和原图都会被删除，此操作无法撤销。'),
+        content: const Text('书籍、关联笔记、原图和书内注释将移除。手动加入笔记库的注释副本会保留。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),

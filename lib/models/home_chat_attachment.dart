@@ -1,9 +1,12 @@
+import 'dart:convert';
 import 'dart:io';
+
 import 'chat_annotation.dart';
 
 /// A private local copy attached to a home chat message.
 class HomeChatAttachment {
   static const Object _unchanged = Object();
+  static const annotationExplanationSource = 'annotation_explanation';
 
   const HomeChatAttachment({
     required this.id,
@@ -31,6 +34,7 @@ class HomeChatAttachment {
     this.annotationImagePath,
     this.imageAnnotations = const [],
     this.annotationSnapshotDirty = false,
+    this.annotationOwnerScope,
   });
 
   final String id;
@@ -58,9 +62,49 @@ class HomeChatAttachment {
   final String? annotationImagePath;
   final List<ChatAnnotation> imageAnnotations;
   final bool annotationSnapshotDirty;
+  final String? annotationOwnerScope;
 
   bool get isImage => mimeType.startsWith('image/');
+  bool get isAnnotationExplanation => source == annotationExplanationSource;
+  bool get isEditableImage => isImage && !isAnnotationExplanation;
   bool get exists => File(path).existsSync();
+
+  HomeChatAttachment bindExplanationOwner(String scope) {
+    if (!isAnnotationExplanation || scope.isEmpty || scope == 'local') {
+      throw const FormatException('解释图需要有效账号');
+    }
+    if (annotationOwnerScope == scope) return this;
+    if (annotationOwnerScope != null) {
+      throw const FormatException('解释图属于原账号');
+    }
+    return copyWith(annotationOwnerScope: scope);
+  }
+
+  bool belongsToExplanationOwner(String scope) =>
+      isAnnotationExplanation && annotationOwnerScope == scope;
+
+  bool hasSameDraftMaterial(HomeChatAttachment other) =>
+      id == other.id &&
+      name == other.name &&
+      path == other.path &&
+      mimeType == other.mimeType &&
+      byteLength == other.byteLength &&
+      source == other.source &&
+      sourceAssetId == other.sourceAssetId &&
+      drawingDraftPath == other.drawingDraftPath &&
+      drawingDraftScope == other.drawingDraftScope &&
+      ((contentHash?.isNotEmpty != true) ||
+          (other.contentHash?.isNotEmpty != true) ||
+          contentHash == other.contentHash) &&
+      originalImagePath == other.originalImagePath &&
+      originalImageName == other.originalImageName &&
+      annotationImagePath == other.annotationImagePath &&
+      annotationSnapshotDirty == other.annotationSnapshotDirty &&
+      annotationOwnerScope == other.annotationOwnerScope &&
+      jsonEncode(imageAnnotations.map((item) => item.toJson()).toList()) ==
+          jsonEncode(
+            other.imageAnnotations.map((item) => item.toJson()).toList(),
+          );
 
   Map<String, Object?> toJson() => {
     'id': id,
@@ -91,6 +135,8 @@ class HomeChatAttachment {
     if (imageAnnotations.isNotEmpty)
       'image_annotations': imageAnnotations.map((a) => a.toJson()).toList(),
     if (annotationSnapshotDirty) 'annotation_snapshot_dirty': true,
+    if (annotationOwnerScope != null)
+      'annotation_owner_scope': annotationOwnerScope,
   };
 
   factory HomeChatAttachment.fromJson(Object? raw) {
@@ -136,6 +182,7 @@ class HomeChatAttachment {
                 .toList()
           : const [],
       annotationSnapshotDirty: raw['annotation_snapshot_dirty'] == true,
+      annotationOwnerScope: raw['annotation_owner_scope'] as String?,
     );
   }
 
@@ -157,6 +204,7 @@ class HomeChatAttachment {
     DateTime? preparationExpiresAt,
     List<ChatAnnotation>? imageAnnotations,
     bool? annotationSnapshotDirty,
+    String? annotationOwnerScope,
   }) => HomeChatAttachment(
     id: id,
     name: name,
@@ -192,5 +240,6 @@ class HomeChatAttachment {
     imageAnnotations: imageAnnotations ?? this.imageAnnotations,
     annotationSnapshotDirty:
         annotationSnapshotDirty ?? this.annotationSnapshotDirty,
+    annotationOwnerScope: this.annotationOwnerScope ?? annotationOwnerScope,
   );
 }

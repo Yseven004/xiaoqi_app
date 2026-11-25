@@ -57,6 +57,17 @@ void main() {
         blocks.last.text.substring(emphasis.start, emphasis.end),
         'continues',
       );
+      final native = (await tester.runAsync(
+        () => controller.document.pages.first.loadStructuredText(),
+      ))!;
+      final projection = CompanionReflowPage.sourceProjection(blocks.last);
+      final sourceRange = projection.sourceRange(emphasis.start, emphasis.end)!;
+      final span = sourceRange.pages.single;
+      expect(native.fullText.substring(span.start, span.end), 'continues');
+      expect(projection.displayRange(sourceRange), (
+        start: emphasis.start,
+        end: emphasis.end,
+      ));
       expect(document.assets.single.id, blocks[image].assetId);
       final picture = page.pictures.single;
       final ink = await tester.runAsync(() async {

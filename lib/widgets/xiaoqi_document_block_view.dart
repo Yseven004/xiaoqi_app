@@ -37,6 +37,8 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
     this.contextMenuBuilder,
     this.selectionControls,
     this.textStyleBuilder,
+    this.annotationRanges = const [],
+    this.onOpenAnnotations,
     this.editable = false,
     this.controller,
     this.onTextChanged,
@@ -59,6 +61,10 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
   final EditableTextContextMenuBuilder? contextMenuBuilder;
   final TextSelectionControls? selectionControls;
   final TextStyle Function(TextStyle)? textStyleBuilder;
+
+  /// Half-open offsets in the text displayed by this widget, including slices.
+  final List<({int start, int end, String id})> annotationRanges;
+  final ValueChanged<List<String>>? onOpenAnnotations;
   final bool editable;
   final TextEditingController? controller;
   final ValueChanged<String>? onTextChanged;
@@ -316,19 +322,21 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
     final links = offset == null || onLinkTap == null
         ? const <DocumentLinkRange>[]
         : block.linkRanges;
-    if (links.isNotEmpty) {
+    if (links.isNotEmpty || annotationRanges.isNotEmpty) {
       return _LinkedDocumentText(
         text: text,
-        offset: offset!,
+        offset: offset ?? 0,
         bold: ranges,
         emphasisColor: _emphasisColor,
         links: links,
         style: effectiveStyle,
-        onLinkTap: onLinkTap!,
+        onLinkTap: onLinkTap,
         onTextTap: onTextTap,
         selectionControls: selectionControls,
         contextMenuBuilder: contextMenuBuilder,
         onSelectionChanged: selectionChanged,
+        annotations: annotationRanges,
+        onOpenAnnotations: onOpenAnnotations,
       );
     }
     if (ranges.isNotEmpty) {
@@ -370,6 +378,8 @@ class _LinkedDocumentText extends StatefulWidget {
     required this.selectionControls,
     required this.contextMenuBuilder,
     required this.onSelectionChanged,
+    this.annotations = const [],
+    this.onOpenAnnotations,
   });
   final String text;
   final int offset;
@@ -377,14 +387,57 @@ class _LinkedDocumentText extends StatefulWidget {
   final Color? emphasisColor;
   final List<DocumentLinkRange> links;
   final TextStyle style;
-  final ValueChanged<String> onLinkTap;
+  final ValueChanged<String>? onLinkTap;
   final VoidCallback? onTextTap;
   final TextSelectionControls? selectionControls;
   final EditableTextContextMenuBuilder? contextMenuBuilder;
   final SelectionChangedCallback onSelectionChanged;
+  final List<({int start, int end, String id})> annotations;
+  final ValueChanged<List<String>>? onOpenAnnotations;
 
   @override
   State<_LinkedDocumentText> createState() => _LinkedDocumentTextState();
+}
+
+/// The PDF translation uses a single selectable page so cross-sentence text
+/// gestures keep their existing behavior.
+class CompanionAnnotationTextView extends StatelessWidget {
+  const CompanionAnnotationTextView({
+    required this.text,
+    required this.style,
+    required this.annotations,
+    required this.onOpenAnnotations,
+    required this.onSelectionChanged,
+    this.onTap,
+    this.selectionControls,
+    this.contextMenuBuilder,
+    super.key,
+  });
+
+  final String text;
+  final TextStyle style;
+  final List<({int start, int end, String id})> annotations;
+  final ValueChanged<List<String>>? onOpenAnnotations;
+  final SelectionChangedCallback onSelectionChanged;
+  final VoidCallback? onTap;
+  final TextSelectionControls? selectionControls;
+  final EditableTextContextMenuBuilder? contextMenuBuilder;
+
+  @override
+  Widget build(BuildContext context) => _LinkedDocumentText(
+    text: text,
+    offset: 0,
+    bold: const [],
+    links: const [],
+    style: style,
+    onLinkTap: null,
+    onTextTap: onTap,
+    selectionControls: selectionControls,
+    contextMenuBuilder: contextMenuBuilder,
+    onSelectionChanged: onSelectionChanged,
+    annotations: annotations,
+    onOpenAnnotations: onOpenAnnotations,
+  );
 }
 
 class _LinkedDocumentTextState extends State<_LinkedDocumentText> {
@@ -406,15 +459,17 @@ class _LinkedDocumentTextState extends State<_LinkedDocumentText> {
     final bold = widget.bold
         .where((r) => r.start < end && r.end > start)
         .toList();
-    final targets = {for (final l in links) l.target};
-    for (final key
-        in recognizers.keys.where((k) => !targets.contains(k)).toList()) {
-      recognizers.remove(key)?.dispose();
-    }
+    final annotations = [
+      for (final range in widget.annotations)
+        if (range.start < widget.text.length && range.end > 0)
+          (start: start + range.start, end: start + range.end, id: range.id),
+    ];
+    final activeRecognizers = <String>{};
     final boundaries = <int>{start, end};
     for (final r in [
       ...bold,
       ...links.map((r) => (start: r.start, end: r.end)),
+      ...annotations.map((r) => (start: r.start, end: r.end)),
     ]) {
       boundaries.add(r.start.clamp(start, end));
       boundaries.add(r.end.clamp(start, end));
@@ -428,18 +483,66 @@ class _LinkedDocumentTextState extends State<_LinkedDocumentText> {
           .firstOrNull
           ?.target;
       final strong = bold.any((r) => r.start <= from && r.end >= to);
-      final tap = target == null
-          ? null
-          : (recognizers.putIfAbsent(target, TapGestureRecognizer.new)
-              ..onTap = () => widget.onLinkTap(target));
+      final annotationIds = [
+        for (final range in annotations)
+          if (range.start <= from && range.end >= to) range.id,
+      ];
+      final annotated = annotationIds.isNotEmpty;
+      TapGestureRecognizer? tap;
+      if (target != null && annotated && widget.onOpenAnnotations != null) {
+        final key =
+            'linked-annotation:${jsonEncode([target, ...annotationIds])}';
+        activeRecognizers.add(key);
+        tap = recognizers.putIfAbsent(key, TapGestureRecognizer.new)
+          ..onTap = () async {
+            final openAnnotation = await showModalBottomSheet<bool>(
+              context: context,
+              builder: (context) => SafeArea(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ListTile(
+                      title: const Text('查看注释'),
+                      onTap: () => Navigator.pop(context, true),
+                    ),
+                    ListTile(
+                      title: const Text('打开链接'),
+                      onTap: () => Navigator.pop(context, false),
+                    ),
+                  ],
+                ),
+              ),
+            );
+            if (!mounted) return;
+            if (openAnnotation == true) {
+              widget.onOpenAnnotations?.call(annotationIds);
+            } else if (openAnnotation == false) {
+              widget.onLinkTap?.call(target);
+            }
+          };
+      } else if (target != null) {
+        final key = 'link:$target';
+        activeRecognizers.add(key);
+        tap = recognizers.putIfAbsent(key, TapGestureRecognizer.new)
+          ..onTap = () => widget.onLinkTap?.call(target);
+      } else if (annotated && widget.onOpenAnnotations != null) {
+        final key = 'annotation:${annotationIds.join(',')}';
+        activeRecognizers.add(key);
+        tap = recognizers.putIfAbsent(key, TapGestureRecognizer.new)
+          ..onTap = () => widget.onOpenAnnotations?.call(annotationIds);
+      }
       children.add(
         TextSpan(
           text: widget.text.substring(from - start, to - start),
           recognizer: tap,
           style: TextStyle(
             fontWeight: strong ? FontWeight.w700 : null,
-            decoration: tap == null ? null : TextDecoration.underline,
-            color: tap == null
+            decoration: target != null || annotated
+                ? TextDecoration.underline
+                : null,
+            decorationStyle: annotated ? TextDecorationStyle.dashed : null,
+            decorationColor: annotated ? const Color(0xFFA4BD83) : null,
+            color: target == null
                 ? (strong ? widget.emphasisColor : null)
                 : ThemeData.estimateBrightnessForColor(
                         widget.style.color ?? Colors.black,
@@ -450,6 +553,12 @@ class _LinkedDocumentTextState extends State<_LinkedDocumentText> {
           ),
         ),
       );
+    }
+    for (final key
+        in recognizers.keys
+            .where((key) => !activeRecognizers.contains(key))
+            .toList()) {
+      recognizers.remove(key)?.dispose();
     }
     return SelectableText.rich(
       TextSpan(style: widget.style, children: children),

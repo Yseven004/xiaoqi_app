@@ -50,6 +50,7 @@ import '../models/home_chat_attachment.dart';
 import '../services/book_library_service.dart';
 import '../services/reading_companion_preferences.dart';
 import '../services/reading_task_context.dart';
+import '../services/source_document_loader.dart';
 import '../services/reading_task_materials.dart';
 import '../services/ai_service.dart';
 import '../services/a2ui_genkit_bridge.dart';
@@ -59,6 +60,9 @@ import '../services/home_chat_attachment_preparer.dart';
 import '../services/home_chat_drawing_draft_store.dart';
 import '../models/chat_annotation.dart';
 import '../widgets/chat_annotation_controls.dart';
+import '../widgets/companion_annotation_sheet.dart'
+    show guardPrivateAnnotationContent;
+import '../services/companion_annotation_store.dart';
 import '../widgets/chat_annotation_navigation.dart';
 import '../widgets/chat_image_gallery.dart';
 import '../services/home_chat_model_preferences.dart';
@@ -404,6 +408,16 @@ class HomePage extends StatefulWidget {
 
 enum _HomeSpace { learning, reading }
 
+Future<String> _currentDrawingAccountScope() async {
+  final cloud = CapabilityCloudSync.instance;
+  if (!await cloud.hasEmailSession) return 'local';
+  final email = (await cloud.signedInEmail)?.trim().toLowerCase() ?? '';
+  return email.isEmpty ? 'local' : _drawingAccountScope(email);
+}
+
+String _drawingAccountScope(String email) =>
+    'account_${sha256.convert(utf8.encode(email))}';
+
 const double _homeComposerTapTargetSize = 48;
 const double _homeAssistantMarkdownSegmentSpacing = 8;
 const _streamingReplyDotsMarker = '\uE000XIAOQI_STREAMING_DOTS\uE001';
@@ -677,6 +691,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _preparingAttachments = false;
   List<HomeChatAttachment> _attachments = const [];
   List<ChatAnnotation> _annotations = const [];
+  AiConversationMessage? _pendingAnnotationBatch;
+  String? _pendingAnnotationBatchScope;
   List<ChatAnnotation>? _annotationsBeforeMessageEdit;
   Future<void> _annotationSaveQueue = Future<void>.value();
   int _annotationDraftEpoch = 0;
@@ -971,7 +987,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_editingQuestion != null) return;
     final conversationId = _conversation?.id;
     if (conversationId == null) return;
-    _conversationDrafts[conversationId] = _composerController.snapshot();
+    final previous = _conversationDrafts[conversationId];
+    final draft = _composerController.snapshot();
+    _conversationDrafts[conversationId] = draft;
+    if (_pendingAnnotationBatch != null &&
+        (previous?.value.text != draft.value.text ||
+            previous?.tag?.isExplicit != draft.tag?.isExplicit ||
+            jsonEncode(previous?.tag?.data) != jsonEncode(draft.tag?.data))) {
+      unawaited(_persistAnnotationDraft().catchError((Object _) {}));
+    }
   }
 
   void _restoreConversationDraft(AiConversationRecord conversation) {
@@ -995,6 +1019,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (final attachment in _attachments) {
       _cancelAttachmentPreparation(attachment);
     }
+    _pendingAnnotationBatch = null;
+    _pendingAnnotationBatchScope = null;
     _abandonMessageEdit();
     final draft = _conversationDrafts[conversation.id];
     if (draft != null) {
@@ -1010,7 +1036,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadAttachments(String conversationId) async {
-    await _loadAnnotationDraft(conversationId);
+    if (await _loadAnnotationDraft(conversationId)) return;
     final preferences = await SharedPreferences.getInstance();
     final raw = preferences.getString(
       'home-chat-draft-attachments:$conversationId',
@@ -1029,7 +1055,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           .toList(growable: false);
       if (_conversation?.id == conversationId) {
         setState(() {
-          _attachments = restored;
+          _attachments = [
+            ..._attachments.where((item) => item.isAnnotationExplanation),
+            ...restored.where((item) => !item.isAnnotationExplanation),
+          ];
           _annotations = [
             ..._annotations.where((a) => !a.isImage),
             ...restored.expand((a) => a.imageAnnotations),
@@ -1046,10 +1075,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _persistAttachments() async {
     if (_editingQuestion != null) return;
+    if (_pendingAnnotationBatch != null) return _persistAnnotationDraft();
     final id = _conversation?.id;
     if (id == null) return;
     final snapshot = _attachments
-        .where((item) => item.exists)
+        .where((item) => !item.isAnnotationExplanation && item.exists)
         .map((item) => item.toJson())
         .toList();
     final preferences = await SharedPreferences.getInstance();
@@ -1487,9 +1517,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     bool Function()? isCancelled,
   }) async {
     _cancelledAttachmentPreparations.remove(attachment.id);
-    final stable =
-        await (_attachmentCopies[attachment.id] ??
-            Future<HomeChatAttachment>.value(attachment));
+    final stable = attachment.path.isEmpty
+        ? await (_attachmentCopies[attachment.id] ??
+            Future<HomeChatAttachment>.value(attachment))
+        : attachment;
     if (isCancelled?.call() == true ||
         _cancelledAttachmentPreparations.contains(attachment.id)) {
       throw const FormatException('已停止识别附件');
@@ -1498,32 +1529,77 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _removeAttachment(HomeChatAttachment attachment) async {
+    if (attachment.isAnnotationExplanation) {
+      final updated = [
+        for (final annotation in _annotations)
+          annotation.copyWith(
+            explanationImageIds: [
+              for (final id in annotation.explanationImageIds)
+                if (id != attachment.id) id,
+            ],
+          ),
+      ];
+      _applyAnnotations(
+        updated.where((annotation) => annotation.isImage ||
+            annotation.comment.trim().isNotEmpty ||
+            annotation.explanationImageIds.isNotEmpty).toList(),
+      );
+      return;
+    }
     _annotations = _annotations
         .where((a) => a.attachmentId != attachment.id)
         .toList();
-    _removedAttachmentIds.add(attachment.id);
-    _cancelAttachmentPreparation(attachment);
+    final conversation = _conversation;
+    final wasEditing = _editingQuestion != null;
+    final isPending = _pendingAnnotationBatch?.attachments.any(
+      (item) => item.id == attachment.id && item.path == attachment.path,
+    ) ?? false;
+    if (!isPending) {
+      _removedAttachmentIds.add(attachment.id);
+      _cancelAttachmentPreparation(attachment);
+    }
     _attachments = _attachments
         .where((item) => item.id != attachment.id)
         .toList();
     final isNewEditAttachment =
-        _editingQuestion != null &&
+        wasEditing &&
         _messageEditAddedAttachments.remove(attachment.id) != null;
-    if (_editingQuestion == null || isNewEditAttachment) {
-      try {
-        await File(attachment.path).delete();
-      } catch (_) {}
-      final draftPath = attachment.drawingDraftPath;
-      if (draftPath != null) {
-        try {
-          await HomeChatDrawingDraftStore(
-            accountScope: attachment.drawingDraftScope ?? 'local',
-          ).delete(_conversation?.id ?? '', draftPath);
-        } catch (_) {}
-      }
-    }
     if (mounted) setState(() {});
     await _persistAttachments();
+    if (wasEditing && !isNewEditAttachment) return;
+    final retained = await _retainedChatAttachments(conversation);
+    if (attachment.path.isNotEmpty &&
+        !retained.any((item) => item.path == attachment.path)) {
+      try {
+        await File(attachment.path).delete();
+      } on FileSystemException {
+        // The file may already have been removed.
+      }
+    }
+    final drawingPath = attachment.drawingDraftPath;
+    if (drawingPath != null && !retained.any((item) =>
+        item.drawingDraftPath == drawingPath &&
+        item.drawingDraftScope == attachment.drawingDraftScope)) {
+      await _deleteDrawingDrafts(conversation?.id ?? '', [attachment]);
+    }
+  }
+
+  Future<List<HomeChatAttachment>> _retainedChatAttachments(
+    AiConversationRecord? conversation,
+  ) async {
+    final saved = conversation == null
+        ? null
+        : await _historyService.get(conversation.id);
+    return [
+      ...?conversation?.nodes.expand((node) => node.attachments),
+      ...?saved?.nodes.expand((node) => node.attachments),
+      if (conversation != null && _conversation?.id == conversation.id) ...[
+        ..._conversation!.nodes.expand((node) => node.attachments),
+        ..._attachments,
+        ...?_attachmentsBeforeMessageEdit,
+        ...?_pendingAnnotationBatch?.attachments,
+      ],
+    ];
   }
 
   Future<void> _openDrawingBoard({HomeChatAttachment? editing}) async {
@@ -1535,7 +1611,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     if (editing != null &&
-        !_attachments.any((attachment) => attachment.id == editing.id)) {
+        (!editing.isEditableImage ||
+            !_attachments.any((attachment) => attachment.id == editing.id))) {
       return;
     }
     _dismissComposerFocus();
@@ -1647,7 +1724,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final oldPath = editing?.path;
       if (oldPath != null && oldPath != file.path) {
         try {
-          await File(oldPath).delete();
+          final retained = await _retainedChatAttachments(conversation);
+          if (!retained.any((item) => item.path == oldPath)) {
+            await File(oldPath).delete();
+          }
         } catch (_) {}
       }
     } catch (error) {
@@ -1670,7 +1750,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _loadAnnotationDraft(String conversationId) async {
+  Future<bool> _loadAnnotationDraft(String conversationId) async {
     final epoch = _annotationDraftEpoch;
     await _annotationSaveQueue.catchError((Object _) {});
     final scope = await _currentDrawingAccountScope();
@@ -1679,45 +1759,107 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted ||
         epoch != _annotationDraftEpoch ||
         _conversation?.id != conversationId) {
-      return;
+      return false;
     }
     try {
-      final values = raw == null
-          ? <ChatAnnotation>[]
-          : (jsonDecode(raw) as List)
-                .map(ChatAnnotation.fromJson)
-                .where(
-                  (a) =>
-                      !a.isImage &&
-                      a.quote.isNotEmpty &&
-                      a.comment.trim().isNotEmpty,
-                )
-                .toList();
-      setState(
-        () =>
-            _annotations = [...values, ..._annotations.where((a) => a.isImage)],
-      );
+      final decoded = raw == null ? const [] : jsonDecode(raw);
+      final values = (decoded is Map ? decoded['annotations'] as List : decoded as List)
+          .map(ChatAnnotation.fromJson)
+          .where((a) => a.isImage || (a.quote.isNotEmpty &&
+              (a.comment.trim().isNotEmpty || a.explanationImageIds.isNotEmpty)))
+          .toList();
+      final images = decoded is Map
+          ? (decoded['images'] as List? ?? const [])
+                .map(HomeChatAttachment.fromJson)
+                .where((item) => item.isAnnotationExplanation && item.isImage)
+          : const <HomeChatAttachment>[];
+      final known = values.map((annotation) => annotation.id).toSet();
+      final pending = decoded is Map && decoded['pending'] is Map
+          ? AiConversationMessage.fromJson(
+              Map<String, dynamic>.from(decoded['pending'] as Map),
+            )
+          : null;
+      setState(() {
+        _annotations = [...values, ..._annotations.where((a) => a.isImage && !known.contains(a.id))];
+        _attachments = [..._attachments.where((item) => !item.isAnnotationExplanation), ...images];
+        _pendingAnnotationBatch = pending;
+        _pendingAnnotationBatchScope = pending == null ? null : scope;
+      });
+      if (pending != null) {
+        final draftRecord = decoded as Map;
+        final rawAttachments = draftRecord['draft_attachments'] as List?;
+        if (rawAttachments != null) {
+          _attachments = rawAttachments.map(HomeChatAttachment.fromJson).toList();
+        } else {
+          _attachments = [
+            ..._attachments,
+            ...pending.attachments.where((item) =>
+                !_attachments.any((current) => current.id == item.id)),
+          ];
+        }
+        if (_composerController.messageText.trim().isEmpty &&
+            !_composerController.hasExplicitCapability) {
+          final draftComposer = draftRecord['draft_composer'];
+          final metadata = draftComposer is Map ? draftComposer['capability'] : null;
+          _composerController.setMessage(
+            draftComposer is Map ? draftComposer['text'] as String? ?? '' : pending.displayText ?? '',
+            draftComposer is Map
+                ? (metadata is Map ? Map<String, Object?>.from(metadata) : null)
+                : pending.capabilityTagOrigin == 'explicit' ? pending.capabilityMetadata : null,
+            isExplicit: draftComposer is Map
+                ? draftComposer['explicit'] == true
+                : pending.capabilityTagOrigin == 'explicit',
+          );
+        }
+        _finishAnsweredAnnotationBatch();
+        return true;
+      }
     } on FormatException {
       _showReplyError('注释草稿无法读取');
     } on TypeError {
       _showReplyError('注释草稿无法读取');
     }
+    return false;
   }
 
-  Future<void> _persistAnnotationDraft() {
+  Future<void> _persistAnnotationDraft({
+    String? accountScope,
+    Future<void>? waitFor,
+  }) {
     final id = _conversation?.id;
     if (id == null || _editingQuestion != null) return Future<void>.value();
-    final values = _annotations
-        .where((a) => !a.isImage)
-        .map((a) => a.toJson())
+    final values = _annotations.map((a) => a.toJson()).toList();
+    final images = _attachments
+        .where((attachment) => attachment.isAnnotationExplanation)
+        .map((attachment) => attachment.toJson())
         .toList();
-    final scope = _currentDrawingAccountScope();
-    return _annotationSaveQueue = _annotationSaveQueue
-        .catchError((Object _) {})
+    final pending = _pendingAnnotationBatch?.toJson();
+    final batchAttachments = pending == null
+        ? null
+        : _attachments.map((item) => item.toJson()).toList();
+    final batchComposer = pending == null ? null : {
+      'text': _composerController.messageText,
+      'capability': _composerController.messageMetadata(),
+      'explicit': _composerController.hasExplicitCapability,
+    };
+    final retainedScope = accountScope ?? _pendingAnnotationBatchScope;
+    final scope = retainedScope == null
+        ? _currentDrawingAccountScope()
+        : Future.value(retainedScope);
+    return _annotationSaveQueue = Future.wait<void>([
+      _annotationSaveQueue.catchError((Object _) {}),
+      ?waitFor,
+    ])
         .then((_) async {
           final key = 'home-chat-annotations:${await scope}:$id';
           final prefs = await SharedPreferences.getInstance();
-          if (!await prefs.setString(key, jsonEncode(values))) {
+          if (!await prefs.setString(key, jsonEncode({
+            'annotations': values,
+            'images': images,
+            'pending': ?pending,
+            'draft_attachments': ?batchAttachments,
+            'draft_composer': ?batchComposer,
+          }))) {
             throw StateError('注释草稿保存失败');
           }
         });
@@ -1725,9 +1867,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _applyAnnotations(List<ChatAnnotation> values) {
     ++_annotationDraftEpoch;
+    final conversation = _conversation;
+    final referenced = values.expand((a) => a.explanationImageIds).toSet();
+    final discarded = _attachments
+        .where((item) => item.isAnnotationExplanation && !referenced.contains(item.id))
+        .toList(growable: false);
     setState(() {
       _annotations = List.of(values);
-      _attachments = _attachments.map((item) {
+      _attachments = _attachments.where((item) => !discarded.contains(item)).map((item) {
         if (item.originalImagePath == null) return item;
         final comments = values
             .where((a) => a.attachmentId == item.id)
@@ -1742,7 +1889,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }).toList();
     });
     unawaited(
-      _persistAnnotationDraft().catchError((Object _) {
+      _persistAnnotationDraft().then((_) async {
+        if (conversation == null || discarded.isEmpty) return;
+        final historyFiles = (await _retainedChatAttachments(conversation))
+            .map((item) => item.path).toSet();
+        for (final item in discarded) {
+          if (historyFiles.contains(item.path) ||
+              _attachments.any((value) => value.path == item.path)) continue;
+          try {
+            await File(item.path).delete();
+          } on FileSystemException {
+            // The file may already have been removed.
+          }
+        }
+      }).catchError((Object _) {
         if (mounted) _showReplyError('注释草稿保存失败，请重试');
       }),
     );
@@ -1754,26 +1914,162 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _annotateText(ChatAnnotation annotation, Offset anchor) async {
+    if (_pendingAnnotationBatch != null && (_isGenerating || _isPreparingToSend)) return;
     if (_editingQuestion != null) {
       _showReplyError('请先完成当前消息修改');
       return;
     }
     final conversationId = _conversation?.id;
     if (conversationId == null) return;
-    final existing = _annotations.any((a) => a.id == annotation.id);
-    final comment = await _showAnnotationComment(
-      initialText: annotation.comment,
-      anchor: anchor,
-    );
-    if (!mounted || _conversation?.id != conversationId || comment == null) {
+    final existing = _annotations.where((a) => a.id == annotation.id).firstOrNull;
+    final updated = await _editAnnotationDraft(existing ?? annotation);
+    if (!mounted || _conversation?.id != conversationId || updated == null) {
       return;
     }
-    if (comment.trim().isEmpty) return;
     _applyAnnotations([
       for (final a in _annotations)
-        if (a.id == annotation.id) a.copyWith(comment: comment) else a,
-      if (!existing) annotation.copyWith(comment: comment),
+        if (a.id == annotation.id) updated else a,
+      if (existing == null) updated,
     ]);
+  }
+
+  Future<ChatAnnotation?> _editAnnotationDraft(
+    ChatAnnotation annotation, {
+    BuildContext? editorContext,
+  }) async {
+    if (annotation.isImage) {
+      final value = await _showAnnotationComment(
+        initialText: annotation.comment,
+        anchor: Offset.zero,
+        editorContext: editorContext,
+        dockToKeyboard: true,
+        requireText: false,
+      );
+      return value == null ? null : annotation.copyWith(comment: value);
+    }
+    final conversationId = _conversation?.id;
+    final sessionRevision = CapabilityCloudSync.instance.emailSessionRevision;
+    final revision = sessionRevision.value;
+    final scope = await _currentDrawingAccountScope();
+    if (!mounted || conversationId == null || _conversation?.id != conversationId ||
+        sessionRevision.value != revision) return null;
+    if (_editingQuestion == null && _pendingAnnotationBatch != null &&
+        _pendingAnnotationBatchScope != scope) {
+      _showReplyError('请切换到原账号编辑待发注释');
+      return null;
+    }
+    final imagesById = {for (final item in _attachments) item.id: item};
+    final existing = [
+      for (final id in annotation.explanationImageIds)
+        if (imagesById[id] case final item?) item,
+    ];
+    if (existing.any((item) => !_canViewDraftExplanation(item, scope))) {
+      _showReplyError('解释图属于原账号，请切换到原账号再编辑');
+      return null;
+    }
+    _dismissAnnotationComment?.call();
+    final epoch = ++_annotationCommentEpoch;
+    if (!_keyboardOverlayLayoutLocked || _unlockKeyboardOverlayLayoutAfterImeHides) {
+      _annotationCommentOwnsLayoutLock = true;
+    }
+    _unlockKeyboardOverlayLayoutAfterImeHides = false;
+    setState(() => _keyboardOverlayLayoutLocked = true);
+    final staged = <HomeChatAttachment>[];
+    var retained = const <HomeChatAttachment>[];
+    try {
+      final imageLimit = min(
+        ChatAnnotation.maxExplanationImages,
+        max(existing.length, 9 - _attachments.length + existing.length),
+      );
+      final result = await showChatAnnotationComposer(
+        editorContext ?? context,
+        initialText: annotation.comment,
+        quote: annotation.quote,
+        initialImages: existing,
+        imageLimit: imageLimit,
+        guardContent: (child) => guardPrivateAnnotationContent(revision, child),
+        onDismissReady: (dismiss) => _dismissAnnotationComment = dismiss,
+        onPickImages: (limit) async {
+          final selected = <HomeChatAttachment>[];
+          try {
+            final files = await ImagePicker().pickMultiImage();
+            if (!mounted || epoch != _annotationCommentEpoch ||
+                _conversation?.id != conversationId ||
+                await _currentDrawingAccountScope() != scope ||
+                sessionRevision.value != revision) return selected;
+            for (final file in files.take(limit)) {
+              final mime = _attachmentMime(file.name.split('.').last.toLowerCase());
+              if (mime == null || !mime.startsWith('image/')) {
+                _showReplyError('所选图片格式不受支持');
+                continue;
+              }
+              try {
+                final photo = HomeChatAttachment(
+                  id: CapabilityCloudSync.newTaskId(),
+                  name: file.name,
+                  path: '',
+                  mimeType: mime,
+                  byteLength: 0,
+                  source: HomeChatAttachment.annotationExplanationSource,
+                );
+                final stable = await _copyPickedAttachment(
+                  file,
+                  scope == 'local' ? photo : photo.bindExplanationOwner(scope),
+                  conversationId: conversationId,
+                );
+                if (!mounted || epoch != _annotationCommentEpoch ||
+                    _conversation?.id != conversationId ||
+                    sessionRevision.value != revision) {
+                  await File(stable.path).delete();
+                  return selected;
+                }
+                staged.add(stable);
+                selected.add(stable);
+              } on Object {
+                if (mounted) _showReplyError('有一张解释图无法读取，请重新选择');
+              }
+            }
+            if (files.length > limit && mounted) {
+              _showReplyError('本条最多添加三张解释图，当前发送最多九个附件');
+            }
+          } on Object {
+            if (mounted) _showReplyError('无法打开相册，请重试');
+          }
+          return selected;
+        },
+      );
+      if (result == null || !mounted || _conversation?.id != conversationId ||
+          await _currentDrawingAccountScope() != scope || !mounted ||
+          sessionRevision.value != revision) return null;
+      retained = result.images;
+      final ids = _attachments.map((item) => item.id).toSet();
+      _attachments = [..._attachments, ...retained.where((item) => !ids.contains(item.id))];
+      if (_editingQuestion != null) {
+        for (final item in retained.where((item) => !ids.contains(item.id))) {
+          _messageEditAddedAttachments[item.id] = item;
+        }
+      }
+      return annotation.copyWith(
+        comment: result.comment,
+        explanationImageIds: retained.map((item) => item.id).toList(),
+      );
+    } finally {
+      if (epoch == _annotationCommentEpoch) {
+        ++_annotationCommentEpoch;
+        _dismissAnnotationComment = null;
+        if (_annotationCommentOwnsLayoutLock) {
+          _annotationCommentOwnsLayoutLock = false;
+          _releaseKeyboardOverlayLayoutLockSafely();
+        }
+      }
+      for (final item in staged.where((item) => !retained.contains(item))) {
+        try {
+          await File(item.path).delete();
+        } on FileSystemException {
+          // Cancelled copies need no durable reference.
+        }
+      }
+    }
   }
 
   Future<String?> _showAnnotationComment({
@@ -1784,6 +2080,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ScrollPosition? scrollPosition,
     bool dockToKeyboard = false,
     bool requireText = true,
+    String? quote,
   }) async {
     _dismissAnnotationComment?.call();
     final epoch = ++_annotationCommentEpoch;
@@ -1805,6 +2102,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         scrollPosition: scrollPosition,
         dockToKeyboard: dockToKeyboard,
         requireText: requireText,
+        quote: quote,
         onDismissReady: (dismiss) => _dismissAnnotationComment = dismiss,
       );
     } finally {
@@ -1819,20 +2117,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  void _reviewAnnotations() {
+  bool _canViewDraftExplanation(HomeChatAttachment item, String scope) =>
+      item.isAnnotationExplanation &&
+      (item.belongsToExplanationOwner(scope) ||
+          (item.annotationOwnerScope == null &&
+              _editingQuestion?.attachments.any((stored) => stored.id == item.id) != true));
+
+  Future<void> _reviewAnnotations() async {
+    if (_pendingAnnotationBatch != null && (_isGenerating || _isPreparingToSend)) return;
     final id = _conversation?.id;
     final editingId = _editingQuestion?.id;
-    unawaited(
-      showChatAnnotationReview(
+    final sessionRevision = CapabilityCloudSync.instance.emailSessionRevision;
+    final revision = sessionRevision.value;
+    final scope = await _currentDrawingAccountScope();
+    if (!mounted || _conversation?.id != id || _editingQuestion?.id != editingId ||
+        sessionRevision.value != revision) return;
+    await showChatAnnotationReview(
         context,
         annotations: _annotations,
-        onEditComment: (sheetContext, annotation) => _showAnnotationComment(
-          initialText: annotation.comment,
-          anchor: Offset.zero,
-          editorContext: sheetContext,
-          dockToKeyboard: true,
-          requireText: !annotation.isImage,
-        ),
+        guardContent: (child) => guardPrivateAnnotationContent(revision, child),
+        explanationImages: () => _attachments.where((item) =>
+            sessionRevision.value == revision && _canViewDraftExplanation(item, scope)).toList(),
+        onEditAnnotation: (sheetContext, annotation) =>
+            _editAnnotationDraft(annotation, editorContext: sheetContext),
         onChanged: (values) {
           if (mounted &&
               _conversation?.id == id &&
@@ -1840,13 +2147,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             _applyAnnotations(values);
           }
         },
-      ),
     );
   }
 
   Future<void> _openPendingImage(HomeChatAttachment attachment) async {
     final images = _attachments
-        .where((a) => a.isImage)
+        .where((a) => a.isEditableImage)
         .map((a) => ChatImageSource.fromAttachment(a, pending: true))
         .toList();
     final index = images.indexWhere((a) => a.id == attachment.id);
@@ -1905,10 +2211,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       var updated = List<HomeChatAttachment>.of(previous);
       var annotations = List<ChatAnnotation>.of(previousAnnotations);
       for (final edit in edits) {
+        if (edit.source.attachment?.isAnnotationExplanation == true) {
+          throw StateError('请在注释输入框中更换解释图');
+        }
         final id = edit.source.pending
             ? edit.source.id
             : 'image_${DateTime.now().microsecondsSinceEpoch}';
-        if (edit.source.pending && !updated.any((a) => a.id == id)) {
+        if (edit.source.pending &&
+            !updated.any((a) => a.id == id && a.isEditableImage)) {
           throw StateError('待发送图片已被移除');
         }
         final stem =
@@ -2050,14 +2360,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ).delete(conversationId, path);
       } catch (_) {}
     }
-  }
-
-  Future<String> _currentDrawingAccountScope() async {
-    final cloud = CapabilityCloudSync.instance;
-    if (!await cloud.hasEmailSession) return 'local';
-    final email = (await cloud.signedInEmail)?.trim().toLowerCase() ?? '';
-    if (email.isEmpty) return 'local';
-    return 'account_${sha256.convert(utf8.encode(email))}';
   }
 
   String? _attachmentMime(String extension) => switch (extension) {
@@ -2516,12 +2818,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _attachmentPanelOpen = false;
     _attachmentPanelPending = false;
     _setComposerExpanded(wasExpanded);
-    _composerController.restore(
-      previousValue ?? CapabilityTextSnapshot(value: TextEditingValue.empty),
-    );
     _attachments = previousAttachments ?? const [];
     _annotations = _annotationsBeforeMessageEdit ?? const [];
     _annotationsBeforeMessageEdit = null;
+    _composerController.restore(
+      previousValue ?? CapabilityTextSnapshot(value: TextEditingValue.empty),
+    );
     if (keepAddedAttachments) {
       _messageEditAddedAttachments.clear();
     } else if (!preserveAddedAttachments) {
@@ -2533,6 +2835,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } else {
       _composerFocusNode.unfocus();
     }
+    _finishAnsweredAnnotationBatch();
   }
 
   Future<void> _deleteMessageEditAttachments() async {
@@ -2572,7 +2875,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     if (!await _ensureEmailSessionForChat()) return;
-    final selectedAttachments = List<HomeChatAttachment>.of(_attachments);
+    final List<HomeChatAttachment> selectedAttachments;
+    try {
+      final scope = await _currentDrawingAccountScope();
+      if (!mounted || _editingQuestion?.id != source.id) return;
+      selectedAttachments = [
+        for (final item in _attachments)
+          if (!item.isAnnotationExplanation)
+            item
+          else if (source.attachments.any((previous) => previous.id == item.id) &&
+              !item.belongsToExplanationOwner(scope))
+            throw const FormatException('解释图属于原账号，请用原账号重新发送')
+          else
+            item.bindExplanationOwner(scope),
+      ];
+    } on FormatException catch (error) {
+      if (mounted) _showReplyError(error.message);
+      return;
+    }
     setState(() => _savingMessageEdit = true);
     List<HomeChatAttachment> preparedAttachments;
     try {
@@ -2830,6 +3150,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (isCancelled?.call() == true) {
         throw const FormatException('已停止识别附件');
       }
+      if (attachment.isAnnotationExplanation) {
+        prepared.add(attachment);
+        continue;
+      }
       final ready = await _prepareAttachment(
         attachment,
         isCancelled: isCancelled,
@@ -2869,6 +3193,85 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return queued.future;
   }
 
+  void _finishAnsweredAnnotationBatch() {
+    final conversation = _conversation;
+    final pending = _pendingAnnotationBatch;
+    if (conversation == null || pending == null) return;
+    final question = conversation.nodeById(pending.id);
+    if (question != null && !question.agentTaskPending &&
+        conversation.nodes.any((answer) => !answer.isUser &&
+            answer.parentMessageId == pending.id && !answer.isIncomplete &&
+            !answer.isDeletedMarker)) {
+      _finishPendingAnnotationBatch(conversation.id, pending.id);
+    }
+  }
+
+  void _finishPendingAnnotationBatch(String conversationId, String? messageId) {
+    final batch = _pendingAnnotationBatch;
+    if (batch == null ||
+        batch.id != messageId ||
+        _conversation?.id != conversationId ||
+        _editingQuestion != null ||
+        !mounted) {
+      return;
+    }
+    final sentAnnotations = {
+      for (final item in batch.annotations) item.id: jsonEncode(item.toJson()),
+    };
+    final sentAttachments = {for (final item in batch.attachments) item.id: item};
+    final changedAttachmentIds = {
+      for (final item in _attachments)
+        if (sentAttachments[item.id]?.hasSameDraftMaterial(item) == false)
+          item.id,
+    };
+    final accountScope = _pendingAnnotationBatchScope;
+    final composerText = _composerController.messageText;
+    final composerCapability = _composerController.messageMetadata();
+    _normalizeCapabilityTextOffset(composerCapability, composerText, batch.text);
+    final shouldClearComposer = composerText.trim() == (batch.displayText ?? '') &&
+        _batchHasSameExplicitCapability(
+          batch,
+          _composerController.hasExplicitCapability,
+          composerCapability,
+        );
+    setState(() {
+      _pendingAnnotationBatch = null;
+      _pendingAnnotationBatchScope = null;
+      _annotations = _annotations.where((item) =>
+          changedAttachmentIds.contains(item.attachmentId) ||
+          sentAnnotations[item.id] != jsonEncode(item.toJson())).toList();
+      final stillReferenced = _annotations.expand((item) => item.explanationImageIds).toSet();
+      _attachments = _attachments.where((item) =>
+          stillReferenced.contains(item.id) ||
+          !(sentAttachments[item.id]?.hasSameDraftMaterial(item) ?? false)).toList();
+      ++_annotationDraftEpoch;
+    });
+    if (shouldClearComposer) {
+      _composerController.setMessage('', null, isExplicit: false);
+    }
+    unawaited(
+      _persistAnnotationDraft(
+        accountScope: accountScope,
+        waitFor: _persistAttachments(),
+      ).catchError((Object _) {
+        if (mounted) _showReplyError('已发送，待发注释清理失败');
+      }),
+    );
+    final retainedAttachments = [..._attachments, ...?_attachmentsBeforeMessageEdit];
+    unawaited(_deleteDrawingDrafts(conversationId, batch.attachments.where((item) =>
+        !retainedAttachments.any((current) =>
+            current.drawingDraftScope == item.drawingDraftScope &&
+            current.drawingDraftPath == item.drawingDraftPath))));
+  }
+
+  bool _batchHasSameExplicitCapability(
+    AiConversationMessage batch,
+    bool hasExplicitCapability,
+    Map<String, Object?>? capability,
+  ) => (batch.capabilityTagOrigin == 'explicit') == hasExplicitCapability &&
+      (!hasExplicitCapability ||
+          jsonEncode(batch.capabilityMetadata) == jsonEncode(capability));
+
   Future<void> _sendMessage({VoidCallback? onQueued}) async {
     if (_space != _HomeSpace.reading) return;
     if (_isSelectingAnswerVersion || _isSelectingQuestionVersion) {
@@ -2895,6 +3298,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final rawText = _composerController.messageText;
     final annotationsForMessage = List<ChatAnnotation>.of(_annotations);
+    final batch = _pendingAnnotationBatch;
+    final isAnnotationBatch = annotationsForMessage.isNotEmpty || batch != null;
     final text = appendChatAnnotations(
       rawText.trim(),
       annotationsForMessage,
@@ -2908,7 +3313,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final passage = current.id == _companionConversationId
         ? _readingPassage
         : null;
-    final continuesWork = current.hasOpenWork && !_startsSeparateWork(text);
+    final intentText = isAnnotationBatch
+        ? [rawText, ...annotationsForMessage.map((item) => item.comment)].join('\n')
+        : text;
+    final continuesWork = current.hasOpenWork && !_startsSeparateWork(intentText);
     final workId = continuesWork
         ? current.activeWorkId ?? CapabilityCloudSync.newTaskId()
         : CapabilityCloudSync.newTaskId();
@@ -2916,12 +3324,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         current.messages.lastOrNull?.agentProcessStatus == 'waiting_for_user';
     final problemAttemptStageId = !continuesWork
         ? workId
-        : waitingForDirection && _requestsProblemAttemptContinuation(text)
+        : waitingForDirection && _requestsProblemAttemptContinuation(intentText)
         ? CapabilityCloudSync.newTaskId()
         : current.latestUserMessage?.problemAttemptStageId ?? workId;
     final workReferenceMessageId =
         !continuesWork &&
-            _referencesPreviousResult(text) &&
+            _referencesPreviousResult(intentText) &&
             current.messages.lastOrNull?.isUser == false
         ? current.messages.lastOrNull?.id
         : null;
@@ -2953,19 +3361,78 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() {
       _isPreparingToSend = true;
     });
+    String? annotationTaskId = batch?.agentTaskId;
+    String? batchAccount;
+    late final List<HomeChatAttachment> selectedAttachments;
     try {
       if (!await _ensureEmailSessionForChat()) return;
+      if (isAnnotationBatch) {
+        batchAccount = await _currentDrawingAccountScope();
+        if (batch != null && _pendingAnnotationBatchScope != batchAccount) {
+          if (mounted) _showReplyError('账号已变更，请打开原账号会话重试');
+          return;
+        }
+      }
+      final draftAttachments = List<HomeChatAttachment>.of(_attachments);
+      selectedAttachments = [
+        for (final item in draftAttachments)
+          if (isAnnotationBatch && item.isAnnotationExplanation)
+            item.bindExplanationOwner(batchAccount!)
+          else if (isAnnotationBatch && item.path.isEmpty)
+            await (_attachmentCopies[item.id] ?? Future.value(item))
+          else
+            item,
+      ];
+      if (!mounted || _conversation?.id != current.id) return;
+      if (annotationTaskId != null) {
+        final remote = await CapabilityCloudSync.instance.findTask(annotationTaskId);
+        if (!mounted || _conversation?.id != current.id) return;
+        if (remote != null) {
+          final status = remote['status'];
+          final failed = const {'failed', 'paused', 'cancelled'}.contains(status);
+          if (!failed) {
+            unawaited(Future<void>(() => _resumePendingCapabilityTask(current)));
+            return;
+          }
+          final sameContents = batch != null && batch.text == text &&
+              jsonEncode(batch.annotations.map((item) => item.toJson()).toList()) ==
+                  jsonEncode(annotationsForMessage.map((item) => item.toJson()).toList()) &&
+              batch.attachments.length == selectedAttachments.length &&
+              batch.attachments.indexed.every((entry) =>
+                  entry.$2.hasSameDraftMaterial(selectedAttachments[entry.$1])) &&
+              _batchHasSameExplicitCapability(batch, hasExplicitCapability, selectedCapability);
+          if (sameContents && remote['agent_snapshot_id'] != null) {
+            unawaited(Future<void>(() => _continueStoppedReply(parentMessageId: batch.id)));
+            return;
+          }
+          if (remote['annotation_retry_safe'] != true) {
+            _showReplyError('原任务的操作结果仍需确认，请先继续原任务，已保留整批注释');
+            return;
+          }
+          annotationTaskId = null;
+        }
+      }
+    } on FormatException catch (error) {
+      if (mounted && _conversation?.id == current.id) _showReplyError(error.message);
+      return;
+    } on Object {
+      if (mounted && _conversation?.id == current.id) {
+        _showReplyError('无法确认原任务状态，已保留整批注释，请稍后重试');
+      }
+      return;
     } finally {
       if (mounted) setState(() => _isPreparingToSend = false);
     }
     if (!mounted || _conversation?.id != current.id) return;
-    final selectedAttachments = List<HomeChatAttachment>.of(_attachments);
+    if (isAnnotationBatch) annotationTaskId ??= CapabilityCloudSync.newTaskId();
     _dismissComposerFocus();
     _setComposerExpanded(false);
 
     final selection = _selectionFor(current);
     final now = DateTime.now();
     var userMessage = AiConversationMessage(
+      id: batch?.id,
+      parentMessageId: current.nodeById(batch?.id ?? '')?.parentMessageId,
       text: text,
       displayText: rawText.trim(),
       readingPassage: passage == null
@@ -2977,12 +3444,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
       annotations: annotationsForMessage,
       capabilityTagOrigin: capabilityTagOrigin,
-      workId: workId,
+      workId: batch?.workId ?? workId,
       problemAttemptStageId: problemAttemptStageId,
       workReferenceQuestionId: workReferenceQuestionId,
       isUser: true,
       createdAt: now,
       attachments: selectedAttachments,
+      agentTaskId: annotationTaskId,
+      agentTaskPending: isAnnotationBatch,
       capabilityMetadata: capabilityForMessage == null
           ? null
           : Map<String, Object?>.from(capabilityForMessage),
@@ -3005,7 +3474,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ? '注释讨论'
                 : capabilityTitle ?? '能力任务')
           : current.title,
-      messages: [...baseConversation.messages, userMessage],
+      messages: baseConversation.nodeById(userMessage.id) == null
+          ? [...baseConversation.messages, userMessage]
+          : null,
+      nodes: baseConversation.nodeById(userMessage.id) == null
+          ? null
+          : [
+              for (final node in baseConversation.nodes)
+                if (node.id == userMessage.id) userMessage else node,
+            ],
       updatedAt: now,
       modelId: selection.model.id,
       reasoningLevel: selection.reasoningLevel.name,
@@ -3018,8 +3495,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final requestGeneration = ++_requestGeneration;
     final conversationId = withUserMessage.id;
 
+    if (isAnnotationBatch) {
+      final sent = {for (final item in selectedAttachments) item.id: item};
+      _attachments = [
+        for (final item in _attachments)
+          if (item.isAnnotationExplanation && sent[item.id]?.path == item.path)
+            sent[item.id]!
+          else
+            item,
+      ];
+      _pendingAnnotationBatch = userMessage;
+      _pendingAnnotationBatchScope = batchAccount;
+      setState(() => _isPreparingToSend = true);
+      try {
+        await _persistAnnotationDraft();
+      } on Object {
+        if (mounted && _conversation?.id == conversationId) {
+          setState(() => _isPreparingToSend = false);
+          _showReplyError('待发送注释无法保存，内容已保留，请重试');
+        }
+        _pendingReplyParentId = null;
+        return;
+      }
+      if (!_isCurrentRequest(requestGeneration, conversationId)) return;
+    }
+
     void restoreAnnotationDraft() {
       if (!mounted ||
+          isAnnotationBatch ||
           _conversation?.id != conversationId ||
           (annotationsForMessage.isEmpty &&
               !selectedAttachments.any((a) => a.originalImagePath != null))) {
@@ -3067,12 +3570,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ? _selectedReadingTaskBookId
             : null);
     _rememberReadingTask(bookId, withUserMessage);
-    _attachments = const [];
-    _annotations = const [];
-    ++_annotationDraftEpoch;
-    unawaited(_persistAnnotationDraft().catchError((Object _) {}));
-    _composerController.setMessage('', null, isExplicit: false);
-    unawaited(_persistAttachments());
+    if (!isAnnotationBatch) {
+      _attachments = const [];
+      _annotations = const [];
+      ++_annotationDraftEpoch;
+      unawaited(_persistAnnotationDraft().catchError((Object _) {}));
+      _composerController.setMessage('', null, isExplicit: false);
+      unawaited(_persistAttachments());
+    }
     _scrollToLatest();
     onQueued?.call();
     try {
@@ -3084,7 +3589,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _clearStreamingReply();
         });
         _showReplyError('会话保存失败，云端任务未启动：$error');
-        restoreAnnotationDraft();
+        if (!isAnnotationBatch) restoreAnnotationDraft();
       }
       _pendingReplyParentId = null;
       return;
@@ -3119,7 +3624,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ..clear()
             ..addAll(withUserMessage.messages);
         });
-        await _deleteDrawingDrafts(conversationId, selectedAttachments);
+        if (!isAnnotationBatch) {
+          await _deleteDrawingDrafts(conversationId, selectedAttachments);
+        }
       }
       aiMessages = await _buildAiMessages(
         withUserMessage.messages,
@@ -3152,12 +3659,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         aiMessages: aiMessages,
         modelId: selection.model.id,
         reasoningLevel: selection.reasoningLevel.name,
+        annotationTaskId: annotationTaskId,
       );
       if (taskReply == null ||
           !_isCurrentRequest(requestGeneration, conversationId)) {
         return;
       }
-      await _appendAssistantReply(
+      final saved = await _appendAssistantReply(
         taskReply.reply,
         parentMessageId: _pendingReplyParentId,
         clearAgentTaskId: true,
@@ -3171,19 +3679,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         agentWebSources: taskReply.webSources,
         bookSearchId: taskReply.bookSearchId,
       );
+      if (saved) _finishPendingAnnotationBatch(conversationId, userMessage.id);
     } on TimeoutException {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
-        await _savePartialAgentReply(
+      if (!isAnnotationBatch) await _savePartialAgentReply(
           conversationId: conversationId,
           parentMessageId: userMessage.id,
         );
         _clearStreamingReply();
         _showReplyError('回复超时，请稍后重试');
-        restoreAnnotationDraft();
+        if (!isAnnotationBatch) restoreAnnotationDraft();
       }
     } on AiException catch (error) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
-        await _savePartialAgentReply(
+        if (!isAnnotationBatch) await _savePartialAgentReply(
           conversationId: conversationId,
           parentMessageId: userMessage.id,
         );
@@ -3200,17 +3709,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         } else {
           _showAgentTaskError(error);
         }
-        restoreAnnotationDraft();
+        if (!isAnnotationBatch) restoreAnnotationDraft();
       }
     } catch (_) {
       if (_isCurrentRequest(requestGeneration, conversationId)) {
-        await _savePartialAgentReply(
+        if (!isAnnotationBatch) await _savePartialAgentReply(
           conversationId: conversationId,
           parentMessageId: userMessage.id,
         );
         _clearStreamingReply();
         _showReplyError('回复失败，请稍后重试');
-        restoreAnnotationDraft();
+        if (!isAnnotationBatch) restoreAnnotationDraft();
       }
     } finally {
       if (mounted && requestGeneration == _requestGeneration) {
@@ -3538,6 +4047,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         {'type': 'text', 'text': requestText},
       ];
       for (final attachment in attachments) {
+        if (attachment.isAnnotationExplanation) continue;
         final ready = await _prepareAttachment(attachment);
         content.add({
           'type': 'home_document',
@@ -3639,6 +4149,7 @@ $materialIndex
     List<AiConversationMessage> messages, {
     String? workId,
     String? referenceQuestionId,
+    String? annotationQuestionId,
   }) async {
     final allowedMessageIds = <String>{
       for (final message in messages)
@@ -3657,6 +4168,9 @@ $materialIndex
       if (message.isDeletedMarker) continue;
       if (!allowedMessageIds.contains(message.id)) continue;
       for (final attachment in message.attachments) {
+        if (attachment.isAnnotationExplanation) continue;
+        if (annotationQuestionId != null && attachment.isImage &&
+            message.id != annotationQuestionId) continue;
         final ready = await _prepareAttachment(attachment);
         materialsById[attachment.id] = {
           'id': attachment.id,
@@ -3699,6 +4213,66 @@ $materialIndex
     return {'id': target.id, 'version_id': version.id};
   }
 
+  Future<List<Map<String, Object?>>> _uploadAnnotationGroups(
+    AiConversationMessage question,
+    String authorization, {
+    required String accountScope,
+    required bool Function() isCurrent,
+  }) async {
+    final annotations = question.annotations;
+    final images = {
+      for (final item in question.attachments.where((item) => item.isAnnotationExplanation))
+        item.id: item,
+    };
+    final ids = annotations.expand((annotation) => annotation.explanationImageIds).toList();
+    if (ids.isEmpty) return const [];
+    if (question.attachments.length > 9 || ids.length > 9 ||
+        ids.toSet().length != ids.length ||
+        ids.any((id) => !images.containsKey(id))) {
+      throw const AiException('解释图或附件数量无效，已保留整批注释');
+    }
+    if (ids.any((id) => !images[id]!.belongsToExplanationOwner(accountScope))) {
+      throw const AiException('解释图属于原账号，请切换到原账号再发送');
+    }
+    final ordinaryBytes = question.attachments
+        .where((item) => item.isImage && !item.isAnnotationExplanation)
+        .fold<int>(0, (sum, item) => sum + item.byteLength);
+    final imageBudget = (5 * 1024 * 1024 - ordinaryBytes) ~/ ids.length;
+    if (imageBudget <= 0) {
+      throw const AiException('本轮图片合计超过 5 MB，已保留整批注释');
+    }
+    final names = {for (final item in question.attachments) item.id: item.name};
+    final groups = <Map<String, Object?>>[];
+    for (final (index, annotation) in annotations.indexed) {
+      final imageIds = annotation.explanationImageIds;
+      if (imageIds.length > ChatAnnotation.maxExplanationImages) {
+        throw AiException('注释 ${index + 1} 最多可以添加三张解释图');
+      }
+      final uploaded = <String>[];
+      for (final id in imageIds) {
+        if (!isCurrent()) return const [];
+        try {
+          uploaded.add(await _attachmentPreparer.uploadAnnotationImage(
+            images[id]!,
+            messageId: question.id,
+            authorization: authorization,
+            byteBudget: imageBudget,
+          ));
+        } on Object catch (error) {
+          final detail = error is FormatException ? error.message : '请检查图片或网络连接';
+          throw AiException('注释 ${index + 1} 的解释图准备失败。$detail。已保留整批注释');
+        }
+      }
+      groups.add({
+        'id': annotation.id,
+        'number': index + 1,
+        'text': chatAnnotationGroupText(annotation, annotations, names),
+        'image_ids': uploaded,
+      });
+    }
+    return groups;
+  }
+
   Future<
     ({
       String taskId,
@@ -3723,6 +4297,7 @@ $materialIndex
     required String modelId,
     required String reasoningLevel,
     String? resumeTaskId,
+    String? annotationTaskId,
   }) async {
     final workId = question.workId;
     final conversation = _conversation;
@@ -3736,6 +4311,30 @@ $materialIndex
             ? _selectedReadingTaskBookId
             : null);
     final resumesBookTask = resumeTaskId != null && bookId != null;
+    final hasExplanationImages = question.annotations.any(
+      (annotation) => annotation.explanationImageIds.isNotEmpty,
+    );
+    final hasAnnotationBatch = hasExplanationImages || annotationTaskId != null ||
+        _pendingAnnotationBatch?.id == question.id;
+    if (hasAnnotationBatch && _pendingAnnotationBatch?.id == question.id &&
+        await _currentDrawingAccountScope() != _pendingAnnotationBatchScope) {
+      throw const AiException('账号已变更，请打开原账号会话重试');
+    }
+    final cloud = CapabilityCloudSync.instance;
+    final authorization = hasAnnotationBatch
+        ? (await cloud.authenticatedHeaders())['Authorization']!
+        : null;
+    final annotationGroups = !hasExplanationImages
+        ? const <Map<String, Object?>>[]
+        : await _uploadAnnotationGroups(
+            question,
+            authorization!,
+            accountScope: _drawingAccountScope(
+              await cloud.emailForAuthorization(authorization),
+            ),
+            isCurrent: isCurrent,
+          );
+    if (!isCurrent()) return null;
     final passage = conversationId == _companionConversationId
         ? _readingPassage
         : null;
@@ -3768,6 +4367,7 @@ $materialIndex
           history,
           workId: workId,
           referenceQuestionId: question.workReferenceQuestionId,
+          annotationQuestionId: hasExplanationImages ? question.id : null,
         ),
     ];
     var readingMaterialGuide = '';
@@ -3822,7 +4422,7 @@ $materialIndex
         capability?['type'] == 'action' && capability?['id'] == 'create-image';
     if (!_isCurrentRequest(generation, conversationId)) return null;
 
-    final taskId = resumeTaskId ?? CapabilityCloudSync.newTaskId();
+    final taskId = resumeTaskId ?? annotationTaskId ?? CapabilityCloudSync.newTaskId();
     Map<String, dynamic>? recovery;
     var continueAbortedTurn = false;
     if (resumeTaskId != null) {
@@ -3877,8 +4477,37 @@ $materialIndex
     if (latestLegacyMessageIndex < 0) {
       throw const FormatException('当前回合缺少用户消息');
     }
+    final latestBaseMessage = taskMessages[latestLegacyMessageIndex];
+    final directive = hasAnnotationBatch
+        ? (question.displayText?.trim() ?? '')
+        : question.text.trim();
+    final currentTurnText = hasAnnotationBatch
+        ? [
+            directive,
+            ...question.annotations.map((annotation) => annotation.comment.trim()),
+          ].where((text) => text.isNotEmpty).join('\n')
+        : directive;
     final latestLegacyMessage = chatAnnotationRequestMessage(
-      taskMessages[latestLegacyMessageIndex],
+      hasExplanationImages
+          ? {
+              ...latestBaseMessage,
+              'content': [
+                {
+                  'type': 'text',
+                  'text': [
+                    _messageTextWithCapabilityIntent(
+                      question,
+                      directive.isEmpty ? '请根据以下注释处理对应内容。' : directive,
+                    ),
+                    if (question.readingPassage case final passage?) passage,
+                    '以下编号与引文、配图为用户引用资料。请按各编号理解评论和紧跟的解释图。',
+                  ].join('\n\n'),
+                },
+                if (latestBaseMessage['content'] case final List parts)
+                  ...parts.skip(1),
+              ],
+            }
+          : latestBaseMessage,
       annotationCount: presentChatMessage(
         _conversation ?? AiConversationRecord.empty(),
         question,
@@ -3957,8 +4586,10 @@ $materialIndex
           : capability['selected_mcp_connections'] ??
                 (capability['type'] == 'mcp' ? [capability] : const []),
       'materials': materials,
+      if (hasAnnotationBatch) 'annotation_batch': true,
+      if (annotationGroups.isNotEmpty) 'annotation_groups': annotationGroups,
       if (intentMode != null) 'intent_mode': intentMode,
-      'current_turn_text': question.text.trim(), // 本轮真实用户输入
+      'current_turn_text': currentTurnText,
       if (startSessionId == null && startSnapshotId == null)
         'legacy_history': taskMessages
             .take(latestLegacyMessageIndex)
@@ -3973,7 +4604,7 @@ $materialIndex
         if (readingStatus.isNotEmpty) readingStatus,
       ].join('\n\n'),
     );
-    final agent = CapabilityCloudSync.instance.createRemoteAgent();
+    final agent = cloud.createRemoteAgent(expectedAuthorization: authorization);
     final chat = agent.chat(
       snapshotId: recovery?['agent_snapshot_id'] as String? ?? startSnapshotId,
       sessionId: recovery == null && startSnapshotId == null
@@ -4506,6 +5137,14 @@ $materialIndex
         );
       }
 
+      if (hasAnnotationBatch &&
+          const {
+            genkit_client.AgentFinishReason.aborted,
+            genkit_client.AgentFinishReason.failed,
+            genkit_client.AgentFinishReason.blocked,
+          }.contains(response.finishReason)) {
+        throw const AiException('本轮解释图未完成，已保留整批注释，请重试');
+      }
       if (response.state?['learning_notes_task_id'] == taskId) {
         await notesService.accept(
           response.state?['learning_notes'],
@@ -6709,6 +7348,7 @@ $text''';
             : null);
     _rememberReadingTask(bookId, updated);
     if (!isIncomplete) {
+      _finishPendingAnnotationBatch(updated.id, parentId);
       _maybeGenerateConversationTitle(updated, parentId, content);
     }
     return true;
@@ -6858,6 +7498,7 @@ $text''';
     final bookId = updated.bookId;
     _rememberReadingTask(bookId, updated);
     if (answer.isIncomplete && !isIncomplete) {
+      _finishPendingAnnotationBatch(updated.id, answer.parentMessageId);
       if (mounted && _conversation?.id == current.id && skillDraft != null) {
         setState(() {
           _pendingSkillDraftReview = null;
@@ -8698,8 +9339,12 @@ $text''';
       );
       if (!current()) return;
       if (target == null) {
-        _showReplyError(_missingCompanionTarget);
-        return;
+        final available = await _hasSavedCompanionAnnotations(bookId);
+        if (!current()) return;
+        if (!available) {
+          _showReplyError(_missingCompanionTarget);
+          return;
+        }
       }
       _companionTarget = target;
     } catch (_) {
@@ -8824,13 +9469,14 @@ $text''';
 
   Widget _buildReadingCompanion() {
     final target = _companionTarget;
-    if (target == null) return const SizedBox.shrink();
+    final bookId = target?.source.bookId ?? _selectedReadingTaskBookId;
+    if (bookId == null) return const SizedBox.shrink();
     final chat = _conversation?.id == _companionConversationId
         ? _conversation
         : null;
     return ReadingCompanion(
       key: _readingCompanionKey,
-      bookId: target.source.bookId,
+      bookId: bookId,
       target: target,
       onSourceChanged: _changeCompanionSource,
       library: _bookLibrary,
@@ -8897,7 +9543,7 @@ $text''';
                 mcpCatalogOnly: true,
               ),
               onManageMcp: () => _openCompanionMarket(ExtensionKind.mcp),
-              attachments: _attachments,
+              attachments: _attachments.where((item) => !item.isAnnotationExplanation).toList(),
               attachmentPreparationStates: _attachmentPreparer.states,
               onRemoveAttachment: _removeAttachment,
               onRetryAttachment: _retryAttachment,
@@ -8926,7 +9572,8 @@ $text''';
   }
 
   Future<void> _openCompanionBookSources() async {
-    final bookId = _companionTarget?.source.bookId;
+    int? currentBookId() => _companionTarget?.source.bookId ?? _selectedReadingTaskBookId;
+    final bookId = currentBookId();
     if (bookId == null) {
       await _openBookLibraryFromSidebar();
       return;
@@ -8942,14 +9589,14 @@ $text''';
     );
     if (!mounted ||
         !_readingCompanionOpen ||
-        _companionTarget?.source.bookId != bookId) {
+        currentBookId() != bookId) {
       return;
     }
     final item = await _bookLibrary.getBookLibraryItem(bookId);
     if (mounted &&
         _readingCompanionOpen &&
         item != null &&
-        _companionTarget?.source.bookId == bookId) {
+        currentBookId() == bookId) {
       await _openBookFromSidebar(item, refresh: true);
     }
   }
@@ -8957,16 +9604,15 @@ $text''';
   Future<void> _changeCompanionSource(BookSourceRecord source) async {
     final current = _companionTarget;
     final task = _conversationBeforeCompanion;
-    if (task == null ||
-        current == null ||
-        current.source.bookId != source.bookId) {
+    final bookId = current?.source.bookId ?? _selectedReadingTaskBookId;
+    if (task == null || bookId != source.bookId) {
       return;
     }
     final generation = ++_readingTaskGeneration;
     final target = await ReadingCompanionTarget.resolve(
       library: _bookLibrary,
       bookId: source.bookId,
-      title: current.title,
+      title: current?.title ?? _selectedReadingTaskBookName,
       preferredSourceId: source.id,
     );
     if (!mounted ||
@@ -9556,6 +10202,19 @@ $text''';
       var target = await resolve(preferred);
       if (!mounted || !current()) return;
       if (target == null) {
+        final available = await _hasSavedCompanionAnnotations(bookId);
+        if (!current()) return;
+        final materials = await _bookLibrary.listSourcesForBook(bookId);
+        if (!current()) return;
+        final hasReadableMaterial = materials.any(
+          (source) => SourceDocumentLoader.isReadableSource(source) &&
+              File(source.filePath).existsSync(),
+        );
+        if (available && !hasReadableMaterial) {
+          _showCompanionTask(task, null, bookId: bookId, title: item.book.title);
+          return;
+        }
+        if (!mounted) return;
         final pickedId = await showReadingTaskMaterialsDialog(
           context,
           book: item,
@@ -9588,20 +10247,30 @@ $text''';
     }
   }
 
+  Future<bool> _hasSavedCompanionAnnotations(int bookId) async {
+    const store = CompanionAnnotationStore();
+    final scope = await store.accountScope();
+    return (await store.list(scope, bookId)).isNotEmpty;
+  }
+
   void _showCompanionTask(
     AiConversationRecord task,
-    ReadingCompanionTarget target, {
+    ReadingCompanionTarget? target, {
     AiConversationRecord? history,
+    int? bookId,
+    String? title,
   }) {
+    final targetBookId = target?.source.bookId ?? bookId;
+    if (targetBookId == null) return;
     _readingCompanionKey.currentState?.closeChatForBack();
     final next = history ?? task;
     if (_conversation?.id != next.id) _openConversationFromSidebar(next);
-    _bookConversationFallbacks[target.source.bookId] = task;
+    _bookConversationFallbacks[targetBookId] = task;
     setState(() {
       _companionTarget = target;
       _conversationBeforeCompanion = task;
-      _selectedReadingTaskBookId = target.source.bookId;
-      _selectedReadingTaskBookName = target.title;
+      _selectedReadingTaskBookId = targetBookId;
+      _selectedReadingTaskBookName = target?.title ?? title ?? task.bookName;
       _companionHistoryNotice = null;
       _readingPassage = null;
       _companionConversationId = history?.id;
@@ -10057,7 +10726,9 @@ $text''';
                                               voiceTranscribing:
                                                   _voiceTranscribing,
                                               voiceSoundLevel: _voiceSoundLevel,
-                                              attachments: _attachments,
+                                              attachments: _attachments
+                                                  .where((item) => !item.isAnnotationExplanation)
+                                                  .toList(),
                                               attachmentPreparationStates:
                                                   _attachmentPreparer.states,
                                               onRetryAttachment:
@@ -14343,6 +15014,26 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
     );
   }
 
+  Future<void> _showSentAnnotationReview(
+    BuildContext context,
+    AiConversationMessage message,
+    List<ChatAnnotation> annotations,
+  ) async {
+    final sessionRevision = CapabilityCloudSync.instance.emailSessionRevision;
+    final revision = sessionRevision.value;
+    final scope = await _currentDrawingAccountScope();
+    if (!context.mounted || sessionRevision.value != revision) return;
+    await showChatAnnotationReview(
+      context,
+      annotations: annotations,
+      guardContent: (child) => guardPrivateAnnotationContent(revision, child),
+      explanationImages: () => scope == 'local' || sessionRevision.value != revision
+          ? const []
+          : message.attachments.where((item) => item.belongsToExplanationOwner(scope)).toList(),
+      onLocate: (annotation) => unawaited(_locateAnnotation(annotation)),
+    );
+  }
+
   Widget _userMessage(BuildContext context, AiConversationMessage message) {
     final presentation = _presentation(message);
     return Padding(
@@ -14357,12 +15048,14 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
             crossAxisAlignment: CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (message.attachments.isNotEmpty)
+              if (message.attachments.any((item) => !item.isAnnotationExplanation))
                 HomeChatMessageAttachments(
-                  attachments: message.attachments,
+                  attachments: message.attachments
+                      .where((item) => !item.isAnnotationExplanation)
+                      .toList(),
                   onPreviewImage: (item) {
                     final images = message.attachments
-                        .where((a) => a.isImage)
+                        .where((a) => a.isImage && !a.isAnnotationExplanation)
                         .map((a) => ChatImageSource.fromAttachment(a))
                         .toList();
                     unawaited(
@@ -14380,11 +15073,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                 ChatAnnotationCountChip(
                   count: presentation.annotations.length,
                   onTap: () => unawaited(
-                    showChatAnnotationReview(
-                      context,
-                      annotations: presentation.annotations,
-                      onLocate: (a) => unawaited(_locateAnnotation(a)),
-                    ),
+                    _showSentAnnotationReview(context, message, presentation.annotations),
                   ),
                 ),
               ],

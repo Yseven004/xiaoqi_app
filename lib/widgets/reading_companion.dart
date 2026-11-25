@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart'
     show PointerScrollEvent, PointerSignalEvent;
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_painter/flutter_painter.dart' show FreeStyleDrawable;
 import 'package:flutter_svg/flutter_svg.dart';
@@ -22,7 +23,7 @@ import '../features/ai_study_annotation/data/ai_conversation_history.dart';
 import '../features/ai_study_annotation/domain/ai_chat_process.dart';
 import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/book_source.dart';
-import '../models/note.dart';
+import '../models/companion_source_range.dart';
 import '../models/page_annotation.dart';
 import '../pages/drawing_board_page.dart';
 import '../models/pdf_catalog.dart';
@@ -30,16 +31,21 @@ import '../models/reader_pagination.dart';
 import '../models/xiaoqi_document.dart';
 import '../services/book_library_service.dart';
 import '../services/companion_pdf_reflow.dart';
+import '../services/companion_annotation_store.dart';
+import '../services/companion_annotation_sync.dart';
 import '../services/database_service.dart';
 import '../services/reader_pagination_preferences.dart';
 import '../services/reading_task_context.dart';
 import '../services/reading_companion_translation.dart';
 import '../services/source_document_loader.dart';
 import 'app_toast.dart';
+import 'annotation_sheet.dart';
 import 'chat_annotation_navigation.dart';
 import 'chat_message_scroll_view.dart';
 import 'companion_ink_surface.dart';
+import 'companion_annotation_sheet.dart';
 import 'companion_pdf_object_view.dart';
+import 'companion_pdf_annotation_overlay.dart';
 import 'epub_companion_object_preview.dart';
 import 'message_selection_action_card.dart';
 import 'pdf_page_canvas.dart'
@@ -60,6 +66,13 @@ class ReadingCompanionPassage {
     this.endOffset,
     this.sourceRevision,
     this.translationRevision,
+    this.endAnchor,
+    this.annotationView = 'original',
+    this.pdfPageTextHashes = const {},
+    this.annotationAnchor,
+    this.annotationStartOffset,
+    this.annotationEndOffset,
+    this.annotationCanonicalRange,
   });
 
   final int bookId;
@@ -72,6 +85,30 @@ class ReadingCompanionPassage {
   final int? endOffset;
   final String? sourceRevision;
   final String? translationRevision;
+  final ReaderAnchor? endAnchor;
+  final String annotationView;
+  final Map<int, String> pdfPageTextHashes;
+  final ReaderAnchor? annotationAnchor;
+  final int? annotationStartOffset;
+  final int? annotationEndOffset;
+  final CompanionSourceRange? annotationCanonicalRange;
+
+  CompanionAnnotationSelection get annotationSelection =>
+      CompanionAnnotationSelection(
+        bookId: bookId,
+        sourceId: sourceId,
+        sourceVersion: sourceRevision ?? '',
+        anchor: annotationAnchor ?? anchor,
+        endAnchor: endAnchor,
+        locator: locator,
+        quote: text,
+        startOffset: annotationStartOffset ?? startOffset,
+        endOffset: annotationEndOffset ?? endOffset,
+        translationVersion: translationRevision,
+        view: annotationView,
+        pdfPageTextHashes: pdfPageTextHashes,
+        canonicalRange: annotationCanonicalRange,
+      );
 
   bool sameLocationAs(ReadingCompanionPassage other) =>
       bookId == other.bookId &&
@@ -191,6 +228,7 @@ class ReadingCompanion extends StatefulWidget {
     this.onFreeChat,
     this.onDarkChanged,
     this.toolbarBuilder,
+    this.initialAnnotationSelection,
   });
 
   final int? bookId;
@@ -214,12 +252,17 @@ class ReadingCompanion extends StatefulWidget {
   final VoidCallback? onFreeChat;
   final ValueChanged<bool>? onDarkChanged;
   final ReadingCompanionToolbarBuilder? toolbarBuilder;
+  final CompanionAnnotationSelection? initialAnnotationSelection;
 
   @override
   ReadingCompanionState createState() => ReadingCompanionState();
 }
 
 class ReadingCompanionState extends State<ReadingCompanion> {
+  static const _annotationStore = CompanionAnnotationStore();
+  List<CompanionAnnotation> _bookAnnotations = const [];
+  String? _annotationScope;
+  int _annotationLoad = 0;
   final _surface = GlobalKey();
   final _chatScroll = ScrollController();
   late Future<_CompanionBook> _book;
@@ -249,6 +292,11 @@ class ReadingCompanionState extends State<ReadingCompanion> {
   void initState() {
     super.initState();
     _book = _loadBook();
+    CapabilityCloudSync.instance.emailSessionRevision.addListener(
+      _onAnnotationSessionChanged,
+    );
+    CompanionAnnotationSync.instance.changes.addListener(_onAnnotationsSynced);
+    unawaited(_loadBookAnnotations());
   }
 
   @override
@@ -259,6 +307,9 @@ class ReadingCompanionState extends State<ReadingCompanion> {
         oldWidget.target?.source.id != widget.target?.source.id ||
         oldWidget.target?.source.contentHash !=
             widget.target?.source.contentHash) {
+      _annotationScope = null;
+      _bookAnnotations = const [];
+      unawaited(_loadBookAnnotations());
       _selection = null;
       _chatOpen = false;
       _historyRequest++;
@@ -273,8 +324,26 @@ class ReadingCompanionState extends State<ReadingCompanion> {
 
   @override
   void dispose() {
+    CapabilityCloudSync.instance.emailSessionRevision.removeListener(
+      _onAnnotationSessionChanged,
+    );
+    CompanionAnnotationSync.instance.changes.removeListener(
+      _onAnnotationsSynced,
+    );
     _chatScroll.dispose();
     super.dispose();
+  }
+
+  void _onAnnotationSessionChanged() {
+    setState(() {
+      _annotationScope = null;
+      _bookAnnotations = const [];
+    });
+    unawaited(_loadBookAnnotations());
+  }
+
+  void _onAnnotationsSynced() {
+    unawaited(_loadBookAnnotations());
   }
 
   Future<_CompanionBook> _loadBook() {
@@ -300,9 +369,17 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     final loadPreferredSourceId = widget.loadPreferredSourceId;
     final item = await library.getBookLibraryItem(bookId);
     final records = await library.listSourcesForBook(bookId);
-    final sources = records
-        .where(SourceDocumentLoader.isReadableSource)
-        .toList(growable: false);
+    final checked = await Future.wait(
+      records
+          .where(SourceDocumentLoader.isReadableSource)
+          .map(
+            (source) async =>
+                await File(source.filePath).exists() ? source : null,
+          ),
+    );
+    final sources = checked.whereType<BookSourceRecord>().toList(
+      growable: false,
+    );
     return (
       title: item?.book.title ?? '',
       sources: sources,
@@ -424,16 +501,243 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     setState(() => _sourceId = source.id);
   }
 
-  Future<void> _annotate(
-    ReadingCompanionPassage passage,
-    String bookTitle,
-  ) async {
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (_) =>
-          _PassageAnnotation(passage: passage, bookTitle: bookTitle),
+  Future<void> _loadBookAnnotations() async {
+    final generation = ++_annotationLoad;
+    final bookId = widget.bookId ?? widget.target?.source.bookId;
+    if (bookId == null) return;
+    try {
+      final scope = await _annotationStore.accountScope();
+      final entries = await _annotationStore.list(scope, bookId);
+      if (!mounted || generation != _annotationLoad) return;
+      setState(() {
+        _annotationScope = scope;
+        _bookAnnotations = entries;
+      });
+    } catch (_) {
+      if (!mounted || generation != _annotationLoad) return;
+      setState(() {
+        _annotationScope = null;
+        _bookAnnotations = const [];
+      });
+    }
+  }
+
+  Future<bool> _canOpenAnnotations() async {
+    try {
+      final scope = await _annotationStore.accountScope();
+      if (mounted && scope == _annotationScope) return true;
+      final previous = _annotationScope;
+      await _loadBookAnnotations();
+      if (mounted && scope == _annotationScope) return previous == null;
+    } catch (_) {
+      // Loading failed or the account is changing.
+    }
+    if (mounted) AppToast.show(context, '无法读取本书注释，请重试');
+    return false;
+  }
+
+  Future<CompanionAnnotation?> _editAnnotation(
+    CompanionAnnotationSelection selection, {
+    CompanionAnnotation? initial,
+  }) async {
+    final generation = CapabilityCloudSync.instance.emailSessionRevision.value;
+    if (!await _canOpenAnnotations() || !mounted) return null;
+    if (generation != CapabilityCloudSync.instance.emailSessionRevision.value ||
+        (initial != null &&
+            !_bookAnnotations.any(
+              (entry) =>
+                  entry.id == initial.id && entry.revision == initial.revision,
+            ))) {
+      return null;
+    }
+    final result = await editCompanionAnnotation(
+      context,
+      scope: _annotationScope!,
+      selection: selection,
+      initial: initial,
     );
-    if (saved == true && mounted) AppToast.show(context, '已保存到本书笔记');
+    if (result != null && mounted) await _loadBookAnnotations();
+    return result;
+  }
+
+  Future<void> _annotate(ReadingCompanionPassage passage) async {
+    if (!await _canOpenAnnotations() || !mounted) return;
+    final selection = passage.annotationSelection;
+    final existing = _bookAnnotations
+        .where((entry) => _sameAnnotationRange(entry.selection, selection))
+        .firstOrNull;
+    await _editAnnotation(existing?.selection ?? selection, initial: existing);
+  }
+
+  bool _sameAnnotationRange(
+    CompanionAnnotationSelection before,
+    CompanionAnnotationSelection after,
+  ) {
+    if (before.sourceId != after.sourceId ||
+        before.sourceVersion != after.sourceVersion) {
+      return false;
+    }
+    if (before.key == after.key) return true;
+    if (before.canonicalRange != null && after.canonicalRange != null) {
+      return false;
+    }
+    return before.view == after.view &&
+        before.anchor == after.anchor &&
+        before.endAnchor == after.endAnchor &&
+        before.startOffset == after.startOffset &&
+        before.endOffset == after.endOffset &&
+        before.quote == after.quote &&
+        before.translationVersion == after.translationVersion;
+  }
+
+  Future<void> _openAnnotation(CompanionAnnotation entry) async {
+    if (!await _canOpenAnnotations() || !mounted) return;
+    final current = _bookAnnotations
+        .where((item) => item.id == entry.id)
+        .firstOrNull;
+    if (current == null) return;
+    await viewCompanionAnnotation(
+      context,
+      initial: current,
+      onEdit: (current) => _editAnnotation(current.selection, initial: current),
+    );
+  }
+
+  Future<void> _deleteAnnotation(CompanionAnnotation entry) async {
+    if (!await _canOpenAnnotations() || !mounted) return;
+    final scope = _annotationScope!;
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromSize(
+        Rect.fromCenter(
+          center: MediaQuery.sizeOf(context).center(Offset.zero),
+          width: 1,
+          height: 1,
+        ),
+        MediaQuery.sizeOf(context),
+      ),
+      items: const [PopupMenuItem(value: 'delete', child: Text('删除注释'))],
+    );
+    if (action != 'delete' || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除这条注释？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _annotationStore.remove(scope, entry);
+      if (mounted) await _loadBookAnnotations();
+    } catch (_) {
+      if (mounted) AppToast.show(context, '注释删除失败，请重试');
+    }
+  }
+
+  Widget _annotationList(BuildContext context, {VoidCallback? onReturn}) =>
+      Column(
+        children: [
+          ValueListenableBuilder<String?>(
+            valueListenable: CompanionAnnotationSync.instance.syncFailure,
+            builder: (context, error, _) => error == null
+                ? const SizedBox.shrink()
+                : TextButton(
+                    onPressed: () =>
+                        unawaited(CompanionAnnotationSync.instance.syncNow()),
+                    child: Text(error),
+                  ),
+          ),
+          Expanded(child: _annotationItems(context, onReturn: onReturn)),
+        ],
+      );
+
+  Widget _annotationItems(BuildContext context, {VoidCallback? onReturn}) =>
+      ListView.builder(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        itemCount: _bookAnnotations.isEmpty ? 1 : _bookAnnotations.length,
+        itemBuilder: (context, index) {
+          if (_bookAnnotations.isEmpty) {
+            return const ListTile(title: Text('暂无本书注释'));
+          }
+          final entry = _bookAnnotations[index];
+          Future<void> remove() async {
+            await _deleteAnnotation(entry);
+            onReturn?.call();
+          }
+
+          return Semantics(
+            customSemanticsActions: {
+              const CustomSemanticsAction(label: '删除注释'): () =>
+                  unawaited(remove()),
+            },
+            child: ListTile(
+              onTap: () async {
+                await _openAnnotation(entry);
+                onReturn?.call();
+              },
+              onLongPress: () => unawaited(remove()),
+              title: Text(
+                entry.text.isNotEmpty
+                    ? entry.text
+                    : entry.audio.isNotEmpty
+                    ? '录音'
+                    : '图片',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                entry.selection.quote.replaceAll(RegExp(r'\s+'), ' '),
+                maxLines: 1,
+                overflow: TextOverflow.clip,
+              ),
+            ),
+          );
+        },
+      );
+
+  Future<void> _openAnnotationList() async {
+    if (!await _canOpenAnnotations() || !mounted) return;
+    final revision = CapabilityCloudSync.instance.emailSessionRevision.value;
+    await showAnnotationSheet<void>(
+      context,
+      builder: (context) => guardPrivateAnnotationContent(
+        revision,
+        StatefulBuilder(
+          builder: (context, update) => SizedBox(
+            height: MediaQuery.sizeOf(context).height * .55,
+            child: Column(
+              children: [
+                const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: Text(
+                    '本书注释',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Expanded(
+                  child: _annotationList(
+                    context,
+                    onReturn: () {
+                      if (context.mounted) update(() {});
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _bookFallback(BuildContext context, Widget content) {
@@ -489,6 +793,10 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                       onAction:
                           chooseBook ??
                           (widget.onOpenLibrary == null ? null : _openLibrary),
+                      secondaryAction: _bookAnnotations.isEmpty ? null : '本书注释',
+                      onSecondaryAction: _bookAnnotations.isEmpty
+                          ? null
+                          : () => unawaited(_openAnnotationList()),
                     ),
                   );
                 }
@@ -550,7 +858,11 @@ class ReadingCompanionState extends State<ReadingCompanion> {
                       position: box.globalToLocal(globalAnchor),
                     ));
                   },
-                  onAnnotate: (passage) => _annotate(passage, book.title),
+                  onAnnotate: _annotate,
+                  annotationList: _annotationList,
+                  annotations: _bookAnnotations,
+                  onOpenAnnotation: _openAnnotation,
+                  initialAnnotationSelection: widget.initialAnnotationSelection,
                   onChooseSource: sources.length > 1
                       ? () => _chooseSource(sources, current)
                       : null,
@@ -679,6 +991,9 @@ class _CompanionDocument extends StatefulWidget {
     required this.library,
     required this.onAsk,
     required this.onAnnotate,
+    required this.annotationList,
+    required this.annotations,
+    required this.onOpenAnnotation,
     this.onChooseSource,
     this.onOpenLibrary,
     required this.immersive,
@@ -689,6 +1004,7 @@ class _CompanionDocument extends StatefulWidget {
     this.onDarkChanged,
     this.onInkEditingChanged,
     this.toolbarBuilder,
+    this.initialAnnotationSelection,
   });
 
   final BookSourceRecord source;
@@ -696,6 +1012,9 @@ class _CompanionDocument extends StatefulWidget {
   final String bookTitle;
   final void Function(ReadingCompanionPassage, Offset) onAsk;
   final ValueChanged<ReadingCompanionPassage> onAnnotate;
+  final WidgetBuilder annotationList;
+  final List<CompanionAnnotation> annotations;
+  final ValueChanged<CompanionAnnotation> onOpenAnnotation;
   final VoidCallback? onChooseSource;
   final VoidCallback? onOpenLibrary;
   final bool immersive;
@@ -706,6 +1025,7 @@ class _CompanionDocument extends StatefulWidget {
   final ValueChanged<bool>? onDarkChanged;
   final ValueChanged<bool>? onInkEditingChanged;
   final ReadingCompanionToolbarBuilder? toolbarBuilder;
+  final CompanionAnnotationSelection? initialAnnotationSelection;
 
   @override
   State<_CompanionDocument> createState() => _CompanionDocumentState();
@@ -780,6 +1100,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   int? _pageBeforeJump;
   _ReaderPanel? _activePanel;
   double _outlineExtent = 0;
+  bool _outlineShowsAnnotations = false;
   bool _outlineDragging = false;
   LocalHistoryEntry? _panelHistory;
   WidgetBuilder? _outlinePanel;
@@ -839,7 +1160,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   int _translationRevision = 0;
   List<XiaoqiDocumentBlock> _visibleBlocks = const [];
   final _flowTranslations = <String, String>{};
-  String? _translatedPdfPage;
+  final _alignedFlowTranslations = <String, CompanionTranslationText>{};
+  CompanionTranslationText? _translatedPdfPage;
+  bool _translatedPdfHasNativeSource = false;
+  bool _handledInitialPdfAnnotation = false;
+  ({int page, List<PdfRect> bounds})? _noteOriginPdfMark;
+  Timer? _noteOriginMarkTimeout;
   int? _translatedPdfNumber;
   VoidCallback? _applyDeferredTranslation;
   final _savedInk = <String, _CompanionInkRecord>{};
@@ -898,6 +1224,62 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   BookSourceRecord get _source => widget.source;
   String get _sourceKey => _source.id.toString();
+  String get _annotationSourceVersion => _source.sourceVersionId.isEmpty
+      ? _source.contentHash
+      : _source.sourceVersionId;
+
+  List<CompanionAnnotation> _pdfAnnotations(int page) => [
+    for (final entry in widget.annotations)
+      if (_sourceMatches(entry.selection) &&
+          _annotationShowsOnPdfPage(entry.selection, page))
+        entry,
+  ];
+
+  bool _annotationShowsOnPdfPage(
+    CompanionAnnotationSelection selection,
+    int page,
+  ) {
+    final range = selection.canonicalRange;
+    return range is CompanionPdfSourceRange
+        ? range.pages.any((span) => span.page == page)
+        : selection.view == 'original' &&
+              selection.pdfPageTextHashes.containsKey(page);
+  }
+
+  bool _sourceMatches(CompanionAnnotationSelection selection) =>
+      selection.sourceId == _source.id &&
+      selection.sourceVersion == _annotationSourceVersion;
+
+  Future<void> _openMatchingAnnotations(
+    List<CompanionAnnotation> entries,
+  ) async {
+    if (_inkEditing || _hasActiveSelection || entries.isEmpty) return;
+    if (entries.length == 1) {
+      widget.onOpenAnnotation(entries.first);
+      return;
+    }
+    final revision = CapabilityCloudSync.instance.emailSessionRevision.value;
+    final entry = await showAnnotationSheet<CompanionAnnotation>(
+      context,
+      builder: (context) => guardPrivateAnnotationContent(
+        revision,
+        ListView(
+          shrinkWrap: true,
+          children: [
+            for (final entry in entries)
+              ListTile(
+                title: Text(
+                  entry.text.isEmpty ? entry.selection.quote : entry.text,
+                ),
+                onTap: () => Navigator.pop(context, entry),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (mounted && entry != null) widget.onOpenAnnotation(entry);
+  }
+
   bool get _isPdfDocument => _isCompanionPdf(_source) && _convertedPage == null;
   bool get _isSelectingEbook =>
       !_isCompanionPdf(_source) || _convertedPage != null;
@@ -925,18 +1307,24 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final focus = FocusManager.instance.primaryFocus;
     final editor = focus?.context?.findAncestorStateOfType<EditableTextState>();
     if (editor != null && editor.widget.readOnly) {
-      final value = editor.textEditingValue;
-      final selection = value.selection;
-      if (selection.isValid && !selection.isCollapsed) {
-        editor.userUpdateTextEditingValue(
-          value.copyWith(
-            selection: TextSelection.collapsed(offset: selection.extentOffset),
-          ),
-          SelectionChangedCause.tap,
-        );
-      }
+      _collapseReaderTextSelection(editor);
     }
     focus?.unfocus();
+    if (_selectionActive) _reportSelection(false);
+  }
+
+  void _collapseReaderTextSelection(EditableTextState editor) {
+    final value = editor.textEditingValue;
+    final selection = value.selection;
+    if (selection.isValid && !selection.isCollapsed) {
+      editor.userUpdateTextEditingValue(
+        value.copyWith(
+          selection: TextSelection.collapsed(offset: selection.extentOffset),
+        ),
+        SelectionChangedCause.tap,
+      );
+    }
+    editor.hideToolbar();
     if (_selectionActive) _reportSelection(false);
   }
 
@@ -961,7 +1349,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     if (_isCompanionPdf(_source) && ui.ImageFilter.isShaderFilterSupported) {
       unawaited(_prepareNightPaint());
     }
-    unawaited(_restoreTranslation());
+    if (widget.initialAnnotationSelection == null) {
+      unawaited(_restoreTranslation());
+    }
     unawaited(_loadInk());
   }
 
@@ -1936,10 +2326,16 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         )
         .toList();
     if (listEquals(
-      _visibleBlocks.map((item) => item.id).toList(),
-      available.map((item) => item.id).toList(),
+      _visibleBlocks.map((item) => (item.id, item.text)).toList(),
+      available.map((item) => (item.id, item.text)).toList(),
     )) {
       return;
+    }
+    for (final block in available) {
+      if (_alignedFlowTranslations[block.id]?.source != block.text) {
+        _flowTranslations.remove(block.id);
+        _alignedFlowTranslations.remove(block.id);
+      }
     }
     _visibleBlocks = available;
     _scheduleTranslation();
@@ -2023,30 +2419,46 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       _translationError = null;
     });
     try {
-      final List<String> paragraphs;
+      final List<String> originals;
+      PdfPage? pdfSource;
+      var hasNativePdfSource = false;
       if (pdf == null) {
-        paragraphs = blocks.map((block) => block.text.trim()).toList();
+        originals = blocks.map((block) => block.text).toList();
       } else {
-        final text = await pdf.pages[number - 1].loadText();
-        paragraphs = (text?.fullText ?? '')
-            .split(RegExp(r'\n\s*\n'))
-            .map((part) => part.trim())
-            .where((part) => part.isNotEmpty)
-            .toList();
+        final page = pdf.pages[number - 1];
+        pdfSource = page;
+        hasNativePdfSource = identical(page, companionNativePdfPage(page));
+        final text = await page.loadStructuredText();
+        originals = [text.fullText];
       }
       if (!mounted || revision != _translationRevision) return;
-      final translated = await ReadingCompanionTranslation(
-        _source,
-      ).translate(paragraphs);
+      final translated = await ReadingCompanionTranslation(_source)
+          .translateAligned(
+            originals,
+            legacyParagraphs: pdfSource == null
+                ? null
+                : () async {
+                    final raw = await pdfSource!.loadText();
+                    return [
+                      (raw?.fullText ?? '')
+                          .split(RegExp(r'\n\s*\n'))
+                          .map((part) => part.trim())
+                          .where((part) => part.isNotEmpty)
+                          .toList(),
+                    ];
+                  },
+          );
       if (!mounted || revision != _translationRevision) return;
       void apply() => setState(() {
         _translationPending = false;
         if (pdf == null) {
           for (var index = 0; index < blocks.length; index++) {
-            _flowTranslations[blocks[index].id] = translated[index];
+            _flowTranslations[blocks[index].id] = translated[index].text;
+            _alignedFlowTranslations[blocks[index].id] = translated[index];
           }
         } else {
-          _translatedPdfPage = translated.join('\n\n');
+          _translatedPdfPage = translated.single;
+          _translatedPdfHasNativeSource = hasNativePdfSource;
           _translatedPdfNumber = number;
         }
       });
@@ -2150,6 +2562,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     _nightShader?.dispose();
     _progressPreview.dispose();
     _pdfPageWork?.cancel();
+    _noteOriginMarkTimeout?.cancel();
     for (final part in _drawingLayers.values) {
       part.layer.dispose();
     }
@@ -2218,9 +2631,248 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       document.chapters.first.plainText,
       language: document.language,
     );
-    final saved = await anchor;
+    final selection = widget.initialAnnotationSelection;
+    final origin = selection == null
+        ? null
+        : _flowAnnotationOrigin(document, selection);
+    if (selection != null && origin == null) _showMissingAnnotationOrigin();
+    final saved = origin ?? await anchor;
     if (saved is FlowReaderAnchor) _flowPosition = saved;
     return (document: document, anchor: saved);
+  }
+
+  bool _validAnnotationOrigin(CompanionAnnotationSelection selection) =>
+      selection.bookId == _source.bookId && _sourceMatches(selection);
+
+  FlowReaderAnchor? _flowAnnotationOrigin(
+    XiaoqiDocument document,
+    CompanionAnnotationSelection selection,
+  ) {
+    if (!_validAnnotationOrigin(selection)) return null;
+    final canonical = selection.canonicalRange;
+    final anchor = selection.anchor;
+    final String chapter;
+    final String? blockId;
+    final int? start;
+    final int? end;
+    if (canonical is CompanionFlowSourceRange) {
+      chapter = canonical.chapter;
+      blockId = canonical.block;
+      start = canonical.start;
+      end = canonical.end;
+    } else if (canonical == null &&
+        anchor is FlowReaderAnchor &&
+        selection.translationVersion == null) {
+      chapter = anchor.chapterId;
+      blockId = anchor.blockId;
+      start = selection.startOffset;
+      end = selection.endOffset;
+    } else {
+      return null;
+    }
+    final block = document.chapters
+        .where((item) => item.id == chapter)
+        .firstOrNull
+        ?.blocks
+        .where((item) => item.id == blockId)
+        .firstOrNull;
+    if (block == null ||
+        start == null ||
+        end == null ||
+        start < 0 ||
+        end > block.text.length ||
+        end <= start) {
+      return null;
+    }
+    final agrees = canonical is CompanionFlowSourceRange
+        ? companionTextHash(block.text) == canonical.textHash
+        : block.text.substring(start, end) == selection.quote;
+    return agrees
+        ? FlowReaderAnchor(
+            sourceId: _sourceKey,
+            chapterId: chapter,
+            blockId: blockId,
+            characterOffset: start,
+          )
+        : null;
+  }
+
+  void _showMissingAnnotationOrigin() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) AppToast.show(context, '暂时无法定位引文，可在注释中查看摘录');
+    });
+  }
+
+  Future<bool> _jumpPdfAnnotationOrigin(
+    PdfDocument document,
+    CompanionAnnotationSelection selection,
+  ) async {
+    if (!_validAnnotationOrigin(selection) ||
+        !_pdf.isReady ||
+        document.permissions?.allowsCopying == false) {
+      return false;
+    }
+    try {
+      final origin = await _verifiedPdfOrigin(document, selection);
+      if (!mounted ||
+          !_pdf.isReady ||
+          !identical(_pdfDocumentRef, document) ||
+          origin == null) {
+        return false;
+      }
+      final location = _pdf.calcRectForRectInsidePage(
+        pageNumber: origin.page,
+        rect: origin.rect,
+      );
+      await _goToPdfReaderPage(
+        origin.page,
+        duration: Duration.zero,
+        recordProgress: false,
+      );
+      if (!mounted || !_pdf.isReady || !identical(_pdfDocumentRef, document)) {
+        return false;
+      }
+      if (_pdfPageTurnMode == ReaderPaginationMode.vertical) {
+        final center = Offset(
+          _pdf.layout.pageLayouts[origin.page - 1].center.dx,
+          location.center.dy,
+        );
+        await _pdf.goTo(
+          _pdf.calcMatrixFor(center, zoom: 1, viewSize: _pdf.viewSize),
+          duration: Duration.zero,
+        );
+      }
+      if (!mounted || !identical(_pdfDocumentRef, document)) return false;
+      setState(
+        () => _noteOriginPdfMark = (page: origin.page, bounds: origin.bounds),
+      );
+      _noteOriginMarkTimeout?.cancel();
+      _noteOriginMarkTimeout = Timer(const Duration(seconds: 6), () {
+        if (mounted) setState(() => _noteOriginPdfMark = null);
+      });
+      return true;
+    } on Exception {
+      return false;
+    }
+  }
+
+  Future<({int page, PdfRect rect, List<PdfRect> bounds})?> _verifiedPdfOrigin(
+    PdfDocument document,
+    CompanionAnnotationSelection selection,
+  ) async {
+    final range = selection.canonicalRange;
+    if (range is CompanionPdfSourceRange) {
+      final span = range.pages.firstOrNull;
+      if (span == null) return null;
+      final text = await _annotationPageText(
+        document,
+        span.page,
+        span.textHash,
+        native: true,
+      );
+      if (text == null ||
+          span.start < 0 ||
+          span.start >= span.end ||
+          span.end > math.min(text.charRects.length, text.fullText.length)) {
+        return null;
+      }
+      return _pdfOriginRange(text, span.start, span.end);
+    }
+    final legacy = legacyCompanionPdfRange(selection);
+    if (legacy == null || legacy.lastPage > document.pages.length) return null;
+    ({int page, PdfRect rect, List<PdfRect> bounds})? origin;
+    final quote = <String>[];
+    for (var number = legacy.firstPage; number <= legacy.lastPage; number++) {
+      final hash = selection.pdfPageTextHashes[number];
+      if (hash == null) return null;
+      final text = await _annotationPageText(document, number, hash);
+      if (text == null) return null;
+      final first = number == legacy.firstPage;
+      final last = number == legacy.lastPage;
+      final start = first ? legacy.startOffset : 0;
+      final end = last ? legacy.endOffset : text.fullText.length;
+      if (start > end ||
+          ((first || last) && start == end) ||
+          end > text.fullText.length ||
+          (first && start >= text.charRects.length) ||
+          (last && end > text.charRects.length)) {
+        return null;
+      }
+      if (first) {
+        origin = _pdfOriginRange(
+          text,
+          start,
+          math.min(end, text.charRects.length),
+        );
+      }
+      quote.add(text.fullText.substring(start, end));
+    }
+    return quote.join('\n').trim() == selection.quote.trim() ? origin : null;
+  }
+
+  ({int page, PdfRect rect, List<PdfRect> bounds}) _pdfOriginRange(
+    PdfPageText text,
+    int start,
+    int end,
+  ) {
+    final range = PdfPageTextRange(pageText: text, start: start, end: end);
+    final bounds = [
+      for (final fragment in range.enumerateFragmentBoundingRects())
+        if (fragment.bounds.isNotEmpty) fragment.bounds,
+    ];
+    final rect = text.charRects[start];
+    return (
+      page: text.pageNumber,
+      rect: rect,
+      bounds: bounds.isEmpty ? [rect] : bounds,
+    );
+  }
+
+  void _paintNoteOriginPdfMark(Canvas canvas, Rect pageRect, PdfPage page) {
+    final mark = _noteOriginPdfMark;
+    if (mark == null || mark.page != page.pageNumber) return;
+    final paint = Paint()..color = const Color(0x559AC56B);
+    for (final bound in mark.bounds) {
+      final rect = bound.toRectInDocument(page: page, pageRect: pageRect);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect.inflate(1), const Radius.circular(2)),
+        paint,
+      );
+    }
+  }
+
+  Future<PdfPageText?> _annotationPageText(
+    PdfDocument document,
+    int number,
+    String hash, {
+    bool native = false,
+  }) async {
+    if (number < 1 || number > document.pages.length) return null;
+    final loaded = await document.pages[number - 1].waitForLoaded(
+      timeout: const Duration(seconds: 10),
+    );
+    if (loaded == null || !mounted || !identical(_pdfDocumentRef, document)) {
+      return null;
+    }
+    final page = native ? companionNativePdfPage(loaded) : loaded;
+    final text = await page.loadStructuredText();
+    if (companionTextHash(text.fullText) == hash) return text;
+    if (native ||
+        document is! CompanionSelectionDocument ||
+        !identical(page, companionNativePdfPage(page))) {
+      return null;
+    }
+    final cached = await _pdfReflow.cachedTextLayer(number);
+    if (cached == null || !mounted || !identical(_pdfDocumentRef, document)) {
+      return null;
+    }
+    document.install(cached);
+    final recognized = document.pages[number - 1];
+    if (identical(recognized, page)) return null;
+    final recognizedText = await recognized.loadStructuredText();
+    return companionTextHash(recognizedText.fullText) == hash
+        ? recognizedText
+        : null;
   }
 
   void _showOutline(
@@ -2578,12 +3230,24 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               } else {
                 setState(() => _flowPosition = value);
               }
-              unawaited(
-                _preferences.saveAnchor(bookId: _source.bookId, anchor: value),
-              );
+              if (widget.initialAnnotationSelection == null) {
+                unawaited(
+                  _preferences.saveAnchor(
+                    bookId: _source.bookId,
+                    anchor: value,
+                  ),
+                );
+              }
             },
             onUserAnchorChanged: originalPage == null
-                ? null
+                ? widget.initialAnnotationSelection == null
+                      ? null
+                      : (value) => unawaited(
+                          _preferences.saveAnchor(
+                            bookId: _source.bookId,
+                            anchor: value,
+                          ),
+                        )
                 : (value) {
                     if (_convertedPage == null ||
                         !identical(document, _convertedDocument)) {
@@ -2619,6 +3283,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   _ebookPageTurnMode == ReaderPaginationMode.horizontal
                   ? slice.text
                   : translation ?? slice.text;
+              final annotationRanges = _flowAnnotationRanges(
+                chapter: sliceChapter,
+                slice: slice,
+                visibleText: displayText,
+              );
               final pdfPage = slice.block.kind == 'image' && sourcePage != null
                   ? _convertedPages[sourcePage]
                   : null;
@@ -2699,6 +3368,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         sourcePage,
                       ),
                       textStyleBuilder: textStyle,
+                      annotationRanges: annotationRanges,
+                      onOpenAnnotations: _inkEditing
+                          ? null
+                          : (ids) => unawaited(
+                              _openMatchingAnnotations([
+                                for (final entry in widget.annotations)
+                                  if (ids.contains(entry.id)) entry,
+                              ]),
+                            ),
                     );
               final location = FlowReaderAnchor(
                 sourceId: _sourceKey,
@@ -3044,9 +3722,27 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final anchor = editable.contextMenuAnchors;
     final text = range.textInside(value.text);
     if (text.trim().isEmpty) return const SizedBox.shrink();
-    final translated =
-        _translationEnabled && _flowTranslations.containsKey(slice.block.id);
+    final translation = _visibleAlignedTranslation(slice, value.text);
+    final translated = translation != null;
     final offset = value.text == slice.text ? slice.startOffset : 0;
+    final annotationOffset =
+        translated && _ebookPageTurnMode != ReaderPaginationMode.horizontal
+        ? 0
+        : slice.startOffset;
+    final annotationStart = annotationOffset + range.start;
+    final annotationEnd = annotationOffset + range.end;
+    final originalRange = translation == null
+        ? (slice.startOffset >= 0 &&
+                  slice.startOffset + value.text.length <=
+                      slice.block.text.length &&
+                  slice.block.text.substring(
+                        slice.startOffset,
+                        slice.startOffset + value.text.length,
+                      ) ==
+                      value.text
+              ? (start: annotationStart, end: annotationEnd)
+              : null)
+        : translation.sourceRange(annotationStart, annotationEnd);
     final document = _convertedDocument;
     final source = originalPage == null || document == null || translated
         ? null
@@ -3073,7 +3769,26 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           ? null
           : offset + range.start,
       endOffset: translated || originalPage != null ? null : offset + range.end,
-      translationSnapshot: translated ? value.text : null,
+      annotationAnchor: FlowReaderAnchor(
+        sourceId: _sourceKey,
+        chapterId: chapter.id,
+        blockId: slice.block.id,
+      ),
+      annotationStartOffset: annotationStart,
+      annotationEndOffset: annotationEnd,
+      annotationCanonicalRange: originalRange == null
+          ? null
+          : _flowSourceRange(
+              chapter.id,
+              slice.block,
+              originalRange.start,
+              originalRange.end,
+            ),
+      endAnchor: page == null
+          ? null
+          : PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page),
+      annotationView: translated ? 'flow-translation' : 'flow',
+      translationSnapshot: translation?.text,
     );
     return _selectionToolbar(
       above: anchor.primaryAnchor,
@@ -3083,12 +3798,131 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         _copy(text);
       },
       onAnnotate: () {
-        editable.hideToolbar();
+        _collapseReaderTextSelection(editable);
         widget.onAnnotate(passage);
       },
       onAsk: () =>
           widget.onAsk(passage, anchor.secondaryAnchor ?? anchor.primaryAnchor),
     );
+  }
+
+  List<({int start, int end, String id})> _flowAnnotationRanges({
+    required XiaoqiDocumentChapter chapter,
+    required ReaderBlockSlice slice,
+    required String visibleText,
+  }) {
+    if (widget.annotations.isEmpty) return const [];
+    final aligned = _visibleAlignedTranslation(slice, visibleText);
+    final offset =
+        aligned != null && _ebookPageTurnMode != ReaderPaginationMode.horizontal
+        ? 0
+        : slice.startOffset;
+    final blockText = aligned?.text ?? slice.block.text;
+    // A pagination result from the preceding display revision can briefly be
+    // visible while layout catches up. Wait for coordinates to agree.
+    if (offset < 0 ||
+        offset + visibleText.length > blockText.length ||
+        blockText.substring(offset, offset + visibleText.length) !=
+            visibleText) {
+      return const [];
+    }
+    final revision = aligned == null ? null : companionTextHash(aligned.text);
+    final projection = _isCompanionPdf(_source)
+        ? CompanionReflowPage.sourceProjection(slice.block)
+        : null;
+    final blockHash = projection == null
+        ? companionTextHash(slice.block.text)
+        : null;
+    final ranges = <({int start, int end, String id})>[];
+    final visibleEnd = offset + visibleText.length;
+    void addLocalRange(int start, int end, String id) {
+      final from = math.max(offset, start);
+      final to = math.min(visibleEnd, end);
+      if (from < to) {
+        ranges.add((start: from - offset, end: to - offset, id: id));
+      }
+    }
+
+    for (final entry in widget.annotations) {
+      final location = entry.selection;
+      if (!_sourceMatches(location)) continue;
+      final original = switch (location.canonicalRange) {
+        CompanionPdfSourceRange range => projection?.displayRange(range),
+        CompanionFlowSourceRange range
+            when range.chapter == chapter.id &&
+                range.block == slice.block.id &&
+                range.textHash == blockHash =>
+          (start: range.start, end: range.end),
+        _ => null,
+      };
+      final projected = original == null || aligned == null
+          ? original
+          : aligned.translatedRange(original.start, original.end);
+      if (projected != null &&
+          projected.start >= 0 &&
+          projected.end <= blockText.length) {
+        addLocalRange(projected.start, projected.end, entry.id);
+        continue;
+      }
+      final anchor = location.anchor;
+      final start = location.startOffset;
+      final end = location.endOffset;
+      if (anchor is FlowReaderAnchor &&
+          anchor.chapterId == chapter.id &&
+          anchor.blockId == slice.block.id &&
+          location.translationVersion == revision &&
+          start != null &&
+          end != null &&
+          start >= 0 &&
+          end > start &&
+          end <= blockText.length &&
+          blockText.substring(start, end) == location.quote) {
+        addLocalRange(start, end, entry.id);
+      }
+    }
+    return ranges;
+  }
+
+  CompanionTranslationText? _visibleAlignedTranslation(
+    ReaderBlockSlice slice,
+    String visibleText,
+  ) {
+    final aligned = _translationEnabled
+        ? _alignedFlowTranslations[slice.block.id]
+        : null;
+    if (aligned == null || aligned.source != slice.block.text) return null;
+    final start = _ebookPageTurnMode == ReaderPaginationMode.horizontal
+        ? slice.startOffset
+        : 0;
+    final end = start + visibleText.length;
+    return start >= 0 &&
+            end <= aligned.text.length &&
+            aligned.text.substring(start, end) == visibleText
+        ? aligned
+        : null;
+  }
+
+  CompanionSourceRange? _flowSourceRange(
+    String chapter,
+    XiaoqiDocumentBlock block,
+    int start,
+    int end,
+  ) {
+    if (_isCompanionPdf(_source)) {
+      return CompanionReflowPage.sourceProjection(
+        block,
+      ).sourceRange(start, end);
+    }
+    final range = trimCompanionRange(block.text, start, end);
+    return range == null
+        ? null
+        : CompanionFlowSourceRange(
+            chapter: chapter,
+            block: block.id,
+            start: range.start,
+            end: range.end,
+            textHash: companionTextHash(block.text),
+          );
   }
 
   ReadingCompanionPassage _passage(
@@ -3098,6 +3932,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     int? startOffset,
     int? endOffset,
     String? translationSnapshot,
+    ReaderAnchor? endAnchor,
+    String annotationView = 'original',
+    Map<int, String> pdfPageTextHashes = const {},
+    ReaderAnchor? annotationAnchor,
+    int? annotationStartOffset,
+    int? annotationEndOffset,
+    CompanionSourceRange? annotationCanonicalRange,
   }) => ReadingCompanionPassage(
     bookId: _source.bookId,
     sourceId: _source.id,
@@ -3107,6 +3948,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     anchor: anchor,
     startOffset: startOffset,
     endOffset: endOffset,
+    endAnchor: endAnchor,
+    annotationView: annotationView,
+    pdfPageTextHashes: pdfPageTextHashes,
+    annotationAnchor: annotationAnchor,
+    annotationStartOffset: annotationStartOffset,
+    annotationEndOffset: annotationEndOffset,
+    annotationCanonicalRange: annotationCanonicalRange,
     sourceRevision: _source.sourceVersionId.isEmpty
         ? _source.contentHash
         : _source.sourceVersionId,
@@ -3625,8 +4473,26 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       pagePaintCallbacks: [
                         if (_returnPreview != null) _paintReturnPreview,
                         if (_dark) ...[_endNightPage, _paintNightPdfSelection],
+                        if (showsOriginalPage && _noteOriginPdfMark != null)
+                          _paintNoteOriginPdfMark,
                       ],
                       pageOverlaysBuilder: (context, rect, page) => [
+                        if (showsOriginalPage)
+                          if (_pdfAnnotations(page.pageNumber)
+                              case final entries when entries.isNotEmpty)
+                            Positioned.fill(
+                              child: CompanionPdfAnnotationOverlay(
+                                key: ValueKey(('annotation', page.pageNumber)),
+                                page: page,
+                                pageSize: rect.size,
+                                annotations: entries,
+                                onOpen: _inkEditing || _hasActiveSelection
+                                    ? null
+                                    : (matches) => unawaited(
+                                        _openMatchingAnnotations(matches),
+                                      ),
+                              ),
+                            ),
                         if (showsOriginalPage &&
                             (_inkEditing ||
                                 _savedInk.isNotEmpty ||
@@ -3664,14 +4530,35 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                             _pdfReadingAnchor = null;
                           }
                         });
-                        unawaited(
-                          _goToPdfReaderPage(
-                            _pdfPage,
+                        final initial = widget.initialAnnotationSelection;
+                        final restoredPage = _pdfPage;
+                        unawaited(() async {
+                          if (initial != null &&
+                              !_handledInitialPdfAnnotation) {
+                            _handledInitialPdfAnnotation = true;
+                            final opened = await _jumpPdfAnnotationOrigin(
+                              document,
+                              initial,
+                            );
+                            if (!mounted ||
+                                !identical(_pdfDocumentRef, document)) {
+                              return;
+                            }
+                            if (opened) {
+                              _schedulePdfPageWork(probeText: true);
+                              return;
+                            }
+                            _showMissingAnnotationOrigin();
+                          }
+                          await _goToPdfReaderPage(
+                            restoredPage,
                             duration: Duration.zero,
                             recordProgress: false,
-                          ),
-                        );
-                        _schedulePdfPageWork(probeText: true);
+                          );
+                          if (mounted && identical(_pdfDocumentRef, document)) {
+                            _schedulePdfPageWork(probeText: true);
+                          }
+                        }());
                       },
                       textSelectionParams: PdfTextSelectionParams(
                         enabled: !_inkEditing,
@@ -3818,8 +4705,51 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     }
   }
 
-  Widget _pdfTranslationView(String translation) {
+  Widget _pdfTranslationView(CompanionTranslationText aligned) {
     final page = _pdfPage;
+    final translation = aligned.text;
+    final sourceHash = companionTextHash(aligned.source);
+    final displayHash = companionTextHash(translation);
+    final annotationRanges = <({int start, int end, String id})>[];
+    for (final entry in widget.annotations) {
+      final selection = entry.selection;
+      if (!_sourceMatches(selection)) continue;
+      final range = selection.canonicalRange;
+      final span =
+          _translatedPdfHasNativeSource && range is CompanionPdfSourceRange
+          ? range.pages
+                .where(
+                  (span) => span.page == page && span.textHash == sourceHash,
+                )
+                .firstOrNull
+          : null;
+      final projected = span == null
+          ? null
+          : aligned.translatedRange(span.start, span.end);
+      if (projected != null) {
+        annotationRanges.add((
+          start: projected.start,
+          end: projected.end,
+          id: entry.id,
+        ));
+        continue;
+      }
+      final anchor = selection.anchor;
+      final start = selection.startOffset;
+      final end = selection.endOffset;
+      if (selection.view == 'translation' &&
+          selection.translationVersion == displayHash &&
+          anchor is PdfReaderAnchor &&
+          anchor.pageNumber == page &&
+          start != null &&
+          end != null &&
+          start >= 0 &&
+          end > start &&
+          end <= translation.length &&
+          translation.substring(start, end) == selection.quote) {
+        annotationRanges.add((start: start, end: end, id: entry.id));
+      }
+    }
     void turnPage(int delta) {
       final target = page + delta;
       if (!_selectionActive &&
@@ -3893,8 +4823,17 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             padding: const EdgeInsets.fromLTRB(32, 20, 32, 24),
             child: Stack(
               children: [
-                SelectableText(
-                  translation,
+                CompanionAnnotationTextView(
+                  text: translation,
+                  annotations: annotationRanges,
+                  onOpenAnnotations: _inkEditing
+                      ? null
+                      : (ids) => unawaited(
+                          _openMatchingAnnotations([
+                            for (final entry in widget.annotations)
+                              if (ids.contains(entry.id)) entry,
+                          ]),
+                        ),
                   selectionControls: _companionTextSelectionControls,
                   onTap: widget.onToggleImmersive == null
                       ? null
@@ -3914,11 +4853,29 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                     }
                     final text = selected.textInside(translation);
                     final anchor = editable.contextMenuAnchors;
+                    final original = aligned.sourceRange(
+                      selected.start,
+                      selected.end,
+                    );
                     final passage = _passage(
                       text,
                       '第 $page 页 · 译文',
                       PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page),
+                      startOffset: selected.start,
+                      endOffset: selected.end,
+                      annotationView: 'translation',
                       translationSnapshot: translation,
+                      annotationCanonicalRange:
+                          original == null || !_translatedPdfHasNativeSource
+                          ? null
+                          : CompanionPdfSourceRange([
+                              (
+                                page: page,
+                                start: original.start,
+                                end: original.end,
+                                textHash: sourceHash,
+                              ),
+                            ]),
                     );
                     return _selectionToolbar(
                       above: anchor.primaryAnchor,
@@ -3928,7 +4885,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         _copy(text);
                       },
                       onAnnotate: () {
-                        editable.hideToolbar();
+                        _collapseReaderTextSelection(editable);
                         widget.onAnnotate(passage);
                       },
                       onAsk: () {
@@ -4152,7 +5109,45 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
     Future<void> withText(bool ask) async {
       final globalAnchor = _pdf.localToGlobal(below) ?? below;
-      final text = (await delegate.getSelectedText()).trim();
+      final pages = _pdf.document.pages;
+      final pieces = <String>[];
+      final pageHashes = <int, String>{};
+      final sourceRanges = <CompanionPdfRange>[];
+      var nativeCoordinates = true;
+      try {
+        for (var number = page; number <= endPage; number++) {
+          final selectedPage = pages[number - 1];
+          nativeCoordinates =
+              nativeCoordinates &&
+              identical(selectedPage, companionNativePdfPage(selectedPage));
+          final text = number == page
+              ? range.start.text
+              : number == endPage
+              ? range.end.text
+              : await selectedPage.loadStructuredText();
+          final start = number == page ? range.start.index : 0;
+          final end = number == endPage
+              ? range.end.index + 1
+              : text.fullText.length;
+          if (start < 0 || start > end || end > text.fullText.length) return;
+          pieces.add(text.fullText.substring(start, end));
+          final hash = companionTextHash(text.fullText);
+          pageHashes[number] = hash;
+          final span = trimCompanionRange(text.fullText, start, end);
+          if (span != null) {
+            sourceRanges.add((
+              page: number,
+              start: span.start,
+              end: span.end,
+              textHash: hash,
+            ));
+          }
+        }
+      } catch (_) {
+        if (mounted) AppToast.show(context, '无法读取所选原文，请重试');
+        return;
+      }
+      final text = pieces.join('\n').trim();
       if (!mounted || text.isEmpty) return;
       await delegate.clearTextSelection();
       if (!mounted) return;
@@ -4161,7 +5156,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         label,
         anchor,
         startOffset: range.start.index,
-        endOffset: page == endPage ? range.end.index + 1 : null,
+        endOffset: range.end.index + 1,
+        endAnchor: page == endPage
+            ? null
+            : PdfReaderAnchor(sourceId: _sourceKey, pageNumber: endPage),
+        pdfPageTextHashes: pageHashes,
+        annotationCanonicalRange: nativeCoordinates
+            ? CompanionPdfSourceRange(sourceRanges)
+            : null,
       );
       if (ask) {
         widget.onAsk(passage, globalAnchor);
@@ -4738,6 +5740,33 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 ],
               ),
             ),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: _readerSideInset),
+              child: Row(
+                children: [
+                  TextButton(
+                    onPressed: () =>
+                        setState(() => _outlineShowsAnnotations = false),
+                    child: Text(
+                      '章节',
+                      style: TextStyle(
+                        color: _outlineShowsAnnotations ? _readerMuted : _ink,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () =>
+                        setState(() => _outlineShowsAnnotations = true),
+                    child: Text(
+                      '本书注释',
+                      style: TextStyle(
+                        color: _outlineShowsAnnotations ? _ink : _readerMuted,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             Expanded(
               child: ClipRect(
                 child: Material(
@@ -4746,7 +5775,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                     padding: EdgeInsets.symmetric(
                       horizontal: _readerSideInset * .6,
                     ),
-                    child: Builder(builder: _outlinePanel!),
+                    child: Builder(
+                      builder: _outlineShowsAnnotations
+                          ? widget.annotationList
+                          : _outlinePanel!,
+                    ),
                   ),
                 ),
               ),
@@ -5744,131 +6777,6 @@ class _PassageQuote extends StatelessWidget {
   );
 }
 
-class _PassageAnnotation extends StatefulWidget {
-  const _PassageAnnotation({required this.passage, required this.bookTitle});
-
-  final ReadingCompanionPassage passage;
-  final String bookTitle;
-
-  @override
-  State<_PassageAnnotation> createState() => _PassageAnnotationState();
-}
-
-class _PassageAnnotationState extends State<_PassageAnnotation>
-    with WidgetsBindingObserver {
-  final _text = TextEditingController();
-  final _focus = FocusNode();
-  double _lastInset = 0;
-  bool _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-  }
-
-  @override
-  void didChangeMetrics() {
-    if (!mounted) return;
-    final inset = View.of(context).viewInsets.bottom;
-    if (_lastInset > 0 && inset == 0 && _text.text.isEmpty) _focus.unfocus();
-    _lastInset = inset;
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _text.dispose();
-    _focus.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    final comment = _text.text.trim();
-    if (comment.isEmpty || _saving) return;
-    _focus.unfocus();
-    setState(() => _saving = true);
-    final now = DateTime.now().toIso8601String();
-    final passage = widget.passage;
-    final anchor = passage.anchor;
-    try {
-      await DatabaseService().insertNote(
-        Note(
-          type: 'text',
-          title: passage.locator,
-          content: '${passage.text}\n\n$comment',
-          bookId: passage.bookId,
-          bookName: widget.bookTitle,
-          bookPage: anchor is PdfReaderAnchor ? '${anchor.pageNumber}' : '',
-          createdAt: now,
-          updatedAt: now,
-        ),
-        companionSource: (
-          sourceId: passage.sourceId,
-          locator: {
-            'anchor': readerAnchorJson(anchor),
-            'source_revision': passage.sourceRevision,
-            'translation_revision': passage.translationRevision,
-            'start_offset': passage.startOffset,
-            'end_offset': passage.endOffset,
-            'quote': passage.text,
-          },
-        ),
-      );
-      if (mounted) Navigator.of(context).pop(true);
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _saving = false);
-      AppToast.show(context, '注释保存失败，请重试');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !_saving,
-    child: AlertDialog(
-      backgroundColor: Colors.white,
-      title: const Text('注释'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _PassageQuote(text: widget.passage.text),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _text,
-              focusNode: _focus,
-              minLines: 3,
-              maxLines: 6,
-              enabled: !_saving,
-              decoration: const InputDecoration(
-                hintText: '写下注释',
-                border: OutlineInputBorder(),
-              ),
-              onTapOutside: (_) => _focus.unfocus(),
-              onChanged: (_) => setState(() {}),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: _saving ? null : () => Navigator.pop(context),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          style: FilledButton.styleFrom(
-            backgroundColor: const Color(0xFF262626),
-          ),
-          onPressed: _saving || _text.text.trim().isEmpty ? null : _save,
-          child: Text(_saving ? '保存中' : '保存'),
-        ),
-      ],
-    ),
-  );
-}
-
 Future<int?> _chooseReaderItem(
   BuildContext context, {
   required String title,
@@ -6185,11 +7093,19 @@ class _ReadingPlaceholder extends StatelessWidget {
 }
 
 class _ReaderStatus extends StatelessWidget {
-  const _ReaderStatus(this.text, {this.action, this.onAction});
+  const _ReaderStatus(
+    this.text, {
+    this.action,
+    this.onAction,
+    this.secondaryAction,
+    this.onSecondaryAction,
+  });
 
   final String text;
   final String? action;
   final VoidCallback? onAction;
+  final String? secondaryAction;
+  final VoidCallback? onSecondaryAction;
 
   @override
   Widget build(BuildContext context) => Center(
@@ -6199,6 +7115,11 @@ class _ReaderStatus extends StatelessWidget {
         Text(text, style: const TextStyle(color: Color(0xFF656565))),
         if (action != null && onAction != null)
           TextButton(onPressed: onAction, child: Text(action!)),
+        if (secondaryAction != null && onSecondaryAction != null)
+          TextButton(
+            onPressed: onSecondaryAction,
+            child: Text(secondaryAction!),
+          ),
       ],
     ),
   );

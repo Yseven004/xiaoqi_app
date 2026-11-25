@@ -47,7 +47,11 @@ class AttachmentService {
   String? _runningKey;
   Completer<void>? _drainDone;
 
-  Future<Response> upload(Request request, String tenant) => _respond(() async {
+  Future<Response> upload(
+    Request request,
+    String tenant, {
+    bool annotationImage = false,
+  }) => _respond(() async {
     await _initialization;
     _ensureOpen();
     if (_uploads >= 2) {
@@ -100,8 +104,17 @@ class AttachmentService {
       'pdf' when !readingBook => 'pdf',
       _ => 'document',
     };
-    final sizeLimit = readingBook ? maxReadingBookFileBytes : maxFileBytes;
-    final sizeLabel = readingBook ? '256 MB' : '50 MB';
+    if (annotationImage && (kind != 'image' || uploadProfile != null)) {
+      throw const AttachmentFailure(
+        '解释图必须是图片',
+        code: 'not_image',
+        statusCode: 415,
+      );
+    }
+    final sizeLimit = annotationImage
+        ? 5 * 1024 * 1024
+        : readingBook ? maxReadingBookFileBytes : maxFileBytes;
+    final sizeLabel = annotationImage ? '5 MB' : readingBook ? '256 MB' : '50 MB';
     final length = int.tryParse(request.headers['content-length'] ?? '');
     if (length != null && (length < 1 || length > sizeLimit)) {
       throw AttachmentFailure(
@@ -192,7 +205,10 @@ class AttachmentService {
       final detectedMime = kind == 'image'
           ? lookupMimeType(name, headerBytes: header)
           : mime;
-      if (kind == 'image' && !_isImageHeader(header, detectedMime)) {
+      if (kind == 'image' && (!_isImageHeader(header, detectedMime) ||
+          (annotationImage && !const {
+            'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+          }.contains(detectedMime)))) {
         throw const AttachmentFailure(
           '图片格式无效或不支持',
           code: 'invalid_image',
@@ -519,7 +535,11 @@ class AttachmentService {
     };
   }
 
-  Future<Map<String, dynamic>> imagePart(String tenant, String id) async {
+  Future<Map<String, dynamic>> imagePart(
+    String tenant,
+    String id, {
+    int? maxBytes,
+  }) async {
     await _initialization;
     final record = store.get(_existingKey(tenant, id))!.value;
     if (record['kind'] != 'image') {
@@ -529,7 +549,15 @@ class AttachmentService {
         statusCode: 400,
       );
     }
-    final bytes = await _source(record).readAsBytes();
+    final file = _source(record);
+    if (maxBytes != null && await file.length() > maxBytes) {
+      throw const AttachmentFailure(
+        '图片总大小不能超过 5 MB',
+        code: 'file_limit',
+        statusCode: 413,
+      );
+    }
+    final bytes = await file.readAsBytes();
     return {
       'type': 'image_url',
       'image_url': {

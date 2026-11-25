@@ -1,2 +1,2 @@
-const releaseId = '2026-11-23-book-search-on-demand';
-const apiContractVersion = '43';
+const releaseId = '2026-11-25-annotation-refresh';
+const apiContractVersion = '44';

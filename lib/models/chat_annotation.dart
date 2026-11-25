@@ -11,6 +11,7 @@ class ChatAnnotation {
     this.startOffset,
     this.endOffset,
     this.sourceHash,
+    this.explanationImageIds = const [],
   });
 
   final String id;
@@ -23,9 +24,15 @@ class ChatAnnotation {
   final int? startOffset;
   final int? endOffset;
   final String? sourceHash;
+  final List<String> explanationImageIds;
+  static const maxExplanationImages = 3;
   bool get isImage => attachmentId != null;
 
-  ChatAnnotation copyWith({String? comment, String? attachmentId}) =>
+  ChatAnnotation copyWith({
+    String? comment,
+    String? attachmentId,
+    List<String>? explanationImageIds,
+  }) =>
       ChatAnnotation(
         id: id,
         messageId: messageId,
@@ -37,6 +44,9 @@ class ChatAnnotation {
         startOffset: startOffset,
         endOffset: endOffset,
         sourceHash: sourceHash,
+        explanationImageIds: List.unmodifiable(
+          explanationImageIds ?? this.explanationImageIds,
+        ),
       );
 
   Map<String, Object?> toJson() => {
@@ -50,6 +60,8 @@ class ChatAnnotation {
     'start_offset': startOffset,
     'end_offset': endOffset,
     'source_hash': sourceHash,
+    if (explanationImageIds.isNotEmpty)
+      'explanation_image_ids': explanationImageIds,
   };
 
   factory ChatAnnotation.fromJson(Object? raw) {
@@ -69,11 +81,16 @@ class ChatAnnotation {
       startOffset: (raw['start_offset'] as num?)?.toInt(),
       endOffset: (raw['end_offset'] as num?)?.toInt(),
       sourceHash: raw['source_hash'] as String?,
+      explanationImageIds: raw['explanation_image_ids'] is List
+          ? List<String>.unmodifiable(
+              (raw['explanation_image_ids'] as List).whereType<String>(),
+            )
+          : const [],
     );
   }
 }
 
-/// Uses the existing text + attachment API; the server needs no new wire type.
+/// Persists the text projection separately from explanation-image transport.
 String appendChatAnnotations(
   String message,
   List<ChatAnnotation> annotations, {
@@ -87,23 +104,34 @@ String appendChatAnnotations(
   for (var i = 0; i < annotations.length; i++) {
     final a = annotations[i];
     result.write('\n\n[注释 ${i + 1}] ');
-    if (a.isImage) {
-      final number =
-          annotations
-              .where((v) => v.attachmentId == a.attachmentId)
-              .toList()
-              .indexOf(a) +
-          1;
-      result.write(
-        '图片：${attachmentNames[a.attachmentId] ?? '所选图片'}；图中编号 $number；'
-        '位置：从左 ${(a.x * 100).toStringAsFixed(1)}%，'
-        '从上 ${(a.y * 100).toStringAsFixed(1)}%。',
-      );
-    } else {
-      result.write('选中原文：\n');
-      result.write(a.quote.split('\n').map((line) => '> $line').join('\n'));
-    }
-    if (a.comment.trim().isNotEmpty) result.write('\n我的评论：${a.comment.trim()}');
+    result.write(chatAnnotationGroupText(a, annotations, attachmentNames));
+  }
+  return result.toString();
+}
+
+String chatAnnotationGroupText(
+  ChatAnnotation annotation,
+  List<ChatAnnotation> annotations,
+  Map<String, String> attachmentNames,
+) {
+  final result = StringBuffer();
+  if (annotation.isImage) {
+    final number = annotations
+            .where((other) => other.attachmentId == annotation.attachmentId)
+            .toList()
+            .indexOf(annotation) +
+        1;
+    result.write(
+      '图片：${attachmentNames[annotation.attachmentId] ?? '所选图片'}；图中编号 $number；'
+      '位置：从左 ${(annotation.x * 100).toStringAsFixed(1)}%，'
+      '从上 ${(annotation.y * 100).toStringAsFixed(1)}%。',
+    );
+  } else {
+    result.write('选中原文：\n');
+    result.write(annotation.quote.split('\n').map((line) => '> $line').join('\n'));
+  }
+  if (annotation.comment.trim().isNotEmpty) {
+    result.write('\n我的评论：${annotation.comment.trim()}');
   }
   return result.toString();
 }

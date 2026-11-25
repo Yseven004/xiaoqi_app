@@ -6,7 +6,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier, visibleForTesting;
 import 'package:genkit/experimental_client.dart' as genkit_client;
 import 'package:http/http.dart' as http;
 
@@ -227,6 +227,8 @@ void verifyAttachmentConversionProfile(
 }
 
 class CapabilityCloudSync {
+  final _emailSessionRevision = ValueNotifier(0);
+  ValueListenable<int> get emailSessionRevision => _emailSessionRevision;
   CapabilityCloudSync._()
     : _client = http.Client(),
       _imageCache = TaskArtifactImageCache();
@@ -330,6 +332,19 @@ class CapabilityCloudSync {
     return _headers(token);
   }
 
+  Future<String> emailForAuthorization(String authorization) async {
+    final headers = await _attachmentHeaders(authorization);
+    final response = await _client
+        .get(Uri.parse('$_baseUrl/auth/me'), headers: headers)
+        .timeout(const Duration(seconds: 8));
+    final account = _checked(response);
+    final email = account['email']?.toString().trim().toLowerCase() ?? '';
+    if (account['authenticated'] != true || email.isEmpty) {
+      throw StateError('请先登录个人账号');
+    }
+    return email;
+  }
+
   Uri capabilityEndpoint(String path) => Uri.parse('$_baseUrl/$path');
 
   /// Uploads a content-addressed resource once. Progress is actual bytes read
@@ -343,6 +358,7 @@ class CapabilityCloudSync {
     Future<void>? abortTrigger,
     String? expectedAuthorization,
     String? attachmentProfile,
+    String? annotationMessageId,
   }) async {
     final headers = await _attachmentHeaders(expectedAuthorization);
     final file = File(path);
@@ -357,7 +373,9 @@ class CapabilityCloudSync {
     final request =
         http.AbortableStreamedRequest(
             'POST',
-            Uri.parse('$_baseUrl/attachments'),
+            annotationMessageId == null
+                ? Uri.parse('$_baseUrl/attachments')
+                : capabilityEndpoint('annotation-images/${Uri.encodeComponent(annotationMessageId)}'),
             abortTrigger: abortTrigger,
           )
           ..headers.addAll(headers)
@@ -666,6 +684,7 @@ class CapabilityCloudSync {
       key: _emailKey,
       value: decoded['email']?.toString() ?? email.trim(),
     );
+    _emailSessionRevision.value++;
 
     if (previousToken != null &&
         previousToken.isNotEmpty &&
@@ -725,6 +744,7 @@ class CapabilityCloudSync {
     await _secureStorage.delete(key: _tokenKey);
     await _secureStorage.delete(key: _authMethodKey);
     await _secureStorage.delete(key: _emailKey);
+    _emailSessionRevision.value++;
   }
 
   Future<void> syncNow() {
@@ -956,12 +976,19 @@ class CapabilityCloudSync {
     return decoded;
   }
 
-  genkit_client.AgentApi<Map<String, dynamic>> createRemoteAgent() =>
-      _remoteAgent ??= genkit_client.remoteAgent<Map<String, dynamic>>(
+  genkit_client.AgentApi<Map<String, dynamic>> createRemoteAgent({
+    String? expectedAuthorization,
+  }) {
+    genkit_client.AgentApi<Map<String, dynamic>> create() =>
+        genkit_client.remoteAgent<Map<String, dynamic>>(
         // _baseUrl already includes /v1, like the other capability endpoints.
         url: '$_baseUrl/agent/chat',
-        headers: () async => _headers(await _requireToken()),
+        headers: () => expectedAuthorization == null
+            ? _requireToken().then(_headers)
+            : _attachmentHeaders(expectedAuthorization),
       );
+    return expectedAuthorization == null ? _remoteAgent ??= create() : create();
+  }
 
   Future<http.Response> _postAgentTask(String token, String body) => _client
       .post(
@@ -971,7 +998,10 @@ class CapabilityCloudSync {
       )
       .timeout(const Duration(seconds: 25));
 
-  Future<Map<String, dynamic>> getTask(String taskId) async {
+  Future<Map<String, dynamic>> getTask(String taskId) async =>
+      (await findTask(taskId)) ?? (throw StateError('任务不存在'));
+
+  Future<Map<String, dynamic>?> findTask(String taskId) async {
     final token = await _requireToken();
     final response = await _client
         .get(
@@ -979,7 +1009,7 @@ class CapabilityCloudSync {
           headers: _headers(token),
         )
         .timeout(const Duration(seconds: 20));
-    return _checked(response);
+    return response.statusCode == 404 ? null : _checked(response);
   }
 
   Future<String> getMessageTaskId(

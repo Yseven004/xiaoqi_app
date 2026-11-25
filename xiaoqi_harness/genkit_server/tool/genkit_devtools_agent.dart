@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental_client.dart';
 import 'package:genkit/genkit.dart';
+import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:schemantic/schemantic.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
@@ -20,6 +21,10 @@ const _defaultApiPort = 8180;
 const _devTenantId = 'genkit-devtools';
 const _devDeviceId = 'genkit-devtools-device';
 const _uuid = Uuid();
+const _annotationProbePngs = [
+  'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC',
+  'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdNvJ8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ2oPcf88OIhvJ6vAAAAAElFTkSuQmCC',
+];
 
 class _DevtoolsProxy extends HttpOverrides {
   _DevtoolsProxy(this.proxy);
@@ -51,12 +56,21 @@ Future<void> main() async {
       int.tryParse(Platform.environment['XIAOQI_DEVTOOLS_API_PORT'] ?? '') ??
       _defaultApiPort;
   final token = 'genkit-devtools-${_uuid.v4()}';
+  final annotationToken = 'genkit-devtools-annotation-${_uuid.v4()}';
   final store = CloudStore(root: dataDir.path);
   store.put('device/${sha256.convert(utf8.encode(token))}', {
     'tenant_id': _devTenantId,
     'device_id': _devDeviceId,
     'auth_method': 'local-devtools',
     'account_email': 'genkit-devtools@invalid.local',
+    'created_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    'revoked_at': null,
+  }, null);
+  store.put('device/${sha256.convert(utf8.encode(annotationToken))}', {
+    'tenant_id': _devTenantId,
+    'device_id': '$_devDeviceId-annotation',
+    'auth_method': 'email',
+    'account_email': 'genkit-annotation-fixture@invalid.local',
     'created_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
     'revoked_at': null,
   }, null);
@@ -76,13 +90,16 @@ Future<void> main() async {
     poweredByHeader: null,
   );
 
-  final agent = remoteAgent<Map<String, dynamic>>(
-    url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
-    headers: () async => {
-      'authorization': 'Bearer $token',
-      'x-xiaoqi-contract': apiContractVersion,
-    },
-  );
+  AgentApi<Map<String, dynamic>> agentFor(String bearer) =>
+      remoteAgent<Map<String, dynamic>>(
+        url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
+        headers: () async => {
+          'authorization': 'Bearer $bearer',
+          'x-xiaoqi-contract': apiContractVersion,
+        },
+      );
+  final agent = agentFor(token);
+  final annotationAgent = agentFor(annotationToken);
 
   final genkit = Genkit(isDevEnv: true, promptDir: null);
   genkit.defineFlow<
@@ -109,6 +126,10 @@ Future<void> main() async {
             'description': '仅本地调试：延迟取消当前任务，用于验证暂停和快照恢复。',
           },
           'model_id': {'type': 'string'},
+          'annotation_fixture': {
+            'type': 'boolean',
+            'description': '通过真实业务入口上传两张合成解释图，按注释顺序验证多模态。',
+          },
           'book_search': {
             'type': 'boolean',
             'description': '使用网上找书弹窗入口，返回本次实际检索的候选。',
@@ -202,6 +223,15 @@ Future<void> main() async {
             )
           : 'devtools-message-${_uuid.v4()}';
 
+      final annotationFixture = input['annotation_fixture'] == true;
+      final annotationGroups = annotationFixture && !isResume
+          ? await _uploadAnnotationProbes(
+              port: server.port,
+              token: annotationToken,
+              messageId: userMessageId,
+            )
+          : const <Map<String, Object?>>[];
+
       final turnMetadata = isResume
           ? priorMetadata
           : <String, dynamic>{
@@ -234,6 +264,8 @@ Future<void> main() async {
                 input['selected_mcp_connections'],
               ),
               'materials': _asList(input['materials']),
+              if (annotationGroups.isNotEmpty)
+                'annotation_groups': annotationGroups,
               'current_turn_text': messageText.trim(),
             };
 
@@ -255,7 +287,8 @@ Future<void> main() async {
         content: [if (!isResume) TextPart(text: messageText)],
         metadata: metadata,
       );
-      final chat = agent.chat(
+      final annotationRun = turnMetadata.containsKey('annotation_groups');
+      final chat = (annotationRun ? annotationAgent : agent).chat(
         snapshotId: snapshotId,
         sessionId: operation == 'new' && _nonEmpty(input['session_id'])
             ? input['session_id']!.toString().trim()
@@ -277,7 +310,7 @@ Future<void> main() async {
         cancelTimer = Timer(Duration(milliseconds: cancelAfterMs), () {
           cancelRequest ??= _cancelDevtoolsTask(
             port: server.port,
-            token: token,
+            token: annotationRun ? annotationToken : token,
             taskId: taskId,
           );
         });
@@ -402,10 +435,52 @@ Future<void> main() async {
   } finally {
     await server.close(force: false);
     await agent.close();
+    await annotationAgent.close();
     await api.close();
     await genkit.shutdown();
     store.checkpointWal();
     store.close();
+  }
+}
+
+Future<List<Map<String, Object?>>> _uploadAnnotationProbes({
+  required int port,
+  required String token,
+  required String messageId,
+}) async {
+  final client = http.Client();
+  try {
+    final groups = <Map<String, Object?>>[];
+    for (final (index, png) in _annotationProbePngs.indexed) {
+      final id = index + 1;
+      final bytes = base64Decode(png);
+      final response = await client
+          .post(
+            Uri.parse('http://127.0.0.1:$port/v1/annotation-images/$messageId'),
+            headers: {
+              'authorization': 'Bearer $token',
+              'x-xiaoqi-contract': apiContractVersion,
+              'x-xiaoqi-filename': 'fixture.png',
+              'x-xiaoqi-sha256': sha256.convert(bytes).toString(),
+              'content-type': 'image/png',
+            },
+            body: bytes,
+          )
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('合成解释图 $id 上传失败 HTTP ${response.statusCode}');
+      }
+      final uploaded = _asMap(jsonDecode(response.body));
+      groups.add({
+        'id': 'devtools-annotation-$id',
+        'number': id,
+        'text': '请说出这条注释的解释图颜色。',
+        'image_ids': [_requiredId(uploaded['id'], 'attachment.id')],
+      });
+    }
+    return groups;
+  } finally {
+    client.close();
   }
 }
 

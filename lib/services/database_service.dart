@@ -1,16 +1,21 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart'
+    show MissingPluginException, PlatformException;
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/chat_note_capture.dart';
 import '../models/note_attachment.dart';
 import '../models/note.dart';
 import '../models/learning_note_delta.dart';
 import '../models/notebook.dart';
 import '../models/user.dart';
+import 'companion_annotation_sync_schema.dart';
 
 class DatabaseService {
   DatabaseService._internal();
@@ -21,7 +26,7 @@ class DatabaseService {
 
   static Database? _database;
   static const String _dbName = 'xiaoqi.db';
-  static const int _dbVersion = 36;
+  static const int _dbVersion = 38;
   static const int homeNotebookLimit = 7;
   static const int pinnedNotebookLimit = 10;
   static const Duration deletedNotebookRetention = Duration(days: 30);
@@ -126,7 +131,8 @@ class DatabaseService {
         updated_at TEXT NOT NULL,
         is_pinned INTEGER NOT NULL DEFAULT 0,
         pinned_at TEXT,
-        is_deleted INTEGER NOT NULL DEFAULT 0
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        private_account_scope TEXT NOT NULL DEFAULT ''
       )
     ''');
 
@@ -162,6 +168,9 @@ class DatabaseService {
     await _createBookRecognitionTables(db);
     await _createBookSourceTables(db);
     await _createCompanionTables(db);
+    await _createCompanionAnnotationTable(db);
+    await _createCompanionNoteSnapshots(db);
+    await createCompanionAnnotationSyncTables(db);
     await _createBookSourceRevisionTables(db);
     await _createBookLearningTables(db);
     await _createCaptureSourceLinkTables(db);
@@ -720,6 +729,250 @@ class DatabaseService {
     if (oldVersion < 36 && newVersion >= 36) {
       await _createCompanionTables(db);
     }
+    if (oldVersion < 37 && newVersion >= 37) {
+      await _createCompanionAnnotationTable(db);
+    }
+    if (oldVersion < 38 && newVersion >= 38) {
+      await db.execute(
+        "ALTER TABLE notes ADD COLUMN private_account_scope TEXT NOT NULL DEFAULT ''",
+      );
+      await _createCompanionNoteSnapshots(db);
+      await createCompanionAnnotationSyncTables(db);
+    }
+  }
+
+  static Future<void> _createCompanionNoteSnapshots(DatabaseExecutor db) =>
+      db.execute('''
+        CREATE TABLE IF NOT EXISTS companion_annotation_note_snapshots (
+          note_id INTEGER PRIMARY KEY,
+          scope TEXT NOT NULL,
+          annotation_id TEXT NOT NULL,
+          revision TEXT NOT NULL,
+          book_id INTEGER NOT NULL,
+          source_id INTEGER NOT NULL,
+          selection TEXT NOT NULL,
+          UNIQUE(scope, annotation_id, revision)
+        )
+      ''');
+
+  static Future<String?> currentPrivateNoteScope() async {
+    final cloud = CapabilityCloudSync.instance;
+    try {
+      final revision = cloud.emailSessionRevision.value;
+      final hasSession = await cloud.hasEmailSession;
+      final email = hasSession
+          ? (await cloud.signedInEmail)?.trim().toLowerCase()
+          : null;
+      if (revision != cloud.emailSessionRevision.value) return null;
+      if (!hasSession) return 'local';
+      if (email == null || email.isEmpty) return null;
+      return sha256.convert(utf8.encode(email)).toString();
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  static String visibleNote(String alias) =>
+      "$alias.private_account_scope IN ('', ?)";
+
+  static Future<String> visibleNoteScope() async =>
+      await currentPrivateNoteScope() ?? '-';
+
+  Future<String> _requireVisibleNote(
+    DatabaseExecutor executor,
+    int noteId,
+    String? scope,
+  ) async {
+    final rows = await executor.query(
+      'notes',
+      columns: ['private_account_scope'],
+      where: 'id = ? AND ${visibleNote('notes')}',
+      whereArgs: [noteId, scope ?? '-'],
+    );
+    if (rows.isEmpty) throw StateError('笔记在当前账号不可用');
+    return rows.single['private_account_scope'] as String;
+  }
+
+  Future<({int noteId, bool created})> saveCompanionAnnotationSnapshot({
+    required String scope,
+    required String annotationId,
+    required String revision,
+    required int bookId,
+    required int sourceId,
+    required Map<String, Object?> selection,
+    required Note note,
+    required List<NoteAttachment> attachments,
+  }) async {
+    if (scope != await currentPrivateNoteScope()) throw StateError('账号已切换');
+    final db = await database;
+    return db.transaction((txn) async {
+      final existing = await txn.rawQuery(
+        '''SELECT n.id, n.is_deleted FROM companion_annotation_note_snapshots s
+        JOIN notes n ON n.id = s.note_id
+        WHERE s.scope = ? AND s.annotation_id = ? AND s.revision = ?''',
+        [scope, annotationId, revision],
+      );
+      if (existing.isNotEmpty) {
+        final row = existing.single;
+        final id = row['id'] as int;
+        if (row['is_deleted'] == 1) {
+          await txn.update(
+            'notes',
+            {'is_deleted': 0, 'updated_at': note.updatedAt},
+            where: 'id = ?',
+            whereArgs: [id],
+          );
+          await txn.delete(
+            'note_recycle_items',
+            where: 'note_id = ?',
+            whereArgs: [id],
+          );
+        }
+        return (noteId: id, created: false);
+      }
+
+      final book = await txn.query(
+        'books',
+        columns: ['title'],
+        where: 'id = ? AND is_deleted = 0',
+        whereArgs: [bookId],
+      );
+      final map = {
+        ...note.toMap(),
+        'private_account_scope': scope,
+        'notebook_id': book.isEmpty
+            ? await _defaultNotebookId(txn)
+            : await _bookNotebookId(txn, bookId),
+        'book_id': book.isEmpty ? null : bookId,
+        'book_name': book.isEmpty ? note.bookName : book.single['title'],
+      };
+      final noteId = await txn.insert('notes', map);
+      final sources = await txn.query(
+        'book_sources',
+        columns: ['content_hash'],
+        where: 'id = ? AND book_id = ?',
+        whereArgs: [sourceId, bookId],
+        limit: 1,
+      );
+      final sourceHash = sources.firstOrNull?['content_hash'] as String?;
+      await txn.insert('companion_annotation_note_snapshots', {
+        'note_id': noteId,
+        'scope': scope,
+        'annotation_id': annotationId,
+        'revision': revision,
+        'book_id': bookId,
+        'source_id': sourceId,
+        'selection': jsonEncode({
+          ...selection,
+          if (sourceHash != null && sourceHash.isNotEmpty)
+            'source_content_hash': sourceHash,
+        }),
+      });
+      for (final attachment in attachments) {
+        await txn.insert(
+          'note_attachments',
+          attachment.toMap(forNoteId: noteId),
+        );
+      }
+      await _syncNoteRelations(txn, noteId, map);
+      await _touchNotebook(txn, map['notebook_id'] as int?, note.updatedAt);
+      return (noteId: noteId, created: true);
+    });
+  }
+
+  Future<Map<String, Object?>?> queryCompanionAnnotationSnapshot(
+    int noteId,
+  ) async {
+    final db = await database;
+    final scope = await visibleNoteScope();
+    final rows = await db.query(
+      'companion_annotation_note_snapshots',
+      where: 'note_id = ? AND scope = ?',
+      whereArgs: [noteId, scope],
+      limit: 1,
+    );
+    return rows.singleOrNull;
+  }
+
+  Future<int?> existingCompanionAnnotationSnapshotId({
+    required String scope,
+    required String annotationId,
+    required String revision,
+  }) async {
+    if (scope != await currentPrivateNoteScope()) throw StateError('账号已切换');
+    final db = await database;
+    final rows = await db.rawQuery(
+      '''SELECT s.note_id FROM companion_annotation_note_snapshots s
+      JOIN notes n ON n.id = s.note_id
+      WHERE s.scope = ? AND s.annotation_id = ? AND s.revision = ?
+      AND n.private_account_scope = s.scope AND n.is_deleted = 0''',
+      [scope, annotationId, revision],
+    );
+    return rows.singleOrNull?['note_id'] as int?;
+  }
+
+  Future<void> detachPrivateNotesForDeletedBooks(
+    DatabaseExecutor txn,
+    List<int> bookIds,
+  ) async {
+    final marks = List.filled(bookIds.length, '?').join(',');
+    final rows = await txn.rawQuery(
+      '''SELECT n.* , b.book_id AS notebook_book_id
+      FROM notes n LEFT JOIN notebooks b ON b.id = n.notebook_id
+      WHERE n.private_account_scope != '' AND (
+        n.book_id IN ($marks) OR b.book_id IN ($marks)
+      )''',
+      [...bookIds, ...bookIds],
+    );
+    for (final row in rows) {
+      final noteId = row['id'] as int;
+      final detachBook = bookIds.contains(row['book_id']);
+      final notebookId = bookIds.contains(row['notebook_book_id'])
+          ? await _defaultNotebookId(txn)
+          : row['notebook_id'];
+      await txn.update(
+        'notes',
+        {'notebook_id': notebookId, if (detachBook) 'book_id': null},
+        where: 'id = ?',
+        whereArgs: [noteId],
+      );
+      await txn.delete(
+        'note_book_references',
+        where: 'note_id = ? AND book_id IN ($marks)',
+        whereArgs: [noteId, ...bookIds],
+      );
+      await txn.update(
+        'note_source_snapshots',
+        {'is_primary': 0},
+        where: 'note_id = ? AND book_id IN ($marks)',
+        whereArgs: [noteId, ...bookIds],
+      );
+    }
+  }
+
+  static Future<void> _createCompanionAnnotationTable(
+    DatabaseExecutor db,
+  ) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS companion_annotations (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        book_id INTEGER NOT NULL,
+        source_id INTEGER NOT NULL,
+        selection_key TEXT NOT NULL,
+        revision TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        body TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS companion_annotation_active_selection
+      ON companion_annotations(scope, book_id, source_id, selection_key)
+      WHERE is_deleted = 0
+    ''');
   }
 
   static Future<void> _createCompanionTables(DatabaseExecutor db) async {
@@ -1697,7 +1950,14 @@ class DatabaseService {
     String? learningNotesBaseline,
   }) async {
     final db = await database;
+    final scope = await currentPrivateNoteScope();
     return db.transaction((txn) async {
+      final existingId = note.id;
+      if (existingId != null) await _requireVisibleNote(txn, existingId, scope);
+      if (note.privateAccountScope.isNotEmpty &&
+          note.privateAccountScope != scope) {
+        throw StateError('笔记在当前账号不可用');
+      }
       final map = note.toMap();
       if (note.id != null &&
           learningNotesBaseline != null &&
@@ -1779,11 +2039,10 @@ class DatabaseService {
 
   Future<List<NoteAttachment>> queryNoteAttachments(int noteId) async {
     final db = await database;
-    final rows = await db.query(
-      'note_attachments',
-      where: 'note_id = ?',
-      whereArgs: [noteId],
-      orderBy: 'position, id',
+    final rows = await db.rawQuery(
+      '''SELECT a.* FROM note_attachments a JOIN notes n ON n.id = a.note_id
+      WHERE a.note_id = ? AND ${visibleNote('n')} ORDER BY a.position, a.id''',
+      [noteId, await visibleNoteScope()],
     );
     return rows.map(NoteAttachment.fromMap).toList(growable: false);
   }
@@ -1792,8 +2051,9 @@ class DatabaseService {
     final db = await database;
     return await db.delete(
           'note_attachments',
-          where: 'id = ?',
-          whereArgs: [attachmentId],
+          where:
+              'id = ? AND note_id IN (SELECT id FROM notes WHERE ${visibleNote('notes')})',
+          whereArgs: [attachmentId, await visibleNoteScope()],
         ) ==
         1;
   }
@@ -1804,8 +2064,11 @@ class DatabaseService {
     List<NoteAttachment> copiedAttachments = const [],
   }) async {
     final db = await database;
+    final scope = await currentPrivateNoteScope();
     return db.transaction((txn) async {
+      final owner = await _requireVisibleNote(txn, sourceNoteId, scope);
       final map = await _noteMap(txn, note);
+      if (owner.isNotEmpty) map['private_account_scope'] = owner;
       final noteId = await txn.insert('notes', map);
       final sources = await txn.query(
         'note_chat_sources',
@@ -1834,8 +2097,9 @@ class DatabaseService {
     final db = await database;
     final rows = await db.query(
       'note_chat_sources',
-      where: 'note_id = ?',
-      whereArgs: [noteId],
+      where:
+          'note_id = ? AND note_id IN (SELECT id FROM notes WHERE ${visibleNote('notes')})',
+      whereArgs: [noteId, await visibleNoteScope()],
       orderBy: 'captured_at ASC, id ASC',
     );
     return rows
@@ -1909,8 +2173,8 @@ class DatabaseService {
   }) async {
     try {
       final db = await database;
-      final where = <String>['is_deleted = 0'];
-      final args = <Object?>[];
+      final where = <String>['is_deleted = 0', visibleNote('notes')];
+      final args = <Object?>[await visibleNoteScope()];
       if (notebookId != null) {
         where.add('notebook_id = ?');
         args.add(notebookId);
@@ -1947,7 +2211,8 @@ class DatabaseService {
     final db = await database;
     final maps = await db.query(
       'notes',
-      where: 'is_deleted = 1',
+      where: 'is_deleted = 1 AND ${visibleNote('notes')}',
+      whereArgs: [await visibleNoteScope()],
       orderBy: 'updated_at DESC, id DESC',
     );
     return maps.map(Note.fromMap).toList(growable: false);
@@ -1961,10 +2226,10 @@ class DatabaseService {
       FROM notes
       INNER JOIN note_relations
         ON note_relations.related_note_id = notes.id
-      WHERE note_relations.note_id = ?
+      WHERE note_relations.note_id = ? AND ${visibleNote('notes')}
       ORDER BY notes.is_deleted ASC, notes.updated_at DESC, notes.id DESC
     ''',
-      [noteId],
+      [noteId, await visibleNoteScope()],
     );
     return maps.map(Note.fromMap).toList(growable: false);
   }
@@ -1977,10 +2242,10 @@ class DatabaseService {
       FROM notes
       INNER JOIN note_relations
         ON note_relations.note_id = notes.id
-      WHERE note_relations.related_note_id = ?
+      WHERE note_relations.related_note_id = ? AND ${visibleNote('notes')}
       ORDER BY notes.is_deleted ASC, notes.updated_at DESC, notes.id DESC
     ''',
-      [noteId],
+      [noteId, await visibleNoteScope()],
     );
     return maps.map(Note.fromMap).toList(growable: false);
   }
@@ -2015,8 +2280,9 @@ class DatabaseService {
     final db = await database;
     return db.query(
       'note_book_references',
-      where: 'note_id = ?',
-      whereArgs: [noteId],
+      where:
+          'note_id = ? AND note_id IN (SELECT id FROM notes WHERE ${visibleNote('notes')})',
+      whereArgs: [noteId, await visibleNoteScope()],
       orderBy: 'is_primary DESC, created_at ASC, id ASC',
     );
   }
@@ -2066,8 +2332,8 @@ class DatabaseService {
         'pinned_at': pinned ? DateTime.now().toIso8601String() : null,
         'updated_at': DateTime.now().toIso8601String(),
       },
-      where: 'id = ? AND is_deleted = 0',
-      whereArgs: [noteId],
+      where: 'id = ? AND is_deleted = 0 AND ${visibleNote('notes')}',
+      whereArgs: [noteId, await visibleNoteScope()],
     );
   }
 
@@ -2079,8 +2345,8 @@ class DatabaseService {
     await db.update(
       'notes',
       {'is_deleted': 0, 'updated_at': DateTime.now().toIso8601String()},
-      where: 'id IN ($placeholders)',
-      whereArgs: ids,
+      where: 'id IN ($placeholders) AND ${visibleNote('notes')}',
+      whereArgs: [...ids, await visibleNoteScope()],
     );
   }
 
@@ -2088,23 +2354,39 @@ class DatabaseService {
     final ids = noteIds.toSet().toList(growable: false);
     if (ids.isEmpty) return;
     final db = await database;
+    final scope = await currentPrivateNoteScope();
     final placeholders = List.filled(ids.length, '?').join(',');
     await db.transaction((txn) async {
+      final allowed = await txn.query(
+        'notes',
+        columns: ['id'],
+        where: 'id IN ($placeholders) AND ${visibleNote('notes')}',
+        whereArgs: [...ids, scope ?? '-'],
+      );
+      if (allowed.isEmpty) return;
+      final allowedIds = allowed.map((item) => item['id']).toList();
+      final allowedPlaceholders = List.filled(allowedIds.length, '?').join(',');
       for (final table in const [
         'note_relations',
         'note_book_references',
         'note_source_snapshots',
         'note_attachments',
         'note_chat_sources',
+        'companion_note_sources',
+        'companion_annotation_note_snapshots',
         'ai_usage',
       ]) {
         await txn.delete(
           table,
-          where: 'note_id IN ($placeholders)',
-          whereArgs: ids,
+          where: 'note_id IN ($allowedPlaceholders)',
+          whereArgs: allowedIds,
         );
       }
-      await txn.delete('notes', where: 'id IN ($placeholders)', whereArgs: ids);
+      await txn.delete(
+        'notes',
+        where: 'id IN ($allowedPlaceholders)',
+        whereArgs: allowedIds,
+      );
     });
   }
 
@@ -2113,8 +2395,8 @@ class DatabaseService {
     final db = await database;
     final maps = await db.query(
       'notes',
-      where: 'is_deleted = ?',
-      whereArgs: [0],
+      where: 'is_deleted = 0 AND ${visibleNote('notes')}',
+      whereArgs: [await visibleNoteScope()],
       orderBy: 'updated_at DESC, id DESC',
       limit: limit,
     );
@@ -2128,12 +2410,13 @@ class DatabaseService {
     final db = await database;
     final where = <String>[
       'is_deleted = 0',
+      visibleNote('notes'),
       "type = 'text'",
       "pdf_path = ''",
       "photo_path = ''",
       "source_photo_path = ''",
     ];
-    final args = <Object?>[];
+    final args = <Object?>[await visibleNoteScope()];
     if (notebookId != null) {
       where.add('notebook_id = ?');
       args.add(notebookId);
@@ -2163,17 +2446,19 @@ class DatabaseService {
   }) async {
     final db = await database;
     final where = <String>[];
-    final args = <Object?>[];
+    final scope = await visibleNoteScope();
+    final args = <Object?>[scope];
     if (bookId != null) {
       where.add('''b.is_default = 0 AND (b.book_id = ? OR EXISTS (
         SELECT 1 FROM notes linked_note
         WHERE linked_note.notebook_id = b.id AND linked_note.is_deleted = 0
+          AND ${visibleNote('linked_note')}
           AND (linked_note.book_id = ? OR EXISTS (
             SELECT 1 FROM note_book_references linked_book
             WHERE linked_book.note_id = linked_note.id AND linked_book.book_id = ?
           ))
       ))''');
-      args.addAll([bookId, bookId, bookId]);
+      args.addAll([bookId, scope, bookId, bookId]);
     }
 
     switch (status) {
@@ -2216,7 +2501,7 @@ class DatabaseService {
       SELECT b.*, COUNT(n.id) AS note_count
       FROM notebooks b
       LEFT JOIN notes n
-        ON n.notebook_id = b.id AND n.is_deleted = 0
+        ON n.notebook_id = b.id AND n.is_deleted = 0 AND ${visibleNote('n')}
       WHERE ${where.join(' AND ')}
       GROUP BY b.id
       ORDER BY $orderBy
@@ -2235,12 +2520,12 @@ class DatabaseService {
       SELECT b.*, COUNT(n.id) AS note_count
       FROM notebooks b
       LEFT JOIN notes n
-        ON n.notebook_id = b.id AND n.is_deleted = 0
+        ON n.notebook_id = b.id AND n.is_deleted = 0 AND ${visibleNote('n')}
       WHERE b.id = ? AND b.is_deleted = 0
       GROUP BY b.id
       LIMIT 1
       ''',
-      [id],
+      [await visibleNoteScope(), id],
     );
     return maps.isEmpty ? null : Notebook.fromMap(maps.first);
   }
@@ -2478,8 +2763,8 @@ class DatabaseService {
     final db = await database;
     final maps = await db.query(
       'notes',
-      where: 'notebook_id = ? AND is_deleted = 0',
-      whereArgs: [notebookId],
+      where: 'notebook_id = ? AND is_deleted = 0 AND ${visibleNote('notes')}',
+      whereArgs: [notebookId, await visibleNoteScope()],
       orderBy: 'updated_at DESC, id DESC',
     );
     return maps.map(Note.fromMap).toList(growable: false);
@@ -2487,7 +2772,9 @@ class DatabaseService {
 
   Future<Note> moveNoteToNotebook(int noteId, int notebookId) async {
     final db = await database;
+    final scope = await currentPrivateNoteScope();
     return db.transaction((txn) async {
+      await _requireVisibleNote(txn, noteId, scope);
       final notebook = await txn.query(
         'notebooks',
         where: 'id = ? AND is_deleted = 0 AND is_archived = 0',
@@ -2672,6 +2959,7 @@ class DatabaseService {
   Future<void> permanentlyDeleteNotebook(int notebookId) async {
     await _protectDefaultNotebook(await database, [notebookId]);
     final db = await database;
+    final scope = await visibleNoteScope();
     String coverPath = '';
     await db.transaction((txn) async {
       final rows = await txn.query(
@@ -2682,6 +2970,26 @@ class DatabaseService {
         limit: 1,
       );
       coverPath = rows.isEmpty ? '' : rows.first['cover_path'] as String? ?? '';
+      final foreign = await txn.query(
+        'notes',
+        columns: ['id'],
+        where: 'notebook_id = ? AND private_account_scope NOT IN (\'\', ?)',
+        whereArgs: [notebookId, scope],
+        limit: 1,
+      );
+      if (foreign.isNotEmpty) {
+        await txn.update(
+          'notes',
+          {'notebook_id': await _defaultNotebookId(txn)},
+          where: 'notebook_id = ? AND private_account_scope NOT IN (\'\', ?)',
+          whereArgs: [notebookId, scope],
+        );
+      }
+      await txn.delete(
+        'companion_annotation_note_snapshots',
+        where: 'note_id IN (SELECT id FROM notes WHERE notebook_id = ?)',
+        whereArgs: [notebookId],
+      );
       await txn.delete(
         'ai_usage',
         where: 'note_id IN (SELECT id FROM notes WHERE notebook_id = ?)',
@@ -2969,8 +3277,8 @@ class DatabaseService {
       final db = await database;
       final List<Map<String, dynamic>> maps = await db.query(
         'notes',
-        where: 'id = ?',
-        whereArgs: [id],
+        where: 'id = ? AND ${visibleNote('notes')}',
+        whereArgs: [id, await visibleNoteScope()],
         limit: 1,
       );
       if (maps.isEmpty) {
@@ -3196,7 +3504,9 @@ class DatabaseService {
 
     try {
       final db = await database;
+      final scope = await currentPrivateNoteScope();
       final count = await db.transaction((txn) async {
+        await _requireVisibleNote(txn, note.id!, scope);
         final before = await txn.query(
           'notes',
           columns: ['notebook_id'],
@@ -3238,7 +3548,9 @@ class DatabaseService {
     try {
       final db = await database;
       final now = DateTime.now().toIso8601String();
+      final scope = await currentPrivateNoteScope();
       final count = await db.transaction((txn) async {
+        await _requireVisibleNote(txn, id, scope);
         final rows = await txn.query(
           'notes',
           columns: ['notebook_id', 'book_id'],

@@ -11,6 +11,7 @@ import 'package:genkit/genkit.dart'
         CancellationToken,
         Message,
         ModelResponseChunk,
+        PartExtension,
         ReasoningPart,
         Role,
         TextPart,
@@ -37,6 +38,7 @@ class _StreamingRuntime
   var turnCount = 0;
   List<ToolRequestPart>? lastRestart;
   Map<String, dynamic>? lastRequest;
+  List<Message>? lastMessages;
   Completer<void>? pauseBeforeReturn;
   Completer<void>? turnStarted;
   final disabledNetworkTasks = <String>[];
@@ -91,6 +93,7 @@ class _StreamingRuntime
     turnCount++;
     lastRestart = restart;
     lastRequest = Map<String, dynamic>.from(request);
+    lastMessages = List<Message>.of(messages);
     if (effectStore != null) {
       final execution = ToolExecution(
         effectStore!,
@@ -264,6 +267,202 @@ void main() {
     store.close();
     directory.deleteSync(recursive: true);
   });
+
+  test(
+    'annotation images follow their numbered groups and stay account and message scoped',
+    () async {
+      const otherToken = 'streaming-shared-tenant-other-account';
+      addDevice(otherToken, 'personal', 'other-account');
+      final other = remoteAgent<Map<String, dynamic>>(
+        url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
+        headers: () async => {
+          'authorization': 'Bearer $otherToken',
+          'x-xiaoqi-contract': apiContractVersion,
+        },
+      );
+      final http = HttpClient();
+      addTearDown(() async {
+        http.close(force: true);
+        await other.close();
+      });
+      final base = 'http://127.0.0.1:${server.port}/v1';
+      Future<HttpClientRequest> request(
+        String verb,
+        String path,
+        String token,
+      ) async {
+        final result = await http.openUrl(verb, Uri.parse('$base/$path'));
+        result.headers.set('authorization', 'Bearer $token');
+        result.headers.set('x-xiaoqi-contract', apiContractVersion);
+        return result;
+      }
+
+      List<int> tinyPng(int sentinel) => [
+        137,
+        80,
+        78,
+        71,
+        13,
+        10,
+        26,
+        10,
+        sentinel,
+      ];
+      Future<String> upload(String message, List<int> bytes) async {
+        final pending = await request(
+          'POST',
+          'annotation-images/$message',
+          ownerToken,
+        );
+        pending.headers
+          ..set('x-xiaoqi-filename', 'same-name.png')
+          ..contentType = ContentType('image', 'png');
+        pending.add(bytes);
+        final response = await pending.close();
+        final text = await response.transform(utf8.decoder).join();
+        expect(response.statusCode, anyOf(200, 202), reason: text);
+        return (jsonDecode(text) as Map)['id'] as String;
+      }
+
+      const messageId = 'annotated-question';
+      const taskId = 'numbered-image-task';
+      final firstBytes = tinyPng(1);
+      final secondBytes = tinyPng(2);
+      final first = await upload(messageId, firstBytes);
+      final second = await upload(messageId, secondBytes);
+      expect(first, isNot(second));
+
+      Message grouped(String message, String task, [List<String>? media]) {
+        final ids = media ?? [first, second];
+        return Message(
+          role: Role.user,
+          content: [TextPart(text: '比较解释图')],
+          metadata: {
+            'xiaoqi_agent_turn': {
+              'task_id': task,
+              'workflow_id': 'numbered-image-conversation',
+              'user_message_id': message,
+              'current_turn_text': '比较解释图',
+              'annotation_groups': [
+                {
+                  'id': 'annotation-1',
+                  'number': 1,
+                  'text': '甲',
+                  'image_ids': [ids[0]],
+                },
+                {
+                  'id': 'annotation-2',
+                  'number': 2,
+                  'text': '乙',
+                  'image_ids': [ids[1]],
+                },
+              ],
+            },
+          },
+        );
+      }
+
+      final turn = ownerAgent.chat().sendStream(
+        message: grouped(messageId, taskId),
+      );
+      await turn.stream.drain<void>();
+      final settled = await turn.response;
+      expect(settled.text, '你好');
+      final originalCheckpoint = store
+          .get('task/personal/$taskId')!
+          .value['agent_snapshot_id'];
+      final parts = runtime.lastMessages!
+          .lastWhere((item) => item.role == Role.user)
+          .content;
+      expect(parts.map((part) => part.isMedia ? part.media!.url : part.text), [
+        '比较解释图',
+        '[注释 1] 甲',
+        'data:image/png;base64,${base64Encode(firstBytes)}',
+        '[注释 2] 乙',
+        'data:image/png;base64,${base64Encode(secondBytes)}',
+      ]);
+      final duplicate = ownerAgent.chat().sendStream(
+        message: grouped(messageId, taskId),
+      );
+      await duplicate.stream.drain<void>();
+      expect((await duplicate.response).text, '你好');
+      expect(runtime.turnCount, 1);
+      for (final (agent, id, wrongTask, media) in [
+        (other, messageId, 'forged-account-image', <String>[first, second]),
+        (other, messageId, taskId, <String>[first, second]),
+        (
+          ownerAgent,
+          'other-message',
+          'forged-message-image',
+          <String>[first, second],
+        ),
+        (ownerAgent, messageId, taskId, <String>[second, first]),
+      ]) {
+        final rejected = agent.chat().sendStream(
+          message: grouped(id, wrongTask, media),
+        );
+        await expectLater(rejected.response, throwsA(isA<Object>()));
+      }
+      expect(runtime.turnCount, 1);
+      expect(
+        store.get('task/personal/$taskId')!.value['agent_snapshot_id'],
+        originalCheckpoint,
+      );
+      final publicRead = await (await request(
+        'GET',
+        'attachments/$first',
+        ownerToken,
+      )).close();
+      expect(publicRead.statusCode, 404);
+      await publicRead.drain<void>();
+      final taskRead = await (await request(
+        'GET',
+        'agent/tasks/$taskId',
+        otherToken,
+      )).close();
+      expect(taskRead.statusCode, 404);
+      await taskRead.drain<void>();
+      final privateSnapshot = await CloudSessionStore(store).getSnapshot(
+        snapshotId: settled.snapshotId,
+        context: {'tenant_id': 'personal', '_annotation_account': 'other'},
+      );
+      expect(privateSnapshot, isNull);
+
+      const followupTask = 'numbered-image-followup';
+      final followup = ownerAgent
+          .chat(snapshotId: settled.snapshotId)
+          .sendStream(
+            message: Message(
+              role: Role.user,
+              content: [TextPart(text: '第一张图是什么颜色？')],
+              metadata: {
+                'xiaoqi_agent_turn': {
+                  'task_id': followupTask,
+                  'workflow_id': 'numbered-image-conversation',
+                  'user_message_id': 'question-after-numbered-images',
+                },
+              },
+            ),
+          );
+      await followup.stream.drain<void>();
+      expect((await followup.response).text, '你好');
+      for (final path in [
+        'agent/tasks/$followupTask',
+        'agent/tasks/$followupTask/events',
+      ]) {
+        final rejected = await (await request('GET', path, otherToken)).close();
+        expect(rejected.statusCode, 404);
+        await rejected.drain<void>();
+      }
+      final ownerRead = await (await request(
+        'GET',
+        'agent/tasks/$followupTask',
+        ownerToken,
+      )).close();
+      expect(ownerRead.statusCode, 200);
+      await ownerRead.drain<void>();
+    },
+  );
 
   test('share snapshot is public until its owner revokes it', () async {
     final http = HttpClient();

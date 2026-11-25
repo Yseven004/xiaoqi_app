@@ -6,6 +6,7 @@ import 'package:genkit/experimental.dart'
     show SessionSnapshot, SessionStore, SnapshotMutator, generateUuidV4;
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
+import 'companion_annotation_repository.dart';
 
 class StoredDocument {
   const StoredDocument(this.value, this.revision);
@@ -51,6 +52,7 @@ class CloudStore {
   late final Directory objects;
   late final File database;
   late final Database _db;
+  late final companionAnnotations = CompanionAnnotationRepository(_db);
 
   StoredDocument? get(String key) {
     final rows = _db.select(
@@ -298,6 +300,29 @@ class CloudSessionStore implements SessionStore {
 
   final CloudStore _store;
 
+  String? annotationSessionOwner(String tenant, String sessionId) =>
+      _store.get(_annotationOwnerKey(tenant, sessionId))?.value['account']
+          as String?;
+
+  void claimAnnotationSession(String tenant, String sessionId, String account) {
+    final key = _annotationOwnerKey(tenant, sessionId);
+    final existing = _store.get(key);
+    if (existing == null) {
+      _store.put(key, {'account': account}, null);
+    } else if (existing.value['account'] != account) {
+      throw StateError('会话不存在');
+    }
+  }
+
+  bool _annotationSessionVisible(
+    String tenant,
+    String sessionId,
+    Map<String, dynamic>? context,
+  ) {
+    final owner = annotationSessionOwner(tenant, sessionId);
+    return owner == null || owner == context?['_annotation_account'];
+  }
+
   @override
   Future<SessionSnapshot?> getSnapshot({
     String? snapshotId,
@@ -310,9 +335,17 @@ class CloudSessionStore implements SessionStore {
     if (hasSnapshot == hasSession) {
       throw ArgumentError('Provide exactly one of snapshotId or sessionId.');
     }
-    if (hasSnapshot) return _readSnapshot(tenant, snapshotId);
+    if (hasSnapshot) {
+      final snapshot = _readSnapshot(tenant, snapshotId);
+      final ownerSessionId = snapshot?.sessionId ?? snapshot?.state?.sessionId;
+      if (ownerSessionId != null &&
+          !_annotationSessionVisible(tenant, ownerSessionId, context))
+        return null;
+      return snapshot;
+    }
 
-    final snapshots = _readSessionSnapshots(tenant, sessionId!);
+    if (!_annotationSessionVisible(tenant, sessionId!, context)) return null;
+    final snapshots = _readSessionSnapshots(tenant, sessionId);
     if (snapshots.isEmpty) return null;
     final parentIds = snapshots.map((snapshot) => snapshot.parentId).toSet();
     final leaves = snapshots
@@ -356,6 +389,9 @@ class CloudSessionStore implements SessionStore {
       final ownerSessionId = next.sessionId ?? next.state?.sessionId;
       if (ownerSessionId == null || ownerSessionId.trim().isEmpty) {
         throw StateError('Genkit snapshot is missing its session id.');
+      }
+      if (!_annotationSessionVisible(tenant, ownerSessionId, context)) {
+        throw StateError('会话不存在');
       }
       next
         ..snapshotId = id
@@ -432,6 +468,9 @@ class CloudSessionStore implements SessionStore {
 
   static String _snapshotIndexKey(String tenant, String snapshotId) =>
       'genkit/snapshot/$tenant/$snapshotId';
+
+  static String _annotationOwnerKey(String tenant, String sessionId) =>
+      'genkit/annotation-owner/$tenant/$sessionId';
 
   static String _sessionSnapshotKey(
     String tenant,

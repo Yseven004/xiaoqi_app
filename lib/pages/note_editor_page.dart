@@ -22,6 +22,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../config/notebook_theme.dart';
+import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/note.dart';
 import '../models/note_attachment.dart';
 import '../models/chat_note_capture.dart';
@@ -33,6 +34,8 @@ import '../services/learning_notes_service.dart';
 import '../services/note_actions.dart';
 import '../services/speech_recognition_service.dart';
 import '../widgets/app_toast.dart';
+import '../widgets/companion_note_origin.dart';
+import '../widgets/companion_annotation_sheet.dart';
 import '../widgets/message_selection_action_card.dart';
 import '../widgets/notebook_cover.dart';
 
@@ -86,6 +89,10 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   final _pageScroll = ScrollController();
   final _fontSizeAnchorKey = GlobalKey();
   final _textColorAnchorKey = GlobalKey();
+  final _emailSessionRevision =
+      CapabilityCloudSync.instance.emailSessionRevision;
+  late final int _initialAccountRevision = _emailSessionRevision.value;
+  bool _privateNoteUnavailable = false;
 
   late quill.QuillController _quillController;
   late int? _notebookId;
@@ -199,6 +206,12 @@ class _NoteEditorPageState extends State<NoteEditorPage>
   @override
   void initState() {
     super.initState();
+    if (widget.existingNote?.privateAccountScope.isNotEmpty == true) {
+      _privateNoteUnavailable = true;
+      final revision = _initialAccountRevision;
+      _emailSessionRevision.addListener(_closePrivateNoteOnSessionChange);
+      unawaited(_checkPrivateNoteAccess(revision));
+    }
     WidgetsBinding.instance.addObserver(this);
     _lastKeyboardInset = _currentKeyboardInset;
     _note = widget.existingNote;
@@ -254,6 +267,28 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     if (_note == null || widget.chatSource != null) {
       _saveState = _SaveState.pending;
     }
+  }
+
+  Future<void> _checkPrivateNoteAccess(int revision) async {
+    final scope = await DatabaseService.currentPrivateNoteScope();
+    if (!mounted || revision != _emailSessionRevision.value) return;
+    if (scope != widget.existingNote?.privateAccountScope) {
+      _closePrivateNoteOnSessionChange();
+      return;
+    }
+    setState(() => _privateNoteUnavailable = false);
+  }
+
+  void _closePrivateNoteOnSessionChange() {
+    if (!mounted) return;
+    _saveTimer?.cancel();
+    setState(() => _privateNoteUnavailable = true);
+    unawaited(_inlineAudioPlayer.stop());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final route = ModalRoute.of(context);
+      if (route?.isActive == true) Navigator.of(context).removeRoute(route!);
+    });
   }
 
   void _onEditorSelectionChanged(TextSelection selection) {
@@ -2787,8 +2822,16 @@ class _NoteEditorPageState extends State<NoteEditorPage>
 
   Future<void> _pickNoteReference() async {
     final currentId = _note?.id;
+    final currentScope = _note?.privateAccountScope ?? '';
+    final revision = _emailSessionRevision.value;
     final notes = (await _db.queryAllNotes())
-        .where((item) => item.id != null && item.id != currentId)
+        .where(
+          (item) =>
+              item.id != null &&
+              item.id != currentId &&
+              (item.privateAccountScope.isEmpty ||
+                  item.privateAccountScope == currentScope),
+        )
         .toList(growable: false);
     if (!mounted || notes.isEmpty) {
       if (mounted) AppToast.show(context, '暂无可引用的其他笔记');
@@ -2798,22 +2841,28 @@ class _NoteEditorPageState extends State<NoteEditorPage>
       context: context,
       useSafeArea: true,
       showDragHandle: true,
-      builder: (sheetContext) => ListView(
-        shrinkWrap: true,
-        children: notes
-            .map(
-              (item) => ListTile(
-                title: Text(item.title.trim().isEmpty ? '未命名笔记' : item.title),
-                subtitle: Text(
-                  item.bookName.trim().isEmpty ? '无来源' : item.bookName,
+      builder: (sheetContext) => guardPrivateAnnotationContent(
+        revision,
+        ListView(
+          shrinkWrap: true,
+          children: notes
+              .map(
+                (item) => ListTile(
+                  title: Text(item.title.trim().isEmpty ? '未命名笔记' : item.title),
+                  subtitle: Text(
+                    item.bookName.trim().isEmpty ? '无来源' : item.bookName,
+                  ),
+                  onTap: () => Navigator.pop(sheetContext, item),
                 ),
-                onTap: () => Navigator.pop(sheetContext, item),
-              ),
-            )
-            .toList(),
+              )
+              .toList(),
+        ),
       ),
     );
-    if (!mounted || selected?.id == null) return;
+    if (!mounted ||
+        selected?.id == null ||
+        revision != _emailSessionRevision.value)
+      return;
     final selection = _quillController.selection;
     final start = selection.start.clamp(
       0,
@@ -3083,7 +3132,16 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     return 'file';
   }
 
-  Future<String> _attachmentAbsolutePath(String relativePath) async {
+  Future<String> _attachmentAbsolutePath(
+    String relativePath, {
+    bool requireAccount = true,
+  }) async {
+    final scope = _note?.privateAccountScope ?? '';
+    if (requireAccount &&
+        scope.isNotEmpty &&
+        scope != await DatabaseService.currentPrivateNoteScope()) {
+      throw StateError('笔记附件在当前账号不可用');
+    }
     final documents = await getApplicationDocumentsDirectory();
     final root = p.normalize(documents.path);
     final target = p.normalize(p.join(root, relativePath));
@@ -3096,9 +3154,17 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     return target;
   }
 
-  Future<void> _deleteStoredAttachment(String relativePath) async {
+  Future<void> _deleteStoredAttachment(
+    String relativePath, {
+    bool requireAccount = true,
+  }) async {
     try {
-      final file = File(await _attachmentAbsolutePath(relativePath));
+      final file = File(
+        await _attachmentAbsolutePath(
+          relativePath,
+          requireAccount: requireAccount,
+        ),
+      );
       if (await file.exists()) await file.delete();
     } catch (_) {
       // A failed cleanup leaves the database record intact when applicable.
@@ -3620,6 +3686,7 @@ class _NoteEditorPageState extends State<NoteEditorPage>
 
   @override
   void dispose() {
+    _emailSessionRevision.removeListener(_closePrivateNoteOnSessionChange);
     LearningNotesService.instance.endEditing(_note?.id);
     WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
@@ -3631,7 +3698,10 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     unawaited(
       _speechService.cancelSession(this).then((_) async {
         if (partialVoicePath != null) {
-          await _deleteStoredAttachment(partialVoicePath);
+          await _deleteStoredAttachment(
+            partialVoicePath,
+            requireAccount: false,
+          );
         }
       }),
     );
@@ -3639,9 +3709,22 @@ class _NoteEditorPageState extends State<NoteEditorPage>
     _inlineAudioPositionSubscription?.cancel();
     _inlineAudioDurationSubscription?.cancel();
     unawaited(_inlineAudioPlayer.dispose());
-    for (final attachment in _pendingAttachments) {
-      unawaited(_deleteStoredAttachment(attachment.relativePath));
-    }
+    final pendingSave = _pendingSave;
+    unawaited(() async {
+      if (pendingSave != null) {
+        try {
+          await pendingSave;
+        } catch (_) {
+          // Files still staged after an unsuccessful save can be discarded.
+        }
+      }
+      for (final attachment in _pendingAttachments.toList()) {
+        await _deleteStoredAttachment(
+          attachment.relativePath,
+          requireAccount: false,
+        );
+      }
+    }());
     _titleController
       ..removeListener(_onContentChanged)
       ..dispose();
@@ -3659,6 +3742,7 @@ class _NoteEditorPageState extends State<NoteEditorPage>
 
   @override
   Widget build(BuildContext context) {
+    if (_privateNoteUnavailable) return const SizedBox.shrink();
     final keyboardHidden = MediaQuery.viewInsetsOf(context).bottom <= 0;
     return PopScope<NoteEditorResult>(
       canPop: _allowPop,
@@ -3798,6 +3882,12 @@ class _NoteEditorPageState extends State<NoteEditorPage>
                                     widget.isBottomSheet ? 24 : 120,
                                   ),
                                   children: [
+                                    if ((_note
+                                                ?.privateAccountScope
+                                                .isNotEmpty ??
+                                            false) &&
+                                        _note?.id != null)
+                                      CompanionNoteOrigin(noteId: _note!.id!),
                                     TextField(
                                       key: const Key('note_title_field'),
                                       controller: _titleController,

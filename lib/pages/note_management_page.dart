@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/chat_note_capture.dart';
 import '../models/note.dart';
 import '../models/note_editor_result.dart';
@@ -10,6 +11,7 @@ import '../models/notebook.dart';
 import '../services/database_service.dart';
 import '../widgets/add_chat_note_sheet.dart';
 import '../widgets/app_toast.dart';
+import '../widgets/companion_annotation_sheet.dart';
 import 'note_editor_page.dart';
 
 /// One note panel: a resizable dialog in chat, or expanded inside the library.
@@ -40,6 +42,7 @@ class NoteManagementPage extends StatefulWidget {
 class _NoteManagementPageState extends State<NoteManagementPage> {
   final _db = DatabaseService();
   final _sheetController = DraggableScrollableController();
+  final _accountRevision = CapabilityCloudSync.instance.emailSessionRevision;
   late Future<List<Notebook>> _notebooksFuture;
   int _reloadToken = 0;
   bool _expanded = false;
@@ -50,6 +53,7 @@ class _NoteManagementPageState extends State<NoteManagementPage> {
   @override
   void initState() {
     super.initState();
+    _accountRevision.addListener(_reloadForAccount);
     _notebooksFuture = _loadNotebooks();
   }
 
@@ -82,8 +86,16 @@ class _NoteManagementPageState extends State<NoteManagementPage> {
 
   @override
   void dispose() {
+    _accountRevision.removeListener(_reloadForAccount);
     _sheetController.dispose();
     super.dispose();
+  }
+
+  void _reloadForAccount() {
+    setState(() {
+      _notebooksFuture = _loadNotebooks();
+      _reloadToken++;
+    });
   }
 
   void _reload() {
@@ -270,48 +282,52 @@ class _NoteManagementPageState extends State<NoteManagementPage> {
   }
 
   Future<void> _showSources(Note note, List<Notebook> notebooks) async {
+    final revision = _accountRevision.value;
     final notes = await _db.queryAllNotes();
-    if (!mounted) return;
+    if (!mounted || revision != _accountRevision.value) return;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (sheetContext) => SizedBox(
-        height: MediaQuery.sizeOf(sheetContext).height * 0.85,
-        child: StatefulBuilder(
-          builder: (context, refresh) => _NoteDetail(
-            key: ValueKey(_reloadToken),
-            note: note,
-            database: _db,
-            onOpenNote: () async {
-              Navigator.pop(sheetContext);
-              await _openEditor(
-                ChatNoteCaptureSelection(
-                  notebook: notebooks.firstWhere(
-                    (item) => item.id == note.notebookId,
-                    orElse: () => notebooks.first,
+      builder: (sheetContext) => guardPrivateAnnotationContent(
+        revision,
+        SizedBox(
+          height: MediaQuery.sizeOf(sheetContext).height * 0.85,
+          child: StatefulBuilder(
+            builder: (context, refresh) => _NoteDetail(
+              key: ValueKey(_reloadToken),
+              note: note,
+              database: _db,
+              onOpenNote: () async {
+                Navigator.pop(sheetContext);
+                await _openEditor(
+                  ChatNoteCaptureSelection(
+                    notebook: notebooks.firstWhere(
+                      (item) => item.id == note.notebookId,
+                      orElse: () => notebooks.first,
+                    ),
+                    keepBookAssociation: note.bookId != null,
+                    existingNote: note,
                   ),
-                  keepBookAssociation: note.bookId != null,
-                  existingNote: note,
-                ),
-              );
-              _reload();
-            },
-            onAddRelation: () async {
-              await _addRelation(note, notes);
-              if (sheetContext.mounted) refresh(() => _reloadToken++);
-            },
-            onRemoveRelation: (target) async {
-              try {
-                await _db.removeNoteRelation(
-                  noteId: note.id!,
-                  relatedNoteId: target.id!,
                 );
+                _reload();
+              },
+              onAddRelation: () async {
+                await _addRelation(note, notes);
                 if (sheetContext.mounted) refresh(() => _reloadToken++);
-              } catch (_) {
-                if (context.mounted) AppToast.show(context, '移除引用失败，请重试');
-              }
-            },
+              },
+              onRemoveRelation: (target) async {
+                try {
+                  await _db.removeNoteRelation(
+                    noteId: note.id!,
+                    relatedNoteId: target.id!,
+                  );
+                  if (sheetContext.mounted) refresh(() => _reloadToken++);
+                } catch (_) {
+                  if (context.mounted) AppToast.show(context, '移除引用失败，请重试');
+                }
+              },
+            ),
           ),
         ),
       ),
@@ -319,6 +335,7 @@ class _NoteManagementPageState extends State<NoteManagementPage> {
   }
 
   Future<void> _addRelation(Note note, List<Note> notes) async {
+    final revision = _accountRevision.value;
     final candidates = notes.where((item) => item.id != note.id).toList();
     if (candidates.isEmpty) {
       AppToast.show(context, '暂无可引用的其他笔记');
@@ -327,18 +344,21 @@ class _NoteManagementPageState extends State<NoteManagementPage> {
     final target = await showModalBottomSheet<Note>(
       context: context,
       useSafeArea: true,
-      builder: (sheetContext) => ListView(
-        shrinkWrap: true,
-        children: [
-          for (final item in candidates)
-            ListTile(
-              title: Text(item.title.trim().isEmpty ? '未命名笔记' : item.title),
-              onTap: () => Navigator.pop(sheetContext, item),
-            ),
-        ],
+      builder: (sheetContext) => guardPrivateAnnotationContent(
+        revision,
+        ListView(
+          shrinkWrap: true,
+          children: [
+            for (final item in candidates)
+              ListTile(
+                title: Text(item.title.trim().isEmpty ? '未命名笔记' : item.title),
+                onTap: () => Navigator.pop(sheetContext, item),
+              ),
+          ],
+        ),
       ),
     );
-    if (target?.id == null) return;
+    if (target?.id == null || revision != _accountRevision.value) return;
     try {
       await _db.addNoteRelation(noteId: note.id!, relatedNoteId: target!.id!);
     } catch (_) {

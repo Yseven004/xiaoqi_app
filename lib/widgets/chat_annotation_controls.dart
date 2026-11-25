@@ -7,6 +7,8 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
 import '../models/chat_annotation.dart';
+import '../models/home_chat_attachment.dart';
+import 'annotation_sheet.dart';
 
 /// Keep source links selectable, with an explicit blue independent of theme.
 InlineSpan chatAnnotationLinkSpan(LinkBuildDetails link) {
@@ -187,8 +189,18 @@ Future<String?> showChatAnnotationComment(
   ScrollPosition? scrollPosition,
   bool dockToKeyboard = false,
   bool requireText = true,
+  String? quote,
   ValueChanged<VoidCallback>? onDismissReady,
 }) async {
+  if (quote != null && quote.trim().isNotEmpty) {
+    final result = await showChatAnnotationComposer(
+      context,
+      initialText: initialText,
+      quote: quote,
+      onDismissReady: onDismissReady,
+    );
+    return result?.comment;
+  }
   final result = Completer<String?>();
   void close(String? value) {
     if (!result.isCompleted) result.complete(value);
@@ -222,6 +234,179 @@ Future<String?> showChatAnnotationComment(
     entry.remove();
     entry.dispose();
   }
+}
+
+typedef ChatAnnotationComposerResult = ({
+  String comment,
+  List<HomeChatAttachment> images,
+});
+
+Future<ChatAnnotationComposerResult?> showChatAnnotationComposer(
+  BuildContext context, {
+  required String initialText,
+  required String quote,
+  List<HomeChatAttachment> initialImages = const [],
+  int imageLimit = ChatAnnotation.maxExplanationImages,
+  Future<List<HomeChatAttachment>> Function(int limit)? onPickImages,
+  ValueChanged<VoidCallback>? onDismissReady,
+  Widget Function(Widget)? guardContent,
+}) => showAnnotationSheet<ChatAnnotationComposerResult>(
+  context,
+  builder: (context) {
+    final composer = _TextAnnotationComposer(
+      initialText: initialText,
+      quote: quote,
+      initialImages: initialImages,
+      imageLimit: imageLimit,
+      onPickImages: onPickImages,
+      onDismissReady: onDismissReady,
+      guardContent: guardContent,
+    );
+    return guardContent?.call(composer) ?? composer;
+  },
+);
+
+class _TextAnnotationComposer extends StatefulWidget {
+  const _TextAnnotationComposer({
+    required this.initialText,
+    required this.quote,
+    required this.initialImages,
+    required this.imageLimit,
+    this.onPickImages,
+    required this.onDismissReady,
+    this.guardContent,
+  });
+
+  final String initialText;
+  final String quote;
+  final List<HomeChatAttachment> initialImages;
+  final int imageLimit;
+  final Future<List<HomeChatAttachment>> Function(int limit)? onPickImages;
+  final ValueChanged<VoidCallback>? onDismissReady;
+  final Widget Function(Widget)? guardContent;
+
+  @override
+  State<_TextAnnotationComposer> createState() =>
+      _TextAnnotationComposerState();
+}
+
+class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
+  late final _controller = TextEditingController(text: widget.initialText);
+  late final _images = List<HomeChatAttachment>.of(widget.initialImages);
+  bool _picking = false;
+
+  Future<void> _pickImages() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() => _picking = true);
+    try {
+      final available = widget.imageLimit - _images.length;
+      final picked = await widget.onPickImages!(available);
+      if (mounted) setState(() => _images.addAll(picked.take(available)));
+    } finally {
+      if (mounted) setState(() => _picking = false);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.onDismissReady?.call(() {
+      if (!mounted) return;
+      final route = ModalRoute.of(context);
+      if (route?.isActive == true) Navigator.of(context).removeRoute(route!);
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            if (widget.onPickImages != null)
+              IconButton(
+                tooltip: '添加解释图',
+                onPressed: _picking || _images.length >= widget.imageLimit
+                    ? null
+                    : _pickImages,
+                icon: annotationAsset('assets/images/reading_task_plus.svg'),
+              ),
+            Expanded(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF4F4F5),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      AnnotationTextField(controller: _controller),
+                      if (_images.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: AnnotationThumbnails(
+                            paths: _images.map((image) => image.path).toList(),
+                            guardContent: widget.guardContent,
+                            onRemove: _picking
+                                ? null
+                                : (index) =>
+                                      setState(() => _images.removeAt(index)),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            ValueListenableBuilder(
+              valueListenable: _controller,
+              builder: (context, value, _) {
+                final comment = value.text.trim();
+                final canSubmit =
+                    !_picking && (comment.isNotEmpty || _images.isNotEmpty);
+                return IconButton(
+                  tooltip: '加入待发送注释',
+                  onPressed: canSubmit
+                      ? () => Navigator.pop(context, (
+                          comment: comment,
+                          images: List<HomeChatAttachment>.unmodifiable(
+                            _images,
+                          ),
+                        ))
+                      : null,
+                  icon: DecoratedBox(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: canSubmit
+                          ? const Color(0xFF252525)
+                          : const Color(0xFF777B83),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: chatAnnotationIcon('arrow-up', size: 18),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+        AnnotationQuoteLine(widget.quote),
+      ],
+    ),
+  );
 }
 
 class _ChatAnnotationCommentPopover extends StatefulWidget {
@@ -465,195 +650,227 @@ Future<void> showChatAnnotationReview(
   ValueChanged<List<ChatAnnotation>>? onChanged,
   Future<String?> Function(BuildContext context, ChatAnnotation annotation)?
   onEditComment,
+  Future<ChatAnnotation?> Function(
+    BuildContext context,
+    ChatAnnotation annotation,
+  )?
+  onEditAnnotation,
+  List<HomeChatAttachment> Function()? explanationImages,
+  Widget Function(Widget)? guardContent,
   ValueChanged<ChatAnnotation>? onLocate,
 }) async {
   var current = List<ChatAnnotation>.of(annotations);
   FocusManager.instance.primaryFocus?.unfocus();
-  final editable = onChanged != null && onEditComment != null;
+  final editable =
+      onChanged != null && (onEditComment != null || onEditAnnotation != null);
   await showDialog<void>(
     context: context,
-    builder: (dialogContext) => StatefulBuilder(
-      builder: (context, update) => Dialog(
-        alignment: const Alignment(0, .35),
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.transparent,
-        insetPadding: const EdgeInsets.all(16),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: math.min(480, MediaQuery.sizeOf(context).width * .82),
-            maxHeight: MediaQuery.sizeOf(context).height * .7,
+    builder: (dialogContext) {
+      final review = StatefulBuilder(
+        builder: (context, update) => Dialog(
+          alignment: const Alignment(0, .35),
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        editable ? '待发送注释' : '已发送注释',
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: math.min(480, MediaQuery.sizeOf(context).width * .82),
+              maxHeight: MediaQuery.sizeOf(context).height * .7,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          editable ? '待发送注释' : '已发送注释',
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
-                    ),
-                    IconButton(
-                      tooltip: '关闭',
-                      onPressed: () => Navigator.pop(dialogContext),
-                      icon: SvgPicture.asset(
-                        'assets/icons/chat_note_editor/x.svg',
-                        width: 20,
-                        height: 20,
+                      IconButton(
+                        tooltip: '关闭',
+                        onPressed: () => Navigator.pop(dialogContext),
+                        icon: SvgPicture.asset(
+                          'assets/icons/chat_note_editor/x.svg',
+                          width: 20,
+                          height: 20,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              Flexible(
-                child: current.isEmpty
-                    ? const Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text('暂无注释'),
-                      )
-                    : ListView.separated(
-                        shrinkWrap: true,
-                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-                        itemCount: current.length,
-                        separatorBuilder: (_, _) =>
-                            const Divider(height: 25, color: Color(0xFFE0E0E0)),
-                        itemBuilder: (context, index) {
-                          final a = current[index];
-                          Future<void> edit() async {
-                            final value = await onEditComment!(
-                              dialogContext,
-                              a,
-                            );
-                            if (value == null || !context.mounted) return;
-                            update(
-                              () => current = current
-                                  .map(
-                                    (v) => v.id == a.id
-                                        ? v.copyWith(comment: value)
-                                        : v,
-                                  )
-                                  .toList(),
-                            );
-                            onChanged!(current);
-                          }
+                Flexible(
+                  child: current.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text('暂无注释'),
+                        )
+                      : ListView.separated(
+                          shrinkWrap: true,
+                          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                          itemCount: current.length,
+                          separatorBuilder: (_, _) => const Divider(
+                            height: 25,
+                            color: Color(0xFFE0E0E0),
+                          ),
+                          itemBuilder: (context, index) {
+                            final a = current[index];
+                            Future<void> edit() async {
+                              final ChatAnnotation? value;
+                              if (onEditAnnotation != null) {
+                                value = await onEditAnnotation(
+                                  dialogContext,
+                                  a,
+                                );
+                              } else {
+                                final comment = await onEditComment!(
+                                  dialogContext,
+                                  a,
+                                );
+                                value = comment == null
+                                    ? null
+                                    : a.copyWith(comment: comment);
+                              }
+                              if (value == null || !context.mounted) return;
+                              final edited = value;
+                              update(
+                                () => current = current
+                                    .map((v) => v.id == a.id ? edited : v)
+                                    .toList(),
+                              );
+                              onChanged!(current);
+                            }
 
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: InkWell(
-                                      onTap: onLocate == null
-                                          ? null
-                                          : () {
-                                              Navigator.pop(dialogContext);
-                                              onLocate(a);
-                                            },
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          vertical: 12,
-                                        ),
-                                        child: Text(
-                                          '注释 ${index + 1}',
-                                          style: const TextStyle(
-                                            color: Color(0xFF3B82F6),
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.w600,
+                            final attachedById = {
+                              for (final image
+                                  in explanationImages?.call() ??
+                                      const <HomeChatAttachment>[])
+                                image.id: image.path,
+                            };
+                            final paths = [
+                              for (final id in a.explanationImageIds)
+                                if (attachedById[id] case final path?) path,
+                            ];
+
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: InkWell(
+                                        onTap: onLocate == null
+                                            ? null
+                                            : () {
+                                                Navigator.pop(dialogContext);
+                                                onLocate(a);
+                                              },
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 12,
+                                          ),
+                                          child: Text(
+                                            '注释 ${index + 1}',
+                                            style: const TextStyle(
+                                              color: Color(0xFF3B82F6),
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.w600,
+                                            ),
                                           ),
                                         ),
                                       ),
                                     ),
-                                  ),
-                                  if (editable)
-                                    IconButton(
-                                      tooltip: '编辑评论',
-                                      onPressed: edit,
-                                      icon: SvgPicture.asset(
-                                        'assets/images/home_message_edit.svg',
-                                        width: 20,
-                                        height: 20,
+                                    if (editable)
+                                      IconButton(
+                                        tooltip: '编辑评论',
+                                        onPressed: edit,
+                                        icon: SvgPicture.asset(
+                                          'assets/images/home_message_edit.svg',
+                                          width: 20,
+                                          height: 20,
+                                        ),
                                       ),
-                                    ),
-                                  if (editable)
-                                    IconButton(
-                                      tooltip: '移除注释',
-                                      icon: SvgPicture.asset(
-                                        'assets/icons/chat_note_editor/trash.svg',
-                                        width: 20,
-                                        height: 20,
+                                    if (editable)
+                                      IconButton(
+                                        tooltip: '移除注释',
+                                        icon: SvgPicture.asset(
+                                          'assets/icons/chat_note_editor/trash.svg',
+                                          width: 20,
+                                          height: 20,
+                                        ),
+                                        onPressed: () {
+                                          update(
+                                            () => current = current
+                                                .where((v) => v.id != a.id)
+                                                .toList(),
+                                          );
+                                          onChanged(current);
+                                        },
                                       ),
-                                      onPressed: () {
-                                        update(
-                                          () => current = current
-                                              .where((v) => v.id != a.id)
-                                              .toList(),
-                                        );
-                                        onChanged(current);
-                                      },
-                                    ),
-                                ],
-                              ),
-                              Text(
-                                a.isImage ? '所选图片：' : '所选文本：',
-                                style: const TextStyle(
-                                  fontSize: 15,
-                                  height: 1.5,
-                                  fontWeight: FontWeight.w600,
+                                  ],
                                 ),
-                              ),
-                              Text(
-                                a.isImage
-                                    ? '图片点位 · ${(a.x * 100).round()}%，${(a.y * 100).round()}%'
-                                    : a.quote,
-                                style: const TextStyle(
-                                  fontSize: 15,
-                                  height: 1.5,
-                                ),
-                              ),
-                              const SizedBox(height: 14),
-                              const Text(
-                                '评论：',
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  height: 1.5,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              InkWell(
-                                onTap: editable ? edit : null,
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 6,
-                                  ),
-                                  child: Text(
-                                    a.comment.isEmpty
-                                        ? (editable ? '添加可选评论…' : '未填写评论')
-                                        : a.comment,
+                                if (a.isImage)
+                                  Text(
+                                    '图片点位 · ${(a.x * 100).round()}%，${(a.y * 100).round()}%',
                                     style: const TextStyle(
                                       fontSize: 15,
                                       height: 1.5,
                                     ),
+                                  )
+                                else
+                                  AnnotationQuoteLine(a.quote),
+                                const SizedBox(height: 14),
+                                const Text(
+                                  '评论：',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    height: 1.5,
+                                    fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                              ),
-                            ],
-                          );
-                        },
-                      ),
-              ),
-            ],
+                                InkWell(
+                                  onTap: editable ? edit : null,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 6,
+                                    ),
+                                    child: Text(
+                                      a.comment.isEmpty
+                                          ? (editable ? '添加可选评论…' : '未填写评论')
+                                          : a.comment,
+                                      style: const TextStyle(
+                                        fontSize: 15,
+                                        height: 1.5,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (paths.isNotEmpty)
+                                  AnnotationThumbnails(
+                                    paths: paths,
+                                    guardContent: guardContent,
+                                  ),
+                              ],
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
           ),
         ),
-      ),
-    ),
+      );
+      return guardContent?.call(review) ?? review;
+    },
   );
 }
 

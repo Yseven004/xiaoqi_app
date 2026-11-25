@@ -14,6 +14,7 @@ import 'package:pdfium_dart/pdfium_dart.dart' as pdfium;
 import 'package:pdfrx/pdfrx.dart';
 
 import '../models/book_source.dart';
+import '../models/companion_source_range.dart';
 import '../models/xiaoqi_document.dart';
 import '../plugins/document_recognition/fast_ocr_plugin.dart';
 
@@ -25,6 +26,7 @@ typedef CompanionPdfLink = ({Rect bounds, String target});
 
 /// A source page, in reading order, with geometry in original page fractions.
 class CompanionReflowPage {
+  static const _pdfTextRunsKey = 'pdfTextRuns';
   static const readingChapterId = 'pdf-reflow-body';
   static final _chapterHeading = RegExp(
     r'^(?:第[\s零〇一二三四五六七八九十百千万萬两兩\d０-９]+([卷篇部章节節回])|(chapter|part|section)\s+(?:\d+|[ivxlcdm]+)\b)',
@@ -342,6 +344,13 @@ class CompanionReflowPage {
                       row[2],
                     ],
                 ]),
+              if (last.attributes.containsKey(_pdfTextRunsKey) ||
+                  first.attributes.containsKey(_pdfTextRunsKey))
+                _pdfTextRunsKey: jsonEncode([
+                  for (final run in _sourceRuns(last)) run.toJson(),
+                  for (final run in _sourceRuns(first))
+                    run.shifted(prefix.length).toJson(),
+                ]),
               first.id: prefix.length.toString(),
             },
           ),
@@ -389,6 +398,12 @@ class CompanionReflowPage {
             attributes: {
               if (paragraph.centered) 'textAlign': 'center',
               ..._boldAttributes(paragraph.boldRanges),
+              if (paragraph.lines.any((e) => e.line.pdfTextRuns.isNotEmpty))
+                _pdfTextRunsKey: jsonEncode([
+                  for (final (line: line, offset: offset) in paragraph.lines)
+                    for (final run in line.pdfTextRuns)
+                      run.shifted(offset).toJson(),
+                ]),
               if (paragraph.lines.any((e) => e.line.linkRanges.isNotEmpty))
                 'linkRanges': jsonEncode([
                   for (final entry in paragraph.lines)
@@ -465,6 +480,17 @@ class CompanionReflowPage {
             for (final range in ranges) [range.start, range.end],
           ]),
       };
+
+  static List<CompanionPdfTextRun> _sourceRuns(XiaoqiDocumentBlock block) {
+    final raw = block.attributes[_pdfTextRunsKey];
+    return raw == null
+        ? const []
+        : companionPdfTextRunsFromJson(jsonDecode(raw));
+  }
+
+  static CompanionPdfTextProjection sourceProjection(
+    XiaoqiDocumentBlock block,
+  ) => CompanionPdfTextProjection(block.text, _sourceRuns(block));
 
   /// Map a position in a joined paragraph back to its original PDF block.
   static ({String blockId, int offset})? sourcePosition(
@@ -622,6 +648,7 @@ class CompanionReflowLine {
     this.ocrParagraph,
     this.boldRanges = const [],
     this.linkRanges = const [],
+    this.pdfTextRuns = const [],
   });
 
   final String text;
@@ -633,6 +660,7 @@ class CompanionReflowLine {
   final String? ocrParagraph;
   final List<DocumentBoldRange> boldRanges;
   final List<DocumentLinkRange> linkRanges;
+  final List<CompanionPdfTextRun> pdfTextRuns;
 
   double get typeSize => fontSize ?? bounds.height;
   bool get isMostlyBold =>
@@ -651,6 +679,8 @@ class CompanionReflowLine {
       if (paragraphTag != null) 'paragraphTag': paragraphTag,
       if (headingLevel > 0) 'headingLevel': headingLevel,
       if (ocrParagraph != null) 'ocrParagraph': ocrParagraph,
+      if (pdfTextRuns.isNotEmpty)
+        'pdfTextRuns': [for (final run in pdfTextRuns) run.toJson()],
       if (linkRanges.isNotEmpty)
         'links': [
           for (final link in linkRanges) [link.start, link.end, link.target],
@@ -677,6 +707,7 @@ class CompanionReflowLine {
       paragraphTag: style['paragraphTag'] as int?,
       headingLevel: style['headingLevel'] as int? ?? 0,
       ocrParagraph: style['ocrParagraph'] as String?,
+      pdfTextRuns: companionPdfTextRunsFromJson(style['pdfTextRuns']),
       linkRanges: [
         for (final row in style['links'] as List? ?? const [])
           (start: row[0] as int, end: row[1] as int, target: row[2] as String),
@@ -749,11 +780,23 @@ class CompanionPdfReflow {
         ? await getTemporaryDirectory()
         : Directory(cache);
     return Directory(
-      '${root.path}/companion-reflow-v4/$_cacheKey',
+      '${root.path}/companion-reflow-v5/$_cacheKey',
     ).create(recursive: true);
   }();
 
   CompanionReflowPage? cached(int page) => _results[page];
+
+  Future<CompanionReflowPage?> cachedTextLayer(int number) async {
+    final memory = cached(number);
+    if (memory != null) return memory;
+    try {
+      final directory = await _directory;
+      final file = File('${directory.path}/$number.json');
+      return await file.exists() ? await _decodeCache(file, number) : null;
+    } on Exception {
+      return null;
+    }
+  }
 
   Future<void> invalidatePage(int number) async {
     if (number < 1) return;
@@ -1218,6 +1261,9 @@ class CompanionPdfReflow {
     List<_PdfGlyphStyle?>? styles,
     List<CompanionPdfLink> links,
   ) {
+    final pageBounds = trimCompanionRange(raw.fullText, 0, raw.fullText.length);
+    if (pageBounds == null) return const [];
+    final pageHash = companionTextHash(raw.fullText);
     final words = <({PdfPageTextFragment run, Rect box})>[];
     for (final fragment in raw.fragments) {
       if (fragment.text.trim().isEmpty || fragment.bounds.isEmpty) continue;
@@ -1242,6 +1288,7 @@ class CompanionPdfReflow {
       final tags = <_PdfTextTag, int>{};
       final bold = <DocumentBoldRange>[];
       final glyphLinks = <DocumentLinkRange>[];
+      final textRuns = <CompanionPdfTextRun>[];
       var styledGlyphs = 0;
       PdfPageTextFragment? previous;
       void finish() {
@@ -1267,6 +1314,7 @@ class CompanionPdfReflow {
             headingLevel: tag?.heading ?? 0,
             boldRanges: List.unmodifiable(bold),
             linkRanges: List.unmodifiable(glyphLinks),
+            pdfTextRuns: List.unmodifiable(textRuns),
           ),
         );
       }
@@ -1283,6 +1331,7 @@ class CompanionPdfReflow {
           tags.clear();
           bold.clear();
           glyphLinks.clear();
+          textRuns.clear();
           styledGlyphs = 0;
         }
         if (previous != null) {
@@ -1313,6 +1362,27 @@ class CompanionPdfReflow {
         final value = fragment.trim();
         final sourceStart =
             word.run.index + fragment.length - fragment.trimLeft().length;
+        if (value.isNotEmpty &&
+            sourceStart >= 0 &&
+            sourceStart + value.length <= raw.fullText.length &&
+            raw.fullText.substring(sourceStart, sourceStart + value.length) ==
+                value) {
+          var precedingTextEnd = sourceStart;
+          while (precedingTextEnd > 0 &&
+              raw.fullText[precedingTextEnd - 1].trim().isEmpty) {
+            precedingTextEnd--;
+          }
+          textRuns.add((
+            displayStart: text.length,
+            length: value.length,
+            page: raw.pageNumber,
+            sourceStart: sourceStart,
+            precedingTextEnd: precedingTextEnd,
+            firstTextOffset: pageBounds.start,
+            lastTextEnd: pageBounds.end,
+            textHash: pageHash,
+          ));
+        }
         if (links.isNotEmpty) {
           for (
             var i = 0;
@@ -1955,20 +2025,38 @@ class _RecognizedPdfPage implements PdfPage {
 
   @override
   Future<PdfPageRawText?> loadText() async {
-    final raw = await original.loadText();
+    PdfPageText? native;
+    try {
+      native = await original.loadStructuredText();
+    } on Exception {
+      // An unreadable native layer can still use recognized line geometry.
+    }
     final text = StringBuffer();
     final boxes = <PdfRect>[];
+    final hash = native == null ? null : companionTextHash(native.fullText);
     for (final line in reflow.lines) {
       final bounds = line.bounds;
-      final match = line.recognized || raw == null
-          ? -1
-          : raw.fullText.indexOf(line.text);
       final count = line.text.length;
       text.writeln(line.text);
+      var runIndex = 0;
       for (var index = 0; index < count; index++) {
-        if (match >= 0 && match + index < raw!.charRects.length) {
-          boxes.add(raw.charRects[match + index]);
-          continue;
+        while (runIndex < line.pdfTextRuns.length &&
+            index >=
+                line.pdfTextRuns[runIndex].displayStart +
+                    line.pdfTextRuns[runIndex].length) {
+          runIndex++;
+        }
+        if (runIndex < line.pdfTextRuns.length) {
+          final run = line.pdfTextRuns[runIndex];
+          final offset = run.sourceStart + index - run.displayStart;
+          if (native != null &&
+              run.textHash == hash &&
+              index >= run.displayStart &&
+              offset >= 0 &&
+              offset < native.charRects.length) {
+            boxes.add(native.charRects[offset]);
+            continue;
+          }
         }
         boxes.add(
           Rect.fromLTRB(
@@ -1984,3 +2072,8 @@ class _RecognizedPdfPage implements PdfPage {
     return PdfPageRawText(text.toString(), boxes);
   }
 }
+
+/// PDF coordinates captured before a page's OCR text layer was installed still
+/// resolve against its native glyphs after switching the reading view.
+PdfPage companionNativePdfPage(PdfPage page) =>
+    page is _RecognizedPdfPage ? page.original : page;

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:crypto/crypto.dart';
@@ -12,7 +13,7 @@ import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/home_chat_attachment.dart';
 
 List<int> _encodeAttachmentJpeg(
-  ({int width, int height, Uint8List pixels}) input,
+  ({int width, int height, Uint8List pixels, int quality}) input,
 ) => img.encodeJpg(
   img.Image.fromBytes(
     width: input.width,
@@ -21,7 +22,7 @@ List<int> _encodeAttachmentJpeg(
     bytesOffset: input.pixels.offsetInBytes,
     numChannels: 4,
   ),
-  quality: 92,
+  quality: input.quality,
 );
 
 class AttachmentPreparationState {
@@ -579,12 +580,51 @@ class HomeChatAttachmentPreparer {
     }
   }
 
+  Future<String> uploadAnnotationImage(
+    HomeChatAttachment attachment, {
+    required String messageId,
+    required String authorization,
+    required int byteBudget,
+  }) async {
+    if (!attachment.isAnnotationExplanation || !attachment.isImage) {
+      throw const FormatException('解释图必须是图片');
+    }
+    var source = await _uploadSource(attachment, maxEdge: 2400);
+    try {
+      for (final (edge, quality) in [(2000, 88), (1600, 85), (1200, 82)]) {
+        if (await File(source.path).length() <= byteBudget) break;
+        await _deleteConvertedUpload(source.path, attachment.path);
+        source = await _uploadSource(attachment, maxEdge: edge, jpegQuality: quality);
+      }
+      final file = File(source.path);
+      if (await file.length() > byteBudget) {
+        throw const FormatException('图片体积过大，请裁剪需要解释的局部');
+      }
+      final digest = await sha256.bind(file.openRead()).first;
+      final response = await CapabilityCloudSync.instance.createAttachment(
+        path: source.path,
+        name: source.name,
+        mimeType: source.mimeType,
+        contentHash: digest.toString(),
+        expectedAuthorization: authorization,
+        annotationMessageId: messageId,
+      );
+      final id = response['id']?.toString();
+      if (id == null || id.isEmpty) throw const FormatException('解释图未上传成功');
+      return id;
+    } finally {
+      await _deleteConvertedUpload(source.path, attachment.path);
+    }
+  }
+
   Future<({String path, String name, String mimeType})> _uploadSource(
-    HomeChatAttachment attachment,
-  ) async {
+    HomeChatAttachment attachment, {
+    int? maxEdge,
+    int jpegQuality = 92,
+  }) async {
     final extension = attachment.name.split('.').last.toLowerCase();
     if (!attachment.isImage ||
-        (!const ['heic', 'heif'].contains(extension) &&
+        (maxEdge == null && !const ['heic', 'heif'].contains(extension) &&
             !const [
               'image/heic',
               'image/heif',
@@ -603,17 +643,13 @@ class HomeChatAttachmentPreparer {
         final descriptor = await ui.ImageDescriptor.encoded(buffer);
         try {
           final scale =
-              4096 /
+              (maxEdge ?? 4096) /
               (descriptor.width > descriptor.height
                   ? descriptor.width
                   : descriptor.height);
           final codec = await descriptor.instantiateCodec(
-            targetWidth: scale < 1
-                ? (descriptor.width * scale).round()
-                : descriptor.width,
-            targetHeight: scale < 1
-                ? (descriptor.height * scale).round()
-                : descriptor.height,
+            targetWidth: math.max(1, scale < 1 ? (descriptor.width * scale).round() : descriptor.width),
+            targetHeight: math.max(1, scale < 1 ? (descriptor.height * scale).round() : descriptor.height),
           );
           try {
             final frame = await codec.getNextFrame();
@@ -632,8 +668,11 @@ class HomeChatAttachmentPreparer {
                 width: width,
                 height: height,
                 pixels: pixels,
+                quality: jpegQuality,
               ));
-              final path = '${attachment.path}.upload.jpg';
+              final path = maxEdge == null
+                  ? '${attachment.path}.upload.jpg'
+                  : '${attachment.path}.${DateTime.now().microsecondsSinceEpoch}.upload.jpg';
               try {
                 await File(path).writeAsBytes(jpeg, flush: true);
               } catch (_) {

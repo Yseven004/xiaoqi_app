@@ -35,6 +35,7 @@ import 'mcp_tool_directory.dart';
 import 'sandbox_mcp_transport.dart';
 import 'plugin_dependencies.dart';
 import 'attachment_service.dart';
+import 'chat_annotation_images.dart';
 import 'turn_contract.dart';
 import 'intent_router.dart';
 import 'model_limits.dart';
@@ -1825,12 +1826,16 @@ class GenkitXiaoqiAgentRuntime
       cancellation: cancellation,
     );
     cancellation.throwIfCancelled();
+    final annotationAccount =
+        store.get('task/$tenantId/$taskId')?.value['annotation_account']
+            as String?;
     request = {
       ...request,
       '_visible_artifacts': validateArtifactReferences(
         store,
         tenantId,
         request['_visible_artifacts'],
+        annotationAccount: annotationAccount,
       ),
     };
     final rawCapability = request['capability'];
@@ -2137,13 +2142,17 @@ class GenkitXiaoqiAgentRuntime
         rawCapability is Map &&
         rawCapability['type'] == 'action' &&
         rawCapability['id'] == 'create-image';
+    final hasAnnotationImages = request['annotation_groups'] != null;
+    final rawVisualOperation = hasAnnotationImages
+        ? RegExp(r'(生图|生成.{0,8}(图|图片)|画.{0,8}(图|图片)|制作.{0,8}(海报|插画))')
+        : RegExp(
+            r'(生图|图片|图像|海报|插画|画.{0,8}(图|图片)|生成.{0,8}(图|图片)|视觉.{0,8}(笔记|学习|海报|图文)|图文笔记)',
+          );
     final needsSpecialIntentRouting =
-        taskMaterials.isNotEmpty ||
+        (!hasAnnotationImages && taskMaterials.isNotEmpty) ||
         request['current_action'] != null ||
         request['target_artifact_id'] != null ||
-        RegExp(
-          r'(生图|图片|图像|海报|插画|画.{0,8}(图|图片)|生成.{0,8}(图|图片)|视觉.{0,8}(笔记|学习|海报|图文)|图文笔记)',
-        ).hasMatch(latestUserText);
+        rawVisualOperation.hasMatch(latestUserText);
     final taskHasPendingSteering =
         (store.get('task/$tenantId/$taskId')?.value['steering_instructions']
                     as List? ??
@@ -2611,7 +2620,20 @@ class GenkitXiaoqiAgentRuntime
         );
       }
     }
-    if (turnContract.readsImage &&
+    final usesHistoricalAnnotationImages =
+        referenceImageUrl == null &&
+        messages.any(
+          (message) =>
+              message.role == Role.user &&
+              message.content.any(
+                (part) =>
+                    part.isMedia &&
+                    part.metadata?[groupedAnnotationMediaMarker] == true,
+              ),
+        );
+    if (!hasAnnotationImages &&
+        !usesHistoricalAnnotationImages &&
+        turnContract.readsImage &&
         (referenceImageUrl != null ||
             RegExp(r'图片|这张图|那张图|照片|图里').hasMatch(latestUserText) ||
             (request['_visible_artifacts'] as List? ?? const [])
@@ -2649,6 +2671,7 @@ class GenkitXiaoqiAgentRuntime
 
     // Step 5: Direct image generation path (no text answer needed)
     if (shouldGenerateImage &&
+        !hasAnnotationImages &&
         turnContract.imageLimit == 1 &&
         !answerBeforeImage &&
         (!skillsAvailable || imageGenerationSelected) &&
@@ -2772,6 +2795,7 @@ class GenkitXiaoqiAgentRuntime
       throw StateError('服务器未配置 ${selection.keyName}');
     final ordinaryAttachment =
         taskMaterials.isNotEmpty &&
+        !hasAnnotationImages &&
         !extensionSelected &&
         !skillsAvailable &&
         pluginCommands.entries.isEmpty &&

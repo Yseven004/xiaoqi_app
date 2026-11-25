@@ -94,6 +94,87 @@ void main() {
     expect(restored.copyWith(imageAnnotations: []).imageAnnotations, isEmpty);
   });
 
+  test('explanation owner survives history and cannot be rebound', () {
+    const draft = HomeChatAttachment(
+      id: 'explanation',
+      name: '说明图.png',
+      path: '/private/explanation.png',
+      mimeType: 'image/png',
+      byteLength: 100,
+      source: HomeChatAttachment.annotationExplanationSource,
+    );
+    expect(draft.isImage, isTrue);
+    expect(draft.isEditableImage, isFalse);
+    expect(draft.belongsToExplanationOwner('account_a'), isFalse);
+    expect(() => draft.bindExplanationOwner('local'), throwsFormatException);
+
+    final owned = draft.bindExplanationOwner('account_a');
+    final restored = HomeChatAttachment.fromJson(
+      jsonDecode(jsonEncode(owned.toJson())),
+    );
+    expect(restored.belongsToExplanationOwner('account_a'), isTrue);
+    expect(restored.belongsToExplanationOwner('account_b'), isFalse);
+    expect(
+      () => restored.bindExplanationOwner('account_b'),
+      throwsFormatException,
+    );
+    expect(
+      restored
+          .copyWith(
+            path: '/saved/explanation.png',
+            annotationOwnerScope: 'account_b',
+          )
+          .belongsToExplanationOwner('account_a'),
+      isTrue,
+    );
+  });
+
+  test('batch material tracks changes with the same attachment id', () {
+    const sent = HomeChatAttachment(
+      id: 'drawing',
+      name: '绘图.png',
+      path: '/snapshot.png',
+      mimeType: 'image/png',
+      byteLength: 100,
+      source: 'drawing',
+      drawingDraftPath: '/editable.json',
+      contentHash: 'sent-content',
+    );
+    expect(sent.isEditableImage, isTrue);
+    expect(
+      sent.hasSameDraftMaterial(HomeChatAttachment.fromJson(sent.toJson())),
+      isTrue,
+    );
+    expect(
+      sent.hasSameDraftMaterial(sent.copyWith(path: '/changed.png')),
+      isFalse,
+    );
+    expect(
+      sent.hasSameDraftMaterial(sent.copyWith(contentHash: 'edited-content')),
+      isFalse,
+    );
+    expect(
+      sent.hasSameDraftMaterial(sent.copyWith(annotationSnapshotDirty: true)),
+      isFalse,
+    );
+    expect(
+      sent.hasSameDraftMaterial(sent.copyWith(remoteAttachmentId: 'uploaded')),
+      isTrue,
+    );
+    final unprepared = sent.copyWith(contentHash: '');
+    expect(
+      unprepared.hasSameDraftMaterial(
+        sent.copyWith(
+          extractedText: '准备时生成的文字',
+          sourceLabel: '服务端生成的描述',
+          pageImagePaths: ['/prepared/page.png'],
+          remoteAttachmentId: 'uploaded',
+        ),
+      ),
+      isTrue,
+    );
+  });
+
   test(
     'annotation-only prompt binds image numbering separately for each image',
     () {
@@ -390,6 +471,113 @@ void main() {
     expect(find.byType(ChatAnnotationInput), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'the docked text composer clips the quote and cancels without saving',
+    (tester) async {
+      const quote = '所选引文第一行\n完整引文第二行';
+      String? saved;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () async {
+                  saved = await showChatAnnotationComment(
+                    context,
+                    initialText: '',
+                    anchor: Offset.zero,
+                    quote: quote,
+                  );
+                },
+                child: const Text('写注释'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('写注释'));
+      await tester.pumpAndSettle();
+      final quoteLine = tester.widget<Text>(find.text('引文  所选引文第一行 完整引文第二行'));
+      expect(quoteLine.maxLines, 1);
+      expect(quoteLine.overflow, TextOverflow.clip);
+      await tester.tap(find.byWidget(quoteLine));
+      await tester.pumpAndSettle();
+      expect(find.text(quote), findsOneWidget);
+      await tester.tap(find.text('关闭'));
+      await tester.pumpAndSettle();
+      await tester.tapAt(const Offset(6, 6));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+      expect(saved, isNull);
+    },
+  );
+
+  testWidgets(
+    'the text composer keeps at most three ordered explanation images',
+    (tester) async {
+      final temp = Directory.systemTemp.createTempSync('annotation-composer-');
+      addTearDown(() => temp.deleteSync(recursive: true));
+      final bytes = await tester.runAsync(pictureBytes);
+      final images = [
+        for (var index = 1; index <= 4; index++)
+          HomeChatAttachment(
+            id: 'explanation-$index',
+            name: 'same-name.png',
+            path: (File(
+              '${temp.path}/$index.png',
+            )..writeAsBytesSync(bytes!)).path,
+            mimeType: 'image/png',
+            byteLength: bytes.length,
+            source: HomeChatAttachment.annotationExplanationSource,
+          ),
+      ];
+      ChatAnnotationComposerResult? result;
+      var remaining = -1;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () async =>
+                    result = await showChatAnnotationComposer(
+                      context,
+                      initialText: '',
+                      quote: '选中文本',
+                      onPickImages: (limit) async {
+                        remaining = limit;
+                        return images;
+                      },
+                    ),
+                child: const Text('新建注释'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('新建注释'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('添加解释图'));
+      await tester.pumpAndSettle();
+      expect(remaining, 3);
+      final add = find.byWidgetPredicate(
+        (widget) => widget is IconButton && widget.tooltip == '添加解释图',
+      );
+      expect(tester.widget<IconButton>(add).onPressed, isNull);
+      expect(find.byTooltip('移除图片 3'), findsOneWidget);
+      expect(find.byTooltip('移除图片 4'), findsNothing);
+      await tester.tap(find.byTooltip('移除图片 2'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('加入待发送注释'));
+      await tester.pumpAndSettle();
+      expect(result?.comment, isEmpty);
+      expect(result?.images.map((image) => image.id), [
+        'explanation-1',
+        'explanation-3',
+      ]);
+    },
+  );
 
   testWidgets('an unsaved text draft has no numbered pin', (tester) async {
     await tester.pumpWidget(
