@@ -246,11 +246,40 @@ class _AnnotationAccountGuardState extends State<_AnnotationAccountGuard> {
       : const Padding(padding: EdgeInsets.all(16), child: Text('账号已切换'));
 }
 
-class _AnnotationPrivacy extends StatelessWidget {
+class _AnnotationPrivacy extends StatefulWidget {
   const _AnnotationPrivacy();
 
+  @override
+  State<_AnnotationPrivacy> createState() => _AnnotationPrivacyState();
+}
+
+class _AnnotationPrivacyState extends State<_AnnotationPrivacy> {
+  bool _showing = false;
+
   Future<void> _showMenu(BuildContext context) async {
-    FocusManager.instance.primaryFocus?.unfocus();
+    if (_showing) return;
+    _showing = true;
+    try {
+      final view = View.of(context);
+      FocusManager.instance.primaryFocus?.unfocus();
+      // Measure the trigger after the system keyboard has moved the editor.
+      // Popup routes otherwise keep the coordinates from the opening frame.
+      if (view.viewInsets.bottom > 0) {
+        final deadline = DateTime.now().add(const Duration(milliseconds: 600));
+        while (mounted &&
+            view.viewInsets.bottom > 0 &&
+            DateTime.now().isBefore(deadline)) {
+          await WidgetsBinding.instance.endOfFrame;
+        }
+        if (!context.mounted) return;
+      }
+      await _showAnchoredMenu(context);
+    } finally {
+      _showing = false;
+    }
+  }
+
+  Future<void> _showAnchoredMenu(BuildContext context) async {
     final anchor = context.findRenderObject()! as RenderBox;
     final overlay =
         Navigator.of(
