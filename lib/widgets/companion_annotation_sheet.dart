@@ -249,9 +249,9 @@ class _AnnotationPrivacy extends StatelessWidget {
           1.0,
           double.infinity,
         );
-    final headerHeight = 32.0 * scale.clamp(1.0, double.infinity);
-    final privateHeight = 44.0 * scale.clamp(1.0, double.infinity);
-    final disabledHeight = 36.0 * scale.clamp(1.0, double.infinity);
+    final headerHeight = 32.0 * scale;
+    final privateHeight = 44.0 * scale;
+    final disabledHeight = 36.0 * scale;
     final menuHeight =
         16 * visualScale + headerHeight + privateHeight + disabledHeight * 3;
     final itemPadding = EdgeInsets.symmetric(horizontal: 16 * visualScale);
@@ -321,20 +321,28 @@ class _AnnotationPrivacy extends StatelessWidget {
           PopupMenuItem<String>(
             enabled: false,
             height: disabledHeight,
-            padding: itemPadding,
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    label,
-                    style: TextStyle(color: _quiet, fontSize: 14 * visualScale),
+            padding: EdgeInsets.zero,
+            child: Container(
+              height: disabledHeight,
+              padding: itemPadding,
+              color: const Color(0xFFF7F7F8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        color: _quiet,
+                        fontSize: 14 * visualScale,
+                      ),
+                    ),
                   ),
-                ),
-                Text(
-                  '暂未开放',
-                  style: TextStyle(color: _quiet, fontSize: 13 * visualScale),
-                ),
-              ],
+                  Text(
+                    '暂未开放',
+                    style: TextStyle(color: _quiet, fontSize: 13 * visualScale),
+                  ),
+                ],
+              ),
             ),
           ),
       ],
