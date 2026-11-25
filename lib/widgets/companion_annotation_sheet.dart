@@ -923,7 +923,9 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(7),
               ),
-              textStyle: const TextStyle(fontSize: 14),
+              textStyle: Theme.of(
+                context,
+              ).textTheme.labelLarge?.copyWith(fontSize: 14),
             ),
             onPressed: _saved || _busy || _recording != null || !hasContent
                 ? null
