@@ -6,7 +6,12 @@ class AppToast {
   AppToast._();
 
   /// 居中弹出 Toast，1秒后自动消失
-  static void show(BuildContext context, String message) {
+  static void show(
+    BuildContext context,
+    String message, {
+    Widget? leading,
+    double scale = 1,
+  }) {
     // 先在调用方仍然有效的当前 frame 捕获 Overlay。这样“提示后立即
     // Navigator.pop”的调用仍能显示 Toast，同时不会在 teardown 期间再做
     // 祖先查找。
@@ -34,7 +39,12 @@ class AppToast {
         return IgnorePointer(
           child: Semantics(
             liveRegion: true,
-            child: _ToastWidget(message: message, onDismiss: dismiss),
+            child: _ToastWidget(
+              message: message,
+              leading: leading,
+              scale: scale,
+              onDismiss: dismiss,
+            ),
           ),
         );
       },
@@ -56,9 +66,16 @@ class AppToast {
 
 class _ToastWidget extends StatefulWidget {
   final String message;
+  final Widget? leading;
+  final double scale;
   final VoidCallback onDismiss;
 
-  const _ToastWidget({required this.message, required this.onDismiss});
+  const _ToastWidget({
+    required this.message,
+    required this.leading,
+    required this.scale,
+    required this.onDismiss,
+  });
 
   @override
   State<_ToastWidget> createState() => _ToastWidgetState();
@@ -104,6 +121,17 @@ class _ToastWidgetState extends State<_ToastWidget>
 
   @override
   Widget build(BuildContext context) {
+    final leading = widget.leading;
+    final scale = widget.scale;
+    final label = Text(
+      widget.message,
+      style: TextStyle(
+        color: Colors.white,
+        fontSize: 15 * scale,
+        fontWeight: leading == null ? FontWeight.w400 : FontWeight.w600,
+      ),
+      textAlign: TextAlign.center,
+    );
     return AnimatedBuilder(
       animation: _opacity,
       builder: (context, child) {
@@ -114,13 +142,15 @@ class _ToastWidgetState extends State<_ToastWidget>
             child: Center(
               child: Container(
                 margin: const EdgeInsets.symmetric(horizontal: 40),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 12,
+                padding: EdgeInsets.symmetric(
+                  horizontal: (leading == null ? 24 : 16) * scale,
+                  vertical: (leading == null ? 12 : 8) * scale,
                 ),
                 decoration: BoxDecoration(
                   color: const Color(0xE6000000), // 90% black
-                  borderRadius: BorderRadius.circular(24),
+                  borderRadius: BorderRadius.circular(
+                    (leading == null ? 24 : 10) * scale,
+                  ),
                   boxShadow: const [
                     BoxShadow(
                       color: Color(0x40000000),
@@ -129,15 +159,16 @@ class _ToastWidgetState extends State<_ToastWidget>
                     ),
                   ],
                 ),
-                child: Text(
-                  widget.message,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w400,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
+                child: leading == null
+                    ? label
+                    : Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          leading,
+                          SizedBox(width: 8 * scale),
+                          Flexible(child: label),
+                        ],
+                      ),
               ),
             ),
           ),
