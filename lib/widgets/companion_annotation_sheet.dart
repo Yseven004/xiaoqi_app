@@ -21,6 +21,11 @@ const _plusAsset = 'assets/images/reading_task_plus.svg';
 const _pencilAsset = 'assets/icons/extension_market/detail/pencil.svg';
 const _micAsset = 'assets/icons/chat_note_editor/microphone.svg';
 
+String _audioTime(Duration duration) {
+  final seconds = (duration.inMilliseconds / 1000).ceil();
+  return '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+}
+
 Future<void> _fetchMissingAnnotationMedia(
   BuildContext context,
   String path,
@@ -374,7 +379,47 @@ class _AnnotationAudio extends StatefulWidget {
 
 class _AnnotationAudioState extends State<_AnnotationAudio> {
   final _player = AudioPlayer();
+  StreamSubscription<Duration>? _durationSubscription;
+  Future<void>? _preparingDuration;
+  Duration? _duration;
+  bool _durationPrepared = false;
   bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _durationSubscription = _player.onDurationChanged.listen((duration) {
+      if (mounted) setState(() => _duration = duration);
+    });
+    CompanionAnnotationSync.instance.changes.addListener(_mediaChanged);
+    _mediaChanged();
+  }
+
+  void _mediaChanged() {
+    if (!_durationPrepared && File(widget.path).existsSync()) {
+      unawaited(_prepareDuration());
+    }
+  }
+
+  Future<void> _prepareDuration() {
+    if (_durationPrepared) return Future.value();
+    return _preparingDuration ??= () async {
+      try {
+        await _player.setSourceDeviceFile(widget.path);
+        final duration = await _player.getDuration();
+        if (mounted) {
+          setState(() {
+            _duration = duration ?? _duration;
+            _durationPrepared = true;
+          });
+        }
+      } catch (_) {
+        // Playback still retries the file if reading its metadata failed.
+      } finally {
+        _preparingDuration = null;
+      }
+    }();
+  }
 
   Future<void> _toggle() async {
     if (_busy) return;
@@ -384,6 +429,8 @@ class _AnnotationAudioState extends State<_AnnotationAudio> {
         if (mounted) await _fetchMissingAnnotationMedia(context, widget.path);
         if (!mounted || !await File(widget.path).exists()) return;
       }
+      await _prepareDuration();
+      if (!mounted) return;
       switch (_player.state) {
         case PlayerState.playing:
           await _player.pause();
@@ -401,6 +448,8 @@ class _AnnotationAudioState extends State<_AnnotationAudio> {
 
   @override
   void dispose() {
+    CompanionAnnotationSync.instance.changes.removeListener(_mediaChanged);
+    unawaited(_durationSubscription?.cancel());
     unawaited(_player.dispose());
     super.dispose();
   }
@@ -423,20 +472,30 @@ class _AnnotationAudioState extends State<_AnnotationAudio> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextButton.icon(
-              onPressed: _toggle,
-              icon: annotationAsset(
-                'assets/icons/note_format/${playing ? 'pause' : 'play_arrow'}.svg',
-                size: 16,
-                color: _ink,
-              ),
-              label: Text(
-                pending
-                    ? '录音待下载'
-                    : playing
-                    ? '暂停'
-                    : '录音',
-                style: const TextStyle(color: _ink),
+            Semantics(
+              label: pending
+                  ? '下载并播放录音'
+                  : playing
+                  ? '暂停录音'
+                  : '播放录音',
+              child: TextButton.icon(
+                onPressed: _toggle,
+                icon: annotationAsset(
+                  'assets/icons/note_format/${playing ? 'pause' : 'play_arrow'}.svg',
+                  size: 16,
+                  color: _ink,
+                ),
+                label: Text(
+                  pending
+                      ? '录音待下载'
+                      : _duration == null
+                      ? '录音'
+                      : _audioTime(_duration!),
+                  style: const TextStyle(
+                    color: _ink,
+                    fontFeatures: [ui.FontFeature.tabularFigures()],
+                  ),
+                ),
               ),
             ),
             if (widget.onRemove != null)
