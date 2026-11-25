@@ -71,6 +71,23 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
   final _surfaceKey = GlobalKey();
   bool _scheduled = false;
   double? _lastTop;
+  Animation<double>? _routeAnimation;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final animation = ModalRoute.of(context)?.animation;
+    if (animation == _routeAnimation) return;
+    _routeAnimation?.removeListener(_reportViewport);
+    _routeAnimation = animation;
+    _routeAnimation?.addListener(_reportViewport);
+  }
+
+  @override
+  void dispose() {
+    _routeAnimation?.removeListener(_reportViewport);
+    super.dispose();
+  }
 
   void _reportViewport() {
     if (_scheduled) return;
@@ -121,30 +138,38 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
             final width = constraints.maxWidth;
             final designWidth = math.min(width, 390.0);
             final scale = width / designWidth;
-            return SizedBox(
-              key: _surfaceKey,
-              width: width,
-              child: FittedBox(
-                fit: BoxFit.contain,
-                alignment: Alignment.bottomCenter,
+            return NotificationListener<SizeChangedLayoutNotification>(
+              onNotification: (_) {
+                _reportViewport();
+                return false;
+              },
+              child: SizeChangedLayoutNotifier(
                 child: SizedBox(
-                  width: designWidth,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: availableHeight / scale,
-                    ),
-                    child: _AnnotationVisualScale(
-                      scale: scale,
-                      child: Material(
-                        color: Colors.white,
-                        clipBehavior: Clip.antiAlias,
-                        shape: const RoundedRectangleBorder(
-                          borderRadius: BorderRadius.vertical(
-                            top: Radius.circular(16),
-                          ),
-                          side: BorderSide(color: Color(0xFFE6E7E9)),
+                  key: _surfaceKey,
+                  width: width,
+                  child: FittedBox(
+                    fit: BoxFit.contain,
+                    alignment: Alignment.bottomCenter,
+                    child: SizedBox(
+                      width: designWidth,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: availableHeight / scale,
                         ),
-                        child: Builder(builder: widget.builder),
+                        child: _AnnotationVisualScale(
+                          scale: scale,
+                          child: Material(
+                            color: Colors.white,
+                            clipBehavior: Clip.antiAlias,
+                            shape: const RoundedRectangleBorder(
+                              borderRadius: BorderRadius.vertical(
+                                top: Radius.circular(16),
+                              ),
+                              side: BorderSide(color: Color(0xFFE6E7E9)),
+                            ),
+                            child: Builder(builder: widget.builder),
+                          ),
+                        ),
                       ),
                     ),
                   ),
