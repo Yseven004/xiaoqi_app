@@ -9434,6 +9434,8 @@ $text''';
     ++_readingTaskGeneration;
     setState(() {
       _readingCompanionOpen = false;
+      _companionAnnotationEditing = false;
+      _companionAnnotationKeyboardClosing = _currentKeyboardInset > 0;
       _companionImmersive = false;
       _companionDark = false;
       _companionMenuOpen = false;
