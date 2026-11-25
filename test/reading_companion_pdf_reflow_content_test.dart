@@ -185,6 +185,92 @@ void main() {
     }
   });
 
+  testWidgets(
+    'a grid inside a PDF illustration cannot replace the full image',
+    (tester) async {
+      final previousCache = Pdfrx.cacheDirectoryPath;
+      Pdfrx.cacheDirectoryPath = Directory.systemTemp.path;
+      addTearDown(() => Pdfrx.cacheDirectoryPath = previousCache);
+      for (final inForm in [false, true]) {
+        final controller = PdfViewerController();
+        final source = BookSourceRecord.fromMap({
+          'id': 1,
+          'book_id': 1,
+          'file_path': 'picture-with-grid-$inForm',
+          'source_version_id': DateTime.now().microsecondsSinceEpoch.toString(),
+        });
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: PdfViewer.data(
+                _pictureWithGridPdf(inForm: inForm),
+                key: ValueKey(inForm),
+                sourceName: source.filePath,
+                controller: controller,
+                useProgressiveLoading: false,
+              ),
+            ),
+          ),
+        );
+        for (var frame = 0; frame < 150 && !controller.isReady; frame++) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(controller.isReady, isTrue);
+        final reflow = CompanionPdfReflow(source);
+        final page = (await tester.runAsync(() => reflow.load(controller, 1)))!;
+        expect(page.keepOriginal, isFalse);
+        final picture = page.pictures.single;
+        expect(picture.isTable, isFalse);
+        expect(picture.bounds.left, closeTo(50 / 400, .004));
+        expect(picture.bounds.right, closeTo(350 / 400, .004));
+        expect(picture.bounds.top, closeTo(140 / 600, .004));
+        expect(picture.bounds.bottom, closeTo(440 / 600, .004));
+        final edges = await tester.runAsync(() async {
+          final images = [
+            Uint8List.fromList(picture.asset.bytes),
+            (await controller.useDocument<Uint8List?>(
+              (document) => reflow.renderPicture(document, 1, picture),
+            ))!,
+            (await controller.useDocument<Uint8List?>(
+              (document) =>
+                  reflow.renderPicture(document, 1, picture, forExport: true),
+            ))!,
+          ];
+          final results = <bool>[];
+          for (final bytes in images) {
+            final codec = await ui.instantiateImageCodec(bytes);
+            final frame = await codec.getNextFrame();
+            try {
+              final rgba = (await frame.image.toByteData(
+                format: ui.ImageByteFormat.rawRgba,
+              ))!;
+              for (final corner in const [
+                Offset(70, 440),
+                Offset(330, 440),
+                Offset(70, 180),
+                Offset(330, 180),
+              ]) {
+                results.add(
+                  _darkPixelNear(rgba, frame.image, picture.bounds, corner),
+                );
+              }
+            } finally {
+              frame.image.dispose();
+              codec.dispose();
+            }
+          }
+          return results;
+        });
+        expect(edges, List.filled(12, true));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      }
+    },
+  );
+
   test(
     'reflow keeps title levels, paragraph boundaries and inline emphasis',
     () {
@@ -394,14 +480,50 @@ BT /F1 12 Tf 24 481 Td (Table 1 Measurements) Tj ET
   return _singlePagePdf(page.toString());
 }
 
-Uint8List _singlePagePdf(String page) {
+Uint8List _pictureWithGridPdf({required bool inForm}) {
+  final pixels = StringBuffer();
+  for (var y = 0; y < 60; y++) {
+    for (var x = 0; x < 60; x++) {
+      final corner = (x < 8 || x >= 52) && (y < 8 || y >= 52);
+      final horizontal =
+          x >= 12 && x <= 48 && y >= 15 && y <= 45 && y % 10 == 5;
+      final vertical = y >= 15 && y <= 45 && x >= 12 && x <= 48 && x % 9 == 3;
+      pixels.write(corner || horizontal || vertical ? '00' : 'FF');
+    }
+  }
+  final image = '$pixels>\n';
+  const form = 'q 300 0 0 300 0 0 cm /Picture Do Q\n';
+  final drawing = inForm
+      ? 'q 1 0 0 1 50 160 cm /Figure Do Q'
+      : 'q 300 0 0 300 50 160 cm /Picture Do Q';
+  return _singlePagePdf(
+    'BT /F1 14 Tf 42 535 Td (Introduction to the picture.) Tj ET\n$drawing\n',
+    resources: '/XObject << ${inForm ? '/Figure 8 0 R' : '/Picture 7 0 R'} >>',
+    extraObjects: [
+      '<< /Type /XObject /Subtype /Image /Width 60 /Height 60 '
+          '/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode '
+          '/Length ${image.length} >>\nstream\n${image}endstream',
+      if (inForm)
+        '<< /Type /XObject /Subtype /Form /BBox [0 0 300 300] '
+            '/Resources << /XObject << /Picture 7 0 R >> >> '
+            '/Length ${form.length} >>\nstream\n${form}endstream',
+    ],
+  );
+}
+
+Uint8List _singlePagePdf(
+  String page, {
+  String resources = '',
+  List<String> extraObjects = const [],
+}) {
   final objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Count 1 /Kids [3 0 R] >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 600] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 600] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> $resources >> >>',
     '<< /Length ${page.length} >>\nstream\n${page}endstream',
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>',
+    ...extraObjects,
   ];
   final out = StringBuffer('%PDF-1.4\n');
   final offsets = [0];

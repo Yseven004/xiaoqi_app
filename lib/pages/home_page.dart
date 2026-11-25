@@ -656,6 +656,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _companionInkKeyboardClosing = false;
   bool _companionAnnotationEditing = false;
   bool _companionAnnotationKeyboardClosing = false;
+  bool _companionChatOpen = false;
+  bool _companionChatKeyboardClosing = false;
   bool _companionImmersive = false;
   bool _companionDark = false;
   ReadingCompanionTarget? _companionTarget;
@@ -2623,6 +2625,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (keyboardInset == 0 && _companionAnnotationKeyboardClosing) {
       setState(() => _companionAnnotationKeyboardClosing = false);
+    }
+    if (keyboardInset == 0 && _companionChatKeyboardClosing) {
+      setState(() => _companionChatKeyboardClosing = false);
     }
     if (_readingCompanionOpen &&
         keyboardInset == 0 &&
@@ -9382,6 +9387,8 @@ $text''';
       _attachmentPanelPending = false;
       _spaceMenuOpen = false;
       _companionImmersive = false;
+      _companionChatOpen = false;
+      _companionChatKeyboardClosing = false;
       _readingCompanionOpen = true;
     });
   }
@@ -9437,6 +9444,8 @@ $text''';
       _readingCompanionOpen = false;
       _companionAnnotationEditing = false;
       _companionAnnotationKeyboardClosing = _currentKeyboardInset > 0;
+      _companionChatOpen = false;
+      _companionChatKeyboardClosing = _currentKeyboardInset > 0;
       _companionImmersive = false;
       _companionDark = false;
       _companionMenuOpen = false;
@@ -9539,8 +9548,16 @@ $text''';
       },
       onFreeChat: _startNewConversationForCurrentBookContext,
       onChatVisibilityChanged: (visible) {
-        if (!visible && _companionMenuOpen) {
-          setState(() => _companionMenuOpen = false);
+        if (!_readingCompanionOpen) return;
+        final keyboardClosing = !visible && _currentKeyboardInset > 0;
+        if (_companionChatOpen != visible ||
+            _companionChatKeyboardClosing != keyboardClosing ||
+            (!visible && _companionMenuOpen)) {
+          setState(() {
+            _companionChatOpen = visible;
+            _companionChatKeyboardClosing = keyboardClosing;
+            if (!visible) _companionMenuOpen = false;
+          });
         }
       },
       onOpenLibrary: _openCompanionBookSources,
@@ -10237,17 +10254,19 @@ $text''';
       var target = await resolve(preferred);
       if (!mounted || !current()) return;
       if (target == null) {
-        final available = await _hasSavedCompanionAnnotations(bookId);
-        if (!current()) return;
         final materials = await _bookLibrary.listSourcesForBook(bookId);
         if (!current()) return;
         final hasReadableMaterial = materials.any(
           (source) => SourceDocumentLoader.isReadableSource(source) &&
               File(source.filePath).existsSync(),
         );
-        if (available && !hasReadableMaterial) {
-          _showCompanionTask(task, null, bookId: bookId, title: item.book.title);
-          return;
+        if (!hasReadableMaterial) {
+          final available = await _hasSavedCompanionAnnotations(bookId);
+          if (!current()) return;
+          if (available) {
+            _showCompanionTask(task, null, bookId: bookId, title: item.book.title);
+            return;
+          }
         }
         if (!mounted) return;
         final pickedId = await showReadingTaskMaterialsDialog(
@@ -10407,6 +10426,8 @@ $text''';
         keepComposerFixed ||
         _companionInkEditing ||
         _companionInkKeyboardClosing ||
+        _companionChatOpen ||
+        _companionChatKeyboardClosing ||
         _companionAnnotationEditing ||
         _companionAnnotationKeyboardClosing;
     return AnnotatedRegion<SystemUiOverlayStyle>(

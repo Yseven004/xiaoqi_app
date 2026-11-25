@@ -157,17 +157,13 @@ Future<void> viewCompanionAnnotation(
                                               .instance
                                               .emailSessionRevision
                                               .value) {
-                                    final scale = annotationVisualScaleOf(
-                                      context,
-                                    );
                                     AppToast.show(
                                       context,
                                       '已加入笔记库',
-                                      scale: scale,
                                       leading: annotationAsset(
                                         'assets/icons/drawing/check.svg',
                                         color: Colors.white,
-                                        size: 18 * scale,
+                                        size: 18,
                                       ),
                                     );
                                   }
@@ -287,19 +283,15 @@ class _AnnotationPrivacyState extends State<_AnnotationPrivacy> {
               rootNavigator: true,
             ).overlay!.context.findRenderObject()!
             as RenderBox;
-    final visualScale = annotationVisualScaleOf(context);
-    final scale =
-        visualScale *
-        (MediaQuery.textScalerOf(context).scale(14) / 14).clamp(
-          1.0,
-          double.infinity,
-        );
-    final headerHeight = 32.0 * scale;
-    final privateHeight = 44.0 * scale;
-    final disabledHeight = 36.0 * scale;
-    final menuHeight =
-        16 * visualScale + headerHeight + privateHeight + disabledHeight * 3;
-    final itemPadding = EdgeInsets.symmetric(horizontal: 16 * visualScale);
+    final textScale = (MediaQuery.textScalerOf(context).scale(14) / 14).clamp(
+      1.0,
+      2.0,
+    );
+    final headerHeight = 28.0 * textScale;
+    final privateHeight = 48.0 * textScale;
+    final disabledHeight = 34.0 * textScale;
+    final menuHeight = 16 + headerHeight + privateHeight + disabledHeight * 3;
+    final itemPadding = EdgeInsets.symmetric(horizontal: 14 * textScale);
     await showMenu<String>(
       context: context,
       useRootNavigator: true,
@@ -307,10 +299,10 @@ class _AnnotationPrivacyState extends State<_AnnotationPrivacy> {
       color: Colors.white,
       surfaceTintColor: Colors.transparent,
       elevation: 4,
-      menuPadding: EdgeInsets.symmetric(vertical: 8 * visualScale),
-      constraints: BoxConstraints.tightFor(width: 208 * visualScale),
+      menuPadding: const EdgeInsets.symmetric(vertical: 8),
+      constraints: BoxConstraints.tightFor(width: 184 * textScale),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12 * visualScale),
+        borderRadius: BorderRadius.circular(12),
         side: const BorderSide(color: _rule),
       ),
       positionBuilder: (context, constraints) {
@@ -321,9 +313,9 @@ class _AnnotationPrivacyState extends State<_AnnotationPrivacy> {
         );
         return RelativeRect.fromLTRB(
           topLeft.dx,
-          topLeft.dy - menuHeight - 8 * visualScale,
+          topLeft.dy - menuHeight - 8,
           overlay.size.width - bottomRight.dx,
-          overlay.size.height - topLeft.dy + 8 * visualScale,
+          overlay.size.height - topLeft.dy + 8,
         );
       },
       items: [
@@ -333,9 +325,9 @@ class _AnnotationPrivacyState extends State<_AnnotationPrivacy> {
           padding: itemPadding,
           child: Text(
             '可见范围',
-            style: TextStyle(
+            style: const TextStyle(
               color: _ink,
-              fontSize: 14 * visualScale,
+              fontSize: 14,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -351,13 +343,13 @@ class _AnnotationPrivacyState extends State<_AnnotationPrivacy> {
                 Expanded(
                   child: Text(
                     '私密',
-                    style: TextStyle(color: _ink, fontSize: 14 * visualScale),
+                    style: const TextStyle(color: _ink, fontSize: 14),
                   ),
                 ),
                 annotationAsset(
                   'assets/icons/drawing/check.svg',
                   color: _ink,
-                  size: 20 * visualScale,
+                  size: 20,
                 ),
               ],
             ),
@@ -377,15 +369,19 @@ class _AnnotationPrivacyState extends State<_AnnotationPrivacy> {
                   Expanded(
                     child: Text(
                       label,
-                      style: TextStyle(
-                        color: _quiet,
-                        fontSize: 14 * visualScale,
-                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: _quiet, fontSize: 14),
                     ),
                   ),
-                  Text(
-                    '暂未开放',
-                    style: TextStyle(color: _quiet, fontSize: 13 * visualScale),
+                  const Expanded(
+                    child: Text(
+                      '暂未开放',
+                      textAlign: TextAlign.end,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: _quiet, fontSize: 13),
+                    ),
                   ),
                 ],
               ),

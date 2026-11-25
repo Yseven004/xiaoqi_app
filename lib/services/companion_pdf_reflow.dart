@@ -780,7 +780,7 @@ class CompanionPdfReflow {
         ? await getTemporaryDirectory()
         : Directory(cache);
     return Directory(
-      '${root.path}/companion-reflow-v5/$_cacheKey',
+      '${root.path}/companion-reflow-v6/$_cacheKey',
     ).create(recursive: true);
   }();
 
@@ -1262,7 +1262,8 @@ class CompanionPdfReflow {
     List<CompanionPdfLink> links,
   ) {
     final pageBounds = trimCompanionRange(raw.fullText, 0, raw.fullText.length);
-    if (pageBounds == null) return const [];
+    // Image-only pages can acquire OCR lines before the final sort.
+    if (pageBounds == null) return <CompanionReflowLine>[];
     final pageHash = companionTextHash(raw.fullText);
     final words = <({PdfPageTextFragment run, Rect box})>[];
     for (final fragment in raw.fragments) {

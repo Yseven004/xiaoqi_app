@@ -58,17 +58,23 @@ Future<List<Rect>> _embeddedPdfImages(PdfPage page) async {
           final count = engine.FPDFPage_CountObjects(nativePage);
           for (var index = 0; index < count; index++) {
             final object = engine.FPDFPage_GetObject(nativePage, index);
-            if (object == ffi.nullptr ||
-                engine.FPDFPageObj_GetType(object) !=
-                    pdfium.FPDF_PAGEOBJ_IMAGE ||
-                engine.FPDFPageObj_GetBounds(
-                      object,
-                      left,
-                      bottom,
-                      right,
-                      top,
-                    ) ==
-                    0) {
+            if (object == ffi.nullptr) continue;
+            final type = engine.FPDFPageObj_GetType(object);
+            if (type != pdfium.FPDF_PAGEOBJ_IMAGE &&
+                (type != pdfium.FPDF_PAGEOBJ_FORM ||
+                    _graphicFormHasImage(engine, object, 0) != true)) {
+              continue;
+            }
+            // PDFium reports the containing form in page coordinates. Keep
+            // its image parts together, including any space between them.
+            if (engine.FPDFPageObj_GetBounds(
+                  object,
+                  left,
+                  bottom,
+                  right,
+                  top,
+                ) ==
+                0) {
               continue;
             }
             final start = devicePoint(left.value, top.value);
@@ -95,6 +101,36 @@ Future<List<Rect>> _embeddedPdfImages(PdfPage page) async {
   }
 }
 
+// Null means this form may contain page content outside a standalone figure.
+bool? _graphicFormHasImage(
+  pdfium.PDFium engine,
+  pdfium.FPDF_PAGEOBJECT form,
+  int depth,
+) {
+  if (depth >= 8) return null;
+  final count = engine.FPDFFormObj_CountObjects(form);
+  if (count < 0) return null;
+  var hasImage = false;
+  for (var index = 0; index < count; index++) {
+    final child = engine.FPDFFormObj_GetObject(form, index);
+    if (child == ffi.nullptr) return null;
+    switch (engine.FPDFPageObj_GetType(child)) {
+      case pdfium.FPDF_PAGEOBJ_IMAGE:
+        hasImage = true;
+      case pdfium.FPDF_PAGEOBJ_FORM:
+        final nested = _graphicFormHasImage(engine, child, depth + 1);
+        if (nested == null) return null;
+        hasImage = hasImage || nested;
+      case pdfium.FPDF_PAGEOBJ_PATH:
+      case pdfium.FPDF_PAGEOBJ_SHADING:
+        break;
+      default:
+        return null;
+    }
+  }
+  return hasImage;
+}
+
 Future<({List<Rect> bands, List<_PdfPictureRegion> objects})> _scanPageObjects(
   TransferableTypedData payload,
   int width,
@@ -109,13 +145,23 @@ Future<({List<Rect> bands, List<_PdfPictureRegion> objects})> _scanPageObjects(
       tables.add(candidate);
     }
   }
+  final tableRegions = [
+    for (final table in tables)
+      if (!embedded.any((picture) {
+        final overlap = picture.inflate(.004).intersect(table.bounds);
+        // The raster detector can mistake lines inside an illustration for
+        // a table. Its smaller crop cannot stand in for the native object.
+        return !overlap.isEmpty &&
+            overlap.width * overlap.height >=
+                .9 * table.bounds.width * table.bounds.height;
+      }))
+        _withTableLabels(table, lines),
+  ];
   final objects = <_PdfPictureRegion>[
-    for (final table in tables) _withTableLabels(table, lines),
+    ...tableRegions,
     for (final picture in embedded)
-      if (!tables.any(
-        (table) =>
-            table.bounds.contains(picture.center) ||
-            picture.contains(table.bounds.center),
+      if (!tableRegions.any(
+        (table) => table.bounds.intersect(picture) == picture,
       ))
         _PdfPictureRegion(picture),
   ];

@@ -642,7 +642,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('已发送注释'), findsOneWidget);
       expect(find.text('注释 1'), findsOneWidget);
-      final quoteLine = find.text('引文  ${quote.replaceAll(RegExp(r"\s+"), " ")}');
+      final quoteLine = find.text(
+        '引文  ${quote.replaceAll(RegExp(r"\s+"), " ")}',
+      );
       expect(quoteLine, findsOneWidget);
       expect(tester.widget<Text>(quoteLine).maxLines, 1);
       expect(find.text('评论：'), findsOneWidget);
@@ -652,7 +654,7 @@ void main() {
       final material = find
           .descendant(of: find.byType(Dialog), matching: find.byType(Material))
           .first;
-      expect(tester.getSize(material).width, closeTo(390 * .82, 1));
+      expect(tester.getSize(material).width, closeTo(390, 1));
       await tester.tap(quoteLine);
       await tester.pumpAndSettle();
       expect(find.text(quote), findsOneWidget);

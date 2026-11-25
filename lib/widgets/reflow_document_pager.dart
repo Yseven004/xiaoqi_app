@@ -43,6 +43,9 @@ bool _coverChapter(List<XiaoqiDocumentBlock> blocks) =>
     (blocks.first.assetId == 'epub-cover' ||
         blocks.first.attributes['coverPage'] == 'true');
 
+bool _isPdfFigure(XiaoqiDocumentBlock block) =>
+    block.kind == 'image' && block.attributes['minimumReadableWidth'] == null;
+
 XiaoqiDocumentBlock _plainChapterBlock(XiaoqiDocumentChapter chapter) =>
     XiaoqiDocumentBlock(
       id: '${chapter.id}:plain',
@@ -683,7 +686,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     // These are the actual effective content bounds and typography. Theme
     // colours never invalidate a geometrically identical layout.
     final key = jsonEncode([
-      2,
+      epub ? 2 : 3,
       width,
       height,
       font?.fontFamily,
@@ -796,6 +799,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
       textScaler: textScaler,
       gate: gate,
       showUntitledHeading: false,
+      fitPdfFigures: true,
       from: from,
       until: until,
     );
@@ -1384,7 +1388,12 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
               if (!fragments.moveNext()) return null;
               visible.add(fragments.current);
             }
-            return widget.blockBuilder(context, visible[offset], (_) {});
+            final slice = visible[offset];
+            return _fitPdfFigure(
+              slice,
+              viewport,
+              widget.blockBuilder(context, slice, (_) {}),
+            );
           },
         ),
       ),
@@ -1508,10 +1517,16 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
           const SizedBox(height: 18),
         ],
         for (final slice in page.blocks)
-          widget.blockBuilder(context, slice, (active) {
-            if (!interactive || !mounted || _selectionActive == active) return;
-            setState(() => _selectionActive = active);
-          }),
+          _fitPdfFigure(
+            slice,
+            viewport,
+            widget.blockBuilder(context, slice, (active) {
+              if (!interactive || !mounted || _selectionActive == active) {
+                return;
+              }
+              setState(() => _selectionActive = active);
+            }),
+          ),
       ],
     );
 
@@ -1554,6 +1569,21 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
                 ],
               ),
       ),
+    );
+  }
+
+  Widget _fitPdfFigure(ReaderBlockSlice slice, Size viewport, Widget child) {
+    if (widget.document.format != 'pdf-reflow' || !_isPdfFigure(slice.block)) {
+      return child;
+    }
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: math.max(
+          1.0,
+          viewport.height - widget.verticalPadding.vertical,
+        ),
+      ),
+      child: child,
     );
   }
 
@@ -1872,6 +1902,7 @@ Future<void> _paginateDocumentProgressive(
   required void Function(_PaginationPublish publish) onPublish,
 }) async {
   final chapters = document.chapters;
+  final fitPdfFigures = document.format == 'pdf-reflow';
   final pages = <ReaderPageSlice>[];
   final chapterFirstPages = <String, int>{};
   String? pendingOriginalPageLabel;
@@ -1894,6 +1925,7 @@ Future<void> _paginateDocumentProgressive(
     final headResult = await _paginateChapter(
       headChapter,
       showUntitledHeading: document.format != 'pdf-reflow',
+      fitPdfFigures: fitPdfFigures,
       translations: translations,
       headingStyle: headingStyle,
       textStyleBuilder: textStyleBuilder,
@@ -1953,6 +1985,7 @@ Future<void> _paginateDocumentProgressive(
       final chapterResult = await _paginateChapter(
         chapter,
         showUntitledHeading: document.format != 'pdf-reflow',
+        fitPdfFigures: fitPdfFigures,
         translations: translations,
         headingStyle: headingStyle,
         textStyleBuilder: textStyleBuilder,
@@ -2059,6 +2092,7 @@ Future<_ChapterPaginationResult?> _paginateChapter(
   required TextScaler textScaler,
   required _PageYieldGate gate,
   bool showUntitledHeading = true,
+  bool fitPdfFigures = false,
   String? initialOriginalPageLabel,
   _ChapterPageListener? onPageFlushed,
   ({int block, int offset})? from,
@@ -2195,11 +2229,14 @@ Future<_ChapterPaginationResult?> _paginateChapter(
       final imageWidth = minimumWidth != null && minimumWidth.isFinite
           ? math.max(width, minimumWidth)
           : width;
+      final imageHeight = ratio != null && ratio.isFinite && ratio > 0
+          ? imageWidth / ratio + 12
+          : 430.0;
       put(
         ReaderBlockSlice(chapterId: chapter.id, block: block, text: text),
-        ratio != null && ratio.isFinite && ratio > 0
-            ? imageWidth / ratio + 12
-            : 430,
+        fitPdfFigures && _isPdfFigure(block)
+            ? math.min(imageHeight, height)
+            : imageHeight,
       );
       continue;
     }

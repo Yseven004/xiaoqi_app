@@ -698,13 +698,13 @@ Future<void> showChatAnnotationReview(
           alignment: const Alignment(0, .35),
           backgroundColor: Colors.white,
           surfaceTintColor: Colors.transparent,
-          insetPadding: const EdgeInsets.all(16),
+          insetPadding: EdgeInsets.zero,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(18),
           ),
           child: ConstrainedBox(
             constraints: BoxConstraints(
-              maxWidth: math.min(480, MediaQuery.sizeOf(context).width * .82),
+              minWidth: MediaQuery.sizeOf(context).width,
               maxHeight: MediaQuery.sizeOf(context).height * .7,
             ),
             child: Column(

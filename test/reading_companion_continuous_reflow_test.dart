@@ -287,6 +287,62 @@ void main() {
     },
   );
 
+  testWidgets('a tall PDF figure fits on one horizontal reading screen', (
+    tester,
+  ) async {
+    const picture = CompanionPagePicture(
+      Rect.fromLTWH(.4, .1, .2, .8),
+      .25,
+      XiaoqiDocumentAsset(id: 'tall-figure', mimeType: 'image/png', bytes: []),
+    );
+    const page = CompanionReflowPage(1, [], pictures: [picture]);
+    CompanionPagePicture? previewed;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 640,
+              height: 440,
+              child: ReflowDocumentPager(
+                document: CompanionReflowPage.readingWindow([page], 1),
+                sourceId: 'source',
+                initialChapterId: CompanionReflowPage.readingChapterId,
+                mode: ReaderPaginationMode.horizontal,
+                blockBuilder: (_, _, _) => CompanionPdfObjectView(
+                  picture: picture,
+                  pageObjects: const [],
+                  isOriginalPage: false,
+                  onPreview: (selected) => previewed = selected,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final target = find.byWidgetPredicate(
+      (widget) => widget is Semantics && widget.properties.label == '预览图片',
+    );
+    final image = tester.getRect(target);
+    final viewport = tester.getRect(find.byType(ReflowDocumentPager));
+    expect(image.width / image.height, closeTo(picture.aspectRatio, .001));
+    expect(image.center.dx, closeTo(viewport.center.dx, 1));
+    expect(image.top, closeTo(viewport.top + 18, 1));
+    expect(image.bottom, closeTo(viewport.bottom - 28 - 12, 1));
+    final pageScroll = find.ancestor(
+      of: target,
+      matching: find.byType(SingleChildScrollView),
+    );
+    expect(
+      tester.widget<SingleChildScrollView>(pageScroll).physics,
+      isA<NeverScrollableScrollPhysics>(),
+    );
+    await tester.tapAt(Offset(image.center.dx, image.bottom - 2));
+    expect(previewed, same(picture));
+  });
+
   testWidgets('a wide table drag does not turn the book at its edge', (
     tester,
   ) async {

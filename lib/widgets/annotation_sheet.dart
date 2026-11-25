@@ -24,12 +24,8 @@ Future<T?> showAnnotationSheet<T>(
     useSafeArea: true,
     backgroundColor: Colors.transparent,
     barrierColor: barrierColor,
-    constraints: BoxConstraints(
-      maxWidth: math.min(
-        MediaQuery.sizeOf(context).width,
-        matchReferenceProportions ? 800 : 720,
-      ),
-    ),
+    // Override the Material 3 width cap without capturing the opening size.
+    constraints: const BoxConstraints(),
     builder: (context) => _AnnotationSheetSurface(
       resolveAnchor: resolveAnchor,
       scrollPosition: scrollPosition,
@@ -38,23 +34,6 @@ Future<T?> showAnnotationSheet<T>(
       builder: builder,
     ),
   ).whenComplete(() => onViewportChanged?.call(double.infinity));
-}
-
-/// The confirmed component drawings use a 390-wide composition. Keep their
-/// proportions on the portrait tablet instead of shrinking the controls inside
-/// a desktop-width sheet. The reader and Android IME retain their own scale.
-double annotationVisualScaleOf(BuildContext context) =>
-    context
-        .dependOnInheritedWidgetOfExactType<_AnnotationVisualScale>()
-        ?.scale ??
-    1;
-
-class _AnnotationVisualScale extends InheritedWidget {
-  const _AnnotationVisualScale({required this.scale, required super.child});
-  final double scale;
-  @override
-  bool updateShouldNotify(_AnnotationVisualScale oldWidget) =>
-      scale != oldWidget.scale;
 }
 
 class _AnnotationSheetSurface extends StatefulWidget {
@@ -144,10 +123,6 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final width = constraints.maxWidth;
-            final designWidth = widget.matchReferenceProportions
-                ? math.min(width, 390.0)
-                : width;
-            final scale = width / designWidth;
             return NotificationListener<SizeChangedLayoutNotification>(
               onNotification: (_) {
                 _reportViewport();
@@ -157,32 +132,20 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
                 child: SizedBox(
                   key: _surfaceKey,
                   width: width,
-                  child: FittedBox(
-                    fit: BoxFit.contain,
-                    alignment: Alignment.bottomCenter,
-                    child: SizedBox(
-                      width: designWidth,
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxHeight: availableHeight / scale,
-                        ),
-                        child: _AnnotationVisualScale(
-                          scale: scale,
-                          child: Material(
-                            color: Colors.white,
-                            clipBehavior: Clip.antiAlias,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.vertical(
-                                top: Radius.circular(
-                                  widget.matchReferenceProportions ? 12 : 16,
-                                ),
-                              ),
-                              side: const BorderSide(color: Color(0xFFE6E7E9)),
-                            ),
-                            child: Builder(builder: widget.builder),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxHeight: availableHeight),
+                    child: Material(
+                      color: Colors.white,
+                      clipBehavior: Clip.antiAlias,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.vertical(
+                          top: Radius.circular(
+                            widget.matchReferenceProportions ? 12 : 16,
                           ),
                         ),
+                        side: const BorderSide(color: Color(0xFFE6E7E9)),
                       ),
+                      child: Builder(builder: widget.builder),
                     ),
                   ),
                 ),

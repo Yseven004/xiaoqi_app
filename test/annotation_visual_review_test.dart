@@ -142,7 +142,7 @@ Future<void> _host(
               backgroundColor: Colors.white,
               surfaceTintColor: Colors.transparent,
             ),
-            body: Padding(
+            body: SingleChildScrollView(
               padding: const EdgeInsets.all(24),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -255,6 +255,27 @@ void main() {
     await db.close();
   });
 
+  testWidgets('an open annotation sheet follows window width changes', (
+    tester,
+  ) async {
+    const contentKey = ValueKey('rotating-annotation-sheet');
+    await _host(tester, const Size(390, 844), (context) {
+      unawaited(
+        showAnnotationSheet<void>(
+          context,
+          builder: (_) => const SizedBox(key: contentKey, height: 64),
+        ),
+      );
+    });
+    final content = find.byKey(contentKey);
+    expect(tester.getSize(content).width, 390);
+    tester.view.physicalSize = const Size(844, 390);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 180);
+    await _settle(tester);
+    expect(tester.getSize(content).width, 844);
+    expect(tester.getBottomLeft(content).dy, 210);
+  });
+
   for (final size in [const Size(390, 844), const Size(800, 1280)]) {
     final width = size.width.toInt();
     testWidgets('detail and privacy preserve hierarchy at $width', (
@@ -339,6 +360,21 @@ void main() {
       await _capture(tester, 'companion-privacy-$width');
       await tester.tap(find.text('私密').last);
       await _settle(tester);
+      if (width == 390) {
+        tester.platformDispatcher.textScaleFactorTestValue = 2;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        await _settle(tester);
+        await tester.tap(find.text('私密'));
+        await _settle(tester);
+        final group = find.text('共读小组');
+        final label = tester.widget<Text>(group);
+        expect(label.style?.fontSize, 14);
+        expect(MediaQuery.textScalerOf(tester.element(group)).scale(14), 28);
+        expect(
+          tester.getRect(group).right,
+          lessThanOrEqualTo(tester.getRect(find.text('暂未开放').last).left),
+        );
+      }
       await tester.pumpWidget(const SizedBox());
       await _settle(tester);
     });

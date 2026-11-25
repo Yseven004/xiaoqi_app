@@ -524,6 +524,8 @@ Future<void> _exerciseCompanionHistory(
   final selectedText = value.selection.textInside(value.text);
   await tester.tap(ask);
   await _waitFor(tester, input);
+  final readerViewport = tester.getRect(reader);
+  final documentViewport = tester.getRect(find.byType(ReflowDocumentPager));
   await _waitFor(
     tester,
     find.descendant(
@@ -533,6 +535,25 @@ Future<void> _exerciseCompanionHistory(
       ),
     ),
   );
+  await tester.showKeyboard(input);
+  final chatCard = find.byKey(const ValueKey('companion-chat-card'));
+  expect(tester.getRect(chatCard).width, closeTo(readerViewport.width, 1));
+  expect(tester.getRect(chatCard).height, lessThanOrEqualTo(640));
+  final keyboardInset = 420.0 * tester.view.devicePixelRatio;
+  tester.view.viewInsets = FakeViewPadding(bottom: keyboardInset);
+  await tester.pumpAndSettle();
+  expect(tester.getRect(reader), readerViewport);
+  expect(tester.getRect(find.byType(ReflowDocumentPager)), documentViewport);
+  final keyboardTop =
+      readerViewport.bottom - keyboardInset / tester.view.devicePixelRatio;
+  expect(tester.getRect(chatCard).width, closeTo(readerViewport.width, 1));
+  expect(tester.getRect(chatCard).bottom, lessThanOrEqualTo(keyboardTop));
+  expect(tester.getRect(chatCard).bottom, greaterThan(keyboardTop - 40));
+  expect(tester.getRect(input).bottom, lessThanOrEqualTo(keyboardTop));
+  tester.testTextInput.hide();
+  tester.widget<TextField>(input).focusNode!.unfocus();
+  tester.view.resetViewInsets();
+  await tester.pumpAndSettle();
   expect(tester.widget<TextField>(input).controller!.text, isEmpty);
   expect((await records()).map((record) => record.id).toSet(), originalIds);
 

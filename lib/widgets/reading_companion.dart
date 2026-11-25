@@ -925,21 +925,26 @@ class ReadingCompanionState extends State<ReadingCompanion> {
   );
 
   Widget _positionChat(BoxConstraints available, _ReaderSelection? selection) {
-    final width = math.min(
-      640.0,
-      available.maxWidth < 600
-          ? math.max(0.0, available.maxWidth - 24)
-          : available.maxWidth * .60,
+    final media = MediaQuery.of(context);
+    // The reader keeps its original viewport while the IME is open. Only the
+    // floating chat card yields the portion of that viewport covered by it.
+    final keyboardOverlap = math.max(
+      0.0,
+      media.viewInsets.bottom - media.viewPadding.bottom,
     );
-    final right = available.maxWidth < 600 ? 12.0 : available.maxWidth / 30;
+    final usableHeight = math.max(0.0, available.maxHeight - keyboardOverlap);
+    final width = available.maxWidth;
+    final minimizedRight = available.maxWidth < 600
+        ? 12.0
+        : available.maxWidth / 30;
     final height = math.min(
-      width * 4 / 3,
-      math.max(0.0, available.maxHeight - 24),
+      math.min(640.0, width * 4 / 3),
+      math.max(0.0, usableHeight - 24),
     );
     if (_minimized || height < 152) {
       return Positioned(
-        right: right,
-        bottom: 64,
+        right: minimizedRight,
+        bottom: keyboardOverlap + 64,
         child: OutlinedButton.icon(
           style: OutlinedButton.styleFrom(backgroundColor: Colors.white),
           onPressed: height < 152
@@ -955,22 +960,27 @@ class ReadingCompanionState extends State<ReadingCompanion> {
         ),
       );
     }
-    final top =
-        (selection == null
-                ? (available.maxHeight - height) / 2
-                : selection.position.dy + 12)
-            .clamp(8.0, math.max(8.0, available.maxHeight - height - 8))
-            .toDouble();
+    final keyboardVisible = keyboardOverlap > 0;
+    final top = keyboardVisible
+        ? (available.maxHeight - keyboardOverlap - height - 8)
+              .clamp(8.0, math.max(8.0, available.maxHeight - height - 8))
+              .toDouble()
+        : (selection == null
+                  ? (available.maxHeight - height) / 2
+                  : selection.position.dy + 12)
+              .clamp(8.0, math.max(8.0, available.maxHeight - height - 8))
+              .toDouble();
     return Positioned(
-      right: right,
+      left: 0,
+      right: 0,
       top: top,
-      width: width,
       height: height,
       child: _chatCard(selection?.passage.text ?? widget.savedPassageExcerpt),
     );
   }
 
   Widget _chatCard(String? quote) => Material(
+    key: const ValueKey('companion-chat-card'),
     color: Colors.white,
     elevation: 5,
     shadowColor: const Color(0x26000000),
@@ -3273,6 +3283,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     _renderedChapter = true;
     final assets = {for (final asset in document.assets) asset.id: asset};
     final chaptersById = {for (final entry in chapters) entry.id: entry};
+    final bottomPadding = originalPage != null &&
+            _ebookPageTurnMode == ReaderPaginationMode.horizontal
+        ? _readerFooterHeight
+        : _readerNavHeight;
     return _footerWithBody(
       showChrome: originalPage == null || _convertedPage != null,
       body: LayoutBuilder(
@@ -3292,7 +3306,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               dimensions.maxWidth * _marginFraction,
               readingCompanionToolbarHeight(context) + (_readerWide ? 42 : 24),
               dimensions.maxWidth * _marginFraction,
-              _readerNavHeight + 8,
+              bottomPadding + 8,
             ),
             navigationRevision: _navigationRevision,
             sourceId: _sourceKey,

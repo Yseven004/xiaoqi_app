@@ -32,7 +32,7 @@ void main() {
     },
   );
 
-  testWidgets('task PDF is preferred and its restored page is shown', (
+  testWidgets('task PDF with a blank cover reflows and restores its page', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
@@ -346,12 +346,13 @@ void main() {
 String _samplePdf() {
   const pages = 3;
   const stream = 'BT /F1 24 Tf 64 280 Td (Read this page.) Tj ET\n';
+  const contents = '/Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R ';
   final objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Count $pages /Kids [3 0 R 4 0 R 5 0 R] >>',
     for (var page = 0; page < pages; page++)
       '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 600] '
-          '/Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R >>',
+          '${page == 0 ? '' : contents}>>',
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
     '<< /Length ${stream.length} >>\nstream\n${stream}endstream',
   ];

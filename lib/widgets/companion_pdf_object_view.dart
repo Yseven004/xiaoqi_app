@@ -35,10 +35,12 @@ class CompanionPdfObjectView extends StatelessWidget {
     child: LayoutBuilder(
       builder: (context, constraints) {
         final viewportWidth = constraints.maxWidth;
-        final width = math.max(
-          viewportWidth,
-          picture.minimumReadableWidth ?? 0.0,
-        );
+        final width = picture.isTable
+            ? math.max(viewportWidth, picture.minimumReadableWidth!)
+            : math.min(
+                viewportWidth,
+                constraints.maxHeight * picture.aspectRatio,
+              );
         final height = width / picture.aspectRatio;
         final base = _pictureImage(picture, isOriginalPage: isOriginalPage);
         Widget withLinks(Widget child) => Stack(
@@ -65,36 +67,35 @@ class CompanionPdfObjectView extends StatelessWidget {
                   ),
           ],
         );
-        if (isOriginalPage) {
-          return SizedBox(
-            height: height,
-            child: withLinks(
-              Stack(
-                fit: StackFit.expand,
-                children: [
-                  base,
-                  if (onPreview != null)
-                    for (final object in pageObjects)
-                      Positioned.fromRect(
-                        rect: Rect.fromLTRB(
-                          object.bounds.left * width,
-                          object.bounds.top * height,
-                          object.bounds.right * width,
-                          object.bounds.bottom * height,
-                        ),
-                        child: _previewTarget(object, const SizedBox.expand()),
-                      ),
-                ],
-              ),
-            ),
-          );
-        }
         final content = SizedBox(
           width: width,
           height: height,
-          child: withLinks(_previewTarget(picture, base)),
+          child: withLinks(
+            isOriginalPage
+                ? Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      base,
+                      if (onPreview != null)
+                        for (final object in pageObjects)
+                          Positioned.fromRect(
+                            rect: Rect.fromLTRB(
+                              object.bounds.left * width,
+                              object.bounds.top * height,
+                              object.bounds.right * width,
+                              object.bounds.bottom * height,
+                            ),
+                            child: _previewTarget(object, const SizedBox.expand()),
+                          ),
+                    ],
+                  )
+                : _previewTarget(picture, base),
+          ),
         );
-        if (width <= viewportWidth) return content;
+        if (width < viewportWidth) {
+          return Align(heightFactor: 1, child: content);
+        }
+        if (width == viewportWidth) return content;
         final scroll = SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           physics: onPreview == null
