@@ -92,10 +92,11 @@ Future<void> viewCompanionAnnotation(
               AnnotationQuoteLine(
                 annotation.selection.quote,
                 guardContent: guard,
+                verticalPadding: 4,
               ),
               _AnnotationBody(text: annotation.text, audio: annotation.audio),
               if (annotation.images.isNotEmpty) ...[
-                const SizedBox(height: 10),
+                const SizedBox(height: 4),
                 AnnotationThumbnails(
                   paths: annotation.images,
                   guardContent: guard,
