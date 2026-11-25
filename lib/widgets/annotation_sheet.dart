@@ -168,21 +168,50 @@ class AnnotationQuoteLine extends StatelessWidget {
   Widget build(BuildContext context) => InkWell(
     onTap: () {
       FocusManager.instance.primaryFocus?.unfocus();
-      showDialog<void>(
-        context: context,
-        builder: (context) {
-          final dialog = AlertDialog(
-            title: const Text('引文'),
-            content: SingleChildScrollView(child: SelectableText(quote)),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('关闭'),
+      Navigator.of(context, rootNavigator: true).push<void>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (context) {
+            final page = Scaffold(
+              backgroundColor: Colors.white,
+              appBar: AppBar(
+                backgroundColor: Colors.white,
+                surfaceTintColor: Colors.transparent,
+                foregroundColor: const Color(0xFF232427),
+                automaticallyImplyLeading: false,
+                title: const Text('引文', style: TextStyle(fontSize: 18)),
+                actions: [
+                  IconButton(
+                    tooltip: '关闭引文',
+                    onPressed: () => Navigator.pop(context),
+                    icon: annotationAsset(
+                      'assets/icons/chat_note_editor/x.svg',
+                    ),
+                  ),
+                ],
               ),
-            ],
-          );
-          return guardContent?.call(dialog) ?? dialog;
-        },
+              body: SafeArea(
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 800),
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(24),
+                      child: SelectableText(
+                        quote,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          height: 1.65,
+                          color: Color(0xFF232427),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+            return guardContent?.call(page) ?? page;
+          },
+        ),
       );
     },
     child: Semantics(
