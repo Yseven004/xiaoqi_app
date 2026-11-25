@@ -653,6 +653,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _readingCompanionOpen = false;
   bool _companionInkEditing = false;
   bool _companionInkKeyboardClosing = false;
+  bool _companionAnnotationEditing = false;
+  bool _companionAnnotationKeyboardClosing = false;
   bool _companionImmersive = false;
   bool _companionDark = false;
   ReadingCompanionTarget? _companionTarget;
@@ -2617,6 +2619,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _lastKeyboardInset = keyboardInset;
     if (keyboardInset == 0 && _companionInkKeyboardClosing) {
       setState(() => _companionInkKeyboardClosing = false);
+    }
+    if (keyboardInset == 0 && _companionAnnotationKeyboardClosing) {
+      setState(() => _companionAnnotationKeyboardClosing = false);
     }
     if (_readingCompanionOpen &&
         keyboardInset == 0 &&
@@ -9484,6 +9489,15 @@ $text''';
     });
   }
 
+  void _onCompanionAnnotationEditingChanged(bool editing) {
+    if (!mounted || _companionAnnotationEditing == editing) return;
+    setState(() {
+      _companionAnnotationEditing = editing;
+      _companionAnnotationKeyboardClosing =
+          !editing && _currentKeyboardInset > 0;
+    });
+  }
+
   Widget _buildReadingCompanion() {
     final target = _companionTarget;
     final bookId = target?.source.bookId ?? _selectedReadingTaskBookId;
@@ -9502,6 +9516,7 @@ $text''';
       streamingReply: _streamingReply,
       onPassageOpened: _openReadingPassage,
       onInkEditingChanged: _onCompanionInkEditingChanged,
+      onAnnotationEditingChanged: _onCompanionAnnotationEditingChanged,
       immersive: _companionImmersive,
       toolbarBuilder: _buildCompanionTopBar,
       onDarkChanged: (dark) {
@@ -10386,7 +10401,11 @@ $text''';
     final keepComposerFixed =
         _keyboardOverlayKeepsComposerFixed || _taskSearchKeepsComposerFixed;
     final keepViewportFixed =
-        keepComposerFixed || _companionInkEditing || _companionInkKeyboardClosing;
+        keepComposerFixed ||
+        _companionInkEditing ||
+        _companionInkKeyboardClosing ||
+        _companionAnnotationEditing ||
+        _companionAnnotationKeyboardClosing;
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
