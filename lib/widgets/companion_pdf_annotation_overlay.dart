@@ -8,7 +8,8 @@ import '../models/reader_pagination.dart';
 import '../services/companion_annotation_store.dart';
 import '../services/companion_pdf_reflow.dart';
 
-const companionAnnotationUnderline = Color(0xFFA4BD83);
+// Core median from the approved companion-note-library-saved.png underline.
+const companionAnnotationUnderline = Color(0xFF6CF638);
 
 ({int firstPage, int lastPage, int startOffset, int endOffset})?
 legacyCompanionPdfRange(CompanionAnnotationSelection selection) {
@@ -195,13 +196,16 @@ class _AnnotationDashPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = companionAnnotationUnderline
-      ..strokeWidth = 1;
+      ..strokeWidth = 1.5;
     for (final rect in ranges) {
       final y = rect.bottom + 1;
-      for (var x = rect.left; x < rect.right; x += 6) {
+      // Approved reference: 15px dashes / 10px gaps at a 40px body size.
+      final dash = rect.height * .375;
+      final gap = rect.height * .25;
+      for (var x = rect.left; x < rect.right; x += dash + gap) {
         canvas.drawLine(
           Offset(x, y),
-          Offset(math.min(rect.right, x + 3.5), y),
+          Offset(math.min(rect.right, x + dash), y),
           paint,
         );
       }

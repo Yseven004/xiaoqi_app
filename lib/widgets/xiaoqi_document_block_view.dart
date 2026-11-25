@@ -541,7 +541,8 @@ class _LinkedDocumentTextState extends State<_LinkedDocumentText> {
                 ? TextDecoration.underline
                 : null,
             decorationStyle: annotated ? TextDecorationStyle.dashed : null,
-            decorationColor: annotated ? const Color(0xFFA4BD83) : null,
+            decorationColor: annotated ? const Color(0xFF6CF638) : null,
+            decorationThickness: annotated ? 1.5 : null,
             color: target == null
                 ? (strong ? widget.emphasisColor : null)
                 : ThemeData.estimateBrightnessForColor(
