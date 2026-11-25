@@ -52,6 +52,7 @@ Future<CompanionAnnotation?> editCompanionAnnotation(
   return showAnnotationSheet(
     context,
     editing: true,
+    matchReferenceProportions: true,
     onViewportChanged: onViewportChanged,
     builder: (_) => _AnnotationAccountGuard(
       revision: revision,
@@ -78,6 +79,8 @@ Future<void> viewCompanionAnnotation(
   var addingToLibrary = false;
   await showAnnotationSheet<void>(
     context,
+    matchReferenceProportions: true,
+    barrierColor: Colors.transparent,
     builder: (_) => guard(
       StatefulBuilder(
         builder: (context, update) => SingleChildScrollView(
@@ -153,7 +156,19 @@ Future<void> viewCompanionAnnotation(
                                               .instance
                                               .emailSessionRevision
                                               .value) {
-                                    AppToast.show(context, '已加入笔记库');
+                                    final scale = annotationVisualScaleOf(
+                                      context,
+                                    );
+                                    AppToast.show(
+                                      context,
+                                      '已加入笔记库',
+                                      scale: scale,
+                                      leading: annotationAsset(
+                                        'assets/icons/drawing/check.svg',
+                                        color: Colors.white,
+                                        size: 18 * scale,
+                                      ),
+                                    );
                                   }
                                 } on FormatException catch (error) {
                                   if (context.mounted)
@@ -258,6 +273,7 @@ class _AnnotationPrivacy extends StatelessWidget {
     await showMenu<String>(
       context: context,
       useRootNavigator: true,
+      popUpAnimationStyle: AnimationStyle.noAnimation,
       color: Colors.white,
       surfaceTintColor: Colors.transparent,
       elevation: 4,
