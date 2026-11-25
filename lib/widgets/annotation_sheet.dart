@@ -303,32 +303,38 @@ class AnnotationThumbnails extends StatelessWidget {
               child: Semantics(
                 label: '查看图片 ${index + 1}',
                 button: true,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: onMissing != null && !File(paths[index]).existsSync()
-                      ? const ColoredBox(
-                          color: Color(0xFFF1F2F4),
-                          child: SizedBox(
-                            width: 58,
-                            height: 58,
-                            child: Center(child: Text('待下载')),
-                          ),
-                        )
-                      : Image.file(
-                          File(paths[index]),
-                          width: 58,
-                          height: 58,
-                          cacheWidth: 192,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => const ColoredBox(
+                child: Container(
+                  foregroundDecoration: BoxDecoration(
+                    border: Border.all(color: const Color(0xFFD5D8DE)),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: onMissing != null && !File(paths[index]).existsSync()
+                        ? const ColoredBox(
                             color: Color(0xFFF1F2F4),
                             child: SizedBox(
                               width: 58,
                               height: 58,
-                              child: Center(child: Text('图片失效')),
+                              child: Center(child: Text('待下载')),
+                            ),
+                          )
+                        : Image.file(
+                            File(paths[index]),
+                            width: 58,
+                            height: 58,
+                            cacheWidth: 192,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => const ColoredBox(
+                              color: Color(0xFFF1F2F4),
+                              child: SizedBox(
+                                width: 58,
+                                height: 58,
+                                child: Center(child: Text('图片失效')),
+                              ),
                             ),
                           ),
-                        ),
+                  ),
                 ),
               ),
             ),
