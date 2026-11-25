@@ -218,12 +218,12 @@ class AnnotationQuoteLine extends StatelessWidget {
                 automaticallyImplyLeading: false,
                 title: const Text('引文', style: TextStyle(fontSize: 18)),
                 actions: [
-                  IconButton(
-                    tooltip: '关闭引文',
+                  TextButton(
                     onPressed: () => Navigator.pop(context),
-                    icon: annotationAsset(
-                      'assets/icons/chat_note_editor/x.svg',
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF232427),
                     ),
+                    child: const Text('关闭'),
                   ),
                 ],
               ),
