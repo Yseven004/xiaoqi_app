@@ -541,6 +541,8 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   late final _images = [...?widget.initial?.images];
   late final _audio = [...?widget.initial?.audio];
   final _newPaths = <String>{};
+  final _recordingClock = Stopwatch();
+  Timer? _recordingTicker;
   String? _recording;
   bool _busy = false;
   bool _saved = false;
@@ -558,6 +560,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
       return;
     }
     final failedPath = _recording!;
+    _stopRecordingClock();
     setState(() {
       _recording = null;
       _busy = true;
@@ -653,6 +656,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
     var path = _recording;
     try {
       if (path != null) {
+        _stopRecordingClock();
         final output = await _speech.stopAudioFileRecording(_recordingOwner);
         if (output != path || await File(path).length() <= 0) {
           throw StateError('录音未保存');
@@ -685,8 +689,10 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
           throw StateError('录音已中断');
         }
         setState(() => _recording = path);
+        _startRecordingClock();
       }
     } catch (_) {
+      _stopRecordingClock();
       await _speech.cancelSession(_recordingOwner);
       if (path != null) await _discard(path);
       if (mounted) {
@@ -696,6 +702,22 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  void _startRecordingClock() {
+    _recordingClock
+      ..reset()
+      ..start();
+    _recordingTicker?.cancel();
+    _recordingTicker = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (mounted && _recording != null) setState(() {});
+    });
+  }
+
+  void _stopRecordingClock() {
+    _recordingTicker?.cancel();
+    _recordingTicker = null;
+    _recordingClock.stop();
   }
 
   Future<void> _save() async {
@@ -725,6 +747,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _stopRecordingClock();
     _controller.dispose();
     if (_recording != null || _speech.ownsSession(_recordingOwner)) {
       unawaited(
@@ -805,17 +828,37 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
                 onPressed: _busy || _recording != null ? null : _pickImages,
                 icon: annotationAsset(_plusAsset),
               ),
-              const Spacer(),
-              IconButton(
-                tooltip: _recording == null ? '开始录音' : '结束并保留录音',
-                onPressed: _busy ? null : _toggleRecording,
-                icon: annotationAsset(
-                  _recording == null
-                      ? _micAsset
-                      : 'assets/icons/note_format/stop.svg',
-                  color: _recording == null ? _quiet : const Color(0xFF9D3A35),
+              if (_recording != null) ...[
+                Expanded(
+                  child: Text(
+                    '录音中 ${_audioTime(_recordingClock.elapsed)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF9D3A35),
+                      fontSize: 13,
+                      fontFeatures: [ui.FontFeature.tabularFigures()],
+                    ),
+                  ),
                 ),
-              ),
+                TextButton.icon(
+                  onPressed: _busy ? null : _toggleRecording,
+                  style: TextButton.styleFrom(foregroundColor: _ink),
+                  icon: annotationAsset(
+                    'assets/icons/note_format/stop.svg',
+                    size: 18,
+                    color: const Color(0xFF9D3A35),
+                  ),
+                  label: const Text('停止'),
+                ),
+              ] else ...[
+                const Spacer(),
+                IconButton(
+                  tooltip: '开始录音',
+                  onPressed: _busy ? null : _toggleRecording,
+                  icon: annotationAsset(_micAsset, color: _quiet),
+                ),
+              ],
               ValueListenableBuilder<TextEditingValue>(
                 valueListenable: _controller,
                 builder: (context, value, _) {
