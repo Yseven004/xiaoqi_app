@@ -311,64 +311,70 @@ class AnnotationThumbnails extends StatelessWidget {
       for (var index = 0; index < paths.length; index++)
         Stack(
           children: [
-            InkWell(
-              borderRadius: BorderRadius.circular(8),
-              onTap: () {
-                FocusManager.instance.primaryFocus?.unfocus();
-                if (onMissing != null && !File(paths[index]).existsSync()) {
-                  onMissing!(paths[index]);
-                  return;
-                }
-                showDialog<void>(
-                  context: context,
-                  builder: (context) {
-                    final dialog = Dialog(
-                      clipBehavior: Clip.antiAlias,
-                      child: InteractiveViewer(
-                        child: Image.file(
-                          File(paths[index]),
-                          fit: BoxFit.contain,
-                        ),
-                      ),
-                    );
-                    return guardContent?.call(dialog) ?? dialog;
-                  },
-                );
-              },
-              child: Semantics(
-                label: '查看图片 ${index + 1}',
-                button: true,
-                child: Container(
-                  foregroundDecoration: BoxDecoration(
-                    border: Border.all(color: const Color(0xFFD5D8DE)),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: onMissing != null && !File(paths[index]).existsSync()
-                        ? const ColoredBox(
-                            color: Color(0xFFF1F2F4),
-                            child: SizedBox(
-                              width: 58,
-                              height: 58,
-                              child: Center(child: Text('待下载')),
-                            ),
-                          )
-                        : Image.file(
+            Padding(
+              padding: onRemove == null
+                  ? EdgeInsets.zero
+                  : const EdgeInsets.only(top: 4, right: 4),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () {
+                  FocusManager.instance.primaryFocus?.unfocus();
+                  if (onMissing != null && !File(paths[index]).existsSync()) {
+                    onMissing!(paths[index]);
+                    return;
+                  }
+                  showDialog<void>(
+                    context: context,
+                    builder: (context) {
+                      final dialog = Dialog(
+                        clipBehavior: Clip.antiAlias,
+                        child: InteractiveViewer(
+                          child: Image.file(
                             File(paths[index]),
-                            width: 58,
-                            height: 58,
-                            cacheWidth: 192,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => const ColoredBox(
+                            fit: BoxFit.contain,
+                          ),
+                        ),
+                      );
+                      return guardContent?.call(dialog) ?? dialog;
+                    },
+                  );
+                },
+                child: Semantics(
+                  label: '查看图片 ${index + 1}',
+                  button: true,
+                  child: Container(
+                    foregroundDecoration: BoxDecoration(
+                      border: Border.all(color: const Color(0xFFD5D8DE)),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child:
+                          onMissing != null && !File(paths[index]).existsSync()
+                          ? const ColoredBox(
                               color: Color(0xFFF1F2F4),
                               child: SizedBox(
                                 width: 58,
                                 height: 58,
-                                child: Center(child: Text('图片失效')),
+                                child: Center(child: Text('待下载')),
+                              ),
+                            )
+                          : Image.file(
+                              File(paths[index]),
+                              width: 58,
+                              height: 58,
+                              cacheWidth: 192,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => const ColoredBox(
+                                color: Color(0xFFF1F2F4),
+                                child: SizedBox(
+                                  width: 58,
+                                  height: 58,
+                                  child: Center(child: Text('图片失效')),
+                                ),
                               ),
                             ),
-                          ),
+                    ),
                   ),
                 ),
               ),
@@ -378,10 +384,12 @@ class AnnotationThumbnails extends StatelessWidget {
                 top: 0,
                 right: 0,
                 child: SizedBox.square(
-                  dimension: 36,
+                  dimension: 44,
                   child: IconButton(
                     tooltip: '移除图片 ${index + 1}',
                     onPressed: () => onRemove!(index),
+                    alignment: Alignment.topRight,
+                    padding: EdgeInsets.zero,
                     icon: DecoratedBox(
                       decoration: const BoxDecoration(
                         color: Color(0xB3343740),
