@@ -21,6 +21,7 @@ import 'package:xiaoqi_genkit_server/src/store.dart';
 const _defaultApiPort = 8180;
 const _devTenantId = 'genkit-devtools';
 const _devDeviceId = 'genkit-devtools-device';
+const _annotationFixtureEmail = 'genkit-annotation-fixture@invalid.local';
 const _uuid = Uuid();
 const _annotationProbePngs = [
   'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC',
@@ -71,7 +72,7 @@ Future<void> main() async {
     'tenant_id': _devTenantId,
     'device_id': '$_devDeviceId-annotation',
     'auth_method': 'email',
-    'account_email': 'genkit-annotation-fixture@invalid.local',
+    'account_email': _annotationFixtureEmail,
     'created_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
     'revoked_at': null,
   }, null);
@@ -231,10 +232,17 @@ Future<void> main() async {
           cancel: context.cancel,
         );
         response.assertValid();
+        // The public snapshot omits tool results. Inspect the isolated fixture
+        // through its own SessionStore account to verify the completed call.
         final snapshot = delegation && response.snapshotId != null
             ? await CloudSessionStore(store).getSnapshot(
                 snapshotId: response.snapshotId,
-                context: {'tenant_id': _devTenantId},
+                context: {
+                  'tenant_id': _devTenantId,
+                  '_annotation_account': sha256
+                      .convert(utf8.encode(_annotationFixtureEmail))
+                      .toString(),
+                },
               )
             : null;
         return {
@@ -245,13 +253,14 @@ Future<void> main() async {
           'fixture_ready_ms': watch.elapsedMilliseconds,
           if (delegation)
             'delegated':
-                snapshot?.state?.messages?.any(
-                  (message) => message.content.whereType<ToolRequestPart>().any(
-                    (part) =>
-                        part.toolRequest.name ==
-                        'delegate_to_reading_companion',
-                  ),
-                ) ??
+                snapshot?.state?.messages
+                    ?.expand((message) => message.content)
+                    .map((part) => part.toJson()['toolResponse'])
+                    .whereType<Map>()
+                    .any(
+                      (response) =>
+                          response['name'] == 'delegate_to_reading_companion',
+                    ) ??
                 false,
         };
       } finally {
