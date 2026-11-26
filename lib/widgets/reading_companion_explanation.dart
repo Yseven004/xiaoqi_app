@@ -2,10 +2,68 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:path_parsing/path_parsing.dart';
 
 import '../models/reading_companion_evidence.dart';
 
 enum _CloudSide { above, left, right, below }
+
+// Keep this clipping path byte-for-byte aligned with the visible cloud SVG.
+const _cloudOutlineSvgPath =
+    'M31 135C10 128 3 116 8 98C-3 81 3 63 21 54C22 34 43 22 69 24C87 8 111 4 134 13C155 2 183 2 206 16C228 7 252 10 270 23C298 20 321 32 329 49C349 56 359 71 352 91C363 107 352 126 335 133C319 153 289 153 269 147C250 159 224 160 205 150C182 159 157 159 137 150C114 161 87 157 71 147C53 151 39 145 31 135Z';
+
+class _ScaledCloudPathProxy implements PathProxy {
+  const _ScaledCloudPathProxy(this.path, this.scaleX, this.scaleY);
+
+  final Path path;
+  final double scaleX;
+  final double scaleY;
+
+  @override
+  void moveTo(double x, double y) => path.moveTo(x * scaleX, y * scaleY);
+
+  @override
+  void lineTo(double x, double y) => path.lineTo(x * scaleX, y * scaleY);
+
+  @override
+  void cubicTo(
+    double x1,
+    double y1,
+    double x2,
+    double y2,
+    double x3,
+    double y3,
+  ) {
+    path.cubicTo(
+      x1 * scaleX,
+      y1 * scaleY,
+      x2 * scaleX,
+      y2 * scaleY,
+      x3 * scaleX,
+      y3 * scaleY,
+    );
+  }
+
+  @override
+  void close() => path.close();
+}
+
+class _CloudOutlineClipper extends CustomClipper<Path> {
+  const _CloudOutlineClipper();
+
+  @override
+  Path getClip(Size size) {
+    final path = Path();
+    writeSvgPathDataToPath(
+      _cloudOutlineSvgPath,
+      _ScaledCloudPathProxy(path, size.width / 360, size.height / 160),
+    );
+    return path;
+  }
+
+  @override
+  bool shouldReclip(covariant _CloudOutlineClipper oldClipper) => false;
+}
 
 const _cloudLeftOutlineProfile = <(double, double)>[
   (0.0125, 0.50),
@@ -82,8 +140,12 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const gap = 16.0;
+    const aboveGap = 27.0;
     final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
-    final width = math.min(560.0, viewport.width * 0.88);
+    final width = math.min(
+      560.0,
+      viewport.width * (viewport.width < 420 ? 0.88 : 0.87),
+    );
     final selectionLines = selectionRects.isEmpty
         ? [selection]
         : selectionRects;
@@ -93,15 +155,18 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     final bottomSelectionLine = selectionLines.reduce(
       (first, second) => first.bottom >= second.bottom ? first : second,
     );
-    double heightFor(double cardWidth) => math.min(
-      230.0,
-      math.max(224.0, cardWidth * 0.43) +
-          (textScale - 1).clamp(0.0, 2.0).toDouble() * 44.0,
-    );
+    double heightFor(double cardWidth) {
+      final minimumHeight = viewport.width < 420 ? 224.0 : 184.0;
+      return math.min(
+        230.0,
+        math.max(minimumHeight, cardWidth * 0.432) +
+            (textScale - 1).clamp(0.0, 2.0).toDouble() * 44.0,
+      );
+    }
 
     final preferredHeight = heightFor(width);
     final canPlaceAbove =
-        selection.top - viewport.top >= preferredHeight + gap - 12;
+        selection.top - viewport.top >= preferredHeight + aboveGap - 12;
     final sideCandidates = <({_CloudSide side, Rect rect, Rect anchor})>[];
     if (!canPlaceAbove) {
       for (final line in selectionLines) {
@@ -200,13 +265,16 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     late final _CloudSide side;
     final Rect? rect;
     late final Rect tailSelection;
+    double horizontalAnchor(Rect line) => viewport.width <= 600
+        ? viewport.center.dx.clamp(line.left, line.right).toDouble()
+        : line.center.dx;
     if (canPlaceAbove) {
       side = _CloudSide.above;
       rect = Rect.fromLTWH(
-        (topSelectionLine.center.dx - width / 2)
+        (horizontalAnchor(topSelectionLine) - width / 2)
             .clamp(viewport.left, viewport.right - width)
             .toDouble(),
-        math.max(viewport.top, selection.top - gap - preferredHeight),
+        math.max(viewport.top, selection.top - aboveGap - preferredHeight),
         width,
         preferredHeight,
       );
@@ -219,7 +287,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     } else if (selection.bottom + preferredHeight + gap <= viewport.bottom) {
       side = _CloudSide.below;
       rect = Rect.fromLTWH(
-        (bottomSelectionLine.center.dx - width / 2)
+        (horizontalAnchor(bottomSelectionLine) - width / 2)
             .clamp(viewport.left, viewport.right - width)
             .toDouble(),
         selection.bottom + gap,
@@ -234,7 +302,9 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     }
 
     final cardWidth = rect?.width ?? width;
-    final contentInset = math.min(54.0, cardWidth * 0.10);
+    final contentInset = math.min(54.0, cardWidth * 0.095);
+    final contentRightInset = math.min(72.0, cardWidth * 0.157);
+    final closeRight = cardWidth * 0.165 - 22;
     final baseScheme = Theme.of(context).colorScheme;
     final scheme = baseScheme.copyWith(
       surface: dark ? const Color(0xFF373737) : Colors.white,
@@ -369,10 +439,11 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
 
     final cloudRect = rect;
     final horizontal = side == _CloudSide.above || side == _CloudSide.below;
-    final tailX = (tailSelection.center.dx - cloudRect.left - 14)
+    final tailX = (horizontalAnchor(tailSelection) - cloudRect.left - 14)
         .clamp(28.0, cloudRect.width - 56)
         .toDouble();
     const sideTailHeight = 18.0;
+    const selectionTailHeight = 26.0;
     late final double sideTailLeft;
     late final double sideTailWidth;
     late final double sideTailTop;
@@ -434,7 +505,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
                   : '重新生成',
               maxLines: 1,
               softWrap: false,
-              style: const TextStyle(fontSize: 13),
+              style: const TextStyle(fontSize: 14),
             ),
           ],
         ),
@@ -448,7 +519,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
             showingPrevious ? '下一条' : '上一条',
             maxLines: 1,
             softWrap: false,
-            style: const TextStyle(fontSize: 13),
+            style: const TextStyle(fontSize: 14),
           ),
         ),
       if (onContinue != null)
@@ -460,7 +531,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
             '继续聊 ›',
             maxLines: 1,
             softWrap: false,
-            style: TextStyle(fontSize: 13),
+            style: TextStyle(fontSize: 14),
           ),
         ),
     ];
@@ -494,11 +565,11 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
           left: horizontal ? tailX : sideTailLeft,
           top: horizontal
               ? side == _CloudSide.below
-                    ? -10
-                    : cloudRect.height - 11
+                    ? -selectionTailHeight + 8
+                    : cloudRect.height - 8
               : sideTailTop,
           width: horizontal ? 28 : sideTailWidth,
-          height: horizontal ? 18 : sideTailHeight,
+          height: horizontal ? selectionTailHeight : sideTailHeight,
           child: horizontal
               ? RotatedBox(
                   quarterTurns: side == _CloudSide.below ? 2 : 0,
@@ -526,80 +597,104 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
           excludeFromSemantics: true,
         ),
         if (settled)
-          Padding(
-            padding: EdgeInsets.fromLTRB(contentInset, 19, contentInset, 15),
-            child: Column(
-              children: [
-                Expanded(
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        top: 18,
-                        right: 16,
-                        child: IconButton(
-                          key: const ValueKey('cloud-close-action'),
-                          tooltip: '关闭解释',
-                          onPressed: onDismiss,
-                          icon: const Icon(Icons.close, size: 18),
-                          style: closeStyle,
-                        ),
-                      ),
-                      Positioned(
-                        top: 60,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: KeyedSubtree(
-                          key: ValueKey(answerVersion),
-                          child: ClipRect(
-                            child: SingleChildScrollView(
-                              key: const ValueKey(
-                                'cloud-explanation-body-viewport',
-                              ),
-                              clipBehavior: Clip.hardEdge,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Semantics(
-                                    liveRegion: !pending,
-                                    child: Text(
-                                      text.isNotEmpty
-                                          ? text
-                                          : failed
-                                          ? '暂时无法解释这段'
-                                          : '正在解释…',
-                                      style: TextStyle(
-                                        color: scheme.onSurface,
-                                        fontSize: 16,
-                                        height: 1.45,
-                                      ),
+          Positioned.fill(
+            child: ClipPath(
+              key: const ValueKey('cloud-outline-content-clip'),
+              clipper: const _CloudOutlineClipper(),
+              child: Stack(
+                children: [
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      contentInset,
+                      19,
+                      contentRightInset,
+                      11,
+                    ),
+                    child: Column(
+                      children: [
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 60),
+                            child: KeyedSubtree(
+                              key: ValueKey(answerVersion),
+                              child: ClipRect(
+                                child: SizedBox(
+                                  width: double.infinity,
+                                  child: SingleChildScrollView(
+                                    key: const ValueKey(
+                                      'cloud-explanation-body-viewport',
+                                    ),
+                                    clipBehavior: Clip.hardEdge,
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Semantics(
+                                          liveRegion: !pending,
+                                          child: Text(
+                                            text.isNotEmpty
+                                                ? text
+                                                : failed
+                                                ? '暂时无法解释这段'
+                                                : pending
+                                                ? ''
+                                                : '正在解释…',
+                                            textAlign: TextAlign.start,
+                                            style: TextStyle(
+                                              color: scheme.onSurface,
+                                              fontSize: 16,
+                                              height: 1.45,
+                                            ),
+                                          ),
+                                        ),
+                                        if (onOpenEvidence != null)
+                                          ReadingCompanionEvidenceLinks(
+                                            evidence: evidence,
+                                            onOpen: onOpenEvidence!,
+                                          ),
+                                      ],
                                     ),
                                   ),
-                                  if (onOpenEvidence != null)
-                                    ReadingCompanionEvidenceLinks(
-                                      evidence: evidence,
-                                      onOpen: onOpenEvidence!,
-                                    ),
-                                ],
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 7),
+                        Divider(
+                          height: 1,
+                          thickness: 1,
+                          color: dark
+                              ? const Color(0x44FFFFFF)
+                              : const Color(0x33000000),
+                        ),
+                        const SizedBox(height: 0),
+                        SizedBox(height: 44, child: footerActions()),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 7),
-                Divider(
-                  height: 1,
-                  thickness: 1,
-                  color: dark
-                      ? const Color(0x44FFFFFF)
-                      : const Color(0x33000000),
-                ),
-                const SizedBox(height: 4),
-                SizedBox(height: 44, child: footerActions()),
-              ],
+                  Positioned(
+                    top: 37,
+                    right: closeRight,
+                    child: IconButton(
+                      key: const ValueKey('cloud-close-action'),
+                      tooltip: '关闭解释',
+                      onPressed: onDismiss,
+                      icon: SvgPicture.asset(
+                        'assets/icons/extension_market/detail/close.svg',
+                        width: 16,
+                        height: 16,
+                        colorFilter: ColorFilter.mode(
+                          scheme.onSurface,
+                          BlendMode.srcIn,
+                        ),
+                        excludeFromSemantics: true,
+                      ),
+                      style: closeStyle,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
       ],
@@ -614,26 +709,41 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
         ),
         child: Material(
           type: MaterialType.transparency,
-          child: TweenAnimationBuilder<double>(
+          child: TweenAnimationBuilder<Size>(
             duration: MediaQuery.disableAnimationsOf(context)
                 ? Duration.zero
-                : const Duration(milliseconds: 480),
-            curve: Curves.easeOutCubic,
-            tween: Tween(begin: 0, end: 1),
-            builder: (context, value, child) {
+                : const Duration(milliseconds: 1000),
+            curve: Curves.linear,
+            tween: Tween(begin: const Size(0.4, 0.3), end: const Size(1, 1)),
+            builder: (context, cloudScale, child) {
               final origin = switch (side) {
                 _CloudSide.above => Alignment.bottomCenter,
                 _CloudSide.left => Alignment.centerRight,
                 _CloudSide.right => Alignment.centerLeft,
                 _CloudSide.below => Alignment.topCenter,
               };
-              return Opacity(
-                opacity: value,
-                child: Transform.scale(
-                  key: const ValueKey('cloud-entry-scale'),
-                  alignment: origin,
-                  scale: 0.68 + value * 0.32,
-                  child: content(value == 1),
+              return Transform.scale(
+                key: const ValueKey('cloud-entry-outline-scale'),
+                scaleX: cloudScale.width,
+                scaleY: cloudScale.height,
+                alignment: origin,
+                child: TweenAnimationBuilder<double>(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : const Duration(milliseconds: 480),
+                  curve: Curves.easeOutCubic,
+                  tween: Tween(begin: 0, end: 1),
+                  builder: (context, value, child) => Opacity(
+                    opacity: value,
+                    child: Transform.scale(
+                      key: const ValueKey('cloud-entry-scale'),
+                      alignment: origin,
+                      scale: 0.68 + value * 0.32,
+                      child: content(
+                        value == 1 && (!pending || text.isNotEmpty || failed),
+                      ),
+                    ),
+                  ),
                 ),
               );
             },
