@@ -1749,6 +1749,8 @@ class XiaoqiApi {
           readingVersion,
           _safeId(config['workflow_id'], '讨论 ID'),
         );
+      } else if (sessionStore.readingSessionClaimed(tenantId, sessionId)) {
+        throw GenkitException('会话不存在', status: StatusCode.notFound);
       }
       final sessionOwner = sessionStore.annotationSessionOwner(
         tenantId,
@@ -2486,9 +2488,10 @@ class XiaoqiApi {
             : partialImage || result.extensionEvidenceMissing
             ? 'partially_completed'
             : 'completed';
-        if (finalTaskStatus == 'completed' && readingSourceVersions.isNotEmpty) {
-          cleanConfig[_readingDiscussionVersionsKey] =
-              readingSourceVersions.toList();
+        if (finalTaskStatus == 'completed' &&
+            readingSourceVersions.isNotEmpty) {
+          cleanConfig[_readingDiscussionVersionsKey] = readingSourceVersions
+              .toList();
         }
         final latestResultUserIndex = resultMessages.lastIndexWhere(
           (message) => message.role == Role.user,

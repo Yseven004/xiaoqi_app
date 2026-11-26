@@ -449,7 +449,8 @@ void main() {
       message: request('read-first', book),
     );
     await started.stream.drain<void>();
-    expect((await started.response).text, '你好');
+    final readingResponse = await started.response;
+    expect(readingResponse.text, '你好');
     expect(runtime.lastRequest?['_reading_discussion'], isTrue);
     expect(
       (runtime.lastRequest?['materials'] as List).single['id'],
@@ -471,6 +472,30 @@ void main() {
       await drained;
     }
     expect(runtime.turnCount, 1);
+    final ordinary = await ownerAgent.chat().send(
+      message: request('read-ordinary-control', book),
+    );
+    expect(ordinary.sessionId, isNotNull);
+    expect(readingResponse.sessionId, isNotNull);
+    for (final (agent, session, task) in [
+      (reader, ordinary.sessionId!, 'ordinary-session-on-reading'),
+      (ownerAgent, readingResponse.sessionId!, 'reading-session-on-ordinary'),
+    ]) {
+      final rejected = agent
+          .chat(sessionId: session)
+          .sendStream(message: request(task, book));
+      final drained = rejected.stream.drain<void>().catchError((Object _) {});
+      await expectLater(rejected.response, throwsA(isA<Object>()));
+      await drained;
+    }
+    expect(runtime.turnCount, 2);
+    expect(
+      (await ownerAgent
+              .chat(sessionId: ordinary.sessionId)
+              .send(message: request('ordinary-session-still-visible', book)))
+          .text,
+      '你好',
+    );
 
     const workflow = 'private-reading-discussion';
     final http = HttpClient();

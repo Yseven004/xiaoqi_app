@@ -311,9 +311,18 @@ class CloudSessionStore implements SessionStore {
     String? sourceVersion,
     String workflow,
   ) {
+    if (!_safeAgentId.hasMatch(sessionId)) {
+      throw GenkitException('伴读会话不存在', status: StatusCode.notFound);
+    }
     final key = 'genkit/reading-owner/$tenant/$sessionId';
     final existing = _store.get(key);
     if (existing == null) {
+      if (annotationSessionOwner(tenant, sessionId) != null ||
+          _store
+              .list('genkit/session/$tenant/$sessionId/', limit: 1)
+              .isNotEmpty) {
+        throw GenkitException('伴读会话不存在', status: StatusCode.notFound);
+      }
       _store.put(key, {
         'account': account,
         'book': book,
@@ -327,6 +336,9 @@ class CloudSessionStore implements SessionStore {
       throw GenkitException('伴读会话不属于这本书', status: StatusCode.notFound);
     }
   }
+
+  bool readingSessionClaimed(String tenant, String sessionId) =>
+      _store.get('genkit/reading-owner/$tenant/$sessionId') != null;
 
   bool ownsReadingSession(
     String tenant,
@@ -360,7 +372,9 @@ class CloudSessionStore implements SessionStore {
     String sessionId,
     Map<String, dynamic>? context,
   ) {
-    final reading = _store.get('genkit/reading-owner/$tenant/$sessionId')?.value;
+    final reading = _store
+        .get('genkit/reading-owner/$tenant/$sessionId')
+        ?.value;
     final isReading = context?['_reading_discussion'] == true;
     if (reading != null) {
       return isReading && reading['account'] == context?['_annotation_account'];
