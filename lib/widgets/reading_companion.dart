@@ -59,6 +59,35 @@ import 'reflow_document_pager.dart';
 import 'reading_companion_explanation.dart';
 import 'xiaoqi_document_block_view.dart';
 
+ColorScheme _companionMonochromeScheme(bool dark) => ColorScheme.fromSeed(
+  seedColor: const Color(0xFF3D3D3D),
+  brightness: dark ? Brightness.dark : Brightness.light,
+  dynamicSchemeVariant: DynamicSchemeVariant.monochrome,
+).copyWith(
+  surface: dark ? const Color(0xFF191B1E) : Colors.white,
+  surfaceContainerLow: dark ? const Color(0xFF232527) : const Color(0xFFF7F7F8),
+  onSurface: dark ? const Color(0xFFF2F2F2) : const Color(0xFF24272C),
+  onSurfaceVariant: dark ? const Color(0xFFBFBFBF) : const Color(0xFF555B62),
+  outlineVariant: dark ? const Color(0xFF494949) : const Color(0xFFE0E0E0),
+);
+
+ButtonStyle _companionFlatActionStyle(Color foreground) => ButtonStyle(
+  foregroundColor: WidgetStatePropertyAll(foreground),
+  elevation: const WidgetStatePropertyAll(0),
+  splashFactory: NoSplash.splashFactory,
+  overlayColor: WidgetStateProperty.resolveWith((states) {
+    if (states.contains(WidgetState.pressed)) return Colors.transparent;
+    return states.contains(WidgetState.focused)
+        ? foreground.withValues(alpha: .12)
+        : Colors.transparent;
+  }),
+  minimumSize: const WidgetStatePropertyAll(Size(48, 48)),
+  padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 12)),
+  shape: WidgetStatePropertyAll(
+    RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+  ),
+);
+
 /// Selected text and the location that the reader can resolve in the source.
 class ReadingCompanionPassage {
   const ReadingCompanionPassage({
@@ -258,6 +287,8 @@ class ReadingCompanion extends StatefulWidget {
     this.target,
     this.onSourceChanged,
     this.savedPassageExcerpt,
+    this.savedPassageOrigin,
+    this.savedPassageMarkdown,
     this.immersive = false,
     this.onToggleImmersive,
     this.onEnterImmersive,
@@ -275,6 +306,8 @@ class ReadingCompanion extends StatefulWidget {
   final BookLibraryService library;
   final List<AiConversationMessage> messages;
   final String? savedPassageExcerpt;
+  final CompanionAnnotationSelection? savedPassageOrigin;
+  final String? savedPassageMarkdown;
   final ValueListenable<String> streamingReply;
   final Widget Function(Widget history) composerBuilder;
   final ValueChanged<ReadingCompanionPassage> onPassageOpened;
@@ -742,6 +775,45 @@ class ReadingCompanionState extends State<ReadingCompanion>
   void _cancelReadingEvidence() {
     _readingEvidenceRequest++;
     _pendingReadingEvidence = null;
+  }
+
+  Future<void> _returnToQuotedPassage() async {
+    final document = _documentKey?.currentState;
+    if (!_chatOpen || document == null) {
+      AppToast.show(context, '暂时无法定位这段原文');
+      return;
+    }
+    final selection =
+        _selection?.passage.annotationSelection ?? widget.savedPassageOrigin;
+    final excerpt = _selection?.passage.text ?? widget.savedPassageExcerpt;
+    final saved = widget.savedPassageMarkdown;
+    final locator = saved == null
+        ? null
+        : savedPassageLocator(saved, document._source);
+    _cancelReadingEvidence();
+    final request = _readingEvidenceRequest;
+    bool cancelled() =>
+        !mounted ||
+        !_chatOpen ||
+        request != _readingEvidenceRequest ||
+        !identical(_documentKey?.currentState, document);
+    bool? precise;
+    try {
+      if (selection != null) {
+        precise = await document._jumpQuotedPassage(selection, cancelled);
+      } else if (excerpt != null && locator != null) {
+        precise = await document._jumpLegacyQuote(locator, excerpt, cancelled);
+      }
+    } on Exception {
+      // The file may have been removed or become unreadable.
+    }
+    if (!mounted || cancelled()) return;
+    if (precise == null) {
+      AppToast.show(context, '暂时无法定位这段原文');
+      return;
+    }
+    _closeChat();
+    if (!precise) AppToast.show(context, '已返回原文所在位置，未能精确高亮引文');
   }
 
   Future<void> _openReadingEvidence(ReadingCompanionEvidence evidence) async {
@@ -1417,6 +1489,7 @@ class ReadingCompanionState extends State<ReadingCompanion>
         evidence: answer?.evidence ?? const [],
         onOpenEvidence: _openReadingEvidence,
         pending: pending,
+        regenerating: pending && answer != null,
         failed: _explanationFailed,
         onDismiss: () {
           _cancelReadingEvidence();
@@ -1439,16 +1512,51 @@ class ReadingCompanionState extends State<ReadingCompanion>
   }
 
   Widget _discussionPage(BuildContext context) {
-    final quote = _selection?.passage.text ?? widget.savedPassageExcerpt ?? '';
+    final quote =
+        _selection?.passage.text ??
+        widget.savedPassageOrigin?.quote ??
+        widget.savedPassageExcerpt ??
+        '';
     final media = MediaQuery.of(context);
     final overlap = math.max(
       0.0,
       media.viewInsets.bottom - media.viewPadding.bottom,
     );
+    final base = Theme.of(context);
+    final scheme = _companionMonochromeScheme(_dark);
+    final theme = base.copyWith(
+      brightness: scheme.brightness,
+      colorScheme: scheme,
+      textTheme: base.textTheme.apply(
+        bodyColor: scheme.onSurface,
+        displayColor: scheme.onSurface,
+      ),
+      iconTheme: base.iconTheme.copyWith(color: scheme.onSurface),
+      textSelectionTheme: TextSelectionThemeData(
+        cursorColor: scheme.onSurface,
+        selectionColor: scheme.onSurface.withValues(alpha: .22),
+        selectionHandleColor: scheme.onSurface,
+      ),
+    );
+    return Theme(
+      data: theme,
+      child: Builder(
+        builder: (context) => _discussionSurface(context, quote, overlap),
+      ),
+    );
+  }
+
+  Widget _discussionSurface(
+    BuildContext context,
+    String quote,
+    double keyboardOverlap,
+  ) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final actionStyle = _companionFlatActionStyle(scheme.onSurface);
     return Material(
       key: const ValueKey('companion-discussion-page'),
-      color: theme.colorScheme.surface,
+      color: scheme.surface,
       child: Semantics(
         scopesRoute: true,
         explicitChildNodes: true,
@@ -1457,20 +1565,35 @@ class ReadingCompanionState extends State<ReadingCompanion>
         child: SafeArea(
           bottom: false,
           child: Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, overlap + 10),
+            padding: EdgeInsets.fromLTRB(16, 0, 16, keyboardOverlap + 10),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                SizedBox(
-                  height: 52,
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 52),
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
-                      Text('伴读问答', style: theme.textTheme.titleMedium),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 84),
+                        child: Text(
+                          '伴读问答',
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
                       Align(
-                        alignment: Alignment.centerLeft,
+                        alignment: AlignmentDirectional.centerStart,
                         child: TextButton.icon(
                           onPressed: _closeChat,
+                          style: actionStyle.copyWith(
+                            padding: const WidgetStatePropertyAll(
+                              EdgeInsets.symmetric(horizontal: 6),
+                            ),
+                          ),
                           icon: const Icon(Icons.arrow_back, size: 18),
                           label: const Text('原文'),
                         ),
@@ -1487,45 +1610,47 @@ class ReadingCompanionState extends State<ReadingCompanion>
                       textAlign: TextAlign.center,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodyMedium,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                     );
                   },
                 ),
                 if (quote.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  OutlinedButton.icon(
-                    onPressed: () {
-                      FocusManager.instance.primaryFocus?.unfocus();
-                      unawaited(
-                        showDialog<void>(
-                          context: context,
-                          builder: (context) => AlertDialog(
-                            title: const Text('原文选段'),
-                            content: SingleChildScrollView(
-                              child: SelectableText(quote),
+                  const SizedBox(height: 14),
+                  Semantics(
+                    hint: '查看完整引文',
+                    child: TextButton(
+                      key: const ValueKey('companion-discussion-quote'),
+                      onPressed: () =>
+                          unawaited(_showDiscussionQuote(context, quote)),
+                      style: actionStyle.copyWith(
+                        backgroundColor: WidgetStatePropertyAll(
+                          scheme.surfaceContainerLow,
+                        ),
+                        side: WidgetStatePropertyAll(
+                          BorderSide(color: scheme.outlineVariant),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.format_quote,
+                            size: 20,
+                            color: scheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              quote.replaceAll(RegExp(r'\s+'), ' '),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodyMedium,
                             ),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.of(context).pop(),
-                                child: const Text('关闭'),
-                              ),
-                            ],
                           ),
-                        ),
-                      );
-                    },
-                    icon: const Icon(Icons.format_quote, size: 19),
-                    label: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            quote.replaceAll(RegExp(r'\s+'), ' '),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const Icon(Icons.chevron_right, size: 17),
-                      ],
+                          const Icon(Icons.chevron_right, size: 17),
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -1549,6 +1674,86 @@ class ReadingCompanionState extends State<ReadingCompanion>
         ),
       ),
     );
+  }
+
+  Future<void> _showDiscussionQuote(BuildContext context, String quote) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    final returnToSource = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black38,
+      builder: (context) {
+        final theme = Theme.of(context);
+        final scheme = theme.colorScheme;
+        return Dialog(
+          key: const ValueKey('companion-quote-dialog'),
+          backgroundColor: scheme.surface,
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+          constraints: const BoxConstraints(maxWidth: 420),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: scheme.outlineVariant),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 12, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          '原文选段',
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '关闭',
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: _companionFlatActionStyle(scheme.onSurface),
+                      icon: const Icon(Icons.close, size: 19),
+                    ),
+                  ],
+                ),
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(0, 6, 8, 8),
+                    child: SelectableText(
+                      quote,
+                      style: theme.textTheme.bodyLarge?.copyWith(
+                        fontFamily: 'NotoSerifCJKSC',
+                        height: 1.65,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: AlignmentDirectional.centerEnd,
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(context).pop(true),
+                    style: _companionFlatActionStyle(scheme.onPrimary).copyWith(
+                      backgroundColor: WidgetStatePropertyAll(scheme.primary),
+                    ),
+                    child: const Text('返回原文'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (mounted && _chatOpen && returnToSource == true) {
+      await _returnToQuotedPassage();
+    }
   }
 }
 
@@ -3321,6 +3526,19 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       });
     }
     _selectionActive = active;
+    if (!active &&
+        _flowEvidenceMark != null &&
+        _flowEvidenceMarkTimeout?.isActive == false) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            !_selectionActive &&
+            _flowEvidenceMark != null &&
+            _flowEvidenceMarkTimeout?.isActive == false) {
+          setState(() => _flowEvidenceMark = null);
+        }
+      });
+      WidgetsBinding.instance.ensureVisualUpdate();
+    }
     if (!active) _prepareEbookNeighbors();
     if (!active && _deferredEpubDocument != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -3955,6 +4173,97 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
 
   /// Returns null for an unavailable location, false for page/chapter
   /// precision, and true only when the original text could be highlighted.
+  Future<bool?> _jumpQuotedPassage(
+    CompanionAnnotationSelection selection,
+    bool Function() cancelled,
+  ) async {
+    if (_inkEditing || !_validAnnotationOrigin(selection)) return null;
+    if (_isCompanionPdf(_source)) {
+      final page = switch (selection.canonicalRange) {
+        CompanionPdfSourceRange(:final pages) => pages.firstOrNull?.page,
+        _ => switch (selection.anchor) {
+          PdfReaderAnchor(:final pageNumber) => pageNumber,
+          _ => switch (selection.endAnchor) {
+            PdfReaderAnchor(:final pageNumber) => pageNumber,
+            _ => null,
+          },
+        },
+      };
+      return page == null
+          ? null
+          : _jumpPdfReadingEvidence(page, '', cancelled, selection: selection);
+    }
+    final loaded = await _loading;
+    if (!mounted || cancelled()) return null;
+    final chapterId = switch (selection.canonicalRange) {
+      CompanionFlowSourceRange(:final chapter) => chapter,
+      _ => switch (selection.anchor) {
+        FlowReaderAnchor(:final chapterId) => chapterId,
+        _ => null,
+      },
+    };
+    if (chapterId == null) return null;
+    final document = _deferredEpubDocument ?? _epubDocument ?? loaded.document;
+    final available = document?.chapters.any((item) => item.id == chapterId) == true
+        ? document
+        : await _ensureEpubChapter(chapterId);
+    if (!mounted || cancelled() || available == null) return null;
+    final chapter = available.chapters.where((item) => item.id == chapterId).firstOrNull;
+    if (chapter == null) return null;
+    final anchor = _flowAnnotationOrigin(available, selection);
+    final end = switch (selection.canonicalRange) {
+      CompanionFlowSourceRange(:final end) => end,
+      _ => selection.endOffset,
+    };
+    final blockId = anchor?.blockId;
+    return _showFlowReadingOrigin(
+      chapter,
+      anchor != null && blockId != null && end != null
+          ? (blockId: blockId, start: anchor.characterOffset, end: end)
+          : null,
+    );
+  }
+
+  Future<bool?> _jumpLegacyQuote(
+    String locator,
+    String excerpt,
+    bool Function() cancelled,
+  ) async {
+    if (_inkEditing || locator.isEmpty) return null;
+    const translationSuffix = ' · 译文';
+    final translated = locator.endsWith(translationSuffix);
+    final location = translated
+        ? locator.substring(0, locator.length - translationSuffix.length)
+        : locator;
+    final quote = translated || excerpt.endsWith('\n（节选）') ? '' : excerpt;
+    if (_isCompanionPdf(_source)) {
+      final page = RegExp(r'^第\s*(\d+)\s*页$').firstMatch(location)?.group(1);
+      return page == null
+          ? null
+          : _jumpPdfReadingEvidence(int.parse(page), quote, cancelled);
+    }
+    final loaded = await _loading;
+    if (!mounted || cancelled()) return null;
+    var document = _deferredEpubDocument ?? _epubDocument ?? loaded.document;
+    if (_epubPreview case final preview? when _deferredEpubDocument == null) {
+      final ids = {
+        for (final item in preview.outline)
+          if (item.title == location && item.chapterId != null) item.chapterId!,
+        for (final item in preview.document.chapters)
+          if (item.title == location) item.id,
+      };
+      final chapterId = ids.singleOrNull;
+      if (chapterId == null) return null;
+      document = await _ensureEpubChapter(chapterId);
+      if (!mounted || cancelled()) return null;
+    }
+    final chapter = document?.chapters
+        .where((item) => item.title.replaceAll(RegExp(r'\s+'), ' ').trim() == location)
+        .singleOrNull;
+    if (chapter == null) return null;
+    return _showFlowReadingOrigin(chapter, resolveReadingEvidenceBlock(chapter, quote));
+  }
+
   Future<bool?> _jumpReadingEvidence(
     ReadingCompanionEvidence evidence,
     bool Function() cancelled,
@@ -3984,39 +4293,183 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       chapter = evidence.resolveChapter(document);
     }
     if (chapter == null) return null;
-    final target = chapter;
-    final match = resolveReadingEvidenceBlock(target, evidence.quote);
+    return _showFlowReadingOrigin(
+      chapter,
+      resolveReadingEvidenceBlock(chapter, evidence.quote),
+    );
+  }
+
+  bool _supportsPreciseFlowMark(XiaoqiDocumentBlock block) =>
+      switch (block.kind) {
+        'divider' || 'table' || 'math' || 'formula' ||
+        'chart' || 'image' || 'figure' => false,
+        _ => true,
+      };
+
+  bool _showFlowReadingOrigin(
+    XiaoqiDocumentChapter target,
+    ({String blockId, int start, int end})? match,
+  ) {
+    final block = match == null
+        ? null
+        : target.blocks.where((block) => block.id == match.blockId).firstOrNull;
+    final precise = block != null && _supportsPreciseFlowMark(block);
+    _markFlowReadingOrigin(target.id, match);
+    _chapter(
+      target,
+      blockId: match?.blockId,
+      characterOffset: precise ? match!.start : 0,
+    );
+    return precise;
+  }
+
+  void _markFlowReadingOrigin(
+    String chapterId,
+    ({String blockId, int start, int end})? match,
+  ) {
     setState(() {
       _translationEnabled = false;
       _flowEvidenceMark = match == null
           ? null
           : (
-              chapter: target.id,
+              chapter: chapterId,
               block: match.blockId,
               start: match.start,
               end: match.end,
             );
     });
     _scheduleTranslation();
-    _chapter(
-      target,
-      blockId: match?.blockId,
-      characterOffset: match?.start ?? 0,
-    );
     _flowEvidenceMarkTimeout?.cancel();
     if (match != null) {
       _flowEvidenceMarkTimeout = Timer(const Duration(seconds: 6), () {
-        if (mounted) setState(() => _flowEvidenceMark = null);
+        // Removing the highlight rebuilds the selectable text. Wait for the
+        // user to finish selecting so its editing state stays in place.
+        if (mounted && !_selectionActive) {
+          setState(() => _flowEvidenceMark = null);
+        }
       });
     }
-    return match != null;
+  }
+
+  Future<bool?> _jumpReflowReadingEvidence(
+    int page,
+    String quote,
+    bool Function() cancelled,
+    CompanionAnnotationSelection? selection,
+  ) async {
+    final prepared = _preparedBook;
+    final reflowPage = prepared?.pages[page];
+    if (prepared == null || reflowPage == null || cancelled()) return null;
+
+    // Match within the original page first. The open reader may join a
+    // paragraph across pages or use a different window of the same book.
+    final sourceChapter = CompanionReflowPage.readingWindow(
+      [reflowPage],
+      prepared.pages.length,
+    ).chapters.single;
+    ({String blockId, int start, int end})? match;
+    final canonical = selection?.canonicalRange;
+    if (canonical is CompanionPdfSourceRange) {
+      for (final block in sourceChapter.blocks) {
+        final visible = CompanionReflowPage.sourceProjection(
+          block,
+        ).displayRange(canonical);
+        if (visible != null) {
+          match = (blockId: block.id, start: visible.start, end: visible.end);
+          break;
+        }
+      }
+    } else if (selection?.translationVersion == null) {
+      if (selection?.anchor case FlowReaderAnchor(:final blockId)) {
+        final block = sourceChapter.blocks
+            .where((block) => block.id == blockId)
+            .firstOrNull;
+        final start = selection?.startOffset;
+        final end = selection?.endOffset;
+        if (block != null &&
+            _supportsPreciseFlowMark(block) &&
+            start != null &&
+            end != null &&
+            start >= 0 &&
+            start < end &&
+            end <= block.text.length &&
+            block.text.substring(start, end) == selection?.quote) {
+          match = (blockId: block.id, start: start, end: end);
+        }
+      }
+      match ??= resolveReadingEvidenceBlock(
+        sourceChapter,
+        selection?.quote ?? quote,
+      );
+    }
+    await _openConvertedPage(
+      page,
+      position: match == null
+          ? null
+          : PdfReaderAnchor(
+              sourceId: _sourceKey,
+              pageNumber: page,
+              blockId: match.blockId,
+              characterOffset: match.start,
+            ),
+    );
+    final document = _convertedDocument;
+    if (!mounted ||
+        cancelled() ||
+        _convertedPage?.number != page ||
+        document == null) {
+      return null;
+    }
+    ({String blockId, int start, int end})? visible;
+    var complete = canonical is! CompanionPdfSourceRange;
+    if (match != null) {
+      final start = CompanionReflowPage.displayPosition(
+        document,
+        match.blockId,
+        match.start,
+      );
+      final end = CompanionReflowPage.displayPosition(
+        document,
+        match.blockId,
+        match.end,
+      );
+      if (start != null && canonical is CompanionPdfSourceRange) {
+        final block = document.chapters.single.blocks
+            .where((block) => block.id == start.blockId)
+            .firstOrNull;
+        if (block != null) {
+          final projection = CompanionReflowPage.sourceProjection(block);
+          final displayed = projection.displayRange(canonical);
+          if (displayed != null) {
+            visible = (
+              blockId: block.id,
+              start: displayed.start,
+              end: displayed.end,
+            );
+            complete = listEquals(
+              projection.sourceRange(displayed.start, displayed.end)?.pages,
+              canonical.pages,
+            );
+          }
+        }
+      } else if (start != null && end != null && start.blockId == end.blockId) {
+        visible = (blockId: start.blockId, start: start.offset, end: end.offset);
+      }
+    }
+    _navigationRevision++;
+    _markFlowReadingOrigin(document.chapters.single.id, visible);
+    return visible != null && complete;
   }
 
   Future<bool?> _jumpPdfReadingEvidence(
     int page,
     String quote,
-    bool Function() cancelled,
-  ) async {
+    bool Function() cancelled, {
+    CompanionAnnotationSelection? selection,
+  }) async {
+    if (_convertedPage != null) {
+      return _jumpReflowReadingEvidence(page, quote, cancelled, selection);
+    }
     var document = _pdf.isReady ? _pdfDocumentRef : null;
     if (document == null) {
       final ready = _readingEvidencePdfReady ??= Completer<PdfDocument?>();
@@ -4038,13 +4491,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       return null;
     }
     if (_convertedPage != null) {
-      await _returnToPdf();
-      if (!mounted ||
-          cancelled() ||
-          _convertedPage != null ||
-          !identical(_pdfDocumentRef, document)) {
-        return null;
-      }
+      return _jumpReflowReadingEvidence(page, quote, cancelled, selection);
     }
     ++_ebookSwitchRevision;
     setState(() {
@@ -4064,28 +4511,18 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     }
     _schedulePdfPageWork(probeText: true);
     _noteOriginMarkTimeout?.cancel();
-    if (quote.isEmpty || document.permissions?.allowsCopying == false) {
+    if ((quote.isEmpty && selection == null) ||
+        document.permissions?.allowsCopying == false) {
       return false;
     }
     try {
-      final loaded = await document.pages[page - 1].waitForLoaded(
-        timeout: const Duration(seconds: 4),
-      );
+      final origin = selection == null
+          ? await _pdfQuoteOrigin(document, page, quote, cancelled)
+          : await _verifiedPdfOrigin(document, selection);
       if (!mounted || cancelled() || !identical(_pdfDocumentRef, document)) {
         return null;
       }
-      if (loaded == null) return false;
-      final text = await companionNativePdfPage(loaded).loadStructuredText();
-      final match = uniqueReadingEvidenceRange(text.fullText, quote);
-      if (!mounted || cancelled() || !identical(_pdfDocumentRef, document)) {
-        return null;
-      }
-      if (match == null ||
-          _pdfPage != page ||
-          match.end > text.charRects.length) {
-        return false;
-      }
-      final origin = _pdfOriginRange(text, match.start, match.end);
+      if (origin == null || _pdfPage != page || origin.page != page) return false;
       if (_pdfPageTurnMode == ReaderPaginationMode.vertical) {
         final location = _pdf.calcRectForRectInsidePage(
           pageNumber: page,
@@ -4111,6 +4548,24 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     } on Exception {
       return mounted && !cancelled() ? false : null;
     }
+  }
+
+  Future<({int page, PdfRect rect, List<PdfRect> bounds})?> _pdfQuoteOrigin(
+    PdfDocument document,
+    int page,
+    String quote,
+    bool Function() cancelled,
+  ) async {
+    final loaded = await document.pages[page - 1].waitForLoaded(
+      timeout: const Duration(seconds: 4),
+    );
+    if (loaded == null || cancelled() || !identical(_pdfDocumentRef, document)) {
+      return null;
+    }
+    final text = await companionNativePdfPage(loaded).loadStructuredText();
+    final match = uniqueReadingEvidenceRange(text.fullText, quote);
+    if (match == null || match.end > text.charRects.length) return null;
+    return _pdfOriginRange(text, match.start, match.end);
   }
 
   void _showFlowOutline(
@@ -4539,6 +4994,31 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 slice: slice,
                 visibleText: displayText,
               );
+              final evidenceMark = _flowEvidenceMark;
+              final markedBlock =
+                  evidenceMark != null &&
+                  evidenceMark.chapter == sliceChapter.id &&
+                  evidenceMark.block == slice.block.id;
+              final supportsPreciseMark = _supportsPreciseFlowMark(slice.block);
+              final markColor = _dark
+                  ? const Color(0x55FFFFFF)
+                  : const Color(0x33000000);
+              final evidenceStart = evidenceMark == null
+                  ? 0
+                  : math.max(0, evidenceMark.start - slice.startOffset);
+              final evidenceEnd = evidenceMark == null
+                  ? 0
+                  : math.min(displayText.length, evidenceMark.end - slice.startOffset);
+              final sourceHighlight = markedBlock &&
+                      supportsPreciseMark &&
+                      displayText == slice.text &&
+                      evidenceStart < evidenceEnd
+                  ? (
+                      start: evidenceStart,
+                      end: evidenceEnd,
+                      color: markColor,
+                    )
+                  : null;
               final pdfPage = slice.block.kind == 'image' && sourcePage != null
                   ? _convertedPages[sourcePage]
                   : null;
@@ -4620,6 +5100,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       ),
                       textStyleBuilder: textStyle,
                       annotationRanges: annotationRanges,
+                      sourceHighlight: sourceHighlight,
                       onOpenAnnotations: _inkEditing
                           ? null
                           : (ids) => unawaited(
@@ -4637,25 +5118,15 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 blockId: origin?.blockId ?? slice.block.id,
                 characterOffset: origin?.offset ?? slice.startOffset,
               );
-              final evidenceMark = _flowEvidenceMark;
-              final highlighted =
-                  evidenceMark != null &&
-                  evidenceMark.chapter == sliceChapter.id &&
-                  evidenceMark.block == slice.block.id &&
-                  evidenceMark.start <
-                      (slice.endOffset ?? slice.block.text.length) &&
-                  evidenceMark.end > slice.startOffset;
               return Stack(
                 children: [
-                  if (highlighted)
-                    ColoredBox(
-                      color: _dark
-                          ? const Color(0x554B6A96)
-                          : const Color(0x555A8DD7),
-                      child: block,
-                    )
+                  if (supportsPreciseMark)
+                    block
                   else
-                    block,
+                    ColoredBox(
+                      color: markedBlock ? markColor : Colors.transparent,
+                      child: block,
+                    ),
                   Positioned.fill(
                     child: _inkSurface(
                       location,
@@ -8061,43 +8532,64 @@ class _CompanionSelectionToolbarState
   bool _ai = false;
 
   @override
-  Widget build(BuildContext context) => TextSelectionToolbar(
-    anchorAbove: widget.above,
-    anchorBelow: widget.below ?? widget.above,
-    toolbarBuilder: (context, child) => child,
-    children: [
-      if (_ai)
-        Material(
-          elevation: 5,
-          borderRadius: BorderRadius.circular(18),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextButton(
-                onPressed: () => widget.onAsk(true),
-                child: const Text('解释这段'),
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final scheme = _companionMonochromeScheme(dark);
+    final style = _companionFlatActionStyle(scheme.onSurface);
+    return TextSelectionToolbar(
+      anchorAbove: widget.above,
+      anchorBelow: widget.below ?? widget.above,
+      toolbarBuilder: (context, child) => child,
+      children: [
+        if (_ai)
+          Material(
+            key: const ValueKey('companion-ai-selection-menu'),
+            color: scheme.surface,
+            surfaceTintColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: scheme.outlineVariant),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Padding(
+              padding: const EdgeInsets.all(4),
+              child: OverflowBar(
+                spacing: 8,
+                overflowAlignment: OverflowBarAlignment.center,
+                children: [
+                  TextButton(
+                    onPressed: () => widget.onAsk(true),
+                    style: style.copyWith(
+                      backgroundColor: WidgetStatePropertyAll(
+                        scheme.surfaceContainerLow,
+                      ),
+                    ),
+                    child: const Text('解释这段'),
+                  ),
+                  TextButton(
+                    onPressed: () => widget.onAsk(false),
+                    style: style,
+                    child: const Text('自定义提问'),
+                  ),
+                ],
               ),
-              TextButton(
-                onPressed: () => widget.onAsk(false),
-                child: const Text('自定义提问'),
-              ),
-            ],
+            ),
+          )
+        else
+          MessageSelectionActionCard(
+            primaryLabel: 'AI',
+            primaryAsset: 'assets/icons/chat_note_editor/sparkle.svg',
+            copyFirst: true,
+            dark: dark,
+            onPrimaryAction: widget.showExplanation
+                ? () => setState(() => _ai = true)
+                : () => widget.onAsk(false),
+            onCopy: widget.onCopy,
+            onAnnotate: widget.onAnnotate,
           ),
-        )
-      else
-        MessageSelectionActionCard(
-          primaryLabel: 'AI',
-          primaryAsset: 'assets/icons/chat_note_editor/sparkle.svg',
-          copyFirst: true,
-          dark: Theme.of(context).brightness == Brightness.dark,
-          onPrimaryAction: widget.showExplanation
-              ? () => setState(() => _ai = true)
-              : () => widget.onAsk(false),
-          onCopy: widget.onCopy,
-          onAnnotate: widget.onAnnotate,
-        ),
-    ],
-  );
+      ],
+    );
+  }
 }
 
 class _CompanionHistory extends StatelessWidget {
@@ -8133,7 +8625,7 @@ class _CompanionHistory extends StatelessWidget {
         controller: controller,
         slivers: [
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(5, 16, 5, 12),
+            padding: const EdgeInsets.only(top: 16, bottom: 12),
             sliver: SliverList.builder(
               itemCount:
                   turns.length +
@@ -8143,22 +8635,24 @@ class _CompanionHistory extends StatelessWidget {
                 if (streamed.isNotEmpty && index == 0) {
                   final live = streamingEvidence;
                   return live == null
-                      ? _answer(streamed)
+                      ? _answer(context, streamed)
                       : ValueListenableBuilder(
                           valueListenable: live,
                           builder: (context, evidence, _) =>
-                              _answerWithEvidence(streamed, evidence),
+                              _answerWithEvidence(context, streamed, evidence),
                         );
                 }
-                if (showSeed) return _answerWithEvidence(seed!, seedEvidence);
+                if (showSeed) {
+                  return _answerWithEvidence(context, seed!, seedEvidence);
+                }
                 final reverseIndex = index - (streamed.isEmpty ? 0 : 1);
                 final turn = turns[turns.length - 1 - reverseIndex];
                 final text = turn.displayText ?? turn.text;
                 return KeyedSubtree(
                   key: messageKeys.putIfAbsent(turn.id, () => GlobalKey()),
                   child: turn.isUser
-                      ? _question(turn, text)
-                      : _assistantTurn(turn, text),
+                      ? _question(context, turn, text)
+                      : _assistantTurn(context, turn, text),
                 );
               },
             ),
@@ -8168,7 +8662,11 @@ class _CompanionHistory extends StatelessWidget {
     },
   );
 
-  Widget _question(AiConversationMessage message, String text) => Align(
+  Widget _question(
+    BuildContext context,
+    AiConversationMessage message,
+    String text,
+  ) => Align(
     alignment: Alignment.centerRight,
     child: FractionallySizedBox(
       widthFactor: .86,
@@ -8178,7 +8676,7 @@ class _CompanionHistory extends StatelessWidget {
           margin: const EdgeInsets.only(bottom: 13),
           padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 9),
           decoration: BoxDecoration(
-            color: const Color(0xFFF1F1F1),
+            color: Theme.of(context).colorScheme.surfaceContainerLow,
             borderRadius: BorderRadius.circular(12),
           ),
           child: Column(
@@ -8190,8 +8688,8 @@ class _CompanionHistory extends StatelessWidget {
                   attachment.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFF555555),
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                     fontSize: 13,
                     height: 1.5,
                   ),
@@ -8205,10 +8703,15 @@ class _CompanionHistory extends StatelessWidget {
     ),
   );
 
-  Widget _assistantTurn(AiConversationMessage message, String text) => Column(
+  Widget _assistantTurn(
+    BuildContext context,
+    AiConversationMessage message,
+    String text,
+  ) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       _answerWithEvidence(
+        context,
         visibleChatAssistantText(text),
         message.readingEvidence,
       ),
@@ -8226,14 +8729,15 @@ class _CompanionHistory extends StatelessWidget {
   );
 
   Widget _answerWithEvidence(
+    BuildContext context,
     String text,
     List<ReadingCompanionEvidence> evidence,
   ) {
-    if (evidence.isEmpty) return _answer(text);
+    if (evidence.isEmpty) return _answer(context, text);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _answer(text),
+        _answer(context, text),
         ReadingCompanionEvidenceLinks(
           evidence: evidence,
           onOpen: onOpenEvidence,
@@ -8242,16 +8746,17 @@ class _CompanionHistory extends StatelessWidget {
     );
   }
 
-  Widget _answer(String text) {
+  Widget _answer(BuildContext context, String text) {
     if (text.trim().isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 20),
       child: GptMarkdown(
         text,
-        style: const TextStyle(
+        style: TextStyle(
+          fontFamily: 'NotoSerifCJKSC',
           fontSize: 16,
           height: 1.65,
-          color: Color(0xFF282828),
+          color: Theme.of(context).colorScheme.onSurface,
         ),
       ),
     );

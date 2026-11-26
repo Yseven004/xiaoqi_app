@@ -333,6 +333,48 @@ void main() {
       ),
       findsOneWidget,
     );
+
+    await tester.tap(ebook);
+    await tester.pumpAndSettle();
+    final reflowText = find
+        .byWidgetPredicate(
+          (w) => w is SelectableText && w.data == 'Read this page.',
+        )
+        .hitTestable()
+        .first;
+    final reflowEditor = tester.state<EditableTextState>(
+      find.descendant(of: reflowText, matching: find.byType(EditableText)),
+    );
+    final render = reflowEditor.renderEditable;
+    final caret = render.getLocalRectForCaret(const TextPosition(offset: 2));
+    await tester.longPressAt(render.localToGlobal(caret.center));
+    await tester.pumpAndSettle();
+    final value = reflowEditor.textEditingValue;
+    expect(value.selection.isCollapsed, isFalse);
+    final selected = value.selection.textInside(value.text);
+    await tester.tap(find.text('AI'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('companion-discussion-quote')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('返回原文'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('companion-discussion-page')),
+      findsNothing,
+    );
+    expect(find.byType(ReflowDocumentPager).hitTestable(), findsOneWidget);
+    expect(viewer.hitTestable(), findsNothing);
+    expect(
+      find.byWidgetPredicate((widget) {
+        if (widget is! SelectableText) return false;
+        final marked = widget.textSpan?.children?.whereType<TextSpan>().where(
+          (span) => span.style?.backgroundColor != null,
+        );
+        return marked?.map((span) => span.text).join() == selected;
+      }),
+      findsOneWidget,
+    );
+
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 3));
     await tester.pumpAndSettle();

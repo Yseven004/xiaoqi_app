@@ -47,11 +47,11 @@ void main() {
       expect(find.byKey(_cloudKey), findsOneWidget);
       expect(find.text('重新生成'), findsOneWidget);
       expect(find.text('下一条'), findsNothing);
-      expect(find.text('继续聊 ›'), findsOneWidget);
+      expect(find.text('继续聊'), findsOneWidget);
       final cloudRect = tester.getRect(find.byKey(_cloudKey));
       final actionCenters = [
         tester.getCenter(find.text('重新生成')),
-        tester.getCenter(find.text('继续聊 ›')),
+        tester.getCenter(find.text('继续聊')),
       ];
       expect(actionCenters[0].dx, lessThan(actionCenters[1].dx));
       expect(actionCenters.every((point) => cloudRect.contains(point)), isTrue);
@@ -61,7 +61,8 @@ void main() {
       final body = tester.getRect(
         find.byKey(const ValueKey('cloud-explanation-body-viewport')),
       );
-      expect(close.center.dy, lessThan(body.top));
+      expect(body.right, lessThanOrEqualTo(close.left - 8));
+      expect(body.top - cloudRect.top, closeTo(cloudRect.height * .225, 1));
       expect(close.center.dx, lessThan(cloudRect.right - 80));
       expect(close.center.dy, greaterThan(cloudRect.top + 48));
     },
@@ -89,7 +90,7 @@ void main() {
 
     final regenerate = tester.getCenter(find.text('重新生成'));
     final switchAnswer = tester.getCenter(find.text('下一条'));
-    final continueChat = tester.getCenter(find.text('继续聊 ›'));
+    final continueChat = tester.getCenter(find.text('继续聊'));
     final cloud = tester.getRect(find.byKey(_cloudKey));
     expect(regenerate.dx, lessThan(switchAnswer.dx));
     expect(switchAnswer.dx, lessThan(continueChat.dx));
@@ -122,7 +123,7 @@ void main() {
     expect(cloud.width, closeTo(343.2, 0.1));
     expect(body.height, greaterThanOrEqualTo(70));
     expect(find.text('重新生成'), findsOneWidget);
-    expect(find.text('继续聊 ›'), findsOneWidget);
+    expect(find.text('继续聊'), findsOneWidget);
   });
 
   testWidgets('large text switches the footer to horizontal scrolling', (
@@ -149,10 +150,10 @@ void main() {
     final footer = find.byKey(const ValueKey('cloud-footer-overflow-scroll'));
     expect(footer, findsOneWidget);
     expect(tester.takeException(), isNull);
-    await tester.ensureVisible(find.text('继续聊 ›'));
+    await tester.ensureVisible(find.text('继续聊'));
     await tester.pumpAndSettle();
     expect(
-      tester.getRect(footer).contains(tester.getCenter(find.text('继续聊 ›'))),
+      tester.getRect(footer).contains(tester.getCenter(find.text('继续聊'))),
       isTrue,
     );
   });
@@ -218,7 +219,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('entry motion expands from the selected text', (tester) async {
+  testWidgets('entry grows from a fixed tail tip at the approved pace', (
+    tester,
+  ) async {
     await _showCloud(tester, _approvedAnswer);
     final cloudContext = tester.element(
       find.byType(ReadingCompanionExplanationCloud),
@@ -230,30 +233,45 @@ void main() {
             find.byType(TweenAnimationBuilder<double>),
           )
           .duration,
-      const Duration(milliseconds: 480),
+      const Duration(milliseconds: 1480),
     );
     await tester.pump();
 
-    final motion = find.byKey(const ValueKey('cloud-entry-scale'));
-    final initialScale = tester.widget<Transform>(motion).transform.entry(0, 0);
-    expect(initialScale, lessThan(1));
+    final motion = find.byKey(const ValueKey('cloud-entry-growth'));
+    final tail = find.byKey(const ValueKey('cloud-selection-tail'));
+    Transform current() => tester.widget<Transform>(motion);
+    final tip =
+        tester.getBottomLeft(tail) + Offset(tester.getRect(tail).width / 2, 0);
+    expect(current().transform.entry(0, 0), closeTo(.18, .01));
+    expect(current().transform.entry(1, 1), closeTo(.33, .01));
 
-    await tester.pump(const Duration(milliseconds: 240));
-    final movingScale = tester.widget<Transform>(motion).transform.entry(0, 0);
-    expect(movingScale, greaterThan(initialScale));
-    expect(movingScale, lessThan(1));
+    await tester.pump(const Duration(milliseconds: 760));
+    expect(current().transform.entry(0, 0), closeTo(.66, .02));
+    final movingTip =
+        tester.getBottomLeft(tail) + Offset(tester.getRect(tail).width / 2, 0);
+    expect((movingTip - tip).distance, lessThan(.01));
+    expect(find.text(_approvedAnswer), findsNothing);
 
-    await tester.pump(const Duration(milliseconds: 300));
-    final finalScale = tester.widget<Transform>(motion).transform.entry(0, 0);
-    expect(finalScale, 1);
+    await tester.pump(const Duration(milliseconds: 440));
+    expect(current().transform.entry(0, 0), 1);
+    expect(find.text(_approvedAnswer), findsNothing);
+    await tester.pump(const Duration(milliseconds: 280));
+    expect(find.text(_approvedAnswer), findsOneWidget);
   });
 
-  testWidgets('regeneration loading stays in place without button shadows', (
+  testWidgets('streaming and settled buttons stay in place without shadows', (
     tester,
   ) async {
+    final regenerateAction = find.byKey(
+      const ValueKey('cloud-regenerate-action'),
+    );
+    final continueAction = find.byKey(const ValueKey('cloud-continue-action'));
+    await _showCloud(tester, _approvedAnswer);
+    await tester.pumpAndSettle();
+    final idleRegenerate = tester.getRect(regenerateAction);
+    final idleContinue = tester.getRect(continueAction);
     await _showCloud(tester, _approvedAnswer, pending: true);
-    await tester.pump(const Duration(milliseconds: 520));
-    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.byType(LinearProgressIndicator), findsNothing);
@@ -264,6 +282,8 @@ void main() {
     final regenerateRect = tester.getRect(
       find.byKey(const ValueKey('cloud-regenerate-action')),
     );
+    expect(regenerateRect, idleRegenerate);
+    expect(tester.getRect(continueAction), idleContinue);
     final progressCenter = tester.getCenter(
       find.byType(CircularProgressIndicator),
     );
@@ -288,23 +308,45 @@ void main() {
     await _captureIfRequested(tester, 'after-loading.png');
   });
 
-  testWidgets('evidence links remain visible during regeneration', (
-    tester,
-  ) async {
-    final evidence = ReadingCompanionEvidence.fromPayload([
-      {'source_version': 'a' * 64, 'page': 2, 'locator': 'PDF 第 2 页'},
-    ]);
-    await _showCloud(
-      tester,
-      _approvedAnswer,
-      pending: true,
-      evidence: evidence,
-    );
-    await tester.pump(const Duration(milliseconds: 520));
-    await tester.pump(const Duration(milliseconds: 200));
-
-    expect(find.text('查看原文 · PDF 第 2 页'), findsOneWidget);
-  });
+  testWidgets(
+    'regeneration keeps the cloud in place and restores prior evidence',
+    (tester) async {
+      final evidence = ReadingCompanionEvidence.fromPayload([
+        {'source_version': 'a' * 64, 'page': 2, 'locator': 'PDF 第 2 页'},
+      ]);
+      await _showCloud(tester, _approvedAnswer, evidence: evidence);
+      await tester.pumpAndSettle();
+      final cloud = find.byKey(_cloudKey);
+      final position = tester.getRect(cloud);
+      expect(find.text('查看原文 · PDF 第 2 页'), findsOneWidget);
+      await _showCloud(
+        tester,
+        _approvedAnswer,
+        pending: true,
+        regenerating: true,
+        evidence: evidence,
+      );
+      expect(
+        find.byKey(const ValueKey('cloud-regeneration-placeholder')),
+        findsOneWidget,
+      );
+      expect(find.text(_approvedAnswer), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(tester.getRect(cloud), position);
+      await _showCloud(
+        tester,
+        _approvedAnswer,
+        failed: true,
+        evidence: evidence,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('cloud-regeneration-placeholder')),
+        findsNothing,
+      );
+      expect(find.text('查看原文 · PDF 第 2 页'), findsOneWidget);
+    },
+  );
 
   testWidgets('new answer versions reset the explanation scroll position', (
     tester,
@@ -477,6 +519,7 @@ Future<void> _showCloud(
   WidgetTester tester,
   String text, {
   bool pending = false,
+  bool regenerating = false,
   bool failed = false,
   bool showSwitch = false,
   Size canvasSize = _canvasSize,
@@ -536,6 +579,7 @@ Future<void> _showCloud(
                     dark: false,
                     text: text,
                     pending: pending,
+                    regenerating: regenerating,
                     failed: failed,
                     onDismiss: () {},
                     onRegenerate: () {},

@@ -73,32 +73,40 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('entry motion is visible at the approved expansion checkpoints', (
+  testWidgets('cloud remains closeable after growing while waiting for text', (
     tester,
   ) async {
     await _showCloud(tester, text: '', pending: true);
     await tester.pump();
-    await _captureIfRequested(tester, 'baseline-motion-start.png');
-    final outlineScale = find.byKey(
-      const ValueKey('cloud-entry-outline-scale'),
-    );
-    final startMatrix = tester.widget<Transform>(outlineScale).transform;
-    expect(startMatrix.entry(0, 0), closeTo(0.4, 0.01));
-    expect(startMatrix.entry(1, 1), closeTo(0.3, 0.01));
+    await _captureIfRequested(tester, 'cloud-growth-start.png');
+    final close = find.byKey(const ValueKey('cloud-close-action'));
+    final body = find.byKey(const ValueKey('cloud-explanation-body-viewport'));
+    expect(close, findsNothing);
+    expect(body, findsNothing);
 
-    await tester.pump(const Duration(milliseconds: 250));
-    await _captureIfRequested(tester, 'baseline-motion-250ms.png');
-    final movingMatrix = tester.widget<Transform>(outlineScale).transform;
-    expect(movingMatrix.entry(0, 0), greaterThan(startMatrix.entry(0, 0)));
-    expect(movingMatrix.entry(0, 0), lessThan(1));
+    await tester.pump(const Duration(milliseconds: 240));
+    await _captureIfRequested(tester, 'cloud-growth-240ms.png');
+    await tester.pump(const Duration(milliseconds: 520));
+    await _captureIfRequested(tester, 'cloud-growth-760ms.png');
+    expect(close, findsNothing);
 
-    await tester.pump(const Duration(milliseconds: 750));
-    await _captureIfRequested(tester, 'baseline-motion-1000ms.png');
-    final finalMatrix = tester.widget<Transform>(outlineScale).transform;
-    expect(finalMatrix.entry(0, 0), 1);
-    expect(finalMatrix.entry(1, 1), 1);
-    expect(find.byKey(const ValueKey('cloud-close-action')), findsNothing);
+    await tester.pump(const Duration(milliseconds: 440));
+    await _captureIfRequested(tester, 'cloud-growth-1200ms.png');
+    expect(body, findsNothing);
+    await tester.pump(const Duration(milliseconds: 280));
+    expect(close.hitTestable(), findsOneWidget);
+    expect(body, findsNothing);
+
+    await _showCloud(tester, text: '回答到了。', pending: true);
+    expect(body, findsOneWidget);
+    expect(close.hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
+    await _showCloud(tester, text: '两所候选学校都离多伦多较近。\n地理位置影响了他的选择。');
+    await _captureIfRequested(tester, 'cloud-growth-answer.png');
+
+    await _showCloud(tester, text: '回答到了。', pending: true, regenerating: true);
+    await tester.pump(const Duration(milliseconds: 350));
+    await _captureIfRequested(tester, 'cloud-growth-regeneration.png');
   });
 
   testWidgets('long answer remains clipped to the cloud while scrolling', (
@@ -148,6 +156,7 @@ Future<void> _showCloud(
   WidgetTester tester, {
   String? text,
   bool pending = false,
+  bool regenerating = false,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -241,6 +250,7 @@ Future<void> _showCloud(
                     dark: false,
                     text: text ?? _approvedAnswer,
                     pending: pending,
+                    regenerating: regenerating,
                     failed: false,
                     onDismiss: () {},
                     onRegenerate: () {},
@@ -257,19 +267,25 @@ Future<void> _showCloud(
 }
 
 Future<void> _captureIfRequested(WidgetTester tester, String fileName) async {
-  if (const String.fromEnvironment('CLOUD_REVIEW_CAPTURE') != fileName) return;
+  const requested = String.fromEnvironment('CLOUD_REVIEW_CAPTURE');
+  if (requested != fileName &&
+      !(requested == 'motion' && fileName.startsWith('cloud-growth-'))) {
+    return;
+  }
   final boundary = tester.renderObject<RenderRepaintBoundary>(
     find.byKey(_captureKey),
   );
-  final image = await boundary.toImage(pixelRatio: 1);
-  try {
-    final png = await image.toByteData(format: ui.ImageByteFormat.png);
-    final file = File(
-      '${Directory.current.path}/.codex-artifacts/design-review/$fileName',
-    );
-    file.parent.createSync(recursive: true);
-    file.writeAsBytesSync(png!.buffer.asUint8List());
-  } finally {
-    image.dispose();
-  }
+  await tester.runAsync(() async {
+    final image = await boundary.toImage(pixelRatio: 1);
+    try {
+      final png = await image.toByteData(format: ui.ImageByteFormat.png);
+      final file = File(
+        '${Directory.current.path}/.codex-artifacts/design-review/$fileName',
+      );
+      file.parent.createSync(recursive: true);
+      file.writeAsBytesSync(png!.buffer.asUint8List());
+    } finally {
+      image.dispose();
+    }
+  });
 }

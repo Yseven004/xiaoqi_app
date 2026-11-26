@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -83,6 +84,37 @@ void main() {
     expect(cloud.authorizations, ['Bearer token-a']);
     expect(cloud.requests, ['POST /v1/attachments']);
   });
+
+  test(
+    'dedicated discussion does not wait for the legacy conversion queue',
+    () async {
+      final uploadStarted = Completer<void>();
+      final finishUpload = Completer<void>();
+      final cloud = _AttachmentCloud(
+        onUpload: () {
+          uploadStarted.complete();
+          return finishUpload.future;
+        },
+      );
+      final service = ReadingTaskMaterials(cloud: cloud.client);
+      addTearDown(service.dispose);
+      final library = _Library(_source(sourceFile));
+
+      final legacy = service.prepare(library: library, bookId: 1);
+      try {
+        await uploadStarted.future.timeout(const Duration(seconds: 5));
+        final discussion = await service
+            .prepare(library: library, bookId: 1, allowLegacyConversion: false)
+            .timeout(const Duration(seconds: 5));
+        expect(discussion.materials, isEmpty);
+        expect(discussion.issues.single.message, contains('尚未取得'));
+        expect(cloud.requests, ['POST /v1/attachments']);
+      } finally {
+        finishUpload.complete();
+        await legacy;
+      }
+    },
+  );
 
   test(
     'only prepares the selected source and never falls back if it disappears',
@@ -243,7 +275,7 @@ class _AttachmentCloud {
     this.skippedPdfPages = 0,
   });
 
-  final void Function()? onUpload;
+  final FutureOr<void> Function()? onUpload;
   bool failConversion;
   final bool mismatchedProfile;
   final bool noReadableText;
@@ -277,7 +309,7 @@ class _AttachmentCloud {
       _formats[id] = request.headers['Content-Type'] == 'application/pdf'
           ? 'pdf'
           : 'epub';
-      onUpload?.call();
+      await onUpload?.call();
       return _snapshot(id, mismatchedProfile ? 'ready' : 'queued');
     }
     expect(route, startsWith('/v1/attachments/'));

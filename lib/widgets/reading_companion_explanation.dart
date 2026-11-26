@@ -49,57 +49,65 @@ class _ScaledCloudPathProxy implements PathProxy {
 }
 
 class _CloudOutlineClipper extends CustomClipper<Path> {
-  const _CloudOutlineClipper();
+  const _CloudOutlineClipper(this.outline);
+
+  final Path outline;
 
   @override
-  Path getClip(Size size) {
-    final path = Path();
-    writeSvgPathDataToPath(
-      _cloudOutlineSvgPath,
-      _ScaledCloudPathProxy(path, size.width / 360, size.height / 160),
-    );
-    return path;
-  }
+  Path getClip(Size size) => outline;
 
   @override
-  bool shouldReclip(covariant _CloudOutlineClipper oldClipper) => false;
+  bool shouldReclip(covariant _CloudOutlineClipper oldClipper) =>
+      oldClipper.outline != outline;
 }
 
-const _cloudLeftOutlineProfile = <(double, double)>[
-  (0.0125, 0.50),
-  (0.15, 0.192),
-  (0.3375, 0.058),
-  (0.50625, -0.008),
-  (0.6125, 0.022),
-  (0.84375, 0.086),
-  (0.91875, 0.197),
-  (0.9875, 0.30),
-  (1.0, 0.50),
-];
+class _CloudTailOutlineClipper extends CustomClipper<Path> {
+  const _CloudTailOutlineClipper(this.cloud, this.tailOrigin);
 
-const _cloudRightOutlineProfile = <(double, double)>[
-  (0.0125, 0.50),
-  (0.15, 0.75),
-  (0.3375, 0.914),
-  (0.50625, 0.997),
-  (0.6125, 0.978),
-  (0.84375, 0.931),
-  (0.91875, 0.747),
-  (0.9875, 0.72),
-  (1.0, 0.50),
-];
+  final Path cloud;
+  final Offset tailOrigin;
 
-double _outlineXAtY(List<(double, double)> profile, double y) {
-  final yClamped = y.clamp(profile.first.$1, profile.last.$1).toDouble();
-  for (var index = 1; index < profile.length; index++) {
-    final previous = profile[index - 1];
-    final current = profile[index];
-    if (yClamped > current.$1) continue;
-    final progress = (yClamped - previous.$1) / (current.$1 - previous.$1);
-    return previous.$2 + (current.$2 - previous.$2) * progress;
+  @override
+  Path getClip(Size size) => Path.combine(
+    PathOperation.difference,
+    Path()..addRect(Offset.zero & size),
+    cloud.shift(-tailOrigin),
+  );
+
+  @override
+  bool shouldReclip(covariant _CloudTailOutlineClipper oldClipper) =>
+      oldClipper.cloud != cloud || oldClipper.tailOrigin != tailOrigin;
+}
+
+Path _cloudOutline(Size size) {
+  final path = Path();
+  writeSvgPathDataToPath(
+    _cloudOutlineSvgPath,
+    _ScaledCloudPathProxy(path, size.width / 360, size.height / 160),
+  );
+  return path;
+}
+
+// Find the intersection between the SVG outline and a line across its body.
+double _cloudEdge(Path outline, Offset inside, Offset outside, Axis axis) {
+  var near = inside;
+  var far = outside;
+  for (var step = 0; step < 12; step++) {
+    final middle = (near + far) / 2;
+    if (outline.contains(middle)) {
+      near = middle;
+    } else {
+      far = middle;
+    }
   }
-  return profile.last.$2;
+  return axis == Axis.horizontal ? near.dx : near.dy;
 }
+
+// Match the first panel of the approved placement GIF. The other two panels
+// stagger the same reveal to demonstrate their directions.
+const _cloudEntryDuration = Duration(milliseconds: 1480);
+const _cloudEntryFade = Interval(180 / 1480, 220 / 1480);
+const _cloudEntryGrowth = Interval(200 / 1480, 1200 / 1480);
 
 class ReadingCompanionExplanationCloud extends StatelessWidget {
   const ReadingCompanionExplanationCloud({
@@ -111,6 +119,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     required this.dark,
     required this.text,
     required this.pending,
+    this.regenerating = false,
     required this.failed,
     required this.onDismiss,
     required this.onRegenerate,
@@ -128,6 +137,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
   final bool dark;
   final String text;
   final bool pending;
+  final bool regenerating;
   final bool failed;
   final VoidCallback onDismiss;
   final VoidCallback onRegenerate;
@@ -141,6 +151,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
   Widget build(BuildContext context) {
     const gap = 16.0;
     const aboveGap = 27.0;
+    const minimumAboveGap = 8.0;
     final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
     final width = math.min(
       560.0,
@@ -166,7 +177,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
 
     final preferredHeight = heightFor(width);
     final canPlaceAbove =
-        selection.top - viewport.top >= preferredHeight + aboveGap - 12;
+        selection.top - viewport.top >= preferredHeight + minimumAboveGap;
     final sideCandidates = <({_CloudSide side, Rect rect, Rect anchor})>[];
     if (!canPlaceAbove) {
       for (final line in selectionLines) {
@@ -322,6 +333,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
       foregroundColor: WidgetStatePropertyAll(scheme.onSurface),
       overlayColor: actionOverlay,
       splashFactory: NoSplash.splashFactory,
+      elevation: const WidgetStatePropertyAll(0),
       padding: const WidgetStatePropertyAll(EdgeInsets.zero),
       minimumSize: const WidgetStatePropertyAll(Size(44, 44)),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -438,47 +450,120 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     }
 
     final cloudRect = rect;
+    final outline = _cloudOutline(cloudRect.size);
+    final bodyTop = math.max(44.0, cloudRect.height * .225);
+    final bodyLeft = _cloudEdge(
+      outline,
+      Offset(cloudRect.width / 2, bodyTop),
+      Offset(-2, bodyTop),
+      Axis.horizontal,
+    );
+    final bodyInsets = EdgeInsets.only(
+      left: math.max(0.0, bodyLeft + 12 - contentInset),
+      top: bodyTop - 19,
+      right: math.max(0.0, closeRight + 44 + 8 - contentRightInset),
+    );
     final horizontal = side == _CloudSide.above || side == _CloudSide.below;
-    final tailX = (horizontalAnchor(tailSelection) - cloudRect.left - 14)
-        .clamp(28.0, cloudRect.width - 56)
-        .toDouble();
-    const sideTailHeight = 18.0;
-    const selectionTailHeight = 26.0;
-    late final double sideTailLeft;
-    late final double sideTailWidth;
-    late final double sideTailTop;
+    final Rect tailRect;
     if (horizontal) {
-      sideTailLeft = 0;
-      sideTailWidth = 0;
-      sideTailTop = 0;
+      final above = side == _CloudSide.above;
+      final left = (horizontalAnchor(tailSelection) - cloudRect.left - 14)
+          .clamp(28.0, cloudRect.width - 56)
+          .toDouble();
+      final edge = [
+        for (final x in [left + 1, left + 14, left + 27])
+          _cloudEdge(
+            outline,
+            Offset(x, cloudRect.height / 2),
+            Offset(x, above ? cloudRect.height : 0),
+            Axis.vertical,
+          ),
+      ].reduce(above ? math.min : math.max);
+      final tip = above
+          ? math.min(
+              cloudRect.height + 18,
+              tailSelection.top - cloudRect.top - 6,
+            )
+          : math.max(-18.0, tailSelection.bottom - cloudRect.top + 6);
+      tailRect = above
+          ? Rect.fromLTRB(left, edge - 3, left + 28, tip)
+          : Rect.fromLTRB(left, tip, left + 28, edge + 3);
     } else {
-      final anchorY = tailSelection.center.dy;
-      final normalizedY = (anchorY - cloudRect.top) / cloudRect.height;
-      final yRadius = sideTailHeight / 2 / cloudRect.height;
-      final profile = side == _CloudSide.right
-          ? _cloudLeftOutlineProfile
-          : _cloudRightOutlineProfile;
-      final edgeSamples = [
-        _outlineXAtY(profile, normalizedY - yRadius),
-        _outlineXAtY(profile, normalizedY),
-        _outlineXAtY(profile, normalizedY + yRadius),
-      ];
-      final insetFraction = side == _CloudSide.right
-          ? edgeSamples.reduce(math.max)
-          : edgeSamples.reduce(math.min);
-      final boundaryX = cloudRect.left + cloudRect.width * insetFraction;
-      final tipX = side == _CloudSide.right
-          ? tailSelection.right + 2
-          : tailSelection.left - 2;
-      final tailStartX = side == _CloudSide.right ? tipX : boundaryX;
-      final tailEndX = side == _CloudSide.right ? boundaryX : tipX;
-      sideTailLeft = tailStartX - cloudRect.left;
-      sideTailWidth = math.max(1.0, tailEndX - tailStartX).toDouble();
-      sideTailTop = anchorY - cloudRect.top - sideTailHeight / 2;
+      final right = side == _CloudSide.right;
+      final centerY = tailSelection.center.dy - cloudRect.top;
+      final edge = [
+        for (final y in [centerY - 8, centerY, centerY + 8])
+          _cloudEdge(
+            outline,
+            Offset(cloudRect.width / 2, y),
+            Offset(right ? -2 : cloudRect.width + 2, y),
+            Axis.horizontal,
+          ),
+      ].reduce(right ? math.max : math.min);
+      final tip =
+          (right ? tailSelection.right + 2 : tailSelection.left - 2) -
+          cloudRect.left;
+      tailRect = right
+          ? Rect.fromLTRB(tip, centerY - 9, edge + 3, centerY + 9)
+          : Rect.fromLTRB(edge - 3, centerY - 9, tip, centerY + 9);
     }
     final assetTint = dark
         ? const ColorFilter.mode(Color(0xFF373737), BlendMode.modulate)
         : null;
+    final tailAsset = horizontal
+        ? 'assets/images/reading_companion_explanation_tail.svg'
+        : 'assets/images/reading_companion_explanation_side_tail.svg';
+    Widget tailArt(ColorFilter? tint) => RotatedBox(
+      quarterTurns: side == _CloudSide.below || side == _CloudSide.left ? 2 : 0,
+      child: SvgPicture.asset(
+        tailAsset,
+        fit: BoxFit.fill,
+        colorFilter: tint,
+        excludeFromSemantics: true,
+      ),
+    );
+    final shell = Stack(
+      fit: StackFit.expand,
+      clipBehavior: Clip.none,
+      children: [
+        SvgPicture.asset(
+          'assets/images/reading_companion_explanation_cloud.svg',
+          fit: BoxFit.fill,
+          colorFilter: assetTint,
+          excludeFromSemantics: true,
+        ),
+        Positioned.fromRect(
+          key: const ValueKey('cloud-selection-tail'),
+          rect: tailRect,
+          // Fill over the original outline, then keep the stroke outside the
+          // body. This leaves a single visible contour through the join.
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              tailArt(ColorFilter.mode(scheme.surface, BlendMode.srcIn)),
+              ClipPath(
+                clipper: _CloudTailOutlineClipper(outline, tailRect.topLeft),
+                child: tailArt(assetTint),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    Widget actionIcon(String asset) => SvgPicture.asset(
+      asset,
+      width: 16,
+      height: 16,
+      colorFilter: ColorFilter.mode(scheme.onSurface, BlendMode.srcIn),
+      excludeFromSemantics: true,
+    );
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final (tailTip, initialScale) = switch (side) {
+      _CloudSide.above => (tailRect.bottomCenter, const Size(.18, .33)),
+      _CloudSide.below => (tailRect.topCenter, const Size(.19, .38)),
+      _CloudSide.left => (tailRect.centerRight, const Size(.32, .22)),
+      _CloudSide.right => (tailRect.centerLeft, const Size(.32, .22)),
+    };
     final actionWidgets = <Widget>[
       TextButton(
         key: const ValueKey('cloud-regenerate-action'),
@@ -487,25 +572,33 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (pending)
-              SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.8,
-                  color: scheme.onSurface,
-                ),
+            SizedBox.square(
+              dimension: 16,
+              child: pending
+                  ? reduceMotion
+                        ? null
+                        : Padding(
+                            padding: const EdgeInsets.all(2),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 1.5,
+                              color: scheme.onSurface,
+                            ),
+                          )
+                  : actionIcon('assets/images/home_reply_regenerate.svg'),
+            ),
+            const SizedBox(width: 6),
+            SizedBox(
+              width: 63 * textScale,
+              child: Text(
+                pending
+                    ? '生成中…'
+                    : failed
+                    ? '重试'
+                    : '重新生成',
+                maxLines: 1,
+                softWrap: false,
+                style: const TextStyle(fontSize: 14),
               ),
-            if (pending) const SizedBox(width: 6),
-            Text(
-              pending
-                  ? '生成中…'
-                  : failed
-                  ? '重试'
-                  : '重新生成',
-              maxLines: 1,
-              softWrap: false,
-              style: const TextStyle(fontSize: 14),
             ),
           ],
         ),
@@ -527,152 +620,136 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
           key: const ValueKey('cloud-continue-action'),
           onPressed: onContinue,
           style: actionStyle,
-          child: const Text(
-            '继续聊 ›',
-            maxLines: 1,
-            softWrap: false,
-            style: TextStyle(fontSize: 14),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                '继续聊',
+                maxLines: 1,
+                softWrap: false,
+                style: TextStyle(fontSize: 14),
+              ),
+              const SizedBox(width: 5),
+              actionIcon(
+                'assets/icons/extension_market/detail/caret-right.svg',
+              ),
+            ],
           ),
-        ),
+        )
+      else
+        const SizedBox.shrink(),
     ];
     Widget footerActions() => LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < actionWidgets.length * 96 * textScale) {
+        final minimumWidth =
+            math.max(44.0, 22 + 63 * textScale) * actionWidgets.length;
+        final actions = Row(
+          children: [
+            for (final action in actionWidgets)
+              Expanded(child: Center(child: action)),
+          ],
+        );
+        if (constraints.maxWidth < minimumWidth) {
           return SingleChildScrollView(
             key: const ValueKey('cloud-footer-overflow-scroll'),
             scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minWidth: constraints.maxWidth),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: actionWidgets,
-              ),
-            ),
+            child: SizedBox(width: minimumWidth, child: actions),
           );
         }
-        return Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: actionWidgets,
-        );
+        return actions;
       },
     );
-    Widget content(bool settled) => Stack(
+    final initialLoading = pending && text.isEmpty && !failed;
+    Widget content(bool settled, Widget shell) => Stack(
       fit: StackFit.expand,
       clipBehavior: Clip.none,
       children: [
-        Positioned(
-          key: const ValueKey('cloud-selection-tail'),
-          left: horizontal ? tailX : sideTailLeft,
-          top: horizontal
-              ? side == _CloudSide.below
-                    ? -selectionTailHeight + 8
-                    : cloudRect.height - 8
-              : sideTailTop,
-          width: horizontal ? 28 : sideTailWidth,
-          height: horizontal ? selectionTailHeight : sideTailHeight,
-          child: horizontal
-              ? RotatedBox(
-                  quarterTurns: side == _CloudSide.below ? 2 : 0,
-                  child: SvgPicture.asset(
-                    'assets/images/reading_companion_explanation_tail.svg',
-                    fit: BoxFit.fill,
-                    colorFilter: assetTint,
-                    excludeFromSemantics: true,
-                  ),
-                )
-              : RotatedBox(
-                  quarterTurns: side == _CloudSide.left ? 2 : 0,
-                  child: SvgPicture.asset(
-                    'assets/images/reading_companion_explanation_side_tail.svg',
-                    fit: BoxFit.fill,
-                    colorFilter: assetTint,
-                    excludeFromSemantics: true,
-                  ),
-                ),
-        ),
-        SvgPicture.asset(
-          'assets/images/reading_companion_explanation_cloud.svg',
-          fit: BoxFit.fill,
-          colorFilter: assetTint,
-          excludeFromSemantics: true,
-        ),
+        shell,
         if (settled)
           Positioned.fill(
             child: ClipPath(
               key: const ValueKey('cloud-outline-content-clip'),
-              clipper: const _CloudOutlineClipper(),
+              clipper: _CloudOutlineClipper(outline),
               child: Stack(
                 children: [
-                  Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      contentInset,
-                      19,
-                      contentRightInset,
-                      11,
-                    ),
-                    child: Column(
-                      children: [
-                        Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.only(top: 60),
-                            child: KeyedSubtree(
-                              key: ValueKey(answerVersion),
-                              child: ClipRect(
-                                child: SizedBox(
-                                  width: double.infinity,
-                                  child: SingleChildScrollView(
-                                    key: const ValueKey(
-                                      'cloud-explanation-body-viewport',
-                                    ),
-                                    clipBehavior: Clip.hardEdge,
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Semantics(
-                                          liveRegion: !pending,
-                                          child: Text(
-                                            text.isNotEmpty
-                                                ? text
-                                                : failed
-                                                ? '暂时无法解释这段'
-                                                : pending
-                                                ? ''
-                                                : '正在解释…',
-                                            textAlign: TextAlign.start,
-                                            style: TextStyle(
-                                              color: scheme.onSurface,
-                                              fontSize: 16,
-                                              height: 1.45,
-                                            ),
-                                          ),
+                  if (!initialLoading)
+                    Visibility(
+                      visible: !regenerating,
+                      maintainState: true,
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          contentInset,
+                          19,
+                          contentRightInset,
+                          15,
+                        ),
+                        child: Column(
+                          children: [
+                            Expanded(
+                              child: Padding(
+                                padding: bodyInsets,
+                                child: KeyedSubtree(
+                                  key: ValueKey(answerVersion),
+                                  child: ClipRect(
+                                    child: SizedBox(
+                                      width: double.infinity,
+                                      child: SingleChildScrollView(
+                                        key: const ValueKey(
+                                          'cloud-explanation-body-viewport',
                                         ),
-                                        if (onOpenEvidence != null)
-                                          ReadingCompanionEvidenceLinks(
-                                            evidence: evidence,
-                                            onOpen: onOpenEvidence!,
-                                          ),
-                                      ],
+                                        clipBehavior: Clip.hardEdge,
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Semantics(
+                                              liveRegion: !pending,
+                                              child: Text(
+                                                text.isNotEmpty
+                                                    ? text
+                                                    : failed
+                                                    ? '暂时无法解释这段'
+                                                    : '正在解释…',
+                                                textAlign: TextAlign.start,
+                                                style: TextStyle(
+                                                  color: scheme.onSurface,
+                                                  fontSize: 16,
+                                                  height: 1.45,
+                                                ),
+                                              ),
+                                            ),
+                                            if (onOpenEvidence != null)
+                                              ReadingCompanionEvidenceLinks(
+                                                evidence: evidence,
+                                                onOpen: onOpenEvidence!,
+                                              ),
+                                          ],
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
+                            const SizedBox(height: 7),
+                            Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: dark
+                                  ? const Color(0x44FFFFFF)
+                                  : const Color(0x33000000),
+                            ),
+                            SizedBox(height: 44, child: footerActions()),
+                          ],
                         ),
-                        const SizedBox(height: 7),
-                        Divider(
-                          height: 1,
-                          thickness: 1,
-                          color: dark
-                              ? const Color(0x44FFFFFF)
-                              : const Color(0x33000000),
-                        ),
-                        const SizedBox(height: 0),
-                        SizedBox(height: 44, child: footerActions()),
-                      ],
+                      ),
+                    )
+                  else
+                    Semantics(liveRegion: true, label: '正在解释这段'),
+                  if (regenerating)
+                    Positioned.fill(
+                      child: _CloudRegenerationPlaceholder(dark: dark),
                     ),
-                  ),
                   Positioned(
                     top: 37,
                     right: closeRight,
@@ -709,44 +786,126 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
         ),
         child: Material(
           type: MaterialType.transparency,
-          child: TweenAnimationBuilder<Size>(
-            duration: MediaQuery.disableAnimationsOf(context)
-                ? Duration.zero
-                : const Duration(milliseconds: 1000),
-            curve: Curves.linear,
-            tween: Tween(begin: const Size(0.4, 0.3), end: const Size(1, 1)),
-            builder: (context, cloudScale, child) {
-              final origin = switch (side) {
-                _CloudSide.above => Alignment.bottomCenter,
-                _CloudSide.left => Alignment.centerRight,
-                _CloudSide.right => Alignment.centerLeft,
-                _CloudSide.below => Alignment.topCenter,
-              };
-              return Transform.scale(
-                key: const ValueKey('cloud-entry-outline-scale'),
-                scaleX: cloudScale.width,
-                scaleY: cloudScale.height,
-                alignment: origin,
-                child: TweenAnimationBuilder<double>(
-                  duration: MediaQuery.disableAnimationsOf(context)
-                      ? Duration.zero
-                      : const Duration(milliseconds: 480),
-                  curve: Curves.easeOutCubic,
+          child: reduceMotion
+              ? content(true, shell)
+              : TweenAnimationBuilder<double>(
+                  duration: _cloudEntryDuration,
                   tween: Tween(begin: 0, end: 1),
-                  builder: (context, value, child) => Opacity(
-                    opacity: value,
-                    child: Transform.scale(
-                      key: const ValueKey('cloud-entry-scale'),
-                      alignment: origin,
-                      scale: 0.68 + value * 0.32,
-                      child: content(
-                        value == 1 && (!pending || text.isNotEmpty || failed),
+                  child: shell,
+                  builder: (context, progress, shell) {
+                    final t = _cloudEntryGrowth.transform(progress);
+                    final growth = t * t * (3 - 2 * t);
+                    final scale = Size.lerp(
+                      initialScale,
+                      const Size(1, 1),
+                      growth,
+                    )!;
+                    return Opacity(
+                      opacity: _cloudEntryFade.transform(progress),
+                      child: Transform.scale(
+                        key: const ValueKey('cloud-entry-growth'),
+                        origin: tailTip,
+                        alignment: Alignment.topLeft,
+                        scaleX: scale.width,
+                        scaleY: scale.height,
+                        child: content(progress == 1, shell!),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CloudRegenerationPlaceholder extends StatefulWidget {
+  const _CloudRegenerationPlaceholder({required this.dark});
+
+  final bool dark;
+
+  @override
+  State<_CloudRegenerationPlaceholder> createState() =>
+      _CloudRegenerationPlaceholderState();
+}
+
+class _CloudRegenerationPlaceholderState
+    extends State<_CloudRegenerationPlaceholder>
+    with SingleTickerProviderStateMixin {
+  late final _sweep = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _sweep.stop();
+    } else if (!_sweep.isAnimating) {
+      _sweep.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _sweep.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rail = widget.dark
+        ? const Color(0xFF515151)
+        : const Color(0xFFE5E5E5);
+    final sheen = widget.dark
+        ? const Color(0xFF686868)
+        : const Color(0xFFF3F3F3);
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    return Semantics(
+      key: const ValueKey('cloud-regeneration-placeholder'),
+      liveRegion: true,
+      label: '正在重新生成解释',
+      child: IgnorePointer(
+        child: Center(
+          child: FractionallySizedBox(
+            widthFactor: .66,
+            child: AnimatedBuilder(
+              animation: _sweep,
+              builder: (context, _) {
+                final center = -1.5 + 3 * _sweep.value;
+                final decoration = BoxDecoration(
+                  color: rail,
+                  gradient: reducedMotion
+                      ? null
+                      : LinearGradient(
+                          begin: Alignment(center - .5, 0),
+                          end: Alignment(center + .5, 0),
+                          colors: [rail, sheen, rail],
+                        ),
+                  borderRadius: BorderRadius.circular(6),
+                );
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    DecoratedBox(
+                      decoration: decoration,
+                      child: const SizedBox(height: 5),
+                    ),
+                    const SizedBox(height: 12),
+                    FractionallySizedBox(
+                      alignment: AlignmentDirectional.centerStart,
+                      widthFactor: .72,
+                      child: DecoratedBox(
+                        decoration: decoration,
+                        child: const SizedBox(height: 5),
                       ),
                     ),
-                  ),
-                ),
-              );
-            },
+                  ],
+                );
+              },
+            ),
           ),
         ),
       ),

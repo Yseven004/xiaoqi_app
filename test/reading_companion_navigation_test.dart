@@ -67,14 +67,14 @@ void main() {
           ),
         ),
       );
-      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
       return tester.getRect(find.byKey(cloud));
     }
 
     expect((await show(belowMiddle)).bottom, lessThan(belowMiddle.top));
     expect((await show(nearTop)).left, greaterThan(nearTop.right));
     expect((await show(fullLine)).top, greaterThan(fullLine.bottom));
-    await tester.tap(find.text('继续聊 ›'));
+    await tester.tap(find.text('继续聊'));
     expect(continued, isTrue);
     await tester.ensureVisible(find.text('查看原文 · PDF 第 2 页'));
     await tester.tap(find.text('查看原文 · PDF 第 2 页'));
@@ -677,6 +677,48 @@ Future<void> _exerciseCompanionHistory(
       .substring(2);
   expect(quote, isNotEmpty);
   expect(quote, selectedText);
+  final savedOrigin = AiConversationRecord.fromJson(
+    selected.toJson(),
+  ).companionPassageOrigin;
+  expect(savedOrigin?.quote, selectedText);
+
+  await tester.tap(find.byKey(const ValueKey('companion-discussion-quote')));
+  await _waitFor(tester, find.text('原文选段'));
+  await tester.tap(find.text('返回原文'));
+  final markedPassage = find.byWidgetPredicate((widget) {
+    if (widget is! SelectableText) return false;
+    final marked = widget.textSpan?.children?.whereType<TextSpan>().where(
+      (span) => span.style?.backgroundColor != null,
+    );
+    return marked?.map((span) => span.text).join() == selectedText;
+  });
+  await _waitFor(tester, markedPassage);
+  expect(chatPage, findsNothing);
+
+  final markedEditor = tester.state<EditableTextState>(
+    find.descendant(of: markedPassage, matching: find.byType(EditableText)),
+  );
+  final markedRender = markedEditor.renderEditable;
+  final markedCaret = markedRender.getLocalRectForCaret(
+    const TextPosition(offset: 3),
+  );
+  await tester.longPressAt(
+    markedRender.localToGlobal(markedCaret.center + const Offset(2, 0)),
+  );
+  await _waitFor(tester, ask);
+  final activeSelection = markedEditor.textEditingValue.selection;
+  expect(activeSelection.isCollapsed, isFalse);
+  await tester.pump(const Duration(seconds: 7));
+  expect(markedPassage, findsOneWidget);
+  expect(markedEditor.textEditingValue.selection, activeSelection);
+  markedEditor.userUpdateTextEditingValue(
+    markedEditor.textEditingValue.copyWith(
+      selection: TextSelection.collapsed(offset: activeSelection.extentOffset),
+    ),
+    SelectionChangedCause.tap,
+  );
+  await tester.pumpAndSettle();
+  expect(markedPassage, findsNothing);
 
   await newFreeChat();
   expect(

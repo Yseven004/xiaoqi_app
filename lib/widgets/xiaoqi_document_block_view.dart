@@ -38,6 +38,7 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
     this.selectionControls,
     this.textStyleBuilder,
     this.annotationRanges = const [],
+    this.sourceHighlight,
     this.onOpenAnnotations,
     this.editable = false,
     this.controller,
@@ -64,6 +65,7 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
 
   /// Half-open offsets in the text displayed by this widget, including slices.
   final List<({int start, int end, String id})> annotationRanges;
+  final ({int start, int end, Color color})? sourceHighlight;
   final ValueChanged<List<String>>? onOpenAnnotations;
   final bool editable;
   final TextEditingController? controller;
@@ -322,7 +324,7 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
     final links = offset == null || onLinkTap == null
         ? const <DocumentLinkRange>[]
         : block.linkRanges;
-    if (links.isNotEmpty || annotationRanges.isNotEmpty) {
+    if (links.isNotEmpty || annotationRanges.isNotEmpty || sourceHighlight != null) {
       return _LinkedDocumentText(
         text: text,
         offset: offset ?? 0,
@@ -336,6 +338,7 @@ class XiaoqiDocumentBlockView extends StatelessWidget {
         contextMenuBuilder: contextMenuBuilder,
         onSelectionChanged: selectionChanged,
         annotations: annotationRanges,
+        sourceHighlight: sourceHighlight,
         onOpenAnnotations: onOpenAnnotations,
       );
     }
@@ -379,6 +382,7 @@ class _LinkedDocumentText extends StatefulWidget {
     required this.contextMenuBuilder,
     required this.onSelectionChanged,
     this.annotations = const [],
+    this.sourceHighlight,
     this.onOpenAnnotations,
   });
   final String text;
@@ -393,6 +397,7 @@ class _LinkedDocumentText extends StatefulWidget {
   final EditableTextContextMenuBuilder? contextMenuBuilder;
   final SelectionChangedCallback onSelectionChanged;
   final List<({int start, int end, String id})> annotations;
+  final ({int start, int end, Color color})? sourceHighlight;
   final ValueChanged<List<String>>? onOpenAnnotations;
 
   @override
@@ -466,10 +471,13 @@ class _LinkedDocumentTextState extends State<_LinkedDocumentText> {
     ];
     final activeRecognizers = <String>{};
     final boundaries = <int>{start, end};
+    final highlight = widget.sourceHighlight;
     for (final r in [
       ...bold,
       ...links.map((r) => (start: r.start, end: r.end)),
       ...annotations.map((r) => (start: r.start, end: r.end)),
+      if (highlight != null)
+        (start: start + highlight.start, end: start + highlight.end),
     ]) {
       boundaries.add(r.start.clamp(start, end));
       boundaries.add(r.end.clamp(start, end));
@@ -537,6 +545,12 @@ class _LinkedDocumentTextState extends State<_LinkedDocumentText> {
           recognizer: tap,
           style: TextStyle(
             fontWeight: strong ? FontWeight.w700 : null,
+            backgroundColor:
+                highlight != null &&
+                    highlight.start <= from - start &&
+                    highlight.end >= to - start
+                ? highlight.color
+                : null,
             decoration: target != null || annotated
                 ? TextDecoration.underline
                 : null,

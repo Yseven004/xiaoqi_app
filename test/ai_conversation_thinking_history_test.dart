@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xiaoqi_app/features/ai_study_annotation/data/ai_conversation_history.dart';
+import 'package:xiaoqi_app/models/reader_pagination.dart';
+import 'package:xiaoqi_app/services/companion_annotation_store.dart';
 import 'package:xiaoqi_app/services/reading_task_context.dart';
 
 void main() {
@@ -54,6 +56,62 @@ void main() {
     expect(restored.companionPassageExcerpt, isNull);
     expect(AiConversationRecord.empty(bookId: 7).isReadingCompanion, isFalse);
   });
+
+  test(
+    'relinking a discussion preserves its original quote location',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final preferences = await SharedPreferences.getInstance();
+      final history = AiConversationHistoryService(preferences: preferences);
+      const origin = CompanionAnnotationSelection(
+        bookId: 7,
+        sourceId: 11,
+        sourceVersion: 'original-version',
+        anchor: FlowReaderAnchor(sourceId: '11', chapterId: 'chapter'),
+        locator: '第一章',
+        quote: '这一段原文。',
+        startOffset: 4,
+        endOffset: 10,
+      );
+      final record =
+          AiConversationRecord.empty(
+            bookId: origin.bookId,
+            companionSourceId: origin.sourceId,
+            companionPassageOrigin: origin,
+            readingCompanion: true,
+          ).copyWith(
+            nodes: [
+              AiConversationMessage(
+                text: '解释这段',
+                isUser: true,
+                createdAt: DateTime(2026),
+              ),
+            ],
+          );
+      await history.save(record);
+      await history.detachFromBook(record.id);
+      final reloaded = AiConversationHistoryService(preferences: preferences);
+      final detached = await reloaded.get(record.id);
+      expect(detached?.bookId, isNull);
+      expect(detached?.companionPassageOrigin?.bookId, origin.bookId);
+      expect(detached?.companionPassageOrigin?.startOffset, origin.startOffset);
+      await reloaded.attachToBook(
+        record.id,
+        bookId: 9,
+        bookName: 'Related book',
+      );
+      final moved = await AiConversationHistoryService(
+        preferences: preferences,
+      ).get(record.id);
+      expect(moved?.bookId, 9);
+      expect(moved?.companionPassageOrigin?.bookId, origin.bookId);
+      expect(moved?.companionPassageOrigin?.sourceId, origin.sourceId);
+      expect(
+        moved?.companionPassageOrigin?.sourceVersion,
+        origin.sourceVersion,
+      );
+    },
+  );
 
   test(
     'companion history starts at a question and sorts by actual use',

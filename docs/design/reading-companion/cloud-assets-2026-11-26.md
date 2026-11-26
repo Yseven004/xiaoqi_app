@@ -1,18 +1,20 @@
 # 伴读解释云的资产与视觉状态
 
-采用按规格接入。静态构图参考 [云朵与问答页](confirmed/cloud-and-discussion-2026-11-26.png)，摆位和整体运动分别以[位置稿](confirmed/cloud-placement-2026-11-26.gif)及[动效稿](confirmed/cloud-whole-motion-2026-11-26.gif)为准。图稿示例尺寸和交互时长提供视觉方向。手机、平板和系统栏的实际尺寸随设备变化。
+静态构图参考 [云朵与问答页](confirmed/cloud-and-discussion-2026-11-26.png)。三种摆位、首次入场和重新生成的动效均以用户确认的[三栏 GIF](confirmed/cloud-placement-2026-11-26.gif)为准。[单云漂移动效](confirmed/cloud-whole-motion-2026-11-26.gif)是早期方案。手机、平板和系统栏的实际尺寸随设备变化。
 
 | 资产 | 来源与独立核对 | SVG 与尺寸 | 消费及状态 |
 | --- | --- | --- | --- |
-| 云朵轮廓 | 以确认稿的固定白云轮廓为目标，按画布上的起伏和边距手工重建。独立预览 360×160。 | [云朵 SVG](../../../assets/images/reading_companion_explanation_cloud.svg)，viewBox 0 0 360 160。按可用空间限宽，深色主题调整颜色。 | `ReadingCompanionExplanationCloud`。首次带整朵位移动效，重生沿用同一轮廓。 |
-| 指向选段的尾巴 | 以摆位稿中的尖尾为目标，手工重建两条边和透明画框。独立预览 100×64。 | [尾巴 SVG](../../../assets/images/reading_companion_explanation_tail.svg)，viewBox 0 0 28 18；横向摆位框 28×18 dp，上下摆位框 28×26 dp。 | `ReadingCompanionExplanationCloud`，尾尖朝选段。 |
-| 侧边连接尾巴 | 沿用批准尾巴的白填充和灰描边，重建水平长三角。独立预览 640×72。 | [侧边尾巴 SVG](../../../assets/images/reading_companion_explanation_side_tail.svg)，viewBox 0 0 160 18，高度 18 dp；宽度按选段端点到云朵侧边轮廓动态计算。 | `ReadingCompanionExplanationCloud`，左右侧放时尾尖对准最近已选行并连接云朵轮廓；深色由组件着色。 |
+| 云朵轮廓 | 以确认稿的固定白云轮廓为目标，按画布上的起伏和边距手工重建。独立预览 360×160。 | [云朵 SVG](../../../assets/images/reading_companion_explanation_cloud.svg)，viewBox 0 0 360 160。按可用空间限宽，深色主题调整颜色。 | `ReadingCompanionExplanationCloud`。首次以尾尖为锚点展开，重生沿用同一轮廓。 |
+| 指向选段的尾巴 | 按整体动效 GIF 重建连贯的曲线尾巴。独立预览 112×72。 | [尾巴 SVG](../../../assets/images/reading_companion_explanation_tail.svg)，viewBox 0 0 28 18；上下摆位宽 28 dp，高度由实际轮廓交点和选段间距决定。 | `ReadingCompanionExplanationCloud`，尾尖朝选段。填充盖住交界处的云朵轮廓，尾巴描边裁切在云朵外，接合处只有一条连续轮廓。 |
+| 侧边连接尾巴 | 沿用摆位稿的白填充和灰描边。独立预览 640×72。 | [侧边尾巴 SVG](../../../assets/images/reading_companion_explanation_side_tail.svg)，viewBox 0 0 160 18，高度 18 dp；宽度按选段端点到云朵侧边轮廓动态计算。 | `ReadingCompanionExplanationCloud`，左右侧放时尾尖对准已选行，沿同一规则融入轮廓；深色由组件着色。 |
+| 底部操作图标 | 复用项目已有的重新生成、向右展开图标，依据静态操作稿。 | [重新生成](../../../assets/images/home_reply_regenerate.svg)，viewBox 0 0 24 24；[向右展开](../../../assets/icons/extension_market/detail/caret-right.svg)，viewBox 0 0 256 256；均显示为 16 dp。 | 回答状态显示。 |
 
-三项独立资产已用 CairoSVG 渲染并检查，预览位于本机 `.codex-artifacts/reading-companion-cloud-asset.png` 与 `.codex-artifacts/design-review/side-tail-preview.png`。正文、加载反馈、退出和版本切换由 Flutter 控件呈现。组件实拍、整页对照及真机待验证。
+资产预览已用 CairoSVG 渲染并检查。圆尾预览位于本机 `.codex-artifacts/design-review/joined-tail-preview.png`，底栏图标预览位于 `.codex-artifacts/design-review/cloud-action-assets-preview.png`。正文、加载反馈、退出和版本切换由 Flutter 控件呈现。组件实拍、整页对照及真机待验证。
 
 ## 云内布局与交互
 
-- 不显示标题。关闭按钮复用项目关闭 SVG，位于云朵轮廓以内的右上方；解释正文从其下方开始。云内所有文字和按钮都按云朵 SVG 同一轮廓裁切，超长解释只在云内滚动。切换或生成出新答案后，正文滚动位置回到开头；重生期间保留当前答案与出处。
+- 不显示标题。正文从云朵上部开始，按该高度的轮廓和关闭按钮留出安全间距；可用宽度较小就自然换行。云内所有文字和按钮都按云朵 SVG 同一轮廓裁切，超长解释只在云内滚动。切换或生成出新答案后，正文滚动位置回到开头。
 - 云朵优先放在选段上方；上方空间不足时按逐行选区寻找不压住选段的一侧空位，再考虑下方。侧边尾巴按侧边曲线轮廓定位，并指向最近已选行；上方或下方尾巴锚定最近的已选行。底部动作固定为左侧「重新生成」、右侧「继续聊」，已有另一版答案时才在中间出现版本切换。
-- 首次打开时，云朵从选段附近展开：约 1 秒内从窄小轮廓扩展到最终大小，过程中淡入；文字等待首段回答到达后再出现。重生不重播入场动画。重新生成时保留当前解释和云朵位置，只在左侧动作内显示小型进度指示与「生成中…」。按钮点击不显示阴影、涟漪或底色闪烁，同时保留键盘焦点提示。
-- 在 552×734 参考画布上，云朵主体约 194 dp 高、实际轮廓宽约 444 dp，尾尖距选区约 9 dp；窄阅读区域保持至少 224 dp 高，较宽区域按宽度的 43.2% 取高，最大 230 dp。窄区域水平居中并尽量让尾尖落在选区内；宽区域跟随最近选区行。靠近视口顶部时允许最多 12 dp 的上方空间不足，以保持上方优先并避免大幅遮挡选段。
+- 首次点击后约 0.2 秒出现小云。尾尖锚定在选段附近，轮廓朝摆放方向展开，约 0.76 秒宽度达到最终的三分之二，约 1.2 秒达到完整尺寸，最早在 1.48 秒显示已到达的文字。三栏稿里各栏先后启动是演示节奏，单次交互使用同一时序。减少动态效果时直接显示最终尺寸。
+- 两个操作分别居于底栏左右，保持分隔线与云朵外缘的留白。重新生成时保持云朵位置和大小，云内显示两条扫过微光的灰色占位线，减少动态效果时显示静态占位。失败后恢复已有解释、出处与操作；等待期间可关闭云朵。按钮点击不显示阴影、涟漪或底色闪烁，同时保留键盘焦点提示。
+- 在 552×734 参考画布上，云朵主体约 194 dp 高、实际轮廓宽约 444 dp；窄阅读区域保持至少 224 dp 高，较宽区域按宽度的 43.2% 取高，最大 230 dp。窄区域水平居中并尽量让尾尖落在选区内；宽区域跟随最近选区行。上方空间可容纳主体与至少 8 dp 间距时优先放上方。

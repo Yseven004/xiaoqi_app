@@ -81,6 +81,13 @@ BookSourceRecord? sourceForSavedPassage(
   String passage,
   Iterable<BookSourceRecord> sources,
 ) {
+  return sources.where((source) {
+    return savedPassageLocator(passage, source) != null;
+  }).singleOrNull;
+}
+
+/// An empty locator means the source matched but the excerpt has no location.
+String? savedPassageLocator(String passage, BookSourceRecord source) {
   const prefix = '来源：';
   final line = passage
       .split('\n')
@@ -88,12 +95,14 @@ BookSourceRecord? sourceForSavedPassage(
       .singleOrNull;
   if (line == null) return null;
   final sourceAndLocator = line.substring(prefix.length).trimRight();
-  return sources.where((source) {
-    final name = source.displayName.replaceAll(RegExp(r'\s+'), ' ').trim();
-    // The writer truncates longer names; their full identity cannot be checked.
-    if (name.isEmpty || name.length > 160) return false;
-    return sourceAndLocator == name || sourceAndLocator.startsWith('$name · ');
-  }).singleOrNull;
+  final name = source.displayName.replaceAll(RegExp(r'\s+'), ' ').trim();
+  // The writer truncates longer names; their full identity cannot be checked.
+  if (name.isEmpty || name.length > 160) return null;
+  if (sourceAndLocator == name) return '';
+  final namePrefix = '$name · ';
+  return sourceAndLocator.startsWith(namePrefix)
+      ? sourceAndLocator.substring(namePrefix.length)
+      : null;
 }
 
 String _bounded(String value, int limit) {

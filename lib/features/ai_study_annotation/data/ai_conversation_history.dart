@@ -9,6 +9,7 @@ import '../domain/ai_chat_process.dart';
 import '../../../models/home_chat_attachment.dart';
 import '../../../models/chat_annotation.dart';
 import '../../../models/reading_companion_evidence.dart';
+import '../../../services/companion_annotation_store.dart';
 import '../../../services/reading_book_preparation.dart';
 
 int _generatedMessageSequence = 0;
@@ -361,6 +362,7 @@ class AiConversationRecord {
     bool? readingCompanion,
     this.usesDedicatedCompanion = false,
     this.companionSourceId,
+    this.companionPassageOrigin,
     this.companionOpenedAt,
     this.pageLabel = '',
     this.isPinned = false,
@@ -396,6 +398,7 @@ class AiConversationRecord {
   final bool isReadingCompanion;
   final bool usesDedicatedCompanion;
   final int? companionSourceId;
+  final CompanionAnnotationSelection? companionPassageOrigin;
 
   /// Last opened from companion history. Stored independently of the chat tree.
   final DateTime? companionOpenedAt;
@@ -832,6 +835,7 @@ class AiConversationRecord {
     bool readingCompanion = false,
     bool usesDedicatedCompanion = false,
     int? companionSourceId,
+    CompanionAnnotationSelection? companionPassageOrigin,
     String pageLabel = '',
     bool enableAutoTitle = false,
   }) {
@@ -847,6 +851,7 @@ class AiConversationRecord {
       readingCompanion: readingCompanion,
       usesDedicatedCompanion: usesDedicatedCompanion,
       companionSourceId: companionSourceId,
+      companionPassageOrigin: companionPassageOrigin,
       pageLabel: pageLabel,
       webSources: const [],
       titleRevision: enableAutoTitle ? 0 : -1,
@@ -880,6 +885,30 @@ class AiConversationRecord {
             (key, value) => MapEntry(key.toString(), value.toString()),
           )
         : null;
+    final bookId = int.tryParse(raw['book_id']?.toString() ?? '');
+    final companionSourceId = int.tryParse(
+      raw['companion_source_id']?.toString() ?? '',
+    );
+    CompanionAnnotationSelection? passageOrigin;
+    if (raw['companion_passage_origin'] case final Map origin) {
+      final originBookId = origin.containsKey('book_id')
+          ? int.tryParse(origin['book_id']?.toString() ?? '')
+          : bookId;
+      final originSourceId = origin.containsKey('source_id')
+          ? int.tryParse(origin['source_id']?.toString() ?? '')
+          : companionSourceId;
+      if (originBookId != null && originSourceId != null) {
+        try {
+          passageOrigin = CompanionAnnotationSelection.fromJson(
+            Map<String, dynamic>.from(origin),
+            bookId: originBookId,
+            sourceId: originSourceId,
+          );
+        } catch (_) {
+          // An invalid optional locator must not hide the rest of the history.
+        }
+      }
+    }
     return AiConversationRecord(
       id: raw['id']?.toString() ?? '',
       title: raw['title']?.toString() ?? '',
@@ -889,16 +918,13 @@ class AiConversationRecord {
       createdAt: createdAt ?? DateTime.fromMillisecondsSinceEpoch(0),
       updatedAt:
           updatedAt ?? createdAt ?? DateTime.fromMillisecondsSinceEpoch(0),
-      bookId: raw['book_id'] is int
-          ? raw['book_id'] as int
-          : int.tryParse(raw['book_id']?.toString() ?? ''),
+      bookId: bookId,
       bookName: raw['book_name']?.toString() ?? '',
       // Older companion conversations stored their origin only on user turns.
       readingCompanion: raw['reading_companion'] == true ? true : null,
       usesDedicatedCompanion: raw['dedicated_reading_companion'] == true,
-      companionSourceId: int.tryParse(
-        raw['companion_source_id']?.toString() ?? '',
-      ),
+      companionSourceId: companionSourceId,
+      companionPassageOrigin: passageOrigin,
       pageLabel: raw['page_label']?.toString() ?? '',
       isPinned: raw['is_pinned'] == true,
       webSources: raw['web_sources'] is List
@@ -956,6 +982,7 @@ class AiConversationRecord {
       readingCompanion: isReadingCompanion,
       usesDedicatedCompanion: usesDedicatedCompanion,
       companionSourceId: companionSourceId,
+      companionPassageOrigin: companionPassageOrigin,
       companionOpenedAt: companionOpenedAt ?? this.companionOpenedAt,
       pageLabel: pageLabel ?? this.pageLabel,
       isPinned: isPinned ?? this.isPinned,
@@ -980,6 +1007,12 @@ class AiConversationRecord {
     if (isReadingCompanion) 'reading_companion': true,
     if (usesDedicatedCompanion) 'dedicated_reading_companion': true,
     if (companionSourceId != null) 'companion_source_id': companionSourceId,
+    if (companionPassageOrigin case final origin?)
+      'companion_passage_origin': {
+        ...origin.toJson(),
+        'book_id': origin.bookId,
+        'source_id': origin.sourceId,
+      },
     'page_label': pageLabel,
     'is_pinned': isPinned,
     'web_sources': webSources.map((source) => source.toJson()).toList(),
@@ -1598,6 +1631,7 @@ class AiConversationHistoryService {
           readingCompanion: record.isReadingCompanion,
           usesDedicatedCompanion: record.usesDedicatedCompanion,
           companionSourceId: record.companionSourceId,
+          companionPassageOrigin: record.companionPassageOrigin,
           companionOpenedAt: record.companionOpenedAt,
           pageLabel: record.pageLabel,
           isPinned: record.isPinned,
@@ -1643,6 +1677,7 @@ class AiConversationHistoryService {
           readingCompanion: record.isReadingCompanion,
           usesDedicatedCompanion: record.usesDedicatedCompanion,
           companionSourceId: record.companionSourceId,
+          companionPassageOrigin: record.companionPassageOrigin,
           companionOpenedAt: record.companionOpenedAt,
           pageLabel: record.pageLabel,
           isPinned: record.isPinned,

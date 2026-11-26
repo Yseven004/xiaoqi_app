@@ -19,7 +19,7 @@ import 'home_chat_model_selector.dart';
 
 part 'reading_companion_composer_menus.dart';
 
-/// Composer and its menus within the bounds of the reading conversation card.
+/// Composer and its menus within the reading discussion.
 /// The surrounding page owns the draft, model and attachment actions.
 class ReadingCompanionComposer extends StatefulWidget {
   const ReadingCompanionComposer({
@@ -40,6 +40,7 @@ class ReadingCompanionComposer extends StatefulWidget {
     required this.signedIn,
     this.requestLogin,
     this.content,
+    this.hintText = '问问这本书…',
     this.generating = false,
     this.sendingEnabled = true,
     this.attachments = const [],
@@ -76,6 +77,7 @@ class ReadingCompanionComposer extends StatefulWidget {
   final bool signedIn;
   final Future<bool> Function()? requestLogin;
   final Widget? content;
+  final String hintText;
   final bool generating;
   final bool sendingEnabled;
   final List<HomeChatAttachment> attachments;
@@ -103,7 +105,7 @@ class ReadingCompanionComposer extends StatefulWidget {
 
 const _bodyInk = Color(0xFF262626);
 const _subtleInk = Color(0xFF686868);
-const _controlHeight = 44.0;
+const _controlHeight = 48.0;
 
 enum _CompanionMenu { root, files, imageSource, skills, mcp, model }
 
@@ -261,16 +263,29 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
   }
 
   Widget _composer() {
-    final recording = widget.voiceRecording;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final surface = dark ? const Color(0xFF222426) : Colors.white;
+    final border = dark ? const Color(0xFF444648) : const Color(0xFFDDDDDD);
+    final focusedBorder = dark
+        ? const Color(0xFF858585)
+        : const Color(0xFFA8A8A8);
+    final ink = dark ? const Color(0xFFECECEC) : _bodyInk;
+    final hintInk = dark ? const Color(0xFFB6B6B6) : _subtleInk;
+    final recording =
+        widget.voiceRecording ||
+        widget.voiceStarting ||
+        widget.voiceTranscribing;
+    final hasVoice =
+        widget.onVoiceLongPressStart != null &&
+        widget.onVoiceLongPressEnd != null;
     return ListenableBuilder(
       listenable: widget.focusNode,
       builder: (context, child) => Material(
-        color: Colors.white,
+        color: surface,
+        surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
           side: BorderSide(
-            color: widget.focusNode.hasFocus
-                ? const Color(0xFFA8A8A8)
-                : const Color(0xFFDDDDDD),
+            color: widget.focusNode.hasFocus ? focusedBorder : border,
           ),
           borderRadius: BorderRadius.circular(12),
         ),
@@ -279,17 +294,77 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
+          const horizontalPadding = 4.0;
+          final controlWidth = _controlHeight * (hasVoice ? 4 : 3);
+          final inputWidth =
+              constraints.maxWidth - controlWidth - 2 * horizontalPadding;
+          final textSize = MediaQuery.textScalerOf(context).scale(15);
+          final stacked = inputWidth < textSize * 6 + 12;
           final trayHeight = widget.attachmentPreparationStates == null
               ? 80.0
               : 124.0;
           final showTray =
               widget.attachments.isNotEmpty &&
-              constraints.maxHeight >= 84 + trayHeight;
+              constraints.maxHeight >=
+                  _controlHeight +
+                      4 +
+                      (stacked ? textSize * 1.5 + 16 : 0) +
+                      trayHeight;
+          final inputPadding = stacked ? 4.0 : 12.0;
+          final textLineHeight = textSize * 1.5;
+          final availableTextHeight =
+              constraints.maxHeight -
+              4 -
+              inputPadding * 2 -
+              (showTray ? trayHeight : 0) -
+              (stacked ? _controlHeight + 8 : 0);
+          final maxLines = (availableTextHeight / textLineHeight)
+              .clamp(1, 3)
+              .floor();
+          final input = recording
+              ? _voiceFeedback(hintInk, border)
+              : Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  child: TextField(
+                    controller: widget.controller,
+                    focusNode: widget.focusNode,
+                    minLines: 1,
+                    maxLines: maxLines,
+                    cursorColor: ink,
+                    style: TextStyle(color: ink, fontSize: 15, height: 1.5),
+                    onTap: () => _showMenu(null),
+                    onTapOutside: (_) => widget.focusNode.unfocus(),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        vertical: inputPadding,
+                      ),
+                      hintText: widget.hintText,
+                      hintStyle: TextStyle(color: hintInk),
+                      hintMaxLines: 1,
+                      border: InputBorder.none,
+                    ),
+                  ),
+                );
+          final add = TapRegion(
+            groupId: _menuTapGroup,
+            child: _toolbarButton(
+              '添加内容',
+              'assets/images/home_composer_add.svg',
+              expanded: _menu != null && _menu != _CompanionMenu.model,
+              onPressed: () => _showMenu(
+                _menu == _CompanionMenu.root ? null : _CompanionMenu.root,
+              ),
+            ),
+          );
           return SingleChildScrollView(
             primary: false,
             physics: const NeverScrollableScrollPhysics(),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(5, 7, 5, 2),
+              padding: const EdgeInsets.symmetric(
+                horizontal: horizontalPadding,
+                vertical: 2,
+              ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -303,98 +378,33 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
                       preparationStates: widget.attachmentPreparationStates,
                       onRetry: widget.onRetryAttachment,
                     ),
-                  if (recording ||
-                      widget.voiceStarting ||
-                      widget.voiceTranscribing)
-                    _voiceFeedback()
-                  else
+                  if (stacked)
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 7),
-                      child: TextField(
-                        controller: widget.controller,
-                        focusNode: widget.focusNode,
-                        minLines: 1,
-                        maxLines: 2,
-                        cursorColor: _bodyInk,
-                        style: const TextStyle(
-                          color: _bodyInk,
-                          fontSize: 15,
-                          height: 1.6,
-                        ),
-                        onTap: () => _showMenu(null),
-                        onTapOutside: (_) => widget.focusNode.unfocus(),
-                        decoration: const InputDecoration(
-                          isCollapsed: true,
-                          hintText: '发消息或按住说话',
-                          hintStyle: TextStyle(color: _subtleInk),
-                          contentPadding: EdgeInsets.only(top: 2, bottom: 5),
-                          border: InputBorder.none,
+                      padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
+                      child: input,
+                    ),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      add,
+                      if (stacked) const Spacer() else Expanded(child: input),
+                      TapRegion(
+                        groupId: _menuTapGroup,
+                        child: _toolbarButton(
+                          '模型 ${widget.modelSelection.model.name}',
+                          'assets/images/reading_companion_model_brain.svg',
+                          size: 19,
+                          expanded: _menu == _CompanionMenu.model,
+                          onPressed: () => _showMenu(
+                            _menu == _CompanionMenu.model
+                                ? null
+                                : _CompanionMenu.model,
+                          ),
                         ),
                       ),
-                    ),
-                  SizedBox(
-                    height: _controlHeight,
-                    child: Row(
-                      children: [
-                        TapRegion(
-                          groupId: _menuTapGroup,
-                          child: _toolbarButton(
-                            '添加内容',
-                            'assets/images/home_composer_add.svg',
-                            expanded:
-                                _menu != null && _menu != _CompanionMenu.model,
-                            onPressed: () => _showMenu(
-                              _menu == _CompanionMenu.root
-                                  ? null
-                                  : _CompanionMenu.root,
-                            ),
-                          ),
-                        ),
-                        const Spacer(),
-                        TapRegion(
-                          groupId: _menuTapGroup,
-                          child: _toolbarButton(
-                            '模型 ${widget.modelSelection.model.name}',
-                            'assets/images/reading_companion_model_brain.svg',
-                            size: 19,
-                            expanded: _menu == _CompanionMenu.model,
-                            onPressed: () => _showMenu(
-                              _menu == _CompanionMenu.model
-                                  ? null
-                                  : _CompanionMenu.model,
-                            ),
-                          ),
-                        ),
-                        _voiceButton(),
-                        ValueListenableBuilder<TextEditingValue>(
-                          valueListenable: widget.controller,
-                          builder: (context, _, _) {
-                            final controller = widget.controller;
-                            final hasExplicitCapability =
-                                controller is CapabilityTagTextController &&
-                                controller.hasExplicitCapability;
-                            final canSend =
-                                widget.sendingEnabled &&
-                                (_draftText.trim().isNotEmpty ||
-                                    hasExplicitCapability ||
-                                    widget.attachments.isNotEmpty);
-                            return _toolbarButton(
-                              widget.generating ? '停止生成' : '发送',
-                              widget.generating
-                                  ? 'assets/images/home_send_stop.svg'
-                                  : canSend
-                                  ? 'assets/images/home_send_active.svg'
-                                  : 'assets/images/home_send_idle.svg',
-                              onPressed: widget.generating
-                                  ? widget.onStop
-                                  : canSend
-                                  ? widget.onSend
-                                  : null,
-                            );
-                          },
-                        ),
-                      ],
-                    ),
+                      if (hasVoice) _voiceButton(),
+                      _sendButton(),
+                    ],
                   ),
                 ],
               ),
@@ -404,6 +414,41 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
       ),
     );
   }
+
+  Widget _sendButton() => ValueListenableBuilder<TextEditingValue>(
+    valueListenable: widget.controller,
+    builder: (context, _, _) {
+      final controller = widget.controller;
+      final hasExplicitCapability =
+          controller is CapabilityTagTextController &&
+          controller.hasExplicitCapability;
+      final canSend =
+          widget.sendingEnabled &&
+          (_draftText.trim().isNotEmpty ||
+              hasExplicitCapability ||
+              widget.attachments.isNotEmpty);
+      return _toolbarButton(
+        widget.generating ? '停止生成' : '发送',
+        widget.generating
+            ? 'assets/images/home_send_stop.svg'
+            : canSend
+            ? 'assets/images/home_send_active.svg'
+            : 'assets/images/home_send_idle.svg',
+        onPressed: widget.generating
+            ? widget.onStop
+            : canSend
+            ? widget.onSend
+            : null,
+      );
+    },
+  );
+
+  Color? _toolbarIconTint({bool enabled = true}) =>
+      Theme.of(context).brightness == Brightness.dark
+      ? enabled
+            ? const Color(0xFFECECEC)
+            : const Color(0xFF858585)
+      : null;
 
   Widget _toolbarButton(
     String label,
@@ -415,13 +460,30 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
     expanded: expanded,
     child: IconButton(
       tooltip: label,
-      onPressed: onPressed,
+      onPressed: onPressed == null
+          ? null
+          : () {
+              widget.focusNode.unfocus();
+              onPressed();
+            },
+      style: ButtonStyle(
+        splashFactory: NoSplash.splashFactory,
+        overlayColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.focused)
+              ? Theme.of(context).colorScheme.onSurface.withValues(alpha: .10)
+              : Colors.transparent,
+        ),
+      ),
       constraints: const BoxConstraints.tightFor(
         width: _controlHeight,
         height: _controlHeight,
       ),
       padding: EdgeInsets.zero,
-      icon: _CompanionIcon(asset, size: size),
+      icon: _CompanionIcon(
+        asset,
+        size: size,
+        tint: _toolbarIconTint(enabled: onPressed != null),
+      ),
     ),
   );
 
@@ -450,12 +512,13 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
               widget.onVoiceLongPressMove?.call(details.offsetFromOrigin.dy),
           onLongPressEnd: (_) => onEnd(),
           onLongPressCancel: widget.onVoiceLongPressCancel,
-          child: const SizedBox.square(
+          child: SizedBox.square(
             dimension: _controlHeight,
             child: Center(
               child: _CompanionIcon(
                 'assets/images/home_composer_microphone.svg',
                 size: 28,
+                tint: _toolbarIconTint(),
               ),
             ),
           ),
@@ -464,7 +527,7 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
     );
   }
 
-  Widget _voiceFeedback() {
+  Widget _voiceFeedback(Color ink, Color track) {
     final label = widget.voiceCancelArmed
         ? '松开取消'
         : widget.voiceRecording
@@ -474,7 +537,7 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
         : '正在启动录音…';
     final soundLevel = widget.voiceSoundLevel;
     return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: 31),
+      constraints: const BoxConstraints(minHeight: _controlHeight),
       child: Center(
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -488,8 +551,8 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
                   width: 44,
                   child: LinearProgressIndicator(
                     value: level.clamp(0.0, 1.0).toDouble(),
-                    color: _subtleInk,
-                    backgroundColor: _line,
+                    color: ink,
+                    backgroundColor: track,
                     minHeight: 2,
                   ),
                 ),
@@ -497,7 +560,7 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
               const SizedBox(width: 8),
             ],
             Flexible(
-              child: Text(label, style: const TextStyle(color: _subtleInk)),
+              child: Text(label, style: TextStyle(color: ink)),
             ),
           ],
         ),
@@ -533,11 +596,7 @@ class _CompanionComposerLayout extends MultiChildLayoutDelegate {
     positionChild(_ComposerSlot.conversation, Offset.zero);
     if (menu == null) return;
 
-    final toolMenu =
-        menu == _CompanionMenu.root || menu == _CompanionMenu.model;
-    final bottom = toolMenu
-        ? size.height - _controlHeight - 6
-        : composerTop - 8;
+    final bottom = composerTop - 8;
     final panelWidth = switch (menu) {
       _CompanionMenu.root => math.min(176.0, size.width),
       _CompanionMenu.model => math.min(320.0, size.width),
@@ -572,16 +631,18 @@ class _CompanionComposerLayout extends MultiChildLayoutDelegate {
 }
 
 class _CompanionIcon extends StatelessWidget {
-  const _CompanionIcon(this.asset, {this.size = 17});
+  const _CompanionIcon(this.asset, {this.size = 17, this.tint});
 
   final String asset;
   final double size;
+  final Color? tint;
 
   @override
   Widget build(BuildContext context) => SvgPicture.asset(
     asset,
     width: size,
     height: size,
+    colorFilter: tint == null ? null : ColorFilter.mode(tint!, BlendMode.srcIn),
     excludeFromSemantics: true,
   );
 }

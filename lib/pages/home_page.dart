@@ -4430,6 +4430,7 @@ $materialIndex
           bookId: bookId,
           sourceId: sourceId,
           isCancelled: () => !isCurrent(),
+          allowLegacyConversion: !readingDiscussion,
         );
       } on FormatException catch (error) {
         throw AiException(error.message);
@@ -4453,11 +4454,13 @@ $materialIndex
             return '- $label：${issue.message}';
           }),
         ].join('\n');
-        _showReplyError(
-          prepared.materials.isEmpty
-              ? '这本书的正文暂未同步，可继续使用书籍信息和选段'
-              : '部分书籍正文暂未同步，已就绪的资料仍可读取',
-        );
+        if (!readingDiscussion) {
+          _showReplyError(
+            prepared.materials.isEmpty
+                ? '这本书的正文暂未同步，可继续使用书籍信息和选段'
+                : '部分书籍正文暂未同步，已就绪的资料仍可读取',
+          );
+        }
       }
     }
     if (!isCurrent()) return null;
@@ -9497,6 +9500,7 @@ $text''';
       readingCompanion: true,
       usesDedicatedCompanion: true,
       companionSourceId: target.source.id,
+      companionPassageOrigin: passage?.annotationSelection,
       enableAutoTitle: true,
     );
     _companionHistoryNotice = null;
@@ -9681,6 +9685,9 @@ $text''';
     final chat = _conversation?.id == _companionConversationId
         ? _conversation
         : null;
+    final hasPassage =
+        _readingPassage?.text.isNotEmpty == true ||
+        chat?.companionPassageExcerpt?.isNotEmpty == true;
     return ReadingCompanion(
       key: _readingCompanionKey,
       bookId: bookId,
@@ -9689,6 +9696,11 @@ $text''';
       library: _bookLibrary,
       messages: chat == null ? const [] : _messages,
       savedPassageExcerpt: chat?.companionPassageExcerpt,
+      savedPassageOrigin: chat?.companionPassageOrigin,
+      savedPassageMarkdown:
+          _companionHistoryNotice == null && chat?.bookId == bookId
+          ? chat?.companionPassage
+          : null,
       streamingReply: _streamingReply,
       streamingEvidence: _streamingReadingEvidence,
       onPassageOpened: _openReadingPassage,
@@ -9740,6 +9752,7 @@ $text''';
             )
           : ReadingCompanionComposer(
               content: history,
+              hintText: hasPassage ? '继续问这段…' : '问问这本书…',
               controller: _composerController,
               focusNode: _companionFocusNode,
               modelSelection: _selectedModel,

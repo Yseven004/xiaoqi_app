@@ -47,15 +47,18 @@ class ReadingTaskMaterials {
     required int bookId,
     int? sourceId,
     bool Function()? isCancelled,
+    bool allowLegacyConversion = true,
   }) {
-    final operation = _pending.then(
-      (_) => _prepare(
-        library: library,
-        bookId: bookId,
-        sourceId: sourceId,
-        isCancelled: () => _disposed || isCancelled?.call() == true,
-      ),
+    Future<ReadingTaskMaterialResult> prepareMaterials() => _prepare(
+      library: library,
+      bookId: bookId,
+      sourceId: sourceId,
+      isCancelled: () => _disposed || isCancelled?.call() == true,
+      allowLegacyConversion: allowLegacyConversion,
     );
+    // A lookup of the progressive index must not wait behind a legacy upload.
+    if (!allowLegacyConversion) return prepareMaterials();
+    final operation = _pending.then((_) => prepareMaterials());
     _pending = operation.then<void>(
       (_) {},
       onError: (Object _, StackTrace _) {},
@@ -68,6 +71,7 @@ class ReadingTaskMaterials {
     required int bookId,
     required int? sourceId,
     required bool Function() isCancelled,
+    required bool allowLegacyConversion,
   }) async {
     if (isCancelled()) return const ReadingTaskMaterialResult();
     final allSources = await library.listSourcesForBook(bookId);
@@ -110,18 +114,21 @@ class ReadingTaskMaterials {
       try {
         final progressive = ReadingBookPreparation.instance;
         final cloudChoice = await progressive.cloudChoice(source);
-        if (cloudChoice != null) {
-          if (cloudChoice) {
+        if (cloudChoice != null || !allowLegacyConversion) {
+          if (cloudChoice == true) {
             final material = await progressive.material(source, authorization);
             if (material != null) {
               materials.add(material);
               continue;
             }
           }
-          issues.add(ReadingTaskMaterialIssue(
-            title,
-            cloudChoice ? '正在准备已授权的书籍正文' : '原文件仅保存在本机',
-          ));
+          issues.add(
+            ReadingTaskMaterialIssue(title, switch (cloudChoice) {
+              true => '正在准备已授权的书籍正文',
+              false => '原文件仅保存在本机',
+              null => '尚未取得此版本的云端正文授权',
+            }),
+          );
           continue;
         }
         final stat = await File(source.filePath).stat();

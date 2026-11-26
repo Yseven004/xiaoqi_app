@@ -13,10 +13,68 @@ import 'package:xiaoqi_app/models/book_recognition.dart';
 import 'package:xiaoqi_app/models/book_source.dart';
 import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/widgets/book_source_import.dart';
+import 'package:xiaoqi_app/widgets/reading_book_cloud_choice.dart';
 import 'package:xiaoqi_app/widgets/reading_task_material_dialog.dart';
 import 'package:xiaoqi_app/widgets/reading_task_switcher.dart';
 
 void main() {
+  testWidgets(
+    'import choices remain symmetric and keep their consent results',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({
+        'xiaoqi.auth.email.v1': 'reader@example.com',
+      });
+      addTearDown(() => FlutterSecureStorage.setMockInitialValues({}));
+      await tester.binding.setSurfaceSize(const Size(320, 600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      ReadingBookCloudChoice? choice;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(colorSchemeSeed: Colors.brown),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(1.5)),
+            child: child!,
+          ),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () async {
+                  choice = await showReadingBookCloudChoice(context);
+                },
+                child: const Text('打开导入'),
+              ),
+            ),
+          ),
+        ),
+      );
+      final open = find.text('打开导入');
+      final local = find.widgetWithText(TextButton, '仅保存在本机');
+      final cloud = find.widgetWithText(FilledButton, '导入并准备伴读');
+      await tester.tap(open);
+      await tester.pumpAndSettle();
+      final localBounds = tester.getRect(local);
+      final cloudBounds = tester.getRect(cloud);
+      expect(localBounds.right, lessThan(cloudBounds.left));
+      expect(localBounds.top, cloudBounds.top);
+      expect(localBounds.size, cloudBounds.size);
+      expect(
+        tester.widget<AlertDialog>(find.byType(AlertDialog)).backgroundColor,
+        Colors.white,
+      );
+      await tester.tap(local);
+      await tester.pumpAndSettle();
+      expect(choice?.enabled, isFalse);
+      await tester.tap(open);
+      await tester.pumpAndSettle();
+      await tester.tap(cloud);
+      await tester.pumpAndSettle();
+      expect(choice, (enabled: true, accountEmail: 'reader@example.com'));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('re-tapping the current book opens the centered material card', (
     tester,
   ) async {
