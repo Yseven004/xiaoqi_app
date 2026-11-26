@@ -551,6 +551,151 @@ void main() {
   });
 
   test(
+    'main agent scopes progressive books to an authenticated account',
+    () async {
+      const otherToken = 'reading-main-other-account';
+      addDevice(otherToken, 'personal', 'different-reader');
+      final other = remoteAgent<Map<String, dynamic>>(
+        url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
+        headers: () async => {
+          'authorization': 'Bearer $otherToken',
+          'x-xiaoqi-contract': apiContractVersion,
+        },
+      );
+      addTearDown(other.close);
+      final original = File('${directory.path}/fixture.pdf');
+      final bytes = utf8.encode('%PDF-1.4\n%%EOF\n');
+      await original.writeAsBytes(bytes);
+      final version = sha256.convert(bytes).toString();
+      Future<(String, String)> register(String email, String bookKey) async {
+        final account = sha256.convert(utf8.encode(email)).toString();
+        final source = await store.progressiveBooks.ingest(
+          tenant: readingBookOwner('personal', account),
+          bookKey: bookKey,
+          version: version,
+          format: 'pdf',
+          original: original,
+        );
+        return (account, source['id'] as String);
+      }
+
+      final (account, book) = await register(
+        'owner-device@example.com',
+        'a' * 64,
+      );
+      final (_, otherBook) = await register(
+        'different-reader@example.com',
+        'b' * 64,
+      );
+      Map<String, dynamic> source(String value) => {
+        'id': 'reading-$value',
+        'kind': 'document',
+        'reading_book_id': value,
+      };
+      Message message(
+        String task, [
+        List<Map<String, dynamic>> materials = const [],
+      ]) => Message(
+        role: Role.user,
+        content: [TextPart(text: '请核对书里的原句。')],
+        metadata: {
+          'xiaoqi_agent_turn': {
+            'task_id': task,
+            'workflow_id': 'main-reading-workflow',
+            'user_message_id': '$task-message',
+            'materials': materials,
+          },
+        },
+      );
+
+      final initial = await ownerAgent.chat().send(
+        message: message('main-reading-origin'),
+      );
+      expect(initial.snapshotId, isNotNull);
+      expect(
+        store
+            .get('task/personal/main-reading-origin')!
+            .value['annotation_account'],
+        isNull,
+      );
+      final unauthorized = await other.chat().send(
+        message: message('foreign-reading-id', [source(book)]),
+      );
+      expect(unauthorized.text, '你好');
+      expect(runtime.lastRequest?['materials'], isEmpty);
+      expect(
+        store
+            .get('task/personal/foreign-reading-id')!
+            .value['annotation_account'],
+        isNull,
+      );
+
+      Future<void> rejects(
+        AgentApi<Map<String, dynamic>> agent,
+        String task, {
+        String? session,
+        String? snapshot,
+        List<Map<String, dynamic>> materials = const [],
+      }) async {
+        final rejected = agent
+            .chat(sessionId: session, snapshotId: snapshot)
+            .sendStream(message: message(task, materials));
+        final drained = rejected.stream.drain<void>().catchError((Object _) {});
+        await expectLater(rejected.response, throwsA(isA<Object>()));
+        await drained;
+        expect(store.get('task/personal/$task'), isNull);
+      }
+
+      await rejects(
+        other,
+        'claim-foreign-reading-session',
+        snapshot: initial.snapshotId,
+        materials: [source(otherBook)],
+      );
+
+      final pinned = await ownerAgent
+          .chat(snapshotId: initial.snapshotId)
+          .send(
+            message: message('main-reading-owned-book', [
+              source(book),
+              source(otherBook),
+            ]),
+          );
+      expect(pinned.text, '你好');
+      expect(runtime.lastRequest?['_reading_discussion'], isFalse);
+      expect(runtime.lastRequest?['materials'], [source(book)]);
+      expect(
+        store
+            .get('task/personal/main-reading-owned-book')!
+            .value['annotation_account'],
+        account,
+      );
+      await rejects(
+        other,
+        'foreign-reading-snapshot',
+        snapshot: pinned.snapshotId,
+      );
+      await rejects(
+        other,
+        'foreign-reading-session',
+        session: pinned.sessionId,
+      );
+
+      final followup = await ownerAgent
+          .chat(snapshotId: pinned.snapshotId)
+          .send(message: message('main-reading-followup'));
+      expect(followup.text, '你好');
+      expect(
+        store
+            .get('task/personal/main-reading-followup')!
+            .value['annotation_account'],
+        account,
+      );
+      expect(runtime.turnCount, 4);
+    },
+  );
+
+  test(
     'annotation images follow their numbered groups and stay account and message scoped',
     () async {
       const otherToken = 'streaming-shared-tenant-other-account';

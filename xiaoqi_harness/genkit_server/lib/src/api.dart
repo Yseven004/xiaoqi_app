@@ -1759,17 +1759,10 @@ class XiaoqiApi {
       if (sessionOwner != null && sessionOwner != annotationAccount) {
         throw GenkitException('会话不存在', status: StatusCode.notFound);
       }
-      if (isAnnotationBatch) {
-        if (annotationAccount == null) {
-          throw GenkitException(
-            '注释批次须使用个人账号发送',
-            status: StatusCode.permissionDenied,
-          );
-        }
-        sessionStore.claimAnnotationSession(
-          tenantId,
-          sessionId,
-          annotationAccount,
+      if (isAnnotationBatch && annotationAccount == null) {
+        throw GenkitException(
+          '注释批次须使用个人账号发送',
+          status: StatusCode.permissionDenied,
         );
       }
 
@@ -1811,6 +1804,65 @@ class XiaoqiApi {
             ..remove(_readingDiscussionVersionsKey)
             // These are one-request transport controls, never conversation data.
             ..remove('_continue_aborted_turn');
+      final readingSourceVersions = <String>{
+        if (readingDiscussion && readingVersion != null) readingVersion,
+      };
+      final materials = cleanConfig['materials'];
+      var hasAuthorizedReadingBook = false;
+      if (materials is List &&
+          materials.whereType<Map>().any(
+            (material) => material.containsKey('reading_book_id'),
+          )) {
+        final bookOwner = annotationAccount == null
+            ? null
+            : readingBookOwner(tenantId, annotationAccount);
+        final scopedBook = readingDiscussion
+            ? config['reading_companion_book']
+            : null;
+        final scoped = <Object?>[];
+        for (final material in materials) {
+          if (material is! Map || !material.containsKey('reading_book_id')) {
+            scoped.add(material);
+            continue;
+          }
+          final id = material['reading_book_id'];
+          if (bookOwner == null || id is! String) continue;
+          final status = store.progressiveBooks.status(bookOwner, id);
+          if (status == null) continue;
+          final version = status['source_version'] as String;
+          if (readingDiscussion &&
+              (status['book_key'] != scopedBook ||
+                  (readingVersion != null && readingVersion != version))) {
+            continue;
+          }
+          hasAuthorizedReadingBook = true;
+          scoped.add(material);
+          if (readingDiscussion) readingSourceVersions.add(version);
+        }
+        cleanConfig['materials'] = scoped;
+      }
+      if (annotationAccount != null &&
+          (isAnnotationBatch ||
+              !readingDiscussion && hasAuthorizedReadingBook)) {
+        final parent = session.lastSnapshot;
+        if (!readingDiscussion &&
+            hasAuthorizedReadingBook &&
+            sessionOwner == null &&
+            parent != null &&
+            !_canClaimExistingBookSession(
+              tenantId,
+              parent,
+              annotationAccount,
+              context['device_id'],
+            )) {
+          throw GenkitException('会话不存在', status: StatusCode.notFound);
+        }
+        sessionStore.claimAnnotationSession(
+          tenantId,
+          sessionId,
+          annotationAccount,
+        );
+      }
       currentUserIndex = messages.lastIndexWhere(
         (message) => message.role == Role.user,
       );
@@ -1915,30 +1967,6 @@ class XiaoqiApi {
               .map((m) => m['task_id']?.toString() ?? ''),
           annotationAccount: annotationAccount,
         );
-      final readingSourceVersions = <String>{};
-      if (readingDiscussion && annotationAccount != null) {
-        final owner = readingBookOwner(tenantId, annotationAccount);
-        final book = config['reading_companion_book'] as String;
-        if (readingVersion != null) readingSourceVersions.add(readingVersion);
-        final materials = request['materials'];
-        if (materials is List) {
-          final scoped = <Map>[];
-          for (final value in materials.whereType<Map>()) {
-            if (value['reading_book_id'] case final String id) {
-              final status = store.progressiveBooks.status(owner, id);
-              if (status == null ||
-                  status['book_key'] != book ||
-                  (readingVersion != null &&
-                      status['source_version'] != readingVersion)) {
-                continue;
-              }
-              readingSourceVersions.add(status['source_version'] as String);
-            }
-            scoped.add(value);
-          }
-          request['materials'] = scoped;
-        }
-      }
       if (resumeControl != null) {
         request['_continue_aborted_turn'] = true;
       }
@@ -1948,7 +1976,10 @@ class XiaoqiApi {
         context['device_id'],
         annotationAccount: annotationAccount,
         privateAnnotations:
-            isAnnotationBatch || sessionOwner != null || readingDiscussion,
+            isAnnotationBatch ||
+            sessionOwner != null ||
+            readingDiscussion ||
+            hasAuthorizedReadingBook,
       );
       try {
         _bindRemoteUserMessage(tenantId, taskId, request);
@@ -2666,6 +2697,28 @@ class XiaoqiApi {
     });
   }
 
+  bool _canClaimExistingBookSession(
+    String tenantId,
+    SessionSnapshot snapshot,
+    String account,
+    Object? deviceId,
+  ) {
+    final messages = snapshot.state?.messages ?? const <Message>[];
+    for (final message in messages) {
+      if (message.role != Role.user) continue;
+      final config = message.metadata?[_remoteAgentTurnMetadataKey];
+      final rawTaskId = config is Map ? config['task_id'] : null;
+      if (rawTaskId is! String) continue;
+      final task = store.get('task/$tenantId/$rawTaskId')?.value;
+      if (task == null) continue;
+      final requestAccount = task['_request_account'];
+      return requestAccount != null
+          ? requestAccount == account
+          : deviceId != null && task['device_id'] == deviceId;
+    }
+    return false;
+  }
+
   void _ensureRemoteAgentTask(
     String tenantId,
     String taskId,
@@ -2690,6 +2743,7 @@ class XiaoqiApi {
       'task_id': taskId,
       'tenant_id': tenantId,
       'device_id': deviceId,
+      if (annotationAccount != null) '_request_account': annotationAccount,
       if (privateAnnotations) 'annotation_account': annotationAccount,
       'remote_agent_turn': true,
       'status': 'running',

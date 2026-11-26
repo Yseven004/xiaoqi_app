@@ -1553,6 +1553,22 @@ class GenkitXiaoqiAgentRuntime
                   offset: offset,
                   maxChars: maxChars,
                 );
+      if (result != null) {
+        result['index_coverage'] = result.remove('coverage');
+        result['content_scope'] = mode == 'query'
+            ? 'matching_passages'
+            : 'retrieved_passages';
+        if (result['source_format'] == 'epub') {
+          result.remove('total_pages');
+          result.remove('completed_pages');
+          if (result.remove('read_pages') case final List units) {
+            result['read_units'] = units;
+          }
+          if (result.remove('next_pages') case final List units) {
+            result['next_units'] = units;
+          }
+        }
+      }
       return {
         'ok': result != null,
         'material_id': materialId,
@@ -6938,6 +6954,13 @@ class GenkitXiaoqiAgentRuntime
         '需要继续核实时用 pages 读取 next_pages，或说明范围并请用户缩小页码。'
         '\n<attachment_evidence>\n${jsonEncode(preparedMaterials)}\n</attachment_evidence>',
       );
+      if (bookMaterials.isNotEmpty) {
+        system.write(
+          '\n书籍的 index_coverage 是索引准备范围。依据本次返回的段落作答，'
+          '查到片段就说明出处，避免声称通读全书。EPUB 位置按章或节表述；'
+          '工具的 pages 参数在 EPUB 资料中接收章节单元序号。',
+        );
+      }
     }
     if (appendImageAfterText) {
       system.write(
@@ -7255,7 +7278,7 @@ class GenkitXiaoqiAgentRuntime
       );
       ai.defineTool<Map<String, dynamic>, String>(
         name: delegation,
-        description: '仅在复杂的本书问题需要跨章节查证时委派。material_id 使用本轮书籍资料 ID。',
+        description: '用户明确要求伴读查证，或复杂问题需要跨章节查证时使用。material_id 使用本轮书籍资料 ID。',
         inputSchema: _objectToolSchema(
           const {
             'material_id': {'type': 'string', 'maxLength': 128},
@@ -7281,6 +7304,7 @@ class GenkitXiaoqiAgentRuntime
         },
       );
       toolNames.add(delegation);
+      system.write('\n用户明确要求委派伴读查证时，调用 $delegation。');
     }
     final protectedValues = [
       apiKey,
