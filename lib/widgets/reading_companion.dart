@@ -327,6 +327,7 @@ class ReadingCompanionState extends State<ReadingCompanion>
   bool _explanationFailed = false;
   String _explanationDraft = '';
   int _shownAnswer = 0;
+  int _explanationAnswerVersion = 0;
   String? _discussionSeed;
   List<ReadingCompanionEvidence> _discussionSeedEvidence = const [];
   ({int sourceId, ReadingCompanionEvidence evidence})? _pendingReadingEvidence;
@@ -591,6 +592,7 @@ class ReadingCompanionState extends State<ReadingCompanion>
     final cancellation = _explanationCancellation;
     _explanationCancellation = null;
     cancellation?.cancel();
+    _explanationAnswerVersion++;
     _explaining = null;
     _explanationAnswers.clear();
     _explanationDraft = '';
@@ -644,6 +646,7 @@ class ReadingCompanionState extends State<ReadingCompanion>
           if (_explanationAnswers.length == 2) _explanationAnswers.removeAt(0);
           _explanationAnswers.add((text: text, evidence: evidence));
           _shownAnswer = _explanationAnswers.length - 1;
+          _explanationAnswerVersion++;
         }
         _explanationCancellation = null;
       });
@@ -1407,6 +1410,8 @@ class ReadingCompanionState extends State<ReadingCompanion>
         key: ObjectKey(selection.passage),
         viewport: viewport,
         selection: bounds,
+        selectionRects: rects,
+        answerVersion: (_explanationAnswerVersion, _shownAnswer),
         dark: _dark,
         text: answer?.text ?? (pending ? _explanationDraft : ''),
         evidence: answer?.evidence ?? const [],
