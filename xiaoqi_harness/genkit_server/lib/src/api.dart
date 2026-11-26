@@ -27,6 +27,8 @@ import 'package:genkit/experimental.dart'
         Artifact,
         GenkitAgents,
         SessionRunner,
+        SessionSnapshot,
+        SnapshotStatus,
         TurnResult;
 import 'package:genkit/genkit.dart'
     show
@@ -52,6 +54,8 @@ import 'package:uuid/uuid.dart';
 import 'agent_runtime.dart';
 import 'book_search_plugin.dart';
 import 'book_search_service.dart';
+import 'reading_discussion_summaries.dart';
+import 'reading_book_evidence.dart';
 import 'public_agent_process.dart';
 import 'public_agent_transport.dart';
 import 'attachment_service.dart';
@@ -67,6 +71,10 @@ import 'store.dart';
 import 'official_catalog.dart';
 
 const _remoteAgentTurnMetadataKey = 'xiaoqi_agent_turn';
+const _readingDiscussionVersionsKey = '_reading_discussion_source_versions';
+const _readingAuthorizationHeader = 'x-xiaoqi-reading-authorization';
+const _readingBindingHeader = 'x-xiaoqi-reading-binding';
+const _readingBindingActiveHeader = 'x-xiaoqi-reading-binding-active';
 final _deepSeekApiKey = Platform.environment['DEEPSEEK_API_KEY'] ?? '';
 final _deepSeekBaseUrl =
     Platform.environment['DEEPSEEK_SEARCH_BASE_URL']?.trim().isNotEmpty == true
@@ -398,6 +406,29 @@ class XiaoqiApi {
       path: '/v1/agent/chat/getSnapshot',
       contextProvider: _agentRequestContext,
     );
+    Map<String, dynamic> discussionContext(RequestData request) => {
+      ..._agentRequestContext(request),
+      '_reading_discussion': true,
+    };
+    _agentRouter.addAction(
+      cancellableAction,
+      path: '/v1/agent/reading-discussion',
+      contextProvider: discussionContext,
+    );
+    _agentRouter.addAction(
+      _remoteAgent.getSnapshotDataAction,
+      path: '/v1/agent/reading-discussion/getSnapshot',
+      contextProvider: discussionContext,
+    );
+    final explanation = genkit.defineCustomAgent<Map<String, dynamic>>(
+      name: 'xiaoqi_reading_explanation',
+      fn: _runReadingExplanation,
+    );
+    _agentRouter.addAction(
+      explanation.action,
+      path: '/v1/agent/reading-explanation',
+      contextProvider: _agentRequestContext,
+    );
     _taskLeaseTimer = Timer.periodic(
       const Duration(seconds: 10),
       (_) => _pauseExpiredTaskLeases(),
@@ -523,6 +554,72 @@ class XiaoqiApi {
         (Request request) => _authenticated(
           request,
           (device) => attachments.upload(request, device.tenant),
+        ),
+      )
+      ..post(
+        '/v1/reading-books/<book>/<version>',
+        (Request request, String book, String version) => _authenticated(
+          request,
+          (device) => _readingBook(request, device, book, version),
+        ),
+      )
+      ..get(
+        '/v1/reading-books/<book>/<version>',
+        (Request request, String book, String version) => _authenticated(
+          request,
+          (device) => _readingBook(request, device, book, version),
+        ),
+      )
+      ..delete(
+        '/v1/reading-books/<book>/<version>',
+        (Request request, String book, String version) => _authenticated(
+          request,
+          (device) => _readingBook(request, device, book, version),
+        ),
+      )
+      ..put(
+        '/v1/reading-books/<book>/<version>/target',
+        (Request request, String book, String version) => _authenticated(
+          request,
+          (device) => _readingBook(request, device, book, version),
+        ),
+      )
+      ..put(
+        '/v1/reading-books/<book>/<version>/binding',
+        (Request request, String book, String version) => _authenticated(
+          request,
+          (device) => _readingBook(
+            request,
+            device,
+            book,
+            version,
+            registerBinding: true,
+          ),
+        ),
+      )
+      ..delete(
+        '/v1/reading-discussions/<book>/<workflow>',
+        (Request request, String book, String workflow) =>
+            _authenticated(request, (device) async {
+              final account = device.annotationAccount;
+              if (account == null) return _error('请先登录个人账号', 403);
+              try {
+                ReadingDiscussionSummaries(store).delete(
+                  owner: readingBookOwner(device.tenant, account),
+                  bookKey: _safeId(book, '书籍 ID'),
+                  workflow: _safeId(workflow, '讨论 ID'),
+                );
+                return _json({'ok': true});
+              } on FormatException catch (error) {
+                return _error(error.message, 400);
+              }
+            }),
+      )
+      ..put(
+        '/v1/reading-discussions/<book>/<workflow>/selection',
+        (Request request, String book, String workflow) => _authenticated(
+          request,
+          (device) => _selectReadingDiscussion(request, device, book, workflow),
         ),
       )
       ..get(
@@ -1111,22 +1208,233 @@ class XiaoqiApi {
     return router;
   }
 
-  Handler get handler => const Pipeline()
-      .addMiddleware(logRequests())
-      .addHandler(
-        Cascade()
-            .add(router.call)
-            .add(
-              (request) async => publicAgentResponse(
-                await _agentRouter.asShelfHandler()(request),
-              ),
-            )
-            .handler,
-      );
+  Handler get handler {
+    final shelfRouter = router;
+    final agentHandler = _agentRouter.asShelfHandler();
+    return const Pipeline().addMiddleware(logRequests()).addHandler((
+      request,
+    ) async {
+      final response = await shelfRouter.call(request);
+      if (!identical(response, Router.routeNotFound)) return response;
+      return publicAgentResponse(await agentHandler(request));
+    });
+  }
 
   Future<void> close() async {
     _taskLeaseTimer?.cancel();
     await _attachments?.close();
+    await store.progressiveBooks.close();
+  }
+
+  final _readingUploads =
+      <(String, String, String, String), Set<CancellationController>>{};
+
+  Future<Response> _readingBook(
+    Request request,
+    _Device device,
+    String book,
+    String version, {
+    bool registerBinding = false,
+  }) async {
+    final account = device.annotationAccount;
+    if (account == null) return _error('请先登录个人账号', 403);
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(book) ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(version)) {
+      return _error('书籍或资料版本无效', 400);
+    }
+    final binding = request.headers[_readingBindingHeader];
+    if (binding == null ||
+        !RegExp(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$').hasMatch(binding)) {
+      return _error('资料绑定无效', 400);
+    }
+    final owner = readingBookOwner(device.tenant, account);
+    final books = store.progressiveBooks;
+    final scope = (owner, book, version, binding);
+    final authorization = request.headers[_readingAuthorizationHeader];
+    ({String generation, bool active}) currentBinding() =>
+        books.sourceBinding(owner, book, version, binding);
+
+    if (request.method == 'POST' || registerBinding) {
+      if (authorization == null ||
+          authorization != currentBinding().generation) {
+        return _json({
+          'error': {
+            'message': '资料授权已变更，请重新检查上传选项',
+            'code': 'authorization_changed',
+          },
+        }, 409);
+      }
+    }
+
+    if (registerBinding) {
+      final source = books.lookup(owner, book, version);
+      if (!books.hasActiveBindings(owner, book, version) ||
+          source == null ||
+          source['status'] == 'uploading') {
+        return _error('书籍资料尚未登记', 404);
+      }
+      if (!currentBinding().active) {
+        books.grantSourceBinding(owner, book, version, binding, authorization!);
+      }
+      return _json(source);
+    }
+
+    if (request.method == 'POST') {
+      final key = device.key;
+      final controller = CancellationController();
+      final pending = _readingUploads.putIfAbsent(scope, () => {});
+      pending.add(controller);
+      bool isAllowed() {
+        if (controller.token.isCancelled ||
+            authorization != currentBinding().generation)
+          return false;
+        final active = store.get(key);
+        return active != null &&
+            active.value['revoked_at'] == null &&
+            _Device(key, active.value).annotationAccount == account;
+      }
+
+      try {
+        return await attachments.upload(
+          request,
+          device.tenant,
+          registerReadingBook: (original, format, hash) async {
+            if (version != hash) {
+              throw const AttachmentFailure(
+                '原件校验失败，请重新选择书籍资料',
+                code: 'version_mismatch',
+                statusCode: 409,
+              );
+            }
+            if (!isAllowed()) {
+              throw const AttachmentFailure(
+                '资料授权已变更',
+                code: 'authorization_changed',
+                statusCode: 409,
+              );
+            }
+            if (!currentBinding().active) {
+              books.grantSourceBinding(
+                owner,
+                book,
+                version,
+                binding,
+                authorization!,
+              );
+            }
+            return books.ingest(
+              tenant: owner,
+              bookKey: book,
+              version: version,
+              format: format,
+              original: original,
+              verifiedSha256: hash,
+              isAllowed: isAllowed,
+            );
+          },
+        );
+      } finally {
+        pending.remove(controller);
+        if (pending.isEmpty) _readingUploads.remove(scope);
+      }
+    }
+    if (request.method == 'DELETE') {
+      final last = books.revokeSourceBinding(owner, book, version, binding);
+      for (final pending
+          in _readingUploads[scope] ?? const <CancellationController>{}) {
+        pending.cancel();
+      }
+      if (!last) return _json({'ok': true});
+      ReadingDiscussionSummaries(
+        store,
+      ).deleteSource(owner: owner, bookKey: book, sourceVersion: version);
+      return _json({'ok': true});
+    }
+    final source = books.lookup(owner, book, version);
+    if (request.method == 'GET') {
+      final grant = currentBinding();
+      final response = source == null ? _error('书籍资料尚未登记', 404) : _json(source);
+      return response.change(
+        headers: {
+          _readingAuthorizationHeader: grant.generation,
+          _readingBindingActiveHeader: grant.active.toString(),
+        },
+      );
+    }
+    if (source == null) return _error('书籍资料尚未登记', 404);
+    final targetBinding = currentBinding();
+    if (!targetBinding.active) return _error('该设备未授权书籍资料', 403);
+    final id = source['id'] as String;
+    try {
+      final body = await _body(request, 8192);
+      final instance = _safeId(body['instance'], '阅读实例');
+      final sequence = body['sequence'];
+      final page = body['page'];
+      final chapter = body['chapter_id'];
+      final release = body['release'] == true;
+      if (sequence is! int ||
+          sequence < 0 ||
+          (page != null && (page is! int || page < 1)) ||
+          (chapter != null && (chapter is! String || chapter.length > 1024)) ||
+          (!release && page == null && chapter == null)) {
+        return _error('阅读位置无效', 400);
+      }
+      if (currentBinding() != targetBinding) {
+        return _error('资料授权已变更，请重新检查上传选项', 409);
+      }
+      final accepted = books.prioritize(
+        owner,
+        id,
+        instance: instance,
+        sequence: sequence,
+        binding: binding,
+        chapterId: chapter as String?,
+        page: page as int?,
+        release: release,
+      );
+      return _json({'ok': true, 'accepted': accepted});
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    }
+  }
+
+  Future<AgentResult> _runReadingExplanation(
+    SessionRunner<Map<String, dynamic>> session,
+    AgentFnOptions options,
+  ) async {
+    final tenant = options.context?['tenant_id'] as String?;
+    final account = options.context?['_annotation_account'] as String?;
+    final native = runtime;
+    if (tenant == null || account == null) {
+      throw GenkitException('请先登录个人账号', status: StatusCode.permissionDenied);
+    }
+    if (native is! GenkitXiaoqiAgentRuntime) {
+      throw GenkitException('伴读暂时不可用', status: StatusCode.unavailable);
+    }
+    await session.run((input, _) async {
+      final metadata = input.message?.metadata?['reading_explanation'];
+      if (input.message?.role != Role.user || metadata is! Map) {
+        throw const FormatException('缺少阅读选段');
+      }
+      final output = await native.explainReadingPassage(
+        owner: readingBookOwner(tenant, account),
+        input: Map<String, dynamic>.from(metadata),
+        cancel: options.cancel,
+        onChunk: options.sendChunk,
+        onEvidence: (references) {
+          if (references.isNotEmpty) {
+            session.updateCustom((_) => {'reading_evidence': references});
+          }
+        },
+      );
+      if (output.message case final response?) session.addMessages([response]);
+      return TurnResult(finishReason: output.finishReason);
+    });
+    final last = session.getMessages().lastOrNull;
+    return AgentResult(
+      message: last?.role == Role.model ? last : null,
+      finishReason: session.lastTurnFinishReason,
+    );
   }
 
   void _pauseExpiredTaskLeases() {
@@ -1209,6 +1517,139 @@ class XiaoqiApi {
     };
   }
 
+  Future<Response> _selectReadingDiscussion(
+    Request request,
+    _Device device,
+    String book,
+    String workflow,
+  ) async {
+    final account = device.annotationAccount;
+    if (account == null) return _error('请先登录个人账号', 403);
+    try {
+      if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(book)) {
+        throw const FormatException('书籍 ID 无效');
+      }
+      _safeId(workflow, '讨论 ID');
+      final payload = await _body(request, 2048);
+      if (!payload.containsKey('snapshot_id')) {
+        throw const FormatException('缺少已选快照');
+      }
+      final rawSnapshotId = payload['snapshot_id'];
+      final owner = readingBookOwner(device.tenant, account);
+      final summaries = ReadingDiscussionSummaries(store);
+      if (rawSnapshotId == null) {
+        summaries.select(
+          owner: owner,
+          bookKey: book,
+          workflow: workflow,
+          sessionId: null,
+          snapshotId: null,
+          turns: const [],
+        );
+        return _json({'ok': true});
+      }
+      if (rawSnapshotId is! String) {
+        throw const FormatException('快照 ID 无效');
+      }
+      final snapshotId = _safeId(rawSnapshotId, '快照 ID');
+      final sessions = CloudSessionStore(store);
+      final context = <String, dynamic>{
+        'tenant_id': device.tenant,
+        '_annotation_account': account,
+        '_reading_discussion': true,
+      };
+      Future<SessionSnapshot?> load(String id) =>
+          sessions.getSnapshot(snapshotId: id, context: context);
+      final selected = await load(snapshotId);
+      final sessionId = selected?.sessionId;
+      if (selected == null ||
+          sessionId == null ||
+          !sessions.ownsReadingSession(
+            device.tenant,
+            sessionId,
+            account,
+            book,
+            workflow,
+          )) {
+        return _error('伴读快照不存在', 404);
+      }
+      if (!_isCompletedReadingSnapshot(selected)) {
+        return _error('伴读快照尚未完成', 409);
+      }
+
+      final turns = <ReadingDiscussionTurn>[];
+      SessionSnapshot? snapshot = selected;
+      for (
+        var i = 0;
+        i < ReadingDiscussionSummaries.maxTurns && snapshot != null;
+        i++
+      ) {
+        if (snapshot.sessionId != sessionId) break;
+        final turn = _readingDiscussionTurn(snapshot, book, workflow);
+        if (turn != null) turns.add(turn);
+        final parent = snapshot.parentId;
+        snapshot = parent == null ? null : await load(parent);
+      }
+      summaries.select(
+        owner: owner,
+        bookKey: book,
+        workflow: workflow,
+        sessionId: sessionId,
+        snapshotId: snapshotId,
+        turns: turns.where(
+          (turn) => turn.sourceVersions.every(
+            (version) =>
+                store.progressiveBooks.hasSourceVersion(owner, book, version),
+          ),
+        ),
+      );
+      return _json({'ok': true});
+    } on FormatException catch (error) {
+      return _error(error.message, 400);
+    }
+  }
+
+  static ReadingDiscussionTurn? _readingDiscussionTurn(
+    SessionSnapshot snapshot,
+    String book,
+    String workflow,
+  ) {
+    if (!_isCompletedReadingSnapshot(snapshot)) return null;
+    final messages = snapshot.state?.messages ?? const <Message>[];
+    final answer = messages.lastOrNull;
+    if (answer?.role != Role.model) return null;
+    final userIndex = messages.lastIndexWhere(
+      (message) => message.role == Role.user,
+    );
+    if (userIndex < 0) return null;
+    final config = messages[userIndex].metadata?[_remoteAgentTurnMetadataKey];
+    if (config is! Map ||
+        config['reading_companion_book'] != book ||
+        config['workflow_id'] != workflow)
+      return null;
+    final versions = config[_readingDiscussionVersionsKey];
+    if (versions is! List || versions.isEmpty) return null;
+    final version = RegExp(r'^[0-9a-f]{64}$');
+    if (versions.any((value) => value is! String || !version.hasMatch(value))) {
+      return null;
+    }
+    return (
+      snapshotId: snapshot.snapshotId,
+      userText: config['current_turn_text']?.toString() ?? '',
+      answerText: answer!.content
+          .whereType<TextPart>()
+          .map((part) => part.text)
+          .join(),
+      sourceVersions: versions.cast<String>(),
+    );
+  }
+
+  static bool _isCompletedReadingSnapshot(SessionSnapshot snapshot) =>
+      snapshot.status == SnapshotStatus.completed &&
+      snapshot.error == null &&
+      (snapshot.finishReason == null ||
+          snapshot.finishReason == AgentFinishReason.stop);
+
   Future<AgentResult> _runRemoteAgent(
     SessionRunner<Map<String, dynamic>> session,
     AgentFnOptions options,
@@ -1283,6 +1724,32 @@ class XiaoqiApi {
       final annotationAccount = context['_annotation_account'] as String?;
       final sessionStore = CloudSessionStore(store);
       final sessionId = session.session.sessionId;
+      final readingDiscussion = context['_reading_discussion'] == true;
+      final rawReadingVersion = config['reading_companion_version'];
+      final readingVersion =
+          rawReadingVersion is String &&
+              RegExp(r'^[0-9a-f]{64}$').hasMatch(rawReadingVersion)
+          ? rawReadingVersion
+          : null;
+      if (readingDiscussion) {
+        final book = config['reading_companion_book'];
+        if (annotationAccount == null ||
+            book is! String ||
+            !RegExp(r'^[0-9a-f]{64}$').hasMatch(book)) {
+          throw GenkitException(
+            '伴读会话缺少有效书籍',
+            status: StatusCode.failedPrecondition,
+          );
+        }
+        sessionStore.claimReadingSession(
+          tenantId,
+          sessionId,
+          annotationAccount,
+          book,
+          readingVersion,
+          _safeId(config['workflow_id'], '讨论 ID'),
+        );
+      }
       final sessionOwner = sessionStore.annotationSessionOwner(
         tenantId,
         sessionId,
@@ -1339,6 +1806,7 @@ class XiaoqiApi {
                   .map((value) => Map<String, dynamic>.from(value)),
             )
             ..remove('legacy_history')
+            ..remove(_readingDiscussionVersionsKey)
             // These are one-request transport controls, never conversation data.
             ..remove('_continue_aborted_turn');
       currentUserIndex = messages.lastIndexWhere(
@@ -1429,6 +1897,7 @@ class XiaoqiApi {
 
       final request = Map<String, dynamic>.from(cleanConfig)
         ..['remote_agent'] = true
+        ..['_reading_discussion'] = readingDiscussion
         ..['_visible_artifacts'] = visibleTaskArtifacts(
           store,
           tenantId,
@@ -1444,6 +1913,30 @@ class XiaoqiApi {
               .map((m) => m['task_id']?.toString() ?? ''),
           annotationAccount: annotationAccount,
         );
+      final readingSourceVersions = <String>{};
+      if (readingDiscussion && annotationAccount != null) {
+        final owner = readingBookOwner(tenantId, annotationAccount);
+        final book = config['reading_companion_book'] as String;
+        if (readingVersion != null) readingSourceVersions.add(readingVersion);
+        final materials = request['materials'];
+        if (materials is List) {
+          final scoped = <Map>[];
+          for (final value in materials.whereType<Map>()) {
+            if (value['reading_book_id'] case final String id) {
+              final status = store.progressiveBooks.status(owner, id);
+              if (status == null ||
+                  status['book_key'] != book ||
+                  (readingVersion != null &&
+                      status['source_version'] != readingVersion)) {
+                continue;
+              }
+              readingSourceVersions.add(status['source_version'] as String);
+            }
+            scoped.add(value);
+          }
+          request['materials'] = scoped;
+        }
+      }
       if (resumeControl != null) {
         request['_continue_aborted_turn'] = true;
       }
@@ -1452,7 +1945,8 @@ class XiaoqiApi {
         taskId,
         context['device_id'],
         annotationAccount: annotationAccount,
-        privateAnnotations: isAnnotationBatch || sessionOwner != null,
+        privateAnnotations:
+            isAnnotationBatch || sessionOwner != null || readingDiscussion,
       );
       try {
         _bindRemoteUserMessage(tenantId, taskId, request);
@@ -1485,6 +1979,16 @@ class XiaoqiApi {
       if ((input.message == null || isDuplicateAnnotationSubmission) &&
           !hasResumeAction &&
           replayableStatuses.contains(settled['status'])) {
+        if (readingDiscussion && settled['reading_evidence'] is List) {
+          session.updateCustom(
+            (current) => {
+              ...?current,
+              'reading_evidence': readingBookEvidence({
+                'matches': settled['reading_evidence'],
+              }),
+            },
+          );
+        }
         session.addArtifacts(_remoteAgentArtifacts(tenantId, taskId));
         if (settled['status'] == 'waiting_for_user') {
           final statusArtifact = _remoteAgentStatusArtifact(taskId, settled);
@@ -1578,6 +2082,11 @@ class XiaoqiApi {
             'selection_binding': binding,
           }, boundTask.revision);
         }
+        var readingEvidence = readingDiscussion
+            ? readingBookEvidence({
+                'matches': store.get(taskKey)?.value['reading_evidence'],
+              })
+            : <Map<String, Object?>>[];
         session.updateCustom(
           (_) => {
             'agent_process': <Map<String, dynamic>>[],
@@ -1586,11 +2095,30 @@ class XiaoqiApi {
             'answer_started': false,
             'process_status': 'thinking',
             'web_sources': <Map<String, Object?>>[],
+            if (readingDiscussion) 'reading_evidence': readingEvidence,
           },
         );
 
         final publicProcess = PublicAgentProcess(_uuid.v4());
         void addProcessEvent(Map<String, Object?> rawEvent) {
+          if (rawEvent['type'] == 'reading_evidence') {
+            if (!readingDiscussion) return;
+            readingEvidence = readingBookEvidence({
+              'matches': rawEvent['references'],
+            }, previous: readingEvidence);
+            _mutateTask(
+              taskKey,
+              (value) => {...value, 'reading_evidence': readingEvidence},
+            );
+            session.updateCustom(
+              (current) => {...?current, 'reading_evidence': readingEvidence},
+            );
+            _appendEvent(taskKey, {
+              'type': 'reading_evidence',
+              'references': readingEvidence,
+            });
+            return;
+          }
           if (rawEvent['type'] == 'book_search_reference') {
             _mutateTask(
               taskKey,
@@ -1906,22 +2434,6 @@ class XiaoqiApi {
                       const [],
           },
         );
-        final latestResultUserIndex = resultMessages.lastIndexWhere(
-          (message) => message.role == Role.user,
-        );
-        if (latestResultUserIndex >= 0) {
-          final resultUser = resultMessages[latestResultUserIndex];
-          resultMessages[latestResultUserIndex] = Message(
-            role: resultUser.role,
-            content: resultUser.content,
-            metadata: {
-              ...?resultUser.metadata,
-              _remoteAgentTurnMetadataKey: cleanConfig,
-            },
-          );
-        }
-        session.setMessages(resultMessages);
-
         final artifacts = _remoteAgentArtifacts(tenantId, taskId);
         if (artifacts.isNotEmpty) {
           session.addArtifacts(artifacts);
@@ -1974,6 +2486,25 @@ class XiaoqiApi {
             : partialImage || result.extensionEvidenceMissing
             ? 'partially_completed'
             : 'completed';
+        if (finalTaskStatus == 'completed' && readingSourceVersions.isNotEmpty) {
+          cleanConfig[_readingDiscussionVersionsKey] =
+              readingSourceVersions.toList();
+        }
+        final latestResultUserIndex = resultMessages.lastIndexWhere(
+          (message) => message.role == Role.user,
+        );
+        if (latestResultUserIndex >= 0) {
+          final resultUser = resultMessages[latestResultUserIndex];
+          resultMessages[latestResultUserIndex] = Message(
+            role: resultUser.role,
+            content: resultUser.content,
+            metadata: {
+              ...?resultUser.metadata,
+              _remoteAgentTurnMetadataKey: cleanConfig,
+            },
+          );
+        }
+        session.setMessages(resultMessages);
         _setRemoteAgentTaskStatus(
           tenantId,
           taskId,
@@ -3602,6 +4133,10 @@ class XiaoqiApi {
         'image_failure': value['image_failure'],
         'problem_attempt_limit': value['problem_attempt_limit'],
         'result': value['result'],
+        if (value['reading_evidence'] is List)
+          'reading_evidence': readingBookEvidence({
+            'matches': value['reading_evidence'],
+          }),
         'learning_notes': value['status'] == 'completed'
             ? value['learning_notes'] ?? const []
             : const [],

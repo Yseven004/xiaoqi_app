@@ -149,6 +149,82 @@ class BookMarkItDownTests(unittest.TestCase):
             for line in self.output.read_text(encoding="utf-8").splitlines()
         ]
 
+    def invoke_interactive(self, path, format, commands):
+        return subprocess.run(
+            [sys.executable, WORKER_PATH, path, format, "--interactive"],
+            input="".join(json.dumps(command) + "\n" for command in commands),
+            encoding="utf-8",
+            capture_output=True,
+            timeout=20,
+        )
+
+    def test_interactive_epub_yields_requested_spine_units_in_order(self):
+        source = self.root / "sample.epub"
+        write_epub(
+            source,
+            [
+                "<h1>先读</h1><p>正文甲</p>",
+                '<p><img src="cover.jpg" alt="封面"/></p>',
+                "<h1>跳到</h1><p>正文丙</p>",
+            ],
+        )
+        result = self.invoke_interactive(source, "epub", [{"ids": [3]}, {"ids": [1, 2]}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        catalog, late, end, early, empty, second_end = [
+            json.loads(line) for line in result.stdout.splitlines()
+        ]
+        self.assertEqual(catalog["type"], "catalog")
+        self.assertEqual([unit["id"] for unit in catalog["units"]], [1, 2, 3])
+        self.assertEqual(catalog["units"][2]["item_id"], "c2")
+        self.assertEqual(catalog["units"][2]["href"], "OEBPS/chapter 3.xhtml")
+        self.assertEqual(late["id"], 3)
+        self.assertEqual(late["status"], "ready")
+        self.assertIn("正文丙", late["markdown"])
+        self.assertIn("跳到", late["locator"])
+        self.assertEqual(early["id"], 1)
+        self.assertIn("正文甲", early["markdown"])
+        self.assertEqual(empty["status"], "no_text")
+        self.assertNotIn("markdown", empty)
+        self.assertEqual(end, second_end)
+        self.assertEqual(end, {"type": "batch_done"})
+        self.assertFalse(self.output.exists())
+
+    def test_interactive_pdf_preserves_outline_and_original_page_numbers(self):
+        from pypdf import PdfReader, PdfWriter
+
+        raw = self.root / "raw.pdf"
+        write_pdf(raw, ["Chapter one", "", "Chapter two"])
+        source = self.root / "outlined.pdf"
+        writer = PdfWriter(clone_from=PdfReader(raw))
+        writer.add_outline_item(title="Foreword", page_number=0)
+        writer.add_outline_item(title="Chapter Two", page_number=2)
+        writer.write(source)
+        result = self.invoke_interactive(source, "pdf", [{"ids": [3, 2]}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        catalog, late, blank, end = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(catalog["units"][2]["page"], 3)
+        self.assertEqual(
+            catalog["sections"],
+            [
+                {"title": "Foreword", "start": 1, "end": 2},
+                {"title": "Chapter Two", "start": 3, "end": 3},
+            ],
+        )
+        self.assertEqual(late["locator"], "PDF 第 3 页")
+        self.assertEqual(late["markdown"], "Chapter two")
+        self.assertEqual(blank["status"], "no_text")
+        self.assertEqual(end["type"], "batch_done")
+
+    def test_interactive_rejects_invalid_batch_after_publishing_prior_unit(self):
+        source = self.root / "sample.epub"
+        write_epub(source, ["<p>已完成</p>"])
+        result = self.invoke_interactive(source, "epub", [{"ids": [1]}, {"ids": [True]}])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr.strip(), "invalid_book")
+        records = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual([record["type"] for record in records], ["catalog", "unit", "batch_done"])
+        self.assertEqual(records[1]["markdown"], "已完成")
+
     def test_pdf_retains_physical_pages_and_skips_nontext(self):
         source = self.root / "sample.pdf"
         write_pdf(source, ["Early sample", "", "Late chapter answer"])

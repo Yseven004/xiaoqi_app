@@ -359,6 +359,9 @@ class CapabilityCloudSync {
     String? expectedAuthorization,
     String? attachmentProfile,
     String? annotationMessageId,
+    ({String book, String version})? readingBook,
+    String? readingAuthorization,
+    String? readingBinding,
   }) async {
     final headers = await _attachmentHeaders(expectedAuthorization);
     final file = File(path);
@@ -373,9 +376,13 @@ class CapabilityCloudSync {
     final request =
         http.AbortableStreamedRequest(
             'POST',
-            annotationMessageId == null
-                ? Uri.parse('$_baseUrl/attachments')
-                : capabilityEndpoint('annotation-images/${Uri.encodeComponent(annotationMessageId)}'),
+            readingBook != null
+                ? _readingBookEndpoint(readingBook.book, readingBook.version)
+                : annotationMessageId == null
+                    ? Uri.parse('$_baseUrl/attachments')
+                    : capabilityEndpoint(
+                        'annotation-images/${Uri.encodeComponent(annotationMessageId)}',
+                      ),
             abortTrigger: abortTrigger,
           )
           ..headers.addAll(headers)
@@ -385,6 +392,12 @@ class CapabilityCloudSync {
     if (contentHash != null) request.headers['X-Xiaoqi-Sha256'] = contentHash;
     if (attachmentProfile != null) {
       request.headers['X-Xiaoqi-Attachment-Profile'] = attachmentProfile;
+    }
+    if (readingAuthorization != null) {
+      request.headers['X-Xiaoqi-Reading-Authorization'] = readingAuthorization;
+    }
+    if (readingBinding != null) {
+      request.headers['X-Xiaoqi-Reading-Binding'] = readingBinding;
     }
     var sent = 0;
     onProgress?.call(sent, size);
@@ -400,8 +413,123 @@ class CapabilityCloudSync {
     final results = await Future.wait<Object?>([
       response,
       pump,
-    ]).timeout(const Duration(minutes: 10));
+    ], eagerError: readingBook != null).timeout(const Duration(minutes: 10));
     return _checkedAttachment(results.first as http.Response);
+  }
+
+  Uri _readingBookEndpoint(String book, String version, {bool target = false}) =>
+      capabilityEndpoint(
+        'reading-books/${Uri.encodeComponent(book)}/'
+        '${Uri.encodeComponent(version)}${target ? '/target' : ''}',
+      );
+
+  Future<({Map<String, dynamic>? status, String? generation, bool bound})>
+  readingBookStatus(
+    String book,
+    String version, {
+    required String authorization,
+    required String binding,
+  }) async {
+    final headers = await _attachmentHeaders(authorization);
+    headers['X-Xiaoqi-Reading-Binding'] = binding;
+    final response = await _client
+        .get(_readingBookEndpoint(book, version), headers: headers)
+        .timeout(const Duration(seconds: 12));
+    return (
+      status: response.statusCode == 404 ? null : _checkedAttachment(response),
+      generation: response.headers['x-xiaoqi-reading-authorization'],
+      bound: response.headers['x-xiaoqi-reading-binding-active'] == 'true',
+    );
+  }
+
+  Future<void> bindReadingBook(
+    String book,
+    String version, {
+    required String authorization,
+    required String binding,
+    required String generation,
+  }) async {
+    final headers = await _attachmentHeaders(authorization);
+    final response = await _client.put(
+      Uri.parse('${_readingBookEndpoint(book, version)}/binding'),
+      headers: {
+        ...headers,
+        'X-Xiaoqi-Reading-Binding': binding,
+        'X-Xiaoqi-Reading-Authorization': generation,
+      },
+    ).timeout(const Duration(seconds: 12));
+    _checkedAttachment(response);
+  }
+
+  Future<void> setReadingBookTarget(
+    String book,
+    String version,
+    Map<String, Object?> target, {
+    required String authorization,
+    required String binding,
+  }) async {
+    final headers = await _attachmentHeaders(authorization);
+    headers['X-Xiaoqi-Reading-Binding'] = binding;
+    final response = await _client
+        .put(
+          _readingBookEndpoint(book, version, target: true),
+          headers: headers,
+          body: jsonEncode(target),
+        )
+        .timeout(const Duration(seconds: 12));
+    _checkedAttachment(response);
+  }
+
+  Future<void> revokeReadingBook(
+    String book,
+    String version, {
+    required String authorization,
+    required String binding,
+  }) async {
+    final headers = await _attachmentHeaders(authorization);
+    headers['X-Xiaoqi-Reading-Binding'] = binding;
+    final response = await _client
+        .delete(_readingBookEndpoint(book, version), headers: headers)
+        .timeout(const Duration(seconds: 12));
+    _checkedAttachment(response);
+  }
+
+  Future<void> deleteReadingDiscussion(
+    String book,
+    String workflow, {
+    required String authorization,
+  }) async {
+    final headers = await _attachmentHeaders(authorization);
+    final response = await _client
+        .delete(
+          capabilityEndpoint(
+            'reading-discussions/${Uri.encodeComponent(book)}/'
+            '${Uri.encodeComponent(workflow)}',
+          ),
+          headers: headers,
+        )
+        .timeout(const Duration(seconds: 12));
+    _checkedAttachment(response);
+  }
+
+  Future<void> selectReadingDiscussion(
+    String book,
+    String workflow,
+    String? snapshotId, {
+    required String authorization,
+  }) async {
+    final headers = await _attachmentHeaders(authorization);
+    final response = await _client
+        .put(
+          capabilityEndpoint(
+            'reading-discussions/${Uri.encodeComponent(book)}/'
+            '${Uri.encodeComponent(workflow)}/selection',
+          ),
+          headers: headers,
+          body: jsonEncode({'snapshot_id': snapshotId}),
+        )
+        .timeout(const Duration(seconds: 12));
+    _checkedAttachment(response);
   }
 
   Future<Map<String, dynamic>> getAttachment(
@@ -978,17 +1106,29 @@ class CapabilityCloudSync {
 
   genkit_client.AgentApi<Map<String, dynamic>> createRemoteAgent({
     String? expectedAuthorization,
+    bool readingDiscussion = false,
   }) {
     genkit_client.AgentApi<Map<String, dynamic>> create() =>
         genkit_client.remoteAgent<Map<String, dynamic>>(
         // _baseUrl already includes /v1, like the other capability endpoints.
-        url: '$_baseUrl/agent/chat',
+        url: readingDiscussion
+            ? '$_baseUrl/agent/reading-discussion'
+            : '$_baseUrl/agent/chat',
         headers: () => expectedAuthorization == null
             ? _requireToken().then(_headers)
             : _attachmentHeaders(expectedAuthorization),
       );
-    return expectedAuthorization == null ? _remoteAgent ??= create() : create();
+    return expectedAuthorization == null && !readingDiscussion
+        ? _remoteAgent ??= create()
+        : create();
   }
+
+  genkit_client.AgentApi<Map<String, dynamic>> createReadingExplanationAgent(
+    String authorization,
+  ) => genkit_client.remoteAgent<Map<String, dynamic>>(
+    url: '$_baseUrl/agent/reading-explanation',
+    headers: () => _attachmentHeaders(authorization),
+  );
 
   Future<http.Response> _postAgentTask(String token, String body) => _client
       .post(

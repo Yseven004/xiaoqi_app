@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -13,17 +14,72 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:xiaoqi_app/config/book_flow_theme.dart';
 import 'package:xiaoqi_app/features/ai_study_annotation/data/ai_conversation_history.dart';
 import 'package:xiaoqi_app/models/book_recognition.dart';
+import 'package:xiaoqi_app/models/reading_companion_evidence.dart';
 import 'package:xiaoqi_app/pages/home_page.dart';
 import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/services/database_service.dart';
 import 'package:xiaoqi_app/services/reading_task_context.dart';
 import 'package:xiaoqi_app/widgets/reading_companion.dart';
+import 'package:xiaoqi_app/widgets/reading_companion_explanation.dart';
 import 'package:xiaoqi_app/widgets/reading_space_sidebar.dart';
 import 'package:xiaoqi_app/widgets/reflow_document_pager.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   sqfliteFfiInit();
+
+  testWidgets('explanation cloud uses above, side, then lower space', (
+    tester,
+  ) async {
+    const cloud = ValueKey('selection-cloud');
+    const viewport = Rect.fromLTWH(20, 20, 700, 550);
+    const belowMiddle = Rect.fromLTWH(110, 260, 210, 40);
+    const nearTop = Rect.fromLTWH(110, 55, 210, 40);
+    const fullLine = Rect.fromLTWH(50, 55, 660, 40);
+    var continued = false;
+    ReadingCompanionEvidence? opened;
+    final evidence = ReadingCompanionEvidence.fromPayload([
+      {'source_version': 'a' * 64, 'page': 2, 'locator': 'PDF 第 2 页'},
+    ]);
+
+    Future<Rect> show(Rect selection) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Stack(
+              children: [
+                ReadingCompanionExplanationCloud(
+                  key: cloud,
+                  viewport: viewport,
+                  selection: selection,
+                  dark: false,
+                  text: '这里的作者正在解释一个选择。',
+                  pending: false,
+                  failed: false,
+                  onDismiss: () {},
+                  onRegenerate: () {},
+                  onContinue: () => continued = true,
+                  evidence: evidence,
+                  onOpenEvidence: (entry) => opened = entry,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      return tester.getRect(find.byKey(cloud));
+    }
+
+    expect((await show(belowMiddle)).bottom, lessThan(belowMiddle.top));
+    expect((await show(nearTop)).left, greaterThan(nearTop.right));
+    expect((await show(fullLine)).top, greaterThan(fullLine.bottom));
+    await tester.tap(find.text('继续聊 ›'));
+    expect(continued, isTrue);
+    await tester.ensureVisible(find.text('查看原文 · PDF 第 2 页'));
+    await tester.tap(find.text('查看原文 · PDF 第 2 页'));
+    expect(opened?.page, 2);
+  });
 
   testWidgets('companion slides beside home and keeps its sidebar context', (
     tester,
@@ -300,6 +356,53 @@ void main() {
       find.descendant(of: reader, matching: find.text('阅读空间')),
       findsOneWidget,
     );
+    final evidenceLink = find.widgetWithText(TextButton, '查看原文 · 第一章');
+    await _waitFor(tester, evidenceLink);
+    await tester.tap(evidenceLink);
+    await _waitFor(tester, body);
+    expect(
+      find.byKey(const ValueKey('companion-discussion-page')),
+      findsNothing,
+    );
+    expect(
+      tester.widget<ReflowDocumentPager>(pager).initialAnchor?.blockId,
+      isNotNull,
+    );
+
+    final bookId = tester.widget<ReadingCompanion>(reader).bookId!;
+    const editionText = '这里是另一版资料的原文。';
+    await tester.runAsync(() async {
+      await _addChapter(db, directory, bookId, '原文版本', text: editionText);
+      await _saveLegacyCompanion(
+        bookId,
+        title: '跨版本出处',
+        source: '第一份资料.epub',
+        quote: '之前选中的一段话',
+        evidenceSource: '原文版本.epub',
+        evidenceQuote: editionText,
+      );
+    });
+    await _openBookHistory(tester);
+    await tester.tap(find.text('跨版本出处'));
+    await _waitFor(tester, evidenceLink);
+    await tester.tap(evidenceLink);
+    await _waitFor(tester, find.text(editionText));
+    expect(
+      tester.widget<ReadingCompanion>(reader).target!.source.displayName,
+      '原文版本.epub',
+    );
+    await _waitFor(
+      tester,
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is ReflowDocumentPager &&
+            widget.initialAnchor?.blockId != null,
+      ),
+    );
+
+    await _openBookHistory(tester);
+    await tester.tap(find.text('旧伴读记录'));
+    await _waitFor(tester, inReader('之前的伴读问题'));
     final companionInput = find.descendant(
       of: reader,
       matching: find.byType(TextField),
@@ -453,6 +556,7 @@ Future<void> _exerciseCompanionHistory(
   final originalIds = (await records()).map((record) => record.id).toSet();
 
   Future<void> newFreeChat() async {
+    await _returnFromDiscussion(tester);
     await tester.tap(find.bySemanticsLabel('打开侧边栏'));
     final newChat = find.descendant(
       of: find.byType(ReadingSpaceSidebar),
@@ -503,7 +607,7 @@ Future<void> _exerciseCompanionHistory(
 
   await newFreeChat();
   await tester.enterText(input, '还没发出的自由问题');
-  await tester.tap(find.byTooltip('关闭问答'));
+  await tester.tap(find.widgetWithText(TextButton, '原文'));
   await tester.pumpAndSettle();
   expect((await records()).map((record) => record.id).toSet(), originalIds);
 
@@ -523,6 +627,9 @@ Future<void> _exerciseCompanionHistory(
   final value = selectionState.textEditingValue;
   final selectedText = value.selection.textInside(value.text);
   await tester.tap(ask);
+  final customQuestion = find.widgetWithText(TextButton, '自定义提问');
+  await _waitFor(tester, customQuestion);
+  await tester.tap(customQuestion);
   await _waitFor(tester, input);
   final readerViewport = tester.getRect(reader);
   final documentViewport = tester.getRect(find.byType(ReflowDocumentPager));
@@ -531,14 +638,14 @@ Future<void> _exerciseCompanionHistory(
     find.descendant(
       of: reader,
       matching: find.byWidgetPredicate(
-        (w) => w is Text && w.data == selectedText,
+        (w) =>
+            w is Text && w.data == selectedText.replaceAll(RegExp(r'\s+'), ' '),
       ),
     ),
   );
   await tester.showKeyboard(input);
-  final chatCard = find.byKey(const ValueKey('companion-chat-card'));
-  expect(tester.getRect(chatCard).width, closeTo(readerViewport.width, 1));
-  expect(tester.getRect(chatCard).height, lessThanOrEqualTo(640));
+  final chatPage = find.byKey(const ValueKey('companion-discussion-page'));
+  expect(tester.getRect(chatPage), readerViewport);
   final keyboardInset = 420.0 * tester.view.devicePixelRatio;
   tester.view.viewInsets = FakeViewPadding(bottom: keyboardInset);
   await tester.pumpAndSettle();
@@ -546,9 +653,7 @@ Future<void> _exerciseCompanionHistory(
   expect(tester.getRect(find.byType(ReflowDocumentPager)), documentViewport);
   final keyboardTop =
       readerViewport.bottom - keyboardInset / tester.view.devicePixelRatio;
-  expect(tester.getRect(chatCard).width, closeTo(readerViewport.width, 1));
-  expect(tester.getRect(chatCard).bottom, lessThanOrEqualTo(keyboardTop));
-  expect(tester.getRect(chatCard).bottom, greaterThan(keyboardTop - 40));
+  expect(tester.getRect(chatPage), readerViewport);
   expect(tester.getRect(input).bottom, lessThanOrEqualTo(keyboardTop));
   tester.testTextInput.hide();
   tester.widget<TextField>(input).focusNode!.unfocus();
@@ -627,7 +732,7 @@ Future<void> _exerciseCompanionHistory(
     find.descendant(of: reader, matching: find.text('继续追问刚才的原文')),
     findsNothing,
   );
-  await tester.tap(find.byTooltip('关闭问答'));
+  await tester.tap(find.widgetWithText(TextButton, '原文'));
   await tester.pumpAndSettle();
   await _openBookHistory(tester);
   expect(
@@ -665,6 +770,7 @@ Future<void> _checkModeHistory(
 }
 
 Future<void> _openBookHistory(WidgetTester tester) async {
+  await _returnFromDiscussion(tester);
   await tester.tap(find.bySemanticsLabel('打开侧边栏'));
   final expandBook = find.bySemanticsLabel('展开伴读测试书');
   await _waitFor(tester, expandBook);
@@ -674,12 +780,40 @@ Future<void> _openBookHistory(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+Future<void> _returnFromDiscussion(WidgetTester tester) async {
+  final discussion = find.byKey(const ValueKey('companion-discussion-page'));
+  if (discussion.evaluate().isEmpty) return;
+  await tester.tap(
+    find.descendant(
+      of: discussion,
+      matching: find.widgetWithText(TextButton, '原文'),
+    ),
+  );
+  await tester.pumpAndSettle();
+  expect(discussion, findsNothing);
+}
+
 Future<void> _saveLegacyCompanion(
   int bookId, {
   required String title,
   required String source,
   required String quote,
+  String? evidenceSource,
+  String evidenceQuote = '这是一段测试原文。',
 }) async {
+  final local = (await BookLibraryService().listSourcesForBook(bookId))
+      .where((item) => item.displayName == (evidenceSource ?? source))
+      .firstOrNull;
+  final evidence = ReadingCompanionEvidence.fromPayload([
+    if (local != null)
+      {
+        'source_version': local.contentHash,
+        'chapter_id': 'chapter',
+        'href': 'chapter.xhtml',
+        'locator': '第一章',
+        'quote': evidenceQuote,
+      },
+  ]);
   final saved =
       AiConversationRecord.empty(bookId: bookId, bookName: '伴读测试书')
           .copyWith(
@@ -699,6 +833,7 @@ Future<void> _saveLegacyCompanion(
                 text: '之前保存的回答',
                 isUser: false,
                 createdAt: DateTime(2026, 11, 20, 0, 1),
+                readingEvidence: evidence,
               ),
             ],
           )
@@ -710,6 +845,7 @@ Future<void> _saveLegacyCompanion(
 }
 
 Future<void> _selectSidebarBook(WidgetTester tester, String title) async {
+  await _returnFromDiscussion(tester);
   await tester.tap(find.bySemanticsLabel('打开侧边栏'));
   final book = find.descendant(
     of: find.byType(ReadingSpaceSidebar),
@@ -723,8 +859,9 @@ Future<void> _addChapter(
   Database database,
   Directory directory,
   int bookId,
-  String title,
-) async {
+  String title, {
+  String text = '这是一段测试原文。',
+}) async {
   final files = {
     'META-INF/container.xml':
         '<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>',
@@ -733,7 +870,7 @@ Future<void> _addChapter(
         '<manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest>'
         '<spine><itemref idref="chapter"/></spine></package>',
     'chapter.xhtml':
-        '<html><head><title>$title</title></head><body><p>这是一段测试原文。</p></body></html>',
+        '<html><head><title>$title</title></head><body><p>$text</p></body></html>',
   };
   final archive = Archive();
   for (final entry in files.entries) {
@@ -748,7 +885,7 @@ Future<void> _addChapter(
     'display_name': '$title.epub',
     'file_path': file.path,
     'file_size': data.length,
-    'content_hash': title,
+    'content_hash': sha256.convert(data).toString(),
     'status': 'ready',
     'created_at': '2026-11-20',
     'updated_at': '2026-11-20',

@@ -7,6 +7,70 @@ import 'package:xiaoqi_app/widgets/companion_pdf_object_view.dart';
 import 'package:xiaoqi_app/widgets/reflow_document_pager.dart';
 
 void main() {
+  for (final mode in ReaderPaginationMode.values) {
+    testWidgets('cold EPUB retains its anchor on hydration in ${mode.name}', (
+      tester,
+    ) async {
+      const early = XiaoqiDocumentChapter(
+        id: 'epub:early',
+        title: 'Early',
+        href: 'early.xhtml',
+        html: '',
+        plainText: 'Earlier chapter.',
+        order: 0,
+      );
+      const late = XiaoqiDocumentChapter(
+        id: 'epub:late',
+        title: 'Late',
+        href: 'late.xhtml',
+        html: '',
+        plainText: 'Selected chapter.',
+        order: 1,
+        blocks: [
+          XiaoqiDocumentBlock(
+            id: 'epub:late:block:0',
+            kind: 'paragraph',
+            text: 'Selected chapter.',
+          ),
+        ],
+      );
+      const restored = FlowReaderAnchor(
+        sourceId: 'epub-source',
+        chapterId: 'epub:late',
+        blockId: 'epub:late:block:0',
+      );
+      Widget reader(bool preview) => MaterialApp(
+        home: Scaffold(
+          body: ReflowDocumentPager(
+            document: XiaoqiDocument(
+              format: 'epub',
+              title: 'Book',
+              author: '',
+              language: 'en',
+              chapters: [if (!preview) early, late],
+            ),
+            sourceId: restored.sourceId,
+            initialChapterId: restored.chapterId,
+            initialAnchor: restored,
+            mode: mode,
+            epubPreview: preview,
+            blockBuilder: (_, slice, _) => Text(slice.block.text),
+          ),
+        ),
+      );
+      await tester.pumpWidget(reader(true));
+      await tester.pumpAndSettle();
+      final selected = find.text('Selected chapter.');
+      expect(selected.hitTestable(), findsOneWidget);
+      final before = tester.getTopLeft(selected);
+      await tester.pumpWidget(reader(false));
+      await tester.pumpAndSettle();
+      expect(selected.hitTestable(), findsOneWidget);
+      expect(tester.getTopLeft(selected), before);
+      expect(find.text('Earlier chapter.').hitTestable(), findsNothing);
+    });
+  }
+
   testWidgets(
     'live preview bounds a legacy plain chapter and starts at its saved character',
     (tester) async {

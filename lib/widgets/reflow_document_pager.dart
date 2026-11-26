@@ -71,6 +71,7 @@ class ReflowDocumentPager extends StatefulWidget {
     this.onLayoutReady,
     this.pdfLayoutCache,
     this.epubLayoutCache,
+    this.epubPreview = false,
     this.navigationRevision = 0,
     this.verticalChapterTitleStyle,
     this.chapterTitleAlign = TextAlign.start,
@@ -103,6 +104,7 @@ class ReflowDocumentPager extends StatefulWidget {
   final ValueChanged<bool>? onLayoutReady;
   final File? pdfLayoutCache;
   final File? epubLayoutCache;
+  final bool epubPreview;
   final int navigationRevision;
   final TextStyle? verticalChapterTitleStyle;
   final TextAlign chapterTitleAlign;
@@ -218,7 +220,12 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
           oldWidget.document.format == widget.document.format &&
           oldWidget.sourceId == widget.sourceId &&
           oldWidget.mode == widget.mode;
-      if (extendsPdfReflow) {
+      final completesEpub =
+          oldWidget.epubPreview &&
+          !widget.epubPreview &&
+          oldWidget.sourceId == widget.sourceId &&
+          oldWidget.mode == widget.mode;
+      if (extendsPdfReflow || completesEpub) {
         final previous = _requestedAnchor;
         if (oldWidget.initialAnchor != widget.initialAnchor) {
           _requestedAnchor = widget.initialAnchor;
@@ -237,6 +244,9 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
         _preparingSignature = null;
         _layoutSignature = null;
         _refreshingContinuousDocument = _pages.isNotEmpty;
+        if (completesEpub && widget.mode == ReaderPaginationMode.horizontal) {
+          _seekOnPublish = true;
+        }
         if (widget.mode == ReaderPaginationMode.vertical) {
           if (_seekOnPublish ||
               previous?.blockId != _requestedAnchor?.blockId) {
@@ -664,7 +674,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
     final epub = widget.document.format == 'epub';
     final locale = epub ? Localizations.maybeLocaleOf(context) : null;
     final direction = epub ? Directionality.maybeOf(context) : null;
-    if (_refreshingContinuousDocument && _publishedLayout == layout) {
+    if (!epub && _refreshingContinuousDocument && _publishedLayout == layout) {
       final publish = await _extendPdfPagination(
         widget.document.chapters.first,
         width: width,
@@ -835,7 +845,7 @@ class _ReflowDocumentPagerState extends State<ReflowDocumentPager> {
   ) {
     if (!mounted || epoch != _paginationEpoch) return;
     if (_refreshingContinuousDocument) {
-      if (!publish.complete) return;
+      if (widget.document.format == 'pdf-reflow' && !publish.complete) return;
       if (_pageController.hasClients &&
           _pageController.position.isScrollingNotifier.value) {
         _continuousPublishDelay = Timer(const Duration(milliseconds: 50), () {

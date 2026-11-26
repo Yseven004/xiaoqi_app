@@ -42,6 +42,34 @@ typedef _EpubPackage = ({
   Map<String, ArchiveFile> entries,
 });
 
+typedef _EpubReadingPackage = ({
+  _EpubPackage package,
+  String title,
+  String author,
+  String language,
+  List<_ManifestItem> items,
+  List<_EpubPageReference> pageList,
+  Map<String, String> pageLabels,
+  List<_EpubOutlineReference> nav,
+  List<_EpubOutlineReference> ncx,
+});
+
+typedef EpubReaderSpineItem = ({String chapterId, String href});
+typedef EpubReaderOutlineItem = ({
+  String title,
+  String? chapterId,
+  String? fragment,
+  int level,
+});
+
+class EpubReaderPreview {
+  const EpubReaderPreview(this.document, this.spine, this.outline);
+
+  final XiaoqiDocument document;
+  final List<EpubReaderSpineItem> spine;
+  final List<EpubReaderOutlineItem> outline;
+}
+
 /// Parses an EPUB package into the app's format-neutral document model.
 ///
 /// This deliberately keeps the source package intact on disk. The parser only
@@ -203,14 +231,152 @@ class EpubDocumentService {
     bool includeCover = false,
     Map<String, String>? legacyText,
   }) {
-    final (:opf, :metadata, :entries, :manifest) = _openPackage(bytes);
-    final title = _firstElement(metadata, 'title')?.innerText.trim() ?? '';
-    final language =
-        _firstElement(metadata, 'language')?.innerText.trim() ?? '';
-    final author = _authors(metadata).join('、');
+    final prepared = _openReadingPackage(bytes);
+    final media = _EpubMedia(
+      prepared.package.manifest,
+      prepared.package.entries,
+    );
+    final chapters = <XiaoqiDocumentChapter>[];
+    var pageBreaks = 0;
+    for (var index = 0; index < prepared.items.length; index++) {
+      final chapter = _readChapter(
+        prepared,
+        index,
+        media,
+        fallbackPageNumber: prepared.pageList.length + 1 + pageBreaks,
+        legacyText: legacyText,
+      );
+      chapters.add(chapter.document);
+      pageBreaks += chapter.pageBreakCount;
+    }
+    return _finishReading(
+      prepared,
+      chapters,
+      media,
+      pageBreaks,
+      includeCover: includeCover,
+    );
+  }
+
+  /// Opens the archive once. The requested chapter is delivered before the
+  /// canonical spine pass so stored page labels and inline assets stay stable.
+  Future<XiaoqiDocument> parseForReader(
+    String filePath, {
+    required String? Function() takeTarget,
+    required void Function(EpubReaderPreview preview) publish,
+  }) async {
+    final prepared = _openReadingPackage(await _readFile(filePath));
+    if (prepared.items.isEmpty) {
+      throw const FormatException('EPUB 没有可读取的章节');
+    }
+    final spine = List<EpubReaderSpineItem>.unmodifiable([
+      for (final item in prepared.items)
+        (chapterId: 'epub:${item.id}', href: item.href),
+    ]);
+    final byHref = <String, String>{};
+    final indices = <String, int>{};
+    for (final (index, item) in spine.indexed) {
+      byHref.putIfAbsent(item.href, () => item.chapterId);
+      indices.putIfAbsent(item.chapterId, () => index);
+    }
+    List<EpubReaderOutlineItem> resolve(
+      List<_EpubOutlineReference> references,
+    ) => [
+      for (final item in references)
+        if (item.target == null || byHref.containsKey(item.target!.path))
+          (
+            title: item.title,
+            chapterId: byHref[item.target?.path],
+            fragment: item.target?.fragment,
+            level: item.level,
+          ),
+    ];
+    final nav = resolve(prepared.nav);
+    final outline = List<EpubReaderOutlineItem>.unmodifiable(
+      nav.any((entry) => entry.chapterId != null) ? nav : resolve(prepared.ncx),
+    );
+    final media = _EpubMedia(
+      prepared.package.manifest,
+      prepared.package.entries,
+    );
+    final chapters = <XiaoqiDocumentChapter>[];
+
+    ({XiaoqiDocumentChapter document, int pageBreakCount})? firstChapter;
+    void show(int target) {
+      final parsed = target < chapters.length;
+      final previewMedia = parsed || target == 0
+          ? media
+          : _EpubMedia(
+              prepared.package.manifest,
+              prepared.package.entries,
+              // Avoid collisions while the old preview is still visible.
+              inlinePrefix: 'epub-preview-inline:$target:',
+            );
+      XiaoqiDocumentChapter chapter;
+      if (parsed) {
+        chapter = chapters[target];
+      } else if (target == 0 && firstChapter != null) {
+        chapter = firstChapter!.document;
+      } else {
+        final read = _readChapter(
+          prepared,
+          target,
+          previewMedia,
+          // Preceding chapters determine generated page labels. Authored
+          // labels and stable block IDs remain available in the preview.
+          fallbackPageNumber: target == 0 ? prepared.pageList.length + 1 : null,
+        );
+        if (target == 0) firstChapter = read;
+        chapter = read.document;
+      }
+      final usedAssets = {for (final block in chapter.blocks) block.assetId};
+      publish(
+        EpubReaderPreview(
+          XiaoqiDocument(
+            format: 'epub',
+            structureVersion: EpubDocumentService.structureVersion,
+            title: prepared.title,
+            author: prepared.author,
+            language: prepared.language,
+            chapters: [chapter],
+            assets: [for (final id in usedAssets) ?previewMedia.assets[id]],
+            originalPageCount: prepared.pageList.isEmpty
+                ? null
+                : prepared.pageList.length,
+          ),
+          spine,
+          outline,
+        ),
+      );
+    }
+
+    await Future<void>.delayed(Duration.zero);
+    show(indices[takeTarget()] ?? 0);
+    var pageBreaks = 0;
+    for (var index = 0; index < prepared.items.length; index++) {
+      // Let the isolate receive a newer navigation request between chapters.
+      await Future<void>.delayed(Duration.zero);
+      final requested = indices[takeTarget()];
+      if (requested != null) show(requested);
+      final chapter = index == 0 && firstChapter != null
+          ? firstChapter!
+          : _readChapter(
+              prepared,
+              index,
+              media,
+              fallbackPageNumber: prepared.pageList.length + 1 + pageBreaks,
+            );
+      chapters.add(chapter.document);
+      pageBreaks += chapter.pageBreakCount;
+    }
+    return _finishReading(prepared, chapters, media, pageBreaks);
+  }
+
+  _EpubReadingPackage _openReadingPackage(List<int> bytes) {
+    final package = _openPackage(bytes);
+    final (:opf, :metadata, :entries, :manifest) = package;
     String readText(String path) =>
         utf8.decode(entries[path]!.content, allowMalformed: true);
-    final media = _EpubMedia(manifest, entries);
     final spine = _firstElement(opf, 'spine');
     final spineRefs = spine == null
         ? const <String>[]
@@ -271,93 +437,111 @@ class EpubDocumentService {
     final ncxOutline = ncx == null || ncxItem == null
         ? const <_EpubOutlineReference>[]
         : _parseNcxOutline(ncx, ncxItem.href);
-    final chapters = <XiaoqiDocumentChapter>[];
-    final fragmentBlocksByPath = <String, Map<String, String>>{};
-    var inlinePageBreakCount = 0;
-    var fallbackPageNumber = pageList.length + 1;
-    for (var index = 0; index < orderedItems.length; index++) {
-      final item = orderedItems[index];
-      final html = readText(item.href);
-      final document = html_parser.parse(html);
-      final chapterId = 'epub:${item.id}';
-      final priorIds = _legacyBlockIds(
-        document,
-        item.href,
-        chapterId,
-        pageLabels,
-        legacyText,
-      );
-      _prepareLocalMarkup(document, item.href, media);
-      _removeUnsafeNodes(document);
-      final chapterTitle = _chapterTitle(document, item.href, index + 1);
-
-      final fragmentBlocks = <String, String>{};
-      final blocksResult = _contentBlocks(
-        document,
-        item.href,
-        chapterId,
-        pageLabels,
-        fallbackPageNumber,
-        media,
-        priorIds,
-        fragmentBlocks,
-      );
-      inlinePageBreakCount += blocksResult.pageBreakCount;
-      fallbackPageNumber += blocksResult.pageBreakCount;
-      final plainText = blocksResult.blocks
-          .map((b) => b.text)
-          .where((text) => text.isNotEmpty)
-          .join('\n\n');
-      if (chapterTitle.isEmpty && plainText.isEmpty) continue;
-      if (fragmentBlocks.isNotEmpty) {
-        fragmentBlocksByPath.putIfAbsent(item.href, () => fragmentBlocks);
-      }
-      chapters.add(
-        XiaoqiDocumentChapter(
-          id: chapterId,
-          title: chapterTitle,
-          href: item.href,
-          // Keep the source package unchanged on disk, but never carry
-          // executable or remotely-loaded markup into derived data.
-          html: document.outerHtml,
-          plainText: plainText,
-          order: chapters.length,
-          blocks: blocksResult.blocks,
-          fragmentBlocks: fragmentBlocks,
-        ),
-      );
-    }
-
-    if (chapters.isEmpty) throw const FormatException('EPUB 没有可读取的章节');
-    final chapterIdsByPath = <String, String>{};
-    for (final chapter in chapters) {
-      chapterIdsByPath.putIfAbsent(chapter.href, () => chapter.id);
-    }
-    final resolvedNav = _resolveOutline(
-      navOutline,
-      chapterIdsByPath,
-      fragmentBlocksByPath,
+    return (
+      package: package,
+      title: _firstElement(metadata, 'title')?.innerText.trim() ?? '',
+      author: _authors(metadata).join('、'),
+      language: _firstElement(metadata, 'language')?.innerText.trim() ?? '',
+      items: orderedItems,
+      pageList: pageList,
+      pageLabels: pageLabels,
+      nav: navOutline,
+      ncx: ncxOutline,
     );
-    final outline = resolvedNav.isNotEmpty
-        ? resolvedNav
-        : _resolveOutline(ncxOutline, chapterIdsByPath, fragmentBlocksByPath);
+  }
+
+  ({XiaoqiDocumentChapter document, int pageBreakCount}) _readChapter(
+    _EpubReadingPackage prepared,
+    int index,
+    _EpubMedia media, {
+    required int? fallbackPageNumber,
+    Map<String, String>? legacyText,
+  }) {
+    final item = prepared.items[index];
+    final entry = prepared.package.entries[item.href];
+    if (entry == null) throw const FormatException('EPUB 缺少章节文件');
+    final html = utf8.decode(entry.content, allowMalformed: true);
+    final document = html_parser.parse(html);
+    final chapterId = 'epub:${item.id}';
+    final priorIds = _legacyBlockIds(
+      document,
+      item.href,
+      chapterId,
+      prepared.pageLabels,
+      legacyText,
+    );
+    _prepareLocalMarkup(document, item.href, media);
+    _removeUnsafeNodes(document);
+    final fragmentBlocks = <String, String>{};
+    final blocksResult = _contentBlocks(
+      document,
+      item.href,
+      chapterId,
+      prepared.pageLabels,
+      fallbackPageNumber,
+      media,
+      priorIds,
+      fragmentBlocks,
+    );
+    return (
+      document: XiaoqiDocumentChapter(
+        id: chapterId,
+        title: _chapterTitle(document, item.href, index + 1),
+        href: item.href,
+        // Persist inert derived markup, keeping the original package intact.
+        html: document.outerHtml,
+        plainText: blocksResult.blocks
+            .map((block) => block.text)
+            .where((text) => text.isNotEmpty)
+            .join('\n\n'),
+        order: index,
+        blocks: blocksResult.blocks,
+        fragmentBlocks: fragmentBlocks,
+      ),
+      pageBreakCount: blocksResult.pageBreakCount,
+    );
+  }
+
+  XiaoqiDocument _finishReading(
+    _EpubReadingPackage prepared,
+    List<XiaoqiDocumentChapter> chapters,
+    _EpubMedia media,
+    int pageBreaks, {
+    bool includeCover = false,
+  }) {
+    if (chapters.isEmpty) throw const FormatException('EPUB 没有可读取的章节');
+    final chapterIds = <String, String>{};
+    final fragments = <String, Map<String, String>>{};
+    for (final chapter in chapters) {
+      chapterIds.putIfAbsent(chapter.href, () => chapter.id);
+      if (chapter.fragmentBlocks.isNotEmpty) {
+        fragments.putIfAbsent(chapter.href, () => chapter.fragmentBlocks);
+      }
+    }
+    final nav = _resolveOutline(prepared.nav, chapterIds, fragments);
+    final (:metadata, :manifest, :entries, :opf) = prepared.package;
     final cover = includeCover
         ? _readCover(metadata, manifest, entries, opf)
         : null;
     return XiaoqiDocument(
       format: 'epub',
       structureVersion: EpubDocumentService.structureVersion,
-      title: title,
-      author: author,
-      language: language,
+      title: prepared.title,
+      author: prepared.author,
+      language: prepared.language,
       chapters: List.unmodifiable(chapters),
-      outline: outline,
-      assets: [?cover, ...media.assets.values.where((a) => a.id != cover?.id)],
-      originalPageCount: pageList.isNotEmpty
-          ? pageList.length
-          : inlinePageBreakCount == 0
+      outline: nav.isNotEmpty
+          ? nav
+          : _resolveOutline(prepared.ncx, chapterIds, fragments),
+      assets: [
+        ?cover,
+        ...media.assets.values.where((asset) => asset.id != cover?.id),
+      ],
+      originalPageCount: prepared.pageList.isNotEmpty
+          ? prepared.pageList.length
+          : pageBreaks == 0
           ? null
-          : inlinePageBreakCount + 1,
+          : pageBreaks + 1,
     );
   }
 
@@ -585,7 +769,7 @@ class EpubDocumentService {
     String chapterHref,
     String chapterId,
     Map<String, String> pageLabels,
-    int fallbackPageNumber,
+    int? fallbackPageNumber,
     _EpubMedia media,
     Map<dom.Element, List<int>> legacyIds,
     Map<String, String> outlineBlocks,
@@ -632,7 +816,7 @@ class EpubDocumentService {
       'code': (kind: 'code', level: 0),
     };
 
-    String pageLabel(dom.Element marker) {
+    String? pageLabel(dom.Element marker) {
       final id = marker.id.trim();
       final mapped = id.isEmpty ? null : pageLabels['$chapterHref#$id'];
       if (mapped != null && mapped.isNotEmpty) return mapped;
@@ -642,7 +826,9 @@ class EpubDocumentService {
       }
       final text = marker.text.trim();
       if (text.isNotEmpty) return text;
-      return '${fallbackPageNumber + pageBreakCount}';
+      return fallbackPageNumber == null
+          ? null
+          : '${fallbackPageNumber + pageBreakCount}';
     }
 
     void addPageBreak(dom.Element marker, {String? labelOverride}) {

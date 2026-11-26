@@ -5,7 +5,7 @@ import 'dart:math' show cos, max, min, pi, sin;
 import 'dart:ui' show ImageByteFormat, ImageFilter;
 
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, ValueListenable, defaultTargetPlatform, kIsWeb;
+    show TargetPlatform, ValueListenable, defaultTargetPlatform, kIsWeb, listEquals;
 import 'package:flutter/gestures.dart'
     show LongPressGestureRecognizer, PointerDownEvent;
 import 'package:flutter/material.dart';
@@ -52,6 +52,9 @@ import '../services/reading_companion_preferences.dart';
 import '../services/reading_task_context.dart';
 import '../services/source_document_loader.dart';
 import '../services/reading_task_materials.dart';
+import '../services/reading_book_preparation.dart';
+import '../models/reader_pagination.dart';
+import '../models/reading_companion_evidence.dart';
 import '../services/ai_service.dart';
 import '../services/a2ui_genkit_bridge.dart';
 import '../services/learning_notes_service.dart';
@@ -584,6 +587,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     },
   );
   final _streamingReply = ValueNotifier<String>('');
+  final _streamingReadingEvidence = ValueNotifier<List<ReadingCompanionEvidence>>(const []);
   final _agentStreamPresentation = ValueNotifier<_AgentStreamPresentation>(
     const _AgentStreamPresentation(),
   );
@@ -666,6 +670,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _companionMenuOpen = false;
   String? _companionConversationId;
   ReadingCompanionPassage? _readingPassage;
+  String? _companionExplanationSeed;
   AiConversationRecord? _conversationBeforeCompanion;
   AiConversationRecord? _readingConversationForSpaceSwitch;
   int _conversationPresentationRevision = 0;
@@ -764,6 +769,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _refreshEmailSession() async {
     final signedIn = await CapabilityCloudSync.instance.hasEmailSession;
     if (mounted) setState(() => _emailSignedIn = signedIn);
+    if (signedIn) unawaited(ReadingBookPreparation.instance.resume(_bookLibrary));
   }
 
   Future<bool> _openEmailLogin() async {
@@ -779,6 +785,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       if (authenticated == true && mounted) {
         setState(() => _emailSignedIn = true);
+        unawaited(ReadingBookPreparation.instance.resume(_bookLibrary));
         final conversation = _conversation;
         if (conversation != null) {
           unawaited(_resumePendingCapabilityTask(conversation));
@@ -850,6 +857,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _abortActiveAgentTurn?.call();
     _abortActiveAgentTurn = null;
     _streamingReply.dispose();
+    _streamingReadingEvidence.dispose();
     _agentStreamPresentation.dispose();
     _clearAgentClarification();
     _agentClarification.dispose();
@@ -919,6 +927,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (state == AppLifecycleState.resumed) {
       unawaited(_retryCapabilitySyncOnResume());
+      unawaited(ReadingBookPreparation.instance.resume(_bookLibrary));
     }
   }
 
@@ -3104,6 +3113,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           agentProcessSummary: taskReply.processSummary,
           agentProcessStatus: taskReply.processStatus,
           agentWebSources: taskReply.webSources,
+          readingEvidence: taskReply.readingEvidence,
           bookSearchId: taskReply.bookSearchId,
         );
       } on TimeoutException {
@@ -3341,6 +3351,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final passage = current.id == _companionConversationId
         ? _readingPassage
         : null;
+    final explanation = current.id == _companionConversationId &&
+        !current.hasCompanionQuestion ? _companionExplanationSeed : null;
     final intentText = isAnnotationBatch
         ? [rawText, ...annotationsForMessage.map((item) => item.comment)].join('\n')
         : text;
@@ -3469,7 +3481,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               source: passage.sourceName,
               locator: passage.locator,
               text: passage.text,
-            ),
+            ) + (explanation == null
+                ? ''
+                : '\n\n### 此前的临时解释\n$explanation'),
       annotations: annotationsForMessage,
       capabilityTagOrigin: capabilityTagOrigin,
       workId: batch?.workId ?? workId,
@@ -3705,6 +3719,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         agentProcessSummary: taskReply.processSummary,
         agentProcessStatus: taskReply.processStatus,
         agentWebSources: taskReply.webSources,
+        readingEvidence: taskReply.readingEvidence,
         bookSearchId: taskReply.bookSearchId,
       );
       if (saved) _finishPendingAnnotationBatch(conversationId, userMessage.id);
@@ -4313,6 +4328,7 @@ $materialIndex
       String processSummary,
       String processStatus,
       List<AiChatWebSource> webSources,
+      List<ReadingCompanionEvidence> readingEvidence,
       String? bookSearchId,
     })?
   >
@@ -4349,7 +4365,8 @@ $materialIndex
       throw const AiException('账号已变更，请打开原账号会话重试');
     }
     final cloud = CapabilityCloudSync.instance;
-    final authorization = hasAnnotationBatch
+    final readingDiscussion = conversation?.usesDedicatedCompanion == true;
+    final authorization = hasAnnotationBatch || readingDiscussion
         ? (await cloud.authenticatedHeaders())['Authorization']!
         : null;
     final annotationGroups = !hasExplanationImages
@@ -4614,6 +4631,13 @@ $materialIndex
           : capability['selected_mcp_connections'] ??
                 (capability['type'] == 'mcp' ? [capability] : const []),
       'materials': materials,
+      if (readingDiscussion && bookId != null)
+        'reading_companion_book': await ReadingBookPreparation.instance.bookKey(bookId),
+      if (readingDiscussion && bookId != null && sourceId != null)
+        'reading_companion_version': (await _bookLibrary.listSourcesForBook(bookId))
+            .where((source) => source.id == sourceId)
+            .firstOrNull
+            ?.contentHash,
       if (hasAnnotationBatch) 'annotation_batch': true,
       if (annotationGroups.isNotEmpty) 'annotation_groups': annotationGroups,
       if (intentMode != null) 'intent_mode': intentMode,
@@ -4632,7 +4656,18 @@ $materialIndex
         if (readingStatus.isNotEmpty) readingStatus,
       ].join('\n\n'),
     );
-    final agent = cloud.createRemoteAgent(expectedAuthorization: authorization);
+    final agent = cloud.createRemoteAgent(
+      expectedAuthorization: authorization,
+      readingDiscussion: readingDiscussion,
+    );
+    if (readingDiscussion) {
+      await ReadingBookPreparation.instance.rememberDiscussionOwner(
+        conversationId,
+        expectedAuthorization: authorization,
+      )
+          .catchError((Object _) {});
+    }
+    if (!isCurrent()) return null;
     final chat = agent.chat(
       snapshotId: recovery?['agent_snapshot_id'] as String? ?? startSnapshotId,
       sessionId: recovery == null && startSnapshotId == null
@@ -4883,6 +4918,10 @@ $materialIndex
                       .inMilliseconds,
                   agentProcessStatus: 'completed',
                   agentWebSources: finalBackgroundSources,
+                  readingEvidence: ReadingCompanionEvidence.fromPayload(
+                    response.state?['reading_evidence'] ??
+                        backgroundTask['reading_evidence'],
+                  ),
                   bookSearchId: bookSearchId,
                 );
                 final completed = answerAlreadySaved
@@ -5249,6 +5288,9 @@ $materialIndex
         processSummary: processSummary,
         processStatus: processStatus,
         webSources: List<AiChatWebSource>.unmodifiable(_agentWebSources),
+        readingEvidence: ReadingCompanionEvidence.fromPayload(
+          response.state?['reading_evidence'],
+        ),
         bookSearchId: bookSearchId,
       );
     } catch (error) {
@@ -6120,6 +6162,15 @@ $text''';
     var newEventAdded = false;
     final custom = chunk.custom;
     if (custom != null) {
+      if (custom['reading_evidence'] case final List references) {
+        final evidence = ReadingCompanionEvidence.fromPayload(references);
+        if (!listEquals(
+          evidence.map((item) => item.identity).toList(),
+          _streamingReadingEvidence.value.map((item) => item.identity).toList(),
+        )) {
+          _streamingReadingEvidence.value = evidence;
+        }
+      }
       nextStatus = custom['process_status']?.toString() ?? nextStatus;
       final step = custom['current_step']?.toString().trim();
       if (step != null && step.isNotEmpty) nextStep = step;
@@ -6786,6 +6837,7 @@ $text''';
     _agentProcessDetails.clear();
     _agentWebSources = <AiChatWebSource>[];
     _streamingReply.value = '';
+    _streamingReadingEvidence.value = const [];
     _imageGenerationInProgress.value = false;
     _agentStreamPresentation.value = const _AgentStreamPresentation();
   }
@@ -6979,6 +7031,7 @@ $text''';
     String? continuationMessageId,
   }) async {
     List<Map<String, Object?>> artifacts = const [];
+    List<ReadingCompanionEvidence> readingEvidence = const [];
     String? completedText;
     String? skillDocument;
     Map<String, String>? skillFiles;
@@ -7031,6 +7084,11 @@ $text''';
           case 'artifacts_ready':
             artifacts = _taskArtifacts(event['artifacts']);
             _prefetchArtifactImages(artifacts);
+            break;
+          case 'reading_evidence':
+            readingEvidence = ReadingCompanionEvidence.fromPayload(
+              event['references'],
+            );
             break;
           case 'web_sources':
             _agentWebSources = (event['sources'] as List? ?? const [])
@@ -7100,6 +7158,12 @@ $text''';
         return;
       }
       final result = completedText ?? _streamingReplyBuffer.toString();
+      if (readingEvidence.isEmpty && _conversation?.usesDedicatedCompanion == true) {
+        final task = await CapabilityCloudSync.instance.getTask(taskId)
+            .catchError((Object _) => <String, dynamic>{});
+        readingEvidence = ReadingCompanionEvidence.fromPayload(task['reading_evidence']);
+        if (!_isCurrentRequest(generation, conversationId)) return;
+      }
       await LearningNotesService.instance.collectTask(
         taskId,
         conversationId: conversationId,
@@ -7136,6 +7200,7 @@ $text''';
           agentProcessSummary: _agentProcessSummary(),
           agentProcessStatus: 'completed',
           agentWebSources: _agentWebSources,
+          readingEvidence: readingEvidence,
         );
       } else {
         await _appendAssistantReply(
@@ -7147,6 +7212,7 @@ $text''';
           agentProcessSummary: _agentProcessSummary(),
           agentProcessStatus: 'completed',
           agentWebSources: _agentWebSources,
+          readingEvidence: readingEvidence,
         );
       }
     } on TimeoutException {
@@ -7243,6 +7309,7 @@ $text''';
     String? agentProcessSummary,
     String? agentProcessStatus,
     List<AiChatWebSource> agentWebSources = const [],
+    List<ReadingCompanionEvidence> readingEvidence = const [],
     String? bookSearchId,
   }) async {
     if (!mounted) return false;
@@ -7319,6 +7386,7 @@ $text''';
                 : null,
             agentProcessExpanded: content.isNotEmpty && activeProcess.expanded,
             agentWebSources: agentWebSources,
+            readingEvidence: readingEvidence,
             bookSearchId: searchId,
             capabilityMetadata: skillDraft == null
                 ? null
@@ -7396,6 +7464,7 @@ $text''';
     String? agentProcessSummary,
     String? agentProcessStatus,
     List<AiChatWebSource>? agentWebSources,
+    List<ReadingCompanionEvidence>? readingEvidence,
     String? bookSearchId,
   }) async {
     if (!mounted) return false;
@@ -7474,6 +7543,7 @@ $text''';
                     agentProcessExpanded:
                         content.isNotEmpty && activeProcess.expanded,
                     agentWebSources: agentWebSources ?? answer.agentWebSources,
+                    readingEvidence: readingEvidence ?? answer.readingEvidence,
                     bookSearchId: searchId,
                     outputArtifacts: outputArtifacts ?? answer.outputArtifacts,
                     capabilityMetadata: skillDraft == null
@@ -8849,6 +8919,7 @@ $text''';
         agentProcessSummary: taskReply.processSummary,
         agentProcessStatus: taskReply.processStatus,
         agentWebSources: taskReply.webSources,
+        readingEvidence: taskReply.readingEvidence,
         bookSearchId: taskReply.bookSearchId,
       );
     } on TimeoutException {
@@ -9035,6 +9106,7 @@ $text''';
           agentProcessSummary: taskReply.processSummary,
           agentProcessStatus: taskReply.processStatus,
           agentWebSources: taskReply.webSources,
+          readingEvidence: taskReply.readingEvidence,
           bookSearchId: taskReply.bookSearchId,
         );
       } else {
@@ -9050,6 +9122,7 @@ $text''';
           agentProcessSummary: taskReply.processSummary,
           agentProcessStatus: taskReply.processStatus,
           agentWebSources: taskReply.webSources,
+          readingEvidence: taskReply.readingEvidence,
           bookSearchId: taskReply.bookSearchId,
         );
         if (!saved) restoreEmptyStoppedHint();
@@ -9416,18 +9489,109 @@ $text''';
   void _startCompanionChat(
     ReadingCompanionTarget target, {
     ReadingCompanionPassage? passage,
+    String? explanation,
   }) {
     final conversation = AiConversationRecord.empty(
       bookId: target.source.bookId,
       bookName: target.title,
       readingCompanion: true,
+      usesDedicatedCompanion: true,
       companionSourceId: target.source.id,
       enableAutoTitle: true,
     );
     _companionHistoryNotice = null;
     _readingPassage = passage;
+    _companionExplanationSeed = explanation;
     _companionConversationId = conversation.id;
     _openConversationFromSidebar(conversation);
+  }
+
+  void _continueReadingExplanation(ReadingCompanionExplanation explanation) {
+    final target = _companionTarget;
+    if (target == null ||
+        target.source.id != explanation.passage.sourceId ||
+        target.source.bookId != explanation.passage.bookId) {
+      return;
+    }
+    _startCompanionChat(
+      target,
+      passage: explanation.passage,
+      explanation: explanation.text,
+    );
+  }
+
+  Stream<ReadingCompanionExplanationChunk> _explainReadingPassage(
+    ReadingCompanionPassage passage,
+    genkit.CancellationToken cancellation,
+  ) async* {
+    final target = _companionTarget;
+    if (target == null ||
+        target.source.id != passage.sourceId ||
+        target.source.bookId != passage.bookId) {
+      throw const AiException('已切换阅读资料');
+    }
+    final preparation = ReadingBookPreparation.instance;
+    final authorization = await preparation.authorization();
+    if (authorization == null) throw const AiException('请先登录个人账号');
+    cancellation.throwIfCancelled();
+    final id = await preparation.cloudChoice(target.source) == true
+        ? await preparation.identity(target.source)
+        : null;
+    final cloud = CapabilityCloudSync.instance;
+    final agent = cloud.createReadingExplanationAgent(authorization);
+    final turn = agent.chat().sendStream(
+      message: genkit.Message(
+        role: genkit.Role.user,
+        content: [genkit.TextPart(text: '解释这段')],
+        metadata: {
+          'reading_explanation': {
+            'quote': passage.text,
+            'before': passage.beforeText,
+            'after': passage.afterText,
+            if (id != null) 'book': id.book,
+            if (id != null) 'version': id.version,
+            if (passage.anchor case FlowReaderAnchor(:final chapterId))
+              'chapter_id': chapterId,
+            if (passage.anchor case PdfReaderAnchor(:final pageNumber))
+              'page': pageNumber,
+            'model_id': _selectedModel.model.id,
+          },
+        },
+      ),
+      cancel: cancellation,
+    );
+    try {
+      var emitted = false;
+      var referencesSent = false;
+      await for (final chunk in turn.stream) {
+        final references = ReadingCompanionEvidence.fromPayload(
+          chunk.custom?['reading_evidence'],
+        );
+        if (chunk.text.isEmpty && references.isEmpty) continue;
+        emitted |= chunk.text.isNotEmpty;
+        referencesSent |= references.isNotEmpty;
+        yield ReadingCompanionExplanationChunk(
+          text: chunk.text,
+          evidence: references,
+        );
+      }
+      final result = await turn.response;
+      cancellation.throwIfCancelled();
+      result.assertValid();
+      final references = referencesSent
+          ? const <ReadingCompanionEvidence>[]
+          : ReadingCompanionEvidence.fromPayload(
+              result.state?['reading_evidence'],
+            );
+      if ((!emitted && result.text.isNotEmpty) || references.isNotEmpty) {
+        yield ReadingCompanionExplanationChunk(
+          text: emitted ? '' : result.text,
+          evidence: references,
+        );
+      }
+    } finally {
+      await agent.close();
+    }
   }
 
   void _closeReadingCompanion() {
@@ -9526,7 +9690,13 @@ $text''';
       messages: chat == null ? const [] : _messages,
       savedPassageExcerpt: chat?.companionPassageExcerpt,
       streamingReply: _streamingReply,
+      streamingEvidence: _streamingReadingEvidence,
       onPassageOpened: _openReadingPassage,
+      onExplainPassage: _explainReadingPassage,
+      onContinueExplanation: _continueReadingExplanation,
+      onReadingTargetChanged: (source, anchor) => unawaited(
+        ReadingBookPreparation.instance.readingTarget(source, anchor),
+      ),
       onInkEditingChanged: _onCompanionInkEditingChanged,
       onAnnotationEditingChanged: _onCompanionAnnotationEditingChanged,
       immersive: _companionImmersive,
@@ -9685,7 +9855,7 @@ $text''';
         generation != _readingTaskGeneration) {
       return;
     }
-    _showCompanionTask(task, target);
+    _showCompanionTask(task, target, switchingToSourceId: source.id);
   }
 
   Future<void> _openExtensionMarket({
@@ -10313,10 +10483,13 @@ $text''';
     AiConversationRecord? history,
     int? bookId,
     String? title,
+    int? switchingToSourceId,
   }) {
     final targetBookId = target?.source.bookId ?? bookId;
     if (targetBookId == null) return;
-    _readingCompanionKey.currentState?.closeChatForBack();
+    _readingCompanionKey.currentState?.closeChatForBack(
+      switchingToSourceId: switchingToSourceId,
+    );
     final next = history ?? task;
     if (_conversation?.id != next.id) _openConversationFromSidebar(next);
     _bookConversationFallbacks[targetBookId] = task;

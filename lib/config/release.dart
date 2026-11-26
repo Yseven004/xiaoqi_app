@@ -1,2 +1,2 @@
-const releaseId = '2026-11-25-annotation-refresh';
-const apiContractVersion = '44';
+const releaseId = '2026-11-26-reading-companion';
+const apiContractVersion = '45';

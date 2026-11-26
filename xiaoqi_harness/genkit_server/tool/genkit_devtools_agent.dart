@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:genkit/experimental_client.dart';
 import 'package:genkit/genkit.dart';
@@ -90,18 +91,174 @@ Future<void> main() async {
     poweredByHeader: null,
   );
 
-  AgentApi<Map<String, dynamic>> agentFor(String bearer) =>
-      remoteAgent<Map<String, dynamic>>(
-        url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
-        headers: () async => {
-          'authorization': 'Bearer $bearer',
-          'x-xiaoqi-contract': apiContractVersion,
-        },
-      );
+  AgentApi<Map<String, dynamic>> agentFor(
+    String bearer, [
+    String route = 'chat',
+  ]) => remoteAgent<Map<String, dynamic>>(
+    url: 'http://127.0.0.1:${server.port}/v1/agent/$route',
+    headers: () async => {
+      'authorization': 'Bearer $bearer',
+      'x-xiaoqi-contract': apiContractVersion,
+    },
+  );
   final agent = agentFor(token);
   final annotationAgent = agentFor(annotationToken);
 
   final genkit = Genkit(isDevEnv: true, promptDir: null);
+  genkit.defineFlow<Map<String, dynamic>, Map<String, dynamic>, void, void>(
+    name: 'xiaoqi_reading_dev_test',
+    inputSchema: SchemanticType.from<Map<String, dynamic>>(
+      jsonSchema: {
+        'type': 'object',
+        'properties': {
+          'mode': {
+            'type': 'string',
+            'enum': ['quick', 'discussion', 'delegation'],
+          },
+          'message': {'type': 'string'},
+          'model_id': {'type': 'string'},
+        },
+        'required': ['mode', 'message'],
+        'additionalProperties': false,
+      },
+      parse: (json) => Map<String, dynamic>.from(json as Map),
+    ),
+    fn: (input, context) async {
+      final message = input['message'] as String;
+      final model = input['model_id'] as String? ?? 'deepseek-flash';
+      final quick = input['mode'] == 'quick';
+      final delegation = input['mode'] == 'delegation';
+      final book = sha256
+          .convert(utf8.encode('devtools reading fixture'))
+          .toString();
+      final bytes = _readingFixture();
+      final version = sha256.convert(bytes).toString();
+      final url = Uri.parse(
+        'http://127.0.0.1:${server.port}/v1/reading-books/$book/$version',
+      );
+      final headers = {
+        'authorization': 'Bearer $annotationToken',
+        'x-xiaoqi-contract': apiContractVersion,
+        'x-xiaoqi-reading-binding': 'devtools-reading-fixture',
+      };
+      final status = await http.get(url, headers: headers);
+      const authorizationHeader = 'x-xiaoqi-reading-authorization';
+      final authorization = status.headers[authorizationHeader];
+      if (authorization == null) {
+        throw StateError('Cannot authorize fixture: HTTP ${status.statusCode}');
+      }
+      final upload = await http.post(
+        url,
+        headers: {
+          ...headers,
+          authorizationHeader: authorization,
+          'content-type': 'application/epub+zip',
+          'x-xiaoqi-filename': 'reading-fixture.epub',
+          'x-xiaoqi-sha256': version,
+          'x-xiaoqi-attachment-profile': 'reading-book-markitdown-v1',
+        },
+        body: bytes,
+      );
+      if (upload.statusCode != 202) {
+        throw StateError('Cannot register fixture: HTTP ${upload.statusCode}');
+      }
+      final receipt = _asMap(jsonDecode(upload.body));
+      final id = receipt['id'] as String;
+      final watch = Stopwatch()..start();
+      var ready = false;
+      while (watch.elapsed < const Duration(seconds: 30)) {
+        context.cancel?.throwIfCancelled();
+        final response = await http.get(url, headers: headers);
+        final result = _asMap(jsonDecode(response.body));
+        ready = result['ready'] == true;
+        if (ready ||
+            const {
+              'failed',
+              'complete_with_errors',
+            }.contains(result['status'])) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+      if (!ready)
+        throw StateError('Reading fixture did not produce searchable text.');
+      watch.stop();
+      final task = _uuid.v4();
+      final agent = agentFor(
+        annotationToken,
+        quick
+            ? 'reading-explanation'
+            : delegation
+            ? 'chat'
+            : 'reading-discussion',
+      );
+      try {
+        final response = await agent.chat().send(
+          message: Message(
+            role: Role.user,
+            content: [TextPart(text: message)],
+            metadata: quick
+                ? {
+                    'reading_explanation': {
+                      'quote': message,
+                      'book': book,
+                      'version': version,
+                      'chapter_id': 'fixture-chapter',
+                      'model_id': model,
+                    },
+                  }
+                : {
+                    'xiaoqi_agent_turn': {
+                      'task_id': task,
+                      'attempt_id': task,
+                      'workflow_id': _uuid.v4(),
+                      'user_message_id': _uuid.v4(),
+                      'model_id': model,
+                      'reasoning_level': 'low',
+                      'reading_companion_book': book,
+                      'reading_companion_version': version,
+                      'materials': [
+                        {
+                          'id': 'reading-fixture',
+                          'name': '合成资料',
+                          'kind': 'document',
+                          'reading_book_id': id,
+                        },
+                      ],
+                    },
+                  },
+          ),
+          cancel: context.cancel,
+        );
+        response.assertValid();
+        final snapshot = delegation && response.snapshotId != null
+            ? await CloudSessionStore(store).getSnapshot(
+                snapshotId: response.snapshotId,
+                context: {'tenant_id': _devTenantId},
+              )
+            : null;
+        return {
+          'text': response.text,
+          'finish_reason': response.finishReason?.value,
+          'reading_evidence': response.state?['reading_evidence'] ?? [],
+          'snapshot_id': response.snapshotId,
+          'fixture_ready_ms': watch.elapsedMilliseconds,
+          if (delegation)
+            'delegated':
+                snapshot?.state?.messages?.any(
+                  (message) => message.content.whereType<ToolRequestPart>().any(
+                    (part) =>
+                        part.toolRequest.name ==
+                        'delegate_to_reading_companion',
+                  ),
+                ) ??
+                false,
+        };
+      } finally {
+        await agent.close();
+      }
+    },
+  );
   genkit.defineFlow<
     Map<String, dynamic>,
     Map<String, dynamic>,
@@ -441,6 +598,26 @@ Future<void> main() async {
     store.checkpointWal();
     store.close();
   }
+}
+
+List<int> _readingFixture() {
+  final archive = Archive();
+  for (final entry in const {
+    'mimetype': 'application/epub+zip',
+    'META-INF/container.xml':
+        '<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>',
+    'book.opf':
+        '<package><metadata><title>合成阅读资料</title></metadata>'
+        '<manifest><item id="fixture-chapter" href="body.xhtml" media-type="application/xhtml+xml"/></manifest>'
+        '<spine><itemref idref="fixture-chapter"/></spine></package>',
+    'body.xhtml':
+        '<html><body><h1>档案室</h1><p>青栎档案存放在北塔第二层。</p>'
+        '<p>登记物品的编号是七四三。</p></body></html>',
+  }.entries) {
+    final bytes = utf8.encode(entry.value);
+    archive.addFile(ArchiveFile.bytes(entry.key, bytes));
+  }
+  return ZipEncoder().encode(archive);
 }
 
 Future<List<Map<String, Object?>>> _uploadAnnotationProbes({

@@ -14,6 +14,8 @@ import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_painter/flutter_painter.dart' show FreeStyleDrawable;
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:genkit/client.dart'
+    show CancellationController, CancellationToken;
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -29,12 +31,14 @@ import '../models/page_annotation.dart';
 import '../pages/drawing_board_page.dart';
 import '../models/pdf_catalog.dart';
 import '../models/reader_pagination.dart';
+import '../models/reading_companion_evidence.dart';
 import '../models/xiaoqi_document.dart';
 import '../services/book_library_service.dart';
 import '../services/companion_pdf_reflow.dart';
 import '../services/companion_annotation_store.dart';
 import '../services/companion_annotation_sync.dart';
 import '../services/database_service.dart';
+import '../services/epub_document_service.dart';
 import '../services/reader_pagination_preferences.dart';
 import '../services/reading_task_context.dart';
 import '../services/reading_companion_translation.dart';
@@ -52,6 +56,7 @@ import 'message_selection_action_card.dart';
 import 'pdf_page_canvas.dart'
     show horizontalPdfPageTarget, verticalPdfPageTarget, viewportPdfPageLayout;
 import 'reflow_document_pager.dart';
+import 'reading_companion_explanation.dart';
 import 'xiaoqi_document_block_view.dart';
 
 /// Selected text and the location that the reader can resolve in the source.
@@ -74,6 +79,8 @@ class ReadingCompanionPassage {
     this.annotationStartOffset,
     this.annotationEndOffset,
     this.annotationCanonicalRange,
+    this.beforeText,
+    this.afterText,
   });
 
   final int bookId;
@@ -93,6 +100,8 @@ class ReadingCompanionPassage {
   final int? annotationStartOffset;
   final int? annotationEndOffset;
   final CompanionSourceRange? annotationCanonicalRange;
+  final String? beforeText;
+  final String? afterText;
 
   CompanionAnnotationSelection get annotationSelection =>
       CompanionAnnotationSelection(
@@ -122,7 +131,32 @@ class ReadingCompanionPassage {
       text == other.text;
 }
 
-typedef _ReaderSelection = ({ReadingCompanionPassage passage, Offset position});
+class ReadingCompanionExplanation {
+  const ReadingCompanionExplanation({
+    required this.passage,
+    required this.text,
+    this.evidence = const [],
+  });
+
+  final ReadingCompanionPassage passage;
+  final String text;
+  final List<ReadingCompanionEvidence> evidence;
+}
+
+class ReadingCompanionExplanationChunk {
+  const ReadingCompanionExplanationChunk({
+    this.text = '',
+    this.evidence = const [],
+  });
+
+  final String text;
+  final List<ReadingCompanionEvidence> evidence;
+}
+
+typedef _ReaderSelection = ({
+  ReadingCompanionPassage passage,
+  List<Rect> globalRects,
+});
 typedef _CompanionBook = ({
   String title,
   List<BookSourceRecord> sources,
@@ -231,6 +265,10 @@ class ReadingCompanion extends StatefulWidget {
     this.onDarkChanged,
     this.toolbarBuilder,
     this.initialAnnotationSelection,
+    this.onExplainPassage,
+    this.onContinueExplanation,
+    this.onReadingTargetChanged,
+    this.streamingEvidence,
   });
 
   final int? bookId;
@@ -256,12 +294,22 @@ class ReadingCompanion extends StatefulWidget {
   final ValueChanged<bool>? onDarkChanged;
   final ReadingCompanionToolbarBuilder? toolbarBuilder;
   final CompanionAnnotationSelection? initialAnnotationSelection;
+  final Stream<ReadingCompanionExplanationChunk> Function(
+    ReadingCompanionPassage passage,
+    CancellationToken cancellation,
+  )?
+  onExplainPassage;
+  final ValueChanged<ReadingCompanionExplanation>? onContinueExplanation;
+  final ValueListenable<List<ReadingCompanionEvidence>>? streamingEvidence;
+  final void Function(BookSourceRecord source, ReaderAnchor? anchor)?
+  onReadingTargetChanged;
 
   @override
   ReadingCompanionState createState() => ReadingCompanionState();
 }
 
-class ReadingCompanionState extends State<ReadingCompanion> {
+class ReadingCompanionState extends State<ReadingCompanion>
+    with WidgetsBindingObserver {
   static const _annotationStore = CompanionAnnotationStore();
   List<CompanionAnnotation> _bookAnnotations = const [];
   String? _annotationScope;
@@ -271,15 +319,28 @@ class ReadingCompanionState extends State<ReadingCompanion> {
   late Future<_CompanionBook> _book;
   _ReaderSelection? _selection;
   bool _chatOpen = false;
+  bool _dark = false;
+  _ReaderSelection? _explaining;
+  CancellationController? _explanationCancellation;
+  final _explanationAnswers =
+      <({String text, List<ReadingCompanionEvidence> evidence})>[];
+  bool _explanationFailed = false;
+  String _explanationDraft = '';
+  int _shownAnswer = 0;
+  String? _discussionSeed;
+  List<ReadingCompanionEvidence> _discussionSeedEvidence = const [];
+  ({int sourceId, ReadingCompanionEvidence evidence})? _pendingReadingEvidence;
+  int _readingEvidenceRequest = 0;
+  BookSourceRecord? _prioritySource;
+  Object? _priorityPosition;
   final _messageKeys = <String, GlobalKey>{};
   int _historyRequest = 0;
   int? _sourceId;
-  bool _minimized = false;
   (int, int, String, String)? _documentIdentity;
   GlobalKey<_CompanionDocumentState>? _documentKey;
 
   bool closeReaderPanelForBack() =>
-      _documentKey?.currentState?._closeReaderPanel() ?? false;
+      !_chatOpen && (_documentKey?.currentState?._closeReaderPanel() ?? false);
 
   bool finishInkForBack({VoidCallback? onSaved}) {
     final state = _documentKey?.currentState;
@@ -294,6 +355,7 @@ class ReadingCompanionState extends State<ReadingCompanion> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _book = _loadBook();
     CapabilityCloudSync.instance.emailSessionRevision.addListener(
       _onAnnotationSessionChanged,
@@ -308,6 +370,8 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     if (oldWidget.bookId != widget.bookId ||
         oldWidget.library != widget.library ||
         oldWidget.target?.source.id != widget.target?.source.id ||
+        oldWidget.target?.source.sourceVersionId !=
+            widget.target?.source.sourceVersionId ||
         oldWidget.target?.source.contentHash !=
             widget.target?.source.contentHash) {
       _annotationScope = null;
@@ -318,7 +382,20 @@ class ReadingCompanionState extends State<ReadingCompanion> {
       _historyRequest++;
       _messageKeys.clear();
       _sourceId = null;
-      _minimized = false;
+      _discussionSeed = null;
+      _discussionSeedEvidence = const [];
+      final pending = _pendingReadingEvidence;
+      final targetSource = widget.target?.source;
+      if (oldWidget.bookId != widget.bookId ||
+          oldWidget.library != widget.library ||
+          pending == null ||
+          targetSource == null ||
+          pending.sourceId != targetSource.id ||
+          !pending.evidence.matchesSource(targetSource)) {
+        _cancelReadingEvidence();
+      }
+      _clearExplanation();
+      _releaseReadingTarget();
       _book = _loadBook();
     } else if (oldWidget.target != widget.target) {
       _book = _loadBook();
@@ -327,21 +404,44 @@ class ReadingCompanionState extends State<ReadingCompanion> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     CapabilityCloudSync.instance.emailSessionRevision.removeListener(
       _onAnnotationSessionChanged,
     );
     CompanionAnnotationSync.instance.changes.removeListener(
       _onAnnotationsSynced,
     );
+    _clearExplanation();
+    _releaseReadingTarget();
     _chatScroll.dispose();
     super.dispose();
   }
 
+  @override
+  void didChangeMetrics() {
+    _dismissExplanation();
+  }
+
   void _onAnnotationSessionChanged() {
+    final discussionOpen = _chatOpen;
     setState(() {
+      _cancelReadingEvidence();
       _annotationScope = null;
       _bookAnnotations = const [];
+      _clearExplanation();
+      _selection = null;
+      _discussionSeed = null;
+      _discussionSeedEvidence = const [];
+      _chatOpen = false;
+      _historyRequest++;
+      _messageKeys.clear();
+      _priorityPosition = null;
     });
+    if (discussionOpen) {
+      FocusManager.instance.primaryFocus?.unfocus();
+      widget.onChatVisibilityChanged?.call(false);
+      widget.onPassageClosed?.call();
+    }
     unawaited(_loadBookAnnotations());
   }
 
@@ -390,17 +490,29 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     );
   }
 
-  bool closeChatForBack() {
-    if (!_chatOpen) return false;
-    _closeChat();
-    return true;
+  bool closeChatForBack({int? switchingToSourceId}) {
+    final keepPendingEvidence =
+        switchingToSourceId != null &&
+        _pendingReadingEvidence?.sourceId == switchingToSourceId;
+    if (_chatOpen) {
+      _closeChat(keepPendingEvidence: keepPendingEvidence);
+      return true;
+    }
+    if (_explaining != null) {
+      if (!keepPendingEvidence) _cancelReadingEvidence();
+      _dismissExplanation();
+      return true;
+    }
+    return false;
   }
 
-  void _closeChat() {
+  void _closeChat({bool keepPendingEvidence = false}) {
+    if (!keepPendingEvidence) _cancelReadingEvidence();
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       _selection = null;
-      _minimized = false;
+      _discussionSeed = null;
+      _discussionSeedEvidence = const [];
       _chatOpen = false;
       _historyRequest++;
       _messageKeys.clear();
@@ -411,16 +523,19 @@ class ReadingCompanionState extends State<ReadingCompanion> {
 
   /// Opens the saved conversation without manufacturing a passage or a new turn.
   void openHistoryChat({String? messageId}) {
+    _cancelReadingEvidence();
     final request = ++_historyRequest;
     setState(() {
       _selection = null;
       _chatOpen = true;
-      _minimized = false;
+      _discussionSeed = null;
+      _discussionSeedEvidence = const [];
+      _clearExplanation();
       _messageKeys.clear();
     });
     widget.onChatVisibilityChanged?.call(true);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      bool cancelled() => !mounted || request != _historyRequest || _minimized;
+      bool cancelled() => !mounted || request != _historyRequest;
       if (cancelled() || !_chatScroll.hasClients) return;
       if (messageId == null) {
         _chatScroll.jumpTo(0);
@@ -440,21 +555,131 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     });
   }
 
-  void _openChat(_ReaderSelection selection) {
+  void _openChat(
+    _ReaderSelection selection, {
+    String? explanation,
+    List<ReadingCompanionEvidence> evidence = const [],
+  }) {
+    _cancelReadingEvidence();
     final previous = _selection;
-    if (previous == null ||
+    if (explanation != null && widget.onContinueExplanation != null) {
+      widget.onContinueExplanation!(
+        ReadingCompanionExplanation(
+          passage: selection.passage,
+          text: explanation,
+          evidence: evidence,
+        ),
+      );
+    } else if (previous == null ||
         !previous.passage.sameLocationAs(selection.passage)) {
       widget.onPassageOpened(selection.passage);
-      if (_chatScroll.hasClients) _chatScroll.jumpTo(0);
     }
     if (!mounted) return;
+    if (_chatScroll.hasClients) _chatScroll.jumpTo(0);
     setState(() {
+      _clearExplanation();
       _selection = selection;
-      _minimized = false;
+      _discussionSeed = explanation;
+      _discussionSeedEvidence = evidence;
       _chatOpen = true;
       _historyRequest++;
     });
     widget.onChatVisibilityChanged?.call(true);
+  }
+
+  void _clearExplanation() {
+    final cancellation = _explanationCancellation;
+    _explanationCancellation = null;
+    cancellation?.cancel();
+    _explaining = null;
+    _explanationAnswers.clear();
+    _explanationDraft = '';
+    _explanationFailed = false;
+    _shownAnswer = 0;
+  }
+
+  void _dismissExplanation() {
+    if (_explaining != null && mounted) setState(_clearExplanation);
+  }
+
+  Future<void> _explain(
+    _ReaderSelection selection, {
+    bool regenerate = false,
+  }) async {
+    final explain = widget.onExplainPassage;
+    if (explain == null) return;
+    final cancellation = CancellationController();
+    setState(() {
+      if (!regenerate) _clearExplanation();
+      _explaining = selection;
+      _explanationCancellation = cancellation;
+      _explanationFailed = false;
+      _explanationDraft = '';
+    });
+    try {
+      final answer = StringBuffer();
+      var evidence = const <ReadingCompanionEvidence>[];
+      await for (final chunk in explain(
+        selection.passage,
+        cancellation.token,
+      )) {
+        if (!mounted || _explanationCancellation != cancellation) return;
+        answer.write(chunk.text);
+        if (chunk.evidence.isNotEmpty) {
+          evidence = ReadingCompanionEvidence.merge([
+            ...evidence,
+            ...chunk.evidence,
+          ]);
+        }
+        if (chunk.text.isNotEmpty) {
+          setState(() => _explanationDraft = answer.toString());
+        }
+      }
+      if (!mounted || _explanationCancellation != cancellation) return;
+      final text = answer.toString().trim();
+      setState(() {
+        if (text.isEmpty) {
+          _explanationFailed = true;
+        } else {
+          if (_explanationAnswers.length == 2) _explanationAnswers.removeAt(0);
+          _explanationAnswers.add((text: text, evidence: evidence));
+          _shownAnswer = _explanationAnswers.length - 1;
+        }
+        _explanationCancellation = null;
+      });
+    } catch (_) {
+      if (!mounted || _explanationCancellation != cancellation) return;
+      setState(() {
+        _explanationFailed = true;
+        _explanationCancellation = null;
+      });
+    }
+  }
+
+  void _publishReadingTarget(BookSourceRecord source, ReaderAnchor anchor) {
+    final position = switch (anchor) {
+      PdfReaderAnchor(:final pageNumber) => pageNumber,
+      FlowReaderAnchor(:final chapterId) => chapterId,
+    };
+    if (source.id == _prioritySource?.id &&
+        source.sourceVersionId == _prioritySource?.sourceVersionId &&
+        source.contentHash == _prioritySource?.contentHash &&
+        position == _priorityPosition) {
+      return;
+    }
+    if (_prioritySource != null && source.id != _prioritySource!.id) {
+      _releaseReadingTarget();
+    }
+    _prioritySource = source;
+    _priorityPosition = position;
+    widget.onReadingTargetChanged?.call(source, anchor);
+  }
+
+  void _releaseReadingTarget() {
+    final source = _prioritySource;
+    _prioritySource = null;
+    _priorityPosition = null;
+    if (source != null) widget.onReadingTargetChanged?.call(source, null);
   }
 
   Future<void> _openLibrary() async {
@@ -490,7 +715,14 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     await _selectCompanionSource(sources[next]);
   }
 
-  Future<void> _selectCompanionSource(BookSourceRecord source) async {
+  Future<void> _selectCompanionSource(
+    BookSourceRecord source, {
+    bool fromEvidence = false,
+  }) async {
+    if (!fromEvidence) {
+      _cancelReadingEvidence();
+    }
+    _dismissExplanation();
     final changeSource = widget.onSourceChanged;
     if (changeSource != null) {
       try {
@@ -500,8 +732,107 @@ class ReadingCompanionState extends State<ReadingCompanion> {
       }
       return;
     }
-    if (_chatOpen) _closeChat();
+    if (_chatOpen) _closeChat(keepPendingEvidence: fromEvidence);
     setState(() => _sourceId = source.id);
+  }
+
+  void _cancelReadingEvidence() {
+    _readingEvidenceRequest++;
+    _pendingReadingEvidence = null;
+  }
+
+  Future<void> _openReadingEvidence(ReadingCompanionEvidence evidence) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    final request = ++_readingEvidenceRequest;
+    _pendingReadingEvidence = null;
+    try {
+      final current = _documentKey?.currentState;
+      if (current != null && evidence.matchesSource(current._source)) {
+        await _revealReadingEvidence(current, evidence, request);
+        return;
+      }
+      final bookId = widget.bookId ?? widget.target?.source.bookId;
+      if (bookId == null) return;
+      final sources = await widget.library.listSourcesForBook(bookId);
+      if (!mounted || request != _readingEvidenceRequest) return;
+      final matches = sources.where(evidence.matchesSource).toList();
+      for (final source in matches) {
+        final exists = await File(source.filePath).exists();
+        if (!mounted || request != _readingEvidenceRequest) return;
+        if (!exists) continue;
+        _pendingReadingEvidence = (sourceId: source.id, evidence: evidence);
+        await _selectCompanionSource(source, fromEvidence: true);
+        if (!mounted || request != _readingEvidenceRequest) return;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted ||
+              request != _readingEvidenceRequest ||
+              _pendingReadingEvidence?.sourceId != source.id) {
+            return;
+          }
+          final selected = widget.target?.source.id ?? _sourceId;
+          if (selected == source.id) return;
+          _pendingReadingEvidence = null;
+          AppToast.show(context, '此版本的原资料暂不可用');
+        });
+        WidgetsBinding.instance.scheduleFrame();
+        return;
+      }
+      AppToast.show(context, '此版本的原资料暂不可用');
+    } on Exception {
+      if (mounted && request == _readingEvidenceRequest) {
+        _pendingReadingEvidence = null;
+        AppToast.show(context, '此版本的原资料暂不可用');
+      }
+    }
+  }
+
+  void _revealPendingReadingEvidence(BookSourceRecord source) {
+    final pending = _pendingReadingEvidence;
+    if (pending == null ||
+        pending.sourceId != source.id ||
+        !pending.evidence.matchesSource(source)) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _pendingReadingEvidence != pending) return;
+      final document = _documentKey?.currentState;
+      if (document == null || document._source.id != source.id) return;
+      _pendingReadingEvidence = null;
+      unawaited(
+        _revealReadingEvidence(
+          document,
+          pending.evidence,
+          _readingEvidenceRequest,
+        ),
+      );
+    });
+  }
+
+  Future<void> _revealReadingEvidence(
+    _CompanionDocumentState document,
+    ReadingCompanionEvidence evidence,
+    int request,
+  ) async {
+    bool cancelled() =>
+        !mounted ||
+        request != _readingEvidenceRequest ||
+        !identical(_documentKey?.currentState, document);
+    bool? precision;
+    try {
+      precision = await document._jumpReadingEvidence(evidence, cancelled);
+    } on Exception {
+      // A malformed or unavailable local publication cannot resolve the link.
+    }
+    if (!mounted || cancelled()) return;
+    if (precision == null) {
+      AppToast.show(context, '此版本的原文位置暂不可用');
+      return;
+    }
+    if (_chatOpen) _closeChat();
+    _dismissExplanation();
+    if (!precision) {
+      AppToast.show(context, evidence.page == null ? '已到原文所在章节' : '已到 PDF 原页');
+    }
   }
 
   Future<void> _loadBookAnnotations() async {
@@ -844,6 +1175,16 @@ class ReadingCompanionState extends State<ReadingCompanion> {
     );
   }
 
+  bool _onReaderScrollUpdate() {
+    final explanation = _explaining;
+    if (explanation != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_explaining == explanation) _dismissExplanation();
+      });
+    }
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) => Material(
     color: Colors.white,
@@ -852,238 +1193,358 @@ class ReadingCompanionState extends State<ReadingCompanion> {
         key: _surface,
         children: [
           Positioned.fill(
-            child: FutureBuilder(
-              future: _book,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState != ConnectionState.done) {
-                  return _bookFallback(context, const _ReadingPlaceholder());
-                }
-                if (snapshot.hasError) {
-                  return _bookFallback(
-                    context,
-                    _ReaderStatus(
-                      '阅读资料暂时无法打开',
-                      action: '重试',
-                      onAction: _reloadBook,
-                    ),
-                  );
-                }
-                final book = snapshot.requireData;
-                final sources = book.sources;
-                if (sources.isEmpty) {
-                  final chooseBook = widget.bookId == null
-                      ? widget.onChooseBook
-                      : null;
-                  return _bookFallback(
-                    context,
-                    _ReaderStatus(
-                      widget.bookId == null ? '选择一本书后开始伴读' : '这本书还没有阅读资料',
-                      action: widget.bookId != null
-                          ? '打开本书资料'
-                          : chooseBook == null
-                          ? '打开书库'
-                          : '选择书籍',
-                      onAction:
-                          chooseBook ??
-                          (widget.onOpenLibrary == null ? null : _openLibrary),
-                      secondaryAction: _bookAnnotations.isEmpty ? null : '注释',
-                      onSecondaryAction: _bookAnnotations.isEmpty
-                          ? null
-                          : () => unawaited(_openAnnotationList()),
-                    ),
-                  );
-                }
-                final current =
-                    sources
-                        .where((source) => source.id == _sourceId)
-                        .firstOrNull ??
-                    sources
-                        .where((source) => source.id == book.preferredSourceId)
-                        .firstOrNull ??
-                    sources.first;
-                final pdf = sources.where(_isCompanionPdf).toList();
-                final ebooks = sources
-                    .where((item) => !_isCompanionPdf(item))
-                    .toList();
-                final identity = (
-                  current.bookId,
-                  current.id,
-                  current.contentHash,
-                  current.sourceVersionId,
-                );
-                if (_documentIdentity != identity) {
-                  _documentIdentity = identity;
-                  _documentKey = GlobalKey<_CompanionDocumentState>();
-                }
-                return _CompanionDocument(
-                  key: _documentKey,
-                  source: current,
-                  bookTitle: book.title,
-                  immersive: widget.immersive,
-                  onToggleImmersive: _chatOpen
-                      ? null
-                      : widget.onToggleImmersive,
-                  onEnterImmersive: _chatOpen ? null : widget.onEnterImmersive,
-                  onFreeChat: _chatOpen ? null : widget.onFreeChat,
-                  onDarkChanged: widget.onDarkChanged,
-                  onInkEditingChanged: widget.onInkEditingChanged,
-                  toolbarBuilder: widget.toolbarBuilder,
-                  onSwitchFormat: pdf.isNotEmpty && ebooks.isNotEmpty
-                      ? () {
-                          final alternatives = _isCompanionPdf(current)
-                              ? ebooks
-                              : pdf;
-                          if (alternatives.length == 1) {
-                            unawaited(
-                              _selectCompanionSource(alternatives.single),
-                            );
-                          } else {
-                            unawaited(_chooseSource(alternatives, current));
-                          }
+            child: NotificationListener<ScrollUpdateNotification>(
+              onNotification: (_) => _onReaderScrollUpdate(),
+              child: ExcludeFocus(
+                excluding: _chatOpen,
+                child: IgnorePointer(
+                  ignoring: _chatOpen,
+                  child: ExcludeSemantics(
+                    excluding: _chatOpen,
+                    child: FutureBuilder(
+                      future: _book,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState != ConnectionState.done) {
+                          return _bookFallback(
+                            context,
+                            const _ReadingPlaceholder(),
+                          );
                         }
-                      : null,
-                  library: widget.library,
-                  onAsk: (passage, globalAnchor) {
-                    final box = _surface.currentContext?.findRenderObject();
-                    if (box is! RenderBox || !box.hasSize) return;
-                    _openChat((
-                      passage: passage,
-                      position: box.globalToLocal(globalAnchor),
-                    ));
-                  },
-                  onAnnotate: _annotate,
-                  annotationList: _annotationList,
-                  annotations: _bookAnnotations,
-                  onOpenAnnotation: _openAnnotation,
-                  initialAnnotationSelection: widget.initialAnnotationSelection,
-                  onChooseSource: sources.length > 1
-                      ? () => _chooseSource(sources, current)
-                      : null,
-                  onOpenLibrary: widget.onOpenLibrary == null
-                      ? null
-                      : _openLibrary,
-                );
-              },
+                        if (snapshot.hasError) {
+                          return _bookFallback(
+                            context,
+                            _ReaderStatus(
+                              '阅读资料暂时无法打开',
+                              action: '重试',
+                              onAction: _reloadBook,
+                            ),
+                          );
+                        }
+                        final book = snapshot.requireData;
+                        final sources = book.sources;
+                        if (sources.isEmpty) {
+                          final chooseBook = widget.bookId == null
+                              ? widget.onChooseBook
+                              : null;
+                          return _bookFallback(
+                            context,
+                            _ReaderStatus(
+                              widget.bookId == null
+                                  ? '选择一本书后开始伴读'
+                                  : '这本书还没有阅读资料',
+                              action: widget.bookId != null
+                                  ? '打开本书资料'
+                                  : chooseBook == null
+                                  ? '打开书库'
+                                  : '选择书籍',
+                              onAction:
+                                  chooseBook ??
+                                  (widget.onOpenLibrary == null
+                                      ? null
+                                      : _openLibrary),
+                              secondaryAction: _bookAnnotations.isEmpty
+                                  ? null
+                                  : '注释',
+                              onSecondaryAction: _bookAnnotations.isEmpty
+                                  ? null
+                                  : () => unawaited(_openAnnotationList()),
+                            ),
+                          );
+                        }
+                        final current =
+                            sources
+                                .where((source) => source.id == _sourceId)
+                                .firstOrNull ??
+                            sources
+                                .where(
+                                  (source) =>
+                                      source.id == book.preferredSourceId,
+                                )
+                                .firstOrNull ??
+                            sources.first;
+                        final pdf = sources.where(_isCompanionPdf).toList();
+                        final ebooks = sources
+                            .where((item) => !_isCompanionPdf(item))
+                            .toList();
+                        final identity = (
+                          current.bookId,
+                          current.id,
+                          current.contentHash,
+                          current.sourceVersionId,
+                        );
+                        if (_documentIdentity != identity) {
+                          _documentIdentity = identity;
+                          _documentKey = GlobalKey<_CompanionDocumentState>();
+                        }
+                        _revealPendingReadingEvidence(current);
+                        return _CompanionDocument(
+                          key: _documentKey,
+                          source: current,
+                          bookTitle: book.title,
+                          immersive: widget.immersive,
+                          onToggleImmersive: _chatOpen
+                              ? null
+                              : widget.onToggleImmersive,
+                          onEnterImmersive: _chatOpen
+                              ? null
+                              : widget.onEnterImmersive,
+                          onFreeChat: _chatOpen ? null : widget.onFreeChat,
+                          onDarkChanged: (dark) {
+                            if (_dark != dark && mounted) {
+                              setState(() => _dark = dark);
+                            }
+                            widget.onDarkChanged?.call(dark);
+                          },
+                          onInkEditingChanged: widget.onInkEditingChanged,
+                          toolbarBuilder: widget.toolbarBuilder,
+                          onSwitchFormat: pdf.isNotEmpty && ebooks.isNotEmpty
+                              ? () {
+                                  final alternatives = _isCompanionPdf(current)
+                                      ? ebooks
+                                      : pdf;
+                                  if (alternatives.length == 1) {
+                                    unawaited(
+                                      _selectCompanionSource(
+                                        alternatives.single,
+                                      ),
+                                    );
+                                  } else {
+                                    unawaited(
+                                      _chooseSource(alternatives, current),
+                                    );
+                                  }
+                                }
+                              : null,
+                          library: widget.library,
+                          showExplanationOption:
+                              widget.onExplainPassage != null,
+                          onAsk: (passage, globalRects, explain) {
+                            final selection = (
+                              passage: passage,
+                              globalRects: globalRects,
+                            );
+                            if (explain) {
+                              unawaited(_explain(selection));
+                            } else {
+                              _openChat(selection);
+                            }
+                          },
+                          onReadingTargetChanged: (anchor) {
+                            _dismissExplanation();
+                            _publishReadingTarget(current, anchor);
+                          },
+                          onSelectionChanged: _dismissExplanation,
+                          onAnnotate: _annotate,
+                          annotationList: _annotationList,
+                          annotations: _bookAnnotations,
+                          onOpenAnnotation: _openAnnotation,
+                          initialAnnotationSelection:
+                              widget.initialAnnotationSelection,
+                          onChooseSource: sources.length > 1
+                              ? () => _chooseSource(sources, current)
+                              : null,
+                          onOpenLibrary: widget.onOpenLibrary == null
+                              ? null
+                              : _openLibrary,
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
-          if (_chatOpen) _positionChat(constraints, _selection),
+          if (_explaining case final selection?)
+            ..._positionExplanation(constraints, selection),
+          if (_chatOpen) Positioned.fill(child: _discussionPage(context)),
         ],
       ),
     ),
   );
 
-  Widget _positionChat(BoxConstraints available, _ReaderSelection? selection) {
+  List<Widget> _positionExplanation(
+    BoxConstraints available,
+    _ReaderSelection selection,
+  ) {
+    final box = _surface.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize || selection.globalRects.isEmpty) {
+      return const [];
+    }
     final media = MediaQuery.of(context);
-    // The reader keeps its original viewport while the IME is open. Only the
-    // floating chat card yields the portion of that viewport covered by it.
-    final keyboardOverlap = math.max(
+    final viewport = Rect.fromLTRB(
+      math.max(10.0, media.padding.left),
+      widget.immersive ? 12.0 : 60.0,
+      available.maxWidth - math.max(10.0, media.padding.right),
+      available.maxHeight - (widget.immersive ? 12.0 : 78.0),
+    );
+    if (viewport.isEmpty) return const [];
+    final rects = [
+      for (final rect in selection.globalRects)
+        Rect.fromPoints(
+          box.globalToLocal(rect.topLeft),
+          box.globalToLocal(rect.bottomRight),
+        ).intersect(viewport),
+    ].where((rect) => !rect.isEmpty).toList();
+    if (rects.isEmpty) return const [];
+    final bounds = rects.reduce(
+      (first, second) => first.expandToInclude(second),
+    );
+    final answer = _explanationAnswers.isEmpty
+        ? null
+        : _explanationAnswers[_shownAnswer];
+    final pending = _explanationCancellation != null;
+    return [
+      for (final rect in rects)
+        Positioned.fromRect(
+          rect: rect,
+          child: IgnorePointer(
+            child: ColoredBox(
+              color: _dark ? const Color(0x559DADCB) : const Color(0x443D526C),
+            ),
+          ),
+        ),
+      ReadingCompanionExplanationCloud(
+        key: ObjectKey(selection.passage),
+        viewport: viewport,
+        selection: bounds,
+        dark: _dark,
+        text: answer?.text ?? (pending ? _explanationDraft : ''),
+        evidence: answer?.evidence ?? const [],
+        onOpenEvidence: _openReadingEvidence,
+        pending: pending,
+        failed: _explanationFailed,
+        onDismiss: () {
+          _cancelReadingEvidence();
+          _dismissExplanation();
+        },
+        onRegenerate: () => unawaited(_explain(selection, regenerate: true)),
+        onContinue: answer == null
+            ? null
+            : () => _openChat(
+                selection,
+                explanation: answer.text,
+                evidence: answer.evidence,
+              ),
+        onSwitchAnswer: _explanationAnswers.length == 2
+            ? () => setState(() => _shownAnswer = 1 - _shownAnswer)
+            : null,
+        showingPrevious: _shownAnswer == 0,
+      ),
+    ];
+  }
+
+  Widget _discussionPage(BuildContext context) {
+    final quote = _selection?.passage.text ?? widget.savedPassageExcerpt ?? '';
+    final media = MediaQuery.of(context);
+    final overlap = math.max(
       0.0,
       media.viewInsets.bottom - media.viewPadding.bottom,
     );
-    final usableHeight = math.max(0.0, available.maxHeight - keyboardOverlap);
-    final width = available.maxWidth;
-    final minimizedRight = available.maxWidth < 600
-        ? 12.0
-        : available.maxWidth / 30;
-    final height = math.min(
-      math.min(640.0, width * 4 / 3),
-      math.max(0.0, usableHeight - 24),
-    );
-    if (_minimized || height < 152) {
-      return Positioned(
-        right: minimizedRight,
-        bottom: keyboardOverlap + 64,
-        child: OutlinedButton.icon(
-          style: OutlinedButton.styleFrom(backgroundColor: Colors.white),
-          onPressed: height < 152
-              ? () => FocusManager.instance.primaryFocus?.unfocus()
-              : () {
-                  setState(() => _minimized = false);
-                  widget.onChatVisibilityChanged?.call(true);
-                },
-          icon: _readerIcon(
-            'assets/icons/extension_market/detail/chat-dots.svg',
-          ),
-          label: const Text('继续问答'),
-        ),
-      );
-    }
-    final keyboardVisible = keyboardOverlap > 0;
-    final top = keyboardVisible
-        ? (available.maxHeight - keyboardOverlap - height - 8)
-              .clamp(8.0, math.max(8.0, available.maxHeight - height - 8))
-              .toDouble()
-        : (selection == null
-                  ? (available.maxHeight - height) / 2
-                  : selection.position.dy + 12)
-              .clamp(8.0, math.max(8.0, available.maxHeight - height - 8))
-              .toDouble();
-    return Positioned(
-      left: 0,
-      right: 0,
-      top: top,
-      height: height,
-      child: _chatCard(selection?.passage.text ?? widget.savedPassageExcerpt),
-    );
-  }
-
-  Widget _chatCard(String? quote) => Material(
-    key: const ValueKey('companion-chat-card'),
-    color: Colors.white,
-    elevation: 5,
-    shadowColor: const Color(0x26000000),
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(18),
-      side: const BorderSide(color: Color(0xFFD5D5D5)),
-    ),
-    clipBehavior: Clip.antiAlias,
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(18, 14, 18, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 9, left: 5),
-                  child: quote == null
-                      ? const SizedBox.shrink()
-                      : _PassageQuote(text: quote),
+    final theme = Theme.of(context);
+    return Material(
+      key: const ValueKey('companion-discussion-page'),
+      color: theme.colorScheme.surface,
+      child: Semantics(
+        scopesRoute: true,
+        explicitChildNodes: true,
+        namesRoute: true,
+        label: '伴读问答',
+        child: SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, overlap + 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(
+                  height: 52,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Text('伴读问答', style: theme.textTheme.titleMedium),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: _closeChat,
+                          icon: const Icon(Icons.arrow_back, size: 18),
+                          label: const Text('原文'),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(width: 6),
-              _ReaderButton(
-                label: '收起问答',
-                icon: 'assets/images/reading_companion_minimize.svg',
-                onPressed: () {
-                  FocusManager.instance.primaryFocus?.unfocus();
-                  setState(() => _minimized = true);
-                  widget.onChatVisibilityChanged?.call(false);
-                },
-              ),
-              _ReaderButton(
-                label: '关闭问答',
-                icon: 'assets/icons/extension_market/detail/close.svg',
-                onPressed: _closeChat,
-              ),
-            ],
-          ),
-          Expanded(
-            child: widget.composerBuilder(
-              _CompanionHistory(
-                controller: _chatScroll,
-                messages: widget.messages,
-                streamingReply: widget.streamingReply,
-                messageKeys: _messageKeys,
-              ),
+                FutureBuilder(
+                  future: _book,
+                  builder: (_, snapshot) {
+                    final title = snapshot.data?.title ?? '';
+                    return Text(
+                      title,
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium,
+                    );
+                  },
+                ),
+                if (quote.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      FocusManager.instance.primaryFocus?.unfocus();
+                      unawaited(
+                        showDialog<void>(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('原文选段'),
+                            content: SingleChildScrollView(
+                              child: SelectableText(quote),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(context).pop(),
+                                child: const Text('关闭'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.format_quote, size: 19),
+                    label: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            quote.replaceAll(RegExp(r'\s+'), ' '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const Icon(Icons.chevron_right, size: 17),
+                      ],
+                    ),
+                  ),
+                ],
+                Expanded(
+                  child: widget.composerBuilder(
+                    _CompanionHistory(
+                      controller: _chatScroll,
+                      messages: widget.messages,
+                      streamingReply: widget.streamingReply,
+                      messageKeys: _messageKeys,
+                      seed: _discussionSeed,
+                      seedEvidence: _discussionSeedEvidence,
+                      streamingEvidence: widget.streamingEvidence,
+                      onOpenEvidence: _openReadingEvidence,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _CompanionDocument extends StatefulWidget {
@@ -1093,6 +1554,9 @@ class _CompanionDocument extends StatefulWidget {
     required this.source,
     required this.library,
     required this.onAsk,
+    required this.showExplanationOption,
+    required this.onReadingTargetChanged,
+    required this.onSelectionChanged,
     required this.onAnnotate,
     required this.annotationList,
     required this.annotations,
@@ -1113,7 +1577,10 @@ class _CompanionDocument extends StatefulWidget {
   final BookSourceRecord source;
   final BookLibraryService library;
   final String bookTitle;
-  final void Function(ReadingCompanionPassage, Offset) onAsk;
+  final void Function(ReadingCompanionPassage, List<Rect>, bool) onAsk;
+  final bool showExplanationOption;
+  final ValueChanged<ReaderAnchor> onReadingTargetChanged;
+  final VoidCallback onSelectionChanged;
   final ValueChanged<ReadingCompanionPassage> onAnnotate;
   final WidgetBuilder annotationList;
   final List<CompanionAnnotation> annotations;
@@ -1150,10 +1617,27 @@ enum _ReaderPanel {
 
 class _CompanionDocumentState extends State<_CompanionDocument> {
   final _annotationViewportKey = GlobalKey();
+  ReaderAnchor? _pendingReadingTarget;
+  bool _readingTargetScheduled = false;
+  String? _lastReportedChapter;
+  int? _lastReportedPdfPage;
   List<Rect> _annotationSelectionRects = const [];
   bool _annotationEditorActive = false;
   double _annotationShift = 0;
   EditableTextState? _annotationTextEditor;
+
+  void _reportReadingTarget(ReaderAnchor anchor) {
+    _pendingReadingTarget = anchor;
+    if (_readingTargetScheduled) return;
+    _readingTargetScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _readingTargetScheduled = false;
+      final target = _pendingReadingTarget;
+      _pendingReadingTarget = null;
+      if (mounted && target != null) widget.onReadingTargetChanged(target);
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
 
   void _captureAnnotationSelection(EditableTextState editor) {
     final viewport = _annotationViewportKey.currentContext?.findRenderObject();
@@ -1311,6 +1795,16 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   static const _preferences = ReaderPaginationPreferences();
   late Future<({XiaoqiDocument? document, ReaderAnchor? anchor})> _loading;
   File? _epubLayoutCache;
+  EpubReaderLoad? _epubLoad;
+  StreamSubscription<EpubReaderUpdate>? _epubUpdates;
+  XiaoqiDocument? _epubDocument;
+  XiaoqiDocument? _deferredEpubDocument;
+  EpubReaderPreview? _epubPreview;
+  EpubReaderPreview? _readyEpubPreview;
+  Map<String, XiaoqiDocumentAsset> _epubTransitionAssets = const {};
+  ({String chapterId, Completer<XiaoqiDocument?> ready})? _epubRequest;
+  bool _epubLoadEnded = false;
+  int _epubJump = 0;
   final _pdf = PdfViewerController();
   late final _selectablePdfReference = PdfDocumentRefByLoader(
     (_) async => CompanionSelectionDocument(
@@ -1437,6 +1931,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   bool _handledInitialPdfAnnotation = false;
   ({int page, List<PdfRect> bounds})? _noteOriginPdfMark;
   Timer? _noteOriginMarkTimeout;
+  ({String chapter, String block, int start, int end})? _flowEvidenceMark;
+  Timer? _flowEvidenceMarkTimeout;
+  Completer<PdfDocument?>? _readingEvidencePdfReady;
   int? _translatedPdfNumber;
   VoidCallback? _applyDeferredTranslation;
   final _savedInk = <String, _CompanionInkRecord>{};
@@ -2116,6 +2613,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       characterOffset: characterOffset,
       pageFraction: pageFraction,
     );
+    if (anchor.pageNumber != _lastReportedPdfPage) {
+      _lastReportedPdfPage = anchor.pageNumber;
+      _reportReadingTarget(anchor);
+    }
     if (anchor == _pdfReadingAnchor) return;
     _pdfReadingAnchor = anchor;
     if (_isPdfDocument && _preparedBook != null && !_inkEditing) {
@@ -2809,8 +3310,22 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }
 
   void _reportSelection(bool active) {
+    if (active) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _selectionActive) widget.onSelectionChanged();
+      });
+    }
     _selectionActive = active;
     if (!active) _prepareEbookNeighbors();
+    if (!active && _deferredEpubDocument != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _hasActiveSelection || _inkEditing) return;
+        if (_deferredEpubDocument case final document?) {
+          setState(() => _commitCompleteEpub(document));
+        }
+      });
+      WidgetsBinding.instance.ensureVisualUpdate();
+    }
     if (active ||
         _annotationEditorActive ||
         _inkEditing ||
@@ -2896,6 +3411,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     _progressPreview.dispose();
     _pdfPageWork?.cancel();
     _noteOriginMarkTimeout?.cancel();
+    _flowEvidenceMarkTimeout?.cancel();
+    _readingEvidencePdfReady?.complete(null);
+    _readingEvidencePdfReady = null;
     for (final part in _drawingLayers.values) {
       part.layer.dispose();
     }
@@ -2903,6 +3421,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     _panelHistory = null;
     panelHistory?.remove();
     _translationDelay?.cancel();
+    unawaited(_epubUpdates?.cancel());
+    _cancelEpubRequest();
     ++_translationRevision;
     ++_ebookSwitchRevision;
     if (_isCompanionPdf(_source)) _pdfReflow.cancel();
@@ -2959,11 +3479,29 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       return (document: null, anchor: saved);
     }
     final revision = await widget.library.loadBookSourceRevision(source);
-    final parsed = revision == null
-        ? await SourceDocumentLoader.parseBookSourceForReader(source)
+    final savedAnchor = await anchor;
+    final selection = widget.initialAnnotationSelection;
+    final annotationChapter =
+        selection != null && _validAnnotationOrigin(selection)
+        ? switch (selection.canonicalRange) {
+            CompanionFlowSourceRange(:final chapter) => chapter,
+            null when selection.anchor is FlowReaderAnchor =>
+              (selection.anchor as FlowReaderAnchor).chapterId,
+            _ => null,
+          }
         : null;
-    final document = revision ?? parsed!.document;
-    _epubLayoutCache = parsed?.epubLayoutCache;
+    final document =
+        revision ??
+        (normalizeBookSourceFormat(source.format) == 'epub'
+            ? await _openEpub(
+                source,
+                annotationChapter ??
+                    (savedAnchor is FlowReaderAnchor &&
+                            savedAnchor.sourceId == _sourceKey
+                        ? savedAnchor.chapterId
+                        : null),
+              )
+            : await SourceDocumentLoader.parseBookSourceInBackground(source));
     if (document.chapters.isEmpty) {
       throw const FormatException('电子资料没有可读章节');
     }
@@ -2971,14 +3509,125 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       document.chapters.first.plainText,
       language: document.language,
     );
-    final selection = widget.initialAnnotationSelection;
     final origin = selection == null
         ? null
         : _flowAnnotationOrigin(document, selection);
     if (selection != null && origin == null) _showMissingAnnotationOrigin();
-    final saved = origin ?? await anchor;
+    final saved = origin ?? savedAnchor;
     if (saved is FlowReaderAnchor) _flowPosition = saved;
     return (document: document, anchor: saved);
+  }
+
+  Future<XiaoqiDocument> _openEpub(
+    BookSourceRecord source,
+    String? chapterId,
+  ) async {
+    final load = await SourceDocumentLoader.openEpubReader(
+      source,
+      initialChapterId: chapterId,
+    );
+    if (!mounted) throw StateError('阅读器已关闭');
+    _epubLoad = load;
+    _epubLayoutCache = load.layoutCache;
+    final first = Completer<XiaoqiDocument>();
+    _epubUpdates = load.updates.listen(
+      (update) {
+        if (!mounted) return;
+        final request = _epubRequest;
+        final hasTarget =
+            request != null &&
+            update.document.chapters.any(
+              (chapter) => chapter.id == request.chapterId,
+            );
+        if (!first.isCompleted) {
+          _epubDocument = update.document;
+          _epubPreview = update.preview;
+          first.complete(update.document);
+        } else if (update.preview == null) {
+          if (_hasActiveSelection || _inkEditing) {
+            _deferredEpubDocument = update.document;
+          } else {
+            setState(() => _commitCompleteEpub(update.document));
+          }
+        } else {
+          _readyEpubPreview = update.preview;
+        }
+        if (request != null && (hasTarget || update.preview == null)) {
+          _epubRequest = null;
+          request.ready.complete(hasTarget ? update.document : null);
+        }
+      },
+      onError: (Object error, StackTrace trace) {
+        if (!first.isCompleted) first.completeError(error, trace);
+      },
+      onDone: () {
+        _epubLoadEnded = true;
+        if (!first.isCompleted) first.completeError(StateError('无法读取 EPUB'));
+        _cancelEpubRequest();
+      },
+    );
+    return first.future;
+  }
+
+  void _commitCompleteEpub(XiaoqiDocument document) {
+    if (_epubPreview case final preview?) {
+      _epubTransitionAssets = {
+        for (final asset in preview.document.assets) asset.id: asset,
+      };
+    }
+    _epubDocument = document;
+    _deferredEpubDocument = null;
+    _epubPreview = null;
+    _readyEpubPreview = null;
+  }
+
+  void _cancelEpubRequest() {
+    final request = _epubRequest;
+    _epubRequest = null;
+    request?.ready.complete(null);
+  }
+
+  Future<XiaoqiDocument?> _ensureEpubChapter(String chapterId) async {
+    final document = _deferredEpubDocument ?? _epubDocument;
+    _cancelEpubRequest();
+    if (document?.chapters.any((chapter) => chapter.id == chapterId) == true) {
+      return document;
+    }
+    if (_readyEpubPreview case final preview?
+        when preview.document.chapters.first.id == chapterId) {
+      return preview.document;
+    }
+    if (_epubLoadEnded ||
+        _epubPreview?.spine.any((item) => item.chapterId == chapterId) !=
+            true) {
+      return null;
+    }
+    final ready = Completer<XiaoqiDocument?>();
+    _epubRequest = (chapterId: chapterId, ready: ready);
+    _epubLoad?.prioritize(chapterId);
+    return ready.future;
+  }
+
+  Future<void> _openEpubChapter(
+    String chapterId, {
+    String? fragment,
+    String? blockId,
+    int characterOffset = 0,
+  }) async {
+    final requestId = ++_epubJump;
+    final document = await _ensureEpubChapter(chapterId);
+    if (!mounted || requestId != _epubJump) return;
+    final chapter = document?.chapters
+        .where((chapter) => chapter.id == chapterId)
+        .firstOrNull;
+    final destination = fragment == null
+        ? blockId
+        : chapter?.fragmentBlocks[fragment];
+    if (chapter == null || (fragment != null && destination == null)) {
+      AppToast.show(context, '暂时无法定位该章节');
+      return;
+    }
+    _chapter(chapter, blockId: destination, characterOffset: characterOffset);
   }
 
   bool _validAnnotationOrigin(CompanionAnnotationSelection selection) =>
@@ -3270,6 +3919,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     String? blockId,
     int characterOffset = 0,
   }) {
+    _epubJump++;
+    _cancelEpubRequest();
     _dismissFlowSelection();
     FocusManager.instance.primaryFocus?.unfocus();
     final next = FlowReaderAnchor(
@@ -3279,12 +3930,181 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       characterOffset: characterOffset,
     );
     setState(() {
+      if (_deferredEpubDocument case final document?) {
+        _commitCompleteEpub(document);
+      } else if (_readyEpubPreview case final preview?
+          when preview.document.chapters.first.id == chapter.id) {
+        _epubDocument = preview.document;
+        _epubPreview = preview;
+        _readyEpubPreview = null;
+      }
       _chapterNavigation = next;
       _flowPosition = next;
       _navigationRevision++;
     });
     if (_convertedPage == null) {
+      _reportReadingTarget(next);
       unawaited(_preferences.saveAnchor(bookId: _source.bookId, anchor: next));
+    }
+  }
+
+  /// Returns null for an unavailable location, false for page/chapter
+  /// precision, and true only when the original text could be highlighted.
+  Future<bool?> _jumpReadingEvidence(
+    ReadingCompanionEvidence evidence,
+    bool Function() cancelled,
+  ) async {
+    if (!evidence.matchesSource(_source) || _inkEditing) return null;
+    final loaded = await _loading;
+    if (cancelled() || !mounted) return null;
+    if (evidence.page case final page?) {
+      return _jumpPdfReadingEvidence(page, evidence.quote, cancelled);
+    }
+    var document = _epubDocument ?? loaded.document;
+    if (document == null) return null;
+    var chapter = evidence.resolveChapter(document);
+    final path = evidence.href?.split('#').first;
+    final matchingSpineItems = _epubPreview?.spine.where(
+      (item) => path != null && item.href == path,
+    );
+    final raw =
+        evidence.chapterId ??
+        (matchingSpineItems?.length == 1
+            ? matchingSpineItems!.single.chapterId
+            : null);
+    if (chapter == null && raw != null) {
+      final id = raw.startsWith('epub:') ? raw : 'epub:$raw';
+      document = await _ensureEpubChapter(id) ?? document;
+      if (cancelled() || !mounted) return null;
+      chapter = evidence.resolveChapter(document);
+    }
+    if (chapter == null) return null;
+    final target = chapter;
+    final match = resolveReadingEvidenceBlock(target, evidence.quote);
+    setState(() {
+      _translationEnabled = false;
+      _flowEvidenceMark = match == null
+          ? null
+          : (
+              chapter: target.id,
+              block: match.blockId,
+              start: match.start,
+              end: match.end,
+            );
+    });
+    _scheduleTranslation();
+    _chapter(
+      target,
+      blockId: match?.blockId,
+      characterOffset: match?.start ?? 0,
+    );
+    _flowEvidenceMarkTimeout?.cancel();
+    if (match != null) {
+      _flowEvidenceMarkTimeout = Timer(const Duration(seconds: 6), () {
+        if (mounted) setState(() => _flowEvidenceMark = null);
+      });
+    }
+    return match != null;
+  }
+
+  Future<bool?> _jumpPdfReadingEvidence(
+    int page,
+    String quote,
+    bool Function() cancelled,
+  ) async {
+    var document = _pdf.isReady ? _pdfDocumentRef : null;
+    if (document == null) {
+      final ready = _readingEvidencePdfReady ??= Completer<PdfDocument?>();
+      document = await ready.future.timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => null,
+      );
+      if (identical(_readingEvidencePdfReady, ready)) {
+        _readingEvidencePdfReady = null;
+      }
+    }
+    if (!mounted ||
+        cancelled() ||
+        document == null ||
+        !_pdf.isReady ||
+        !identical(_pdfDocumentRef, document) ||
+        page < 1 ||
+        page > document.pages.length) {
+      return null;
+    }
+    if (_convertedPage != null) {
+      await _returnToPdf();
+      if (!mounted ||
+          cancelled() ||
+          _convertedPage != null ||
+          !identical(_pdfDocumentRef, document)) {
+        return null;
+      }
+    }
+    ++_ebookSwitchRevision;
+    setState(() {
+      _translationEnabled = false;
+      _restoringEbook = false;
+      _requestedEbook = false;
+      _ebookSwitchPending = false;
+      _returningToPdf = false;
+      _noteOriginPdfMark = null;
+    });
+    _releaseReturnPreview();
+    _rememberPdfView(ebook: false);
+    _scheduleTranslation();
+    await _goToPdfReaderPage(page);
+    if (!mounted || cancelled() || !identical(_pdfDocumentRef, document)) {
+      return null;
+    }
+    _schedulePdfPageWork(probeText: true);
+    _noteOriginMarkTimeout?.cancel();
+    if (quote.isEmpty || document.permissions?.allowsCopying == false) {
+      return false;
+    }
+    try {
+      final loaded = await document.pages[page - 1].waitForLoaded(
+        timeout: const Duration(seconds: 4),
+      );
+      if (!mounted || cancelled() || !identical(_pdfDocumentRef, document)) {
+        return null;
+      }
+      if (loaded == null) return false;
+      final text = await companionNativePdfPage(loaded).loadStructuredText();
+      final match = uniqueReadingEvidenceRange(text.fullText, quote);
+      if (!mounted || cancelled() || !identical(_pdfDocumentRef, document)) {
+        return null;
+      }
+      if (match == null ||
+          _pdfPage != page ||
+          match.end > text.charRects.length) {
+        return false;
+      }
+      final origin = _pdfOriginRange(text, match.start, match.end);
+      if (_pdfPageTurnMode == ReaderPaginationMode.vertical) {
+        final location = _pdf.calcRectForRectInsidePage(
+          pageNumber: page,
+          rect: origin.rect,
+        );
+        final center = Offset(
+          _pdf.layout.pageLayouts[page - 1].center.dx,
+          location.center.dy,
+        );
+        await _pdf.goTo(
+          _pdf.calcMatrixFor(center, zoom: 1, viewSize: _pdf.viewSize),
+          duration: Duration.zero,
+        );
+      }
+      if (!mounted || cancelled() || !identical(_pdfDocumentRef, document)) {
+        return null;
+      }
+      setState(() => _noteOriginPdfMark = (page: page, bounds: origin.bounds));
+      _noteOriginMarkTimeout = Timer(const Duration(seconds: 6), () {
+        if (mounted) setState(() => _noteOriginPdfMark = null);
+      });
+      return true;
+    } on Exception {
+      return mounted && !cancelled() ? false : null;
     }
   }
 
@@ -3294,6 +4114,39 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     String? blockId,
   ) {
     final chapters = document.chapters;
+    if (_epubPreview case final preview?) {
+      final chapter = chapters[chapterIndex];
+      final authored = preview.outline.any((entry) => entry.chapterId != null);
+      final List<EpubReaderOutlineItem> entries = authored
+          ? preview.outline
+          : [
+              for (final (index, item) in preview.spine.indexed)
+                (
+                  title: item.chapterId == chapter.id
+                      ? chapter.title
+                      : '第 ${index + 1} 节',
+                  chapterId: item.chapterId,
+                  fragment: null,
+                  level: 0,
+                ),
+            ];
+      _showOutline(
+        entries.map((entry) => entry.title).toList(growable: false),
+        entries.indexWhere((entry) => entry.chapterId == chapter.id),
+        (index) {
+          final entry = entries[index];
+          if (entry.chapterId case final id?) {
+            unawaited(_openEpubChapter(id, fragment: entry.fragment));
+          }
+        },
+        levels: entries.map((entry) => entry.level).toList(growable: false),
+        groupLabels: {
+          for (final (index, entry) in entries.indexed)
+            if (entry.chapterId == null) index,
+        },
+      );
+      return;
+    }
     final chaptersById = {for (final chapter in chapters) chapter.id: chapter};
     final entries = document.outline
         .where(
@@ -3368,7 +4221,19 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final chapter = document.chapters
         .where((c) => c.id == destination?.chapterId)
         .firstOrNull;
-    if (chapter != null) _chapter(chapter, blockId: destination!.blockId);
+    if (chapter != null) {
+      _chapter(chapter, blockId: destination!.blockId);
+    } else if (_epubPreview case final preview?) {
+      final hash = target.indexOf('#');
+      final href = hash < 0 ? target : target.substring(0, hash);
+      final item = preview.spine.where((item) => item.href == href).firstOrNull;
+      if (item != null) {
+        await _openEpubChapter(
+          item.chapterId,
+          fragment: hash < 0 ? null : target.substring(hash + 1),
+        );
+      }
+    }
   }
 
   Widget _flow(
@@ -3386,6 +4251,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       ),
     );
     final chapter = chapters[chapterIndex];
+    final preview = originalPage == null ? _epubPreview : null;
+    final spine = preview?.spine;
+    final spineIndex = spine?.indexWhere(
+      (item) => item.chapterId == chapter.id,
+    );
     // A long chapter is laid out as selectable blocks on the UI isolate.
     // Normal chapters are ready to slide immediately, and a chapter already
     // on screen stays rendered if the user reverses the transition.
@@ -3400,7 +4270,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       return const _ReadingPlaceholder();
     }
     _renderedChapter = true;
-    final assets = {for (final asset in document.assets) asset.id: asset};
+    final assets = {
+      if (originalPage == null) ..._epubTransitionAssets,
+      for (final asset in document.assets) asset.id: asset,
+    };
     final chaptersById = {for (final entry in chapters) entry.id: entry};
     final bottomPadding =
         originalPage != null &&
@@ -3433,14 +4306,20 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             document: document,
             initialChapterId: chapter.id,
             initialAnchor: current,
-            epubLayoutCache: _epubLayoutCache,
+            epubLayoutCache: preview == null ? _epubLayoutCache : null,
+            epubPreview: preview != null,
             pdfLayoutCache: originalPage == null
                 ? null
                 : _preparedBook?.layoutCache,
             onLayoutReady: originalPage == null
                 ? (ready) {
-                    if (mounted && _ebookLayoutReady != ready) {
-                      setState(() => _ebookLayoutReady = ready);
+                    if (mounted &&
+                        (_ebookLayoutReady != ready ||
+                            ready && _epubTransitionAssets.isNotEmpty)) {
+                      setState(() {
+                        _ebookLayoutReady = ready;
+                        if (ready) _epubTransitionAssets = const {};
+                      });
                     }
                   }
                 : (ready) => _ebookLayoutChanged(document, current, ready),
@@ -3507,7 +4386,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             textStyleBuilder: textStyle,
             translations: _translationEnabled ? _flowTranslations : null,
             onUserNavigationStart: originalPage == null || !_isPdfDocument
-                ? _hideReaderChrome
+                ? () {
+                    widget.onSelectionChanged();
+                    _hideReaderChrome();
+                  }
                 : null,
             onScrollActivityChanged: originalPage == null
                 ? null
@@ -3530,6 +4412,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                           ),
                         )
                       : null
+                : spine != null && spineIndex != null && spineIndex > 0
+                ? () => unawaited(
+                    _openEpubChapter(spine[spineIndex - 1].chapterId),
+                  )
                 : _ebookPageTurnMode == ReaderPaginationMode.vertical &&
                       chapterIndex > 0
                 ? () => _chapter(chapters[chapterIndex - 1])
@@ -3545,6 +4431,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                           ),
                         )
                       : null
+                : spine != null &&
+                      spineIndex != null &&
+                      spineIndex >= 0 &&
+                      spineIndex + 1 < spine.length
+                ? () => unawaited(
+                    _openEpubChapter(spine[spineIndex + 1].chapterId),
+                  )
                 : _ebookPageTurnMode == ReaderPaginationMode.vertical &&
                       chapterIndex + 1 < chapters.length
                 ? () => _chapter(chapters[chapterIndex + 1])
@@ -3569,6 +4462,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 if (!identical(document, _convertedDocument)) return;
                 _flowPosition = value;
                 return;
+              }
+              if (_epubDocument != null &&
+                  !identical(_epubDocument, document)) {
+                return;
+              }
+              if (value.chapterId != _lastReportedChapter) {
+                _lastReportedChapter = value.chapterId;
+                _reportReadingTarget(value);
               }
               if (value.chapterId == _flowPosition?.chapterId) {
                 _flowPosition = value;
@@ -3731,9 +4632,25 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 blockId: origin?.blockId ?? slice.block.id,
                 characterOffset: origin?.offset ?? slice.startOffset,
               );
+              final evidenceMark = _flowEvidenceMark;
+              final highlighted =
+                  evidenceMark != null &&
+                  evidenceMark.chapter == sliceChapter.id &&
+                  evidenceMark.block == slice.block.id &&
+                  evidenceMark.start <
+                      (slice.endOffset ?? slice.block.text.length) &&
+                  evidenceMark.end > slice.startOffset;
               return Stack(
                 children: [
-                  block,
+                  if (highlighted)
+                    ColoredBox(
+                      color: _dark
+                          ? const Color(0x554B6A96)
+                          : const Color(0x555A8DD7),
+                      child: block,
+                    )
+                  else
+                    block,
                   Positioned.fill(
                     child: _inkSurface(
                       location,
@@ -3765,12 +4682,20 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           );
         },
       ),
-      page: originalPage ?? chapterIndex + 1,
-      pageCount: originalPage == null ? chapters.length : _pdfPageCount,
+      page: originalPage ?? (spineIndex ?? chapterIndex) + 1,
+      pageCount: originalPage == null
+          ? spine?.length ?? chapters.length
+          : _pdfPageCount,
       usesOriginalPages: originalPage != null,
       chapterTitle: chapter.title,
       onPageSelected: originalPage == null
-          ? (page) => _chapter(chapters[page - 1])
+          ? (page) {
+              if (spine != null) {
+                unawaited(_openEpubChapter(spine[page - 1].chapterId));
+              } else {
+                _chapter(chapters[page - 1]);
+              }
+            }
           : (page) => unawaited(_openConvertedPage(page)),
       onRestoreFlow: originalPage != null
           ? null
@@ -3783,6 +4708,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                   target,
                   blockId: position.blockId,
                   characterOffset: position.characterOffset,
+                );
+              } else if (preview != null) {
+                unawaited(
+                  _openEpubChapter(
+                    position.chapterId,
+                    blockId: position.blockId,
+                    characterOffset: position.characterOffset,
+                  ),
                 );
               }
             },
@@ -4099,6 +5032,13 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final page =
         CompanionReflowPage.pageForBlock(source?.blockId) ?? originalPage;
     final location = page == null ? chapter.title : '第 $page 页';
+    final surroundings = originalRange != null
+        ? _passageSurroundings(
+            slice.block.text,
+            originalRange.start,
+            originalRange.end,
+          )
+        : _passageSurroundings(value.text, range.start, range.end);
     final passage = _passage(
       text,
       translated ? '$location · 译文' : location,
@@ -4134,6 +5074,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           : PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page),
       annotationView: translated ? 'flow-translation' : 'flow',
       translationSnapshot: translation?.text,
+      beforeText: surroundings.before,
+      afterText: surroundings.after,
     );
     return _selectionToolbar(
       above: anchor.primaryAnchor,
@@ -4146,8 +5088,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         _captureAnnotationSelection(editable);
         widget.onAnnotate(passage);
       },
-      onAsk: () =>
-          widget.onAsk(passage, anchor.secondaryAnchor ?? anchor.primaryAnchor),
+      showExplanation: widget.showExplanationOption,
+      onAsk: (explain) {
+        final bounds = _editableSelectionRects(editable, range);
+        _collapseReaderTextSelection(editable);
+        widget.onAsk(passage, bounds, explain);
+      },
     );
   }
 
@@ -4284,6 +5230,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     int? annotationStartOffset,
     int? annotationEndOffset,
     CompanionSourceRange? annotationCanonicalRange,
+    String? beforeText,
+    String? afterText,
   }) => ReadingCompanionPassage(
     bookId: _source.bookId,
     sourceId: _source.id,
@@ -4300,6 +5248,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     annotationStartOffset: annotationStartOffset,
     annotationEndOffset: annotationEndOffset,
     annotationCanonicalRange: annotationCanonicalRange,
+    beforeText: beforeText,
+    afterText: afterText,
     sourceRevision: _source.sourceVersionId.isEmpty
         ? _source.contentHash
         : _source.sourceVersionId,
@@ -4507,6 +5457,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   }
 
   void _startPdfSwipe(ScaleStartDetails details) {
+    widget.onSelectionChanged();
     ++_pdfSwipeRevision;
     // Cancel a settling animation at its currently visible position if the
     // reader catches the page with a new finger before it has come to rest.
@@ -4877,6 +5828,19 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         });
                         final initial = widget.initialAnnotationSelection;
                         final restoredPage = _pdfPage;
+                        _lastReportedPdfPage = restoredPage;
+                        _reportReadingTarget(
+                          PdfReaderAnchor(
+                            sourceId: _sourceKey,
+                            pageNumber: restoredPage,
+                          ),
+                        );
+                        if (_readingEvidencePdfReady case final pending?) {
+                          _readingEvidencePdfReady = null;
+                          pending.complete(document);
+                          _schedulePdfPageWork(probeText: true);
+                          return;
+                        }
                         if (_restoringEbook) {
                           unawaited(_prepareBook());
                           return;
@@ -5207,6 +6171,11 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       selected.start,
                       selected.end,
                     );
+                    final surroundings = _passageSurroundings(
+                      translation,
+                      selected.start,
+                      selected.end,
+                    );
                     final passage = _passage(
                       text,
                       '第 $page 页 · 译文',
@@ -5215,6 +6184,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                       endOffset: selected.end,
                       annotationView: 'translation',
                       translationSnapshot: translation,
+                      beforeText: surroundings.before,
+                      afterText: surroundings.after,
                       annotationCanonicalRange:
                           original == null || !_translatedPdfHasNativeSource
                           ? null
@@ -5238,12 +6209,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         _captureAnnotationSelection(editable);
                         widget.onAnnotate(passage);
                       },
-                      onAsk: () {
-                        editable.hideToolbar();
-                        widget.onAsk(
-                          passage,
-                          anchor.secondaryAnchor ?? anchor.primaryAnchor,
+                      showExplanation: widget.showExplanationOption,
+                      onAsk: (explain) {
+                        final bounds = _editableSelectionRects(
+                          editable,
+                          selected,
                         );
+                        _collapseReaderTextSelection(editable);
+                        widget.onAsk(passage, bounds, explain);
                       },
                     );
                   },
@@ -5457,13 +6430,14 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     final label = endPage == page ? '第 $page 页' : '第 $page–$endPage 页';
     final anchor = PdfReaderAnchor(sourceId: _sourceKey, pageNumber: page);
 
-    Future<void> withText(bool ask) async {
-      final globalAnchor = _pdf.localToGlobal(below) ?? below;
+    Future<void> withText({required bool ask, bool explain = false}) async {
+      final swipeRevision = _pdfSwipeRevision;
       final pages = _pdf.document.pages;
       final pieces = <String>[];
       final pageHashes = <int, String>{};
       final sourceRanges = <CompanionPdfRange>[];
       final previewRects = <Rect>[];
+      final globalRects = <Rect>[];
       final viewport = _annotationViewportKey.currentContext
           ?.findRenderObject();
       var nativeCoordinates = true;
@@ -5484,7 +6458,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
               : text.fullText.length;
           if (start < 0 || start > end || end > text.fullText.length) return;
           pieces.add(text.fullText.substring(start, end));
-          if (!ask && viewport is RenderBox) {
+          if (ask || viewport is RenderBox) {
             final selectedRange = PdfPageTextRange(
               pageText: text,
               start: start,
@@ -5503,12 +6477,16 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                 _pdf.documentToLocal(documentRect.bottomRight),
               );
               if (topLeft != null && bottomRight != null) {
-                previewRects.add(
-                  Rect.fromPoints(
-                    viewport.globalToLocal(topLeft),
-                    viewport.globalToLocal(bottomRight),
-                  ),
-                );
+                if (ask) {
+                  globalRects.add(Rect.fromPoints(topLeft, bottomRight));
+                } else if (viewport is RenderBox) {
+                  previewRects.add(
+                    Rect.fromPoints(
+                      viewport.globalToLocal(topLeft),
+                      viewport.globalToLocal(bottomRight),
+                    ),
+                  );
+                }
               }
             }
           }
@@ -5529,10 +6507,20 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
         return;
       }
       final text = pieces.join('\n').trim();
-      if (!mounted || text.isEmpty) return;
+      if (!mounted || swipeRevision != _pdfSwipeRevision || text.isEmpty) {
+        return;
+      }
+      final currentRange = delegate.textSelectionPointRange;
+      if (currentRange == null ||
+          currentRange.start.text.pageNumber != page ||
+          currentRange.end.text.pageNumber != endPage ||
+          currentRange.start.index != range.start.index ||
+          currentRange.end.index != range.end.index) {
+        return;
+      }
       if (!ask) _annotationSelectionRects = previewRects;
       await delegate.clearTextSelection();
-      if (!mounted) return;
+      if (!mounted || swipeRevision != _pdfSwipeRevision) return;
       final passage = _passage(
         text,
         label,
@@ -5543,12 +6531,22 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
             ? null
             : PdfReaderAnchor(sourceId: _sourceKey, pageNumber: endPage),
         pdfPageTextHashes: pageHashes,
+        beforeText: _passageSurroundings(
+          range.start.text.fullText,
+          range.start.index,
+          range.start.index,
+        ).before,
+        afterText: _passageSurroundings(
+          range.end.text.fullText,
+          range.end.index + 1,
+          range.end.index + 1,
+        ).after,
         annotationCanonicalRange: nativeCoordinates
             ? CompanionPdfSourceRange(sourceRanges)
             : null,
       );
       if (ask) {
-        widget.onAsk(passage, globalAnchor);
+        widget.onAsk(passage, globalRects, explain);
       } else {
         widget.onAnnotate(passage);
       }
@@ -5564,8 +6562,9 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
           ),
         );
       },
-      onAnnotate: () => unawaited(withText(false)),
-      onAsk: () => unawaited(withText(true)),
+      showExplanation: widget.showExplanationOption,
+      onAnnotate: () => unawaited(withText(ask: false)),
+      onAsk: (explain) => unawaited(withText(ask: true, explain: explain)),
     );
   }
 
@@ -6644,7 +7643,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       future: _loading,
       builder: (context, snapshot) {
         final data = snapshot.data;
-        final document = data?.document;
+        final document = _epubDocument ?? data?.document;
         final Widget body;
         if (snapshot.connectionState != ConnectionState.done) {
           body = const _ReadingPlaceholder();
@@ -6967,30 +7966,134 @@ class _CompanionTextSelectionControls extends MaterialTextSelectionControls
 
 final _companionTextSelectionControls = _CompanionTextSelectionControls();
 
+List<Rect> _editableSelectionRects(
+  EditableTextState editor,
+  TextSelection selection,
+) {
+  final box = editor.renderEditable;
+  if (!box.attached || !box.hasSize) return const [];
+  return [
+    for (final line in box.getBoxesForSelection(selection))
+      Rect.fromPoints(
+        box.localToGlobal(line.toRect().topLeft),
+        box.localToGlobal(line.toRect().bottomRight),
+      ),
+  ];
+}
+
+({String? before, String? after}) _passageSurroundings(
+  String source,
+  int start,
+  int end,
+) {
+  if (start < 0 || end > source.length || end < start) {
+    return (before: null, after: null);
+  }
+  final beforeText = source.substring(math.max(0, start - 240), start);
+  final afterText = source.substring(end, math.min(source.length, end + 240));
+  final boundaries = RegExp(r'[。！？!?\n]+');
+  final before = beforeText.trimRight().split(boundaries);
+  final after = afterText.trimLeft().split(boundaries);
+  final beforeStart = before.length <= 2
+      ? 0
+      : boundaries
+            .allMatches(beforeText.trimRight())
+            .toList()[before.length - 3]
+            .end;
+  final afterEnd = after.length <= 2
+      ? afterText.trimLeft().length
+      : boundaries.allMatches(afterText.trimLeft()).elementAt(1).end;
+  final contextBefore = beforeText.trimRight().substring(beforeStart).trim();
+  final contextAfter = afterText.trimLeft().substring(0, afterEnd).trim();
+  return (
+    before: contextBefore.isEmpty ? null : contextBefore,
+    after: contextAfter.isEmpty ? null : contextAfter,
+  );
+}
+
 Widget _selectionToolbar({
   required Offset above,
   required Offset? below,
   required VoidCallback onCopy,
   required VoidCallback onAnnotate,
-  required VoidCallback onAsk,
-}) => TextSelectionToolbar(
-  anchorAbove: above,
-  anchorBelow: below ?? above,
-  toolbarBuilder: (context, child) => child,
-  children: [
-    Builder(
-      builder: (context) => MessageSelectionActionCard(
-        primaryLabel: 'AI',
-        primaryAsset: 'assets/icons/chat_note_editor/sparkle.svg',
-        copyFirst: true,
-        dark: Theme.of(context).brightness == Brightness.dark,
-        onPrimaryAction: onAsk,
-        onCopy: onCopy,
-        onAnnotate: onAnnotate,
-      ),
-    ),
-  ],
+  required ValueChanged<bool> onAsk,
+  required bool showExplanation,
+}) => _CompanionSelectionToolbar(
+  key: ValueKey((above, below)),
+  above: above,
+  below: below,
+  onCopy: onCopy,
+  onAnnotate: onAnnotate,
+  onAsk: onAsk,
+  showExplanation: showExplanation,
 );
+
+class _CompanionSelectionToolbar extends StatefulWidget {
+  const _CompanionSelectionToolbar({
+    super.key,
+    required this.above,
+    required this.below,
+    required this.onCopy,
+    required this.onAnnotate,
+    required this.onAsk,
+    required this.showExplanation,
+  });
+
+  final Offset above;
+  final Offset? below;
+  final VoidCallback onCopy;
+  final VoidCallback onAnnotate;
+  final ValueChanged<bool> onAsk;
+  final bool showExplanation;
+
+  @override
+  State<_CompanionSelectionToolbar> createState() =>
+      _CompanionSelectionToolbarState();
+}
+
+class _CompanionSelectionToolbarState
+    extends State<_CompanionSelectionToolbar> {
+  bool _ai = false;
+
+  @override
+  Widget build(BuildContext context) => TextSelectionToolbar(
+    anchorAbove: widget.above,
+    anchorBelow: widget.below ?? widget.above,
+    toolbarBuilder: (context, child) => child,
+    children: [
+      if (_ai)
+        Material(
+          elevation: 5,
+          borderRadius: BorderRadius.circular(18),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextButton(
+                onPressed: () => widget.onAsk(true),
+                child: const Text('解释这段'),
+              ),
+              TextButton(
+                onPressed: () => widget.onAsk(false),
+                child: const Text('自定义提问'),
+              ),
+            ],
+          ),
+        )
+      else
+        MessageSelectionActionCard(
+          primaryLabel: 'AI',
+          primaryAsset: 'assets/icons/chat_note_editor/sparkle.svg',
+          copyFirst: true,
+          dark: Theme.of(context).brightness == Brightness.dark,
+          onPrimaryAction: widget.showExplanation
+              ? () => setState(() => _ai = true)
+              : () => widget.onAsk(false),
+          onCopy: widget.onCopy,
+          onAnnotate: widget.onAnnotate,
+        ),
+    ],
+  );
+}
 
 class _CompanionHistory extends StatelessWidget {
   const _CompanionHistory({
@@ -6998,12 +8101,20 @@ class _CompanionHistory extends StatelessWidget {
     required this.messages,
     required this.streamingReply,
     required this.messageKeys,
+    this.seed,
+    required this.seedEvidence,
+    required this.streamingEvidence,
+    required this.onOpenEvidence,
   });
 
   final ScrollController controller;
   final List<AiConversationMessage> messages;
   final ValueListenable<String> streamingReply;
   final Map<String, GlobalKey> messageKeys;
+  final String? seed;
+  final List<ReadingCompanionEvidence> seedEvidence;
+  final ValueListenable<List<ReadingCompanionEvidence>>? streamingEvidence;
+  final ValueChanged<ReadingCompanionEvidence> onOpenEvidence;
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder(
@@ -7012,17 +8123,29 @@ class _CompanionHistory extends StatelessWidget {
       final turns = messages
           .where((message) => !message.isDeletedMarker)
           .toList();
+      final showSeed = turns.isEmpty && seed != null;
       return ChatMessageScrollView(
         controller: controller,
         slivers: [
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(5, 16, 5, 12),
             sliver: SliverList.builder(
-              itemCount: turns.length + (streamed.isEmpty ? 0 : 1),
+              itemCount:
+                  turns.length +
+                  (streamed.isEmpty ? 0 : 1) +
+                  (showSeed ? 1 : 0),
               itemBuilder: (context, index) {
                 if (streamed.isNotEmpty && index == 0) {
-                  return _answer(streamed);
+                  final live = streamingEvidence;
+                  return live == null
+                      ? _answer(streamed)
+                      : ValueListenableBuilder(
+                          valueListenable: live,
+                          builder: (context, evidence, _) =>
+                              _answerWithEvidence(streamed, evidence),
+                        );
                 }
+                if (showSeed) return _answerWithEvidence(seed!, seedEvidence);
                 final reverseIndex = index - (streamed.isEmpty ? 0 : 1);
                 final turn = turns[turns.length - 1 - reverseIndex];
                 final text = turn.displayText ?? turn.text;
@@ -7080,7 +8203,10 @@ class _CompanionHistory extends StatelessWidget {
   Widget _assistantTurn(AiConversationMessage message, String text) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      _answer(visibleChatAssistantText(text)),
+      _answerWithEvidence(
+        visibleChatAssistantText(text),
+        message.readingEvidence,
+      ),
       for (final artifact in message.outputArtifacts)
         if (artifact['media_type']?.toString().startsWith('image/') == true &&
             (artifact['task_id']?.toString() ?? '').isNotEmpty &&
@@ -7093,6 +8219,23 @@ class _CompanionHistory extends StatelessWidget {
           ),
     ],
   );
+
+  Widget _answerWithEvidence(
+    String text,
+    List<ReadingCompanionEvidence> evidence,
+  ) {
+    if (evidence.isEmpty) return _answer(text);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _answer(text),
+        ReadingCompanionEvidenceLinks(
+          evidence: evidence,
+          onOpen: onOpenEvidence,
+        ),
+      ],
+    );
+  }
 
   Widget _answer(String text) {
     if (text.trim().isEmpty) return const SizedBox.shrink();
@@ -7166,30 +8309,6 @@ class _CompanionImageArtifactState extends State<_CompanionImageArtifact> {
           ),
         );
       },
-    ),
-  );
-}
-
-class _PassageQuote extends StatelessWidget {
-  const _PassageQuote({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    decoration: const BoxDecoration(
-      border: Border(left: BorderSide(color: Color(0xFFBBBBBB), width: 2)),
-    ),
-    padding: const EdgeInsets.only(left: 11),
-    child: Text(
-      text,
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(
-        color: Color(0xFF515151),
-        fontSize: 15,
-        height: 1.65,
-      ),
     ),
   );
 }
@@ -7541,31 +8660,3 @@ class _ReaderStatus extends StatelessWidget {
     ),
   );
 }
-
-class _ReaderButton extends StatelessWidget {
-  const _ReaderButton({
-    required this.label,
-    required this.icon,
-    required this.onPressed,
-  });
-
-  final String label;
-  final String icon;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) => IconButton(
-    tooltip: label,
-    onPressed: onPressed,
-    constraints: const BoxConstraints.tightFor(width: 44, height: 44),
-    icon: _readerIcon(icon),
-  );
-}
-
-Widget _readerIcon(String asset) => SvgPicture.asset(
-  asset,
-  width: 18,
-  height: 18,
-  excludeFromSemantics: true,
-  colorFilter: const ColorFilter.mode(Color(0xFF4D4D4D), BlendMode.srcIn),
-);

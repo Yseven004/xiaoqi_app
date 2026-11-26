@@ -20,6 +20,7 @@ import '../widgets/book_learning_bottom_bar.dart';
 import '../widgets/book_metadata_form_sheet.dart';
 import '../widgets/book_pdf_import_sheet.dart';
 import '../widgets/book_source_import.dart';
+import '../widgets/reading_book_cloud_choice.dart';
 import '../widgets/online_book_search_dialog.dart';
 import 'book_isbn_scanner_page.dart';
 import '../widgets/book_keyboard_layout.dart';
@@ -173,6 +174,8 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
       }
 
       try {
+        final cloudChoice = await showReadingBookCloudChoice(context);
+        if (!mounted || cloudChoice == null) return;
         final sourcePath = await _ensurePickedFilePath(selectedFile);
         final format = inferBookSourceFormat(selectedFile.name);
         final newBook = selection.newBook;
@@ -189,6 +192,11 @@ class _BookLearningShellPageState extends State<BookLearningShellPage> {
                 displayName: selectedFile.name,
                 format: format,
               );
+        await saveReadingBookCloudChoice(
+          mounted ? context : null,
+          outcome.source,
+          cloudChoice,
+        );
         if (outcome.source.format == 'pdf' &&
             outcome.source.catalogStatus != 'processing' &&
             outcome.source.catalogStatus != 'confirmed' &&

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show compute;
@@ -14,6 +15,23 @@ import 'epub_document_service.dart';
 import 'html_article_document_service.dart';
 import 'text_document_service.dart';
 import 'web_article_source_service.dart';
+
+typedef EpubReaderUpdate = ({
+  XiaoqiDocument document,
+  EpubReaderPreview? preview,
+});
+
+class EpubReaderLoad {
+  EpubReaderLoad._(this._worker, this.layoutCache, this.initialChapterId);
+
+  final _EpubReaderWorker _worker;
+  final File? layoutCache;
+  final String? initialChapterId;
+
+  Stream<EpubReaderUpdate> get updates => _worker.watch(initialChapterId);
+
+  void prioritize(String chapterId) => _worker.prioritize(chapterId);
+}
 
 /// Single dispatch point for structured source documents.
 ///
@@ -33,33 +51,81 @@ class SourceDocumentLoader {
   final DocxDocumentService docx;
   final HtmlArticleDocumentService html;
 
+  static final _epubReaderLoads = <String, _EpubReaderWorker>{};
+  static bool _warmingReaderCache = false;
+
   /// File I/O is asynchronous, but decompression and document parsing also
   /// need to leave the UI isolate while the reader is sliding into view.
   static Future<XiaoqiDocument> parseBookSourceInBackground(
     BookSourceRecord source,
   ) => compute(_parseBookSource, source, debugLabel: 'read book source');
 
-  /// Stores only replaceable data from the original EPUB. Edited revisions
-  /// remain the caller's responsibility and never share this layout cache.
-  static Future<({XiaoqiDocument document, File? epubLayoutCache})>
-  parseBookSourceForReader(BookSourceRecord source) async {
+  /// Publishes the requested chapter before completing a cold EPUB. A current
+  /// full cache follows the same stream contract and needs no partial update.
+  static Future<EpubReaderLoad> openEpubReader(
+    BookSourceRecord source, {
+    String? initialChapterId,
+  }) async {
     final directory = await _epubReaderCacheDirectory(source);
-    if (directory == null) {
-      return (
-        document: await parseBookSourceInBackground(source),
-        epubLayoutCache: null,
-      );
-    }
-    final bookFile = path.join(directory.path, 'document.json');
-    final (document, cacheBytes) = await compute(_loadCachedEpub, (
-      source,
-      bookFile,
-    ), debugLabel: 'restore or parse reader EPUB');
-    if (cacheBytes != null) unawaited(_writeEpubCache(bookFile, cacheBytes));
-    return (
-      document: document,
-      epubLayoutCache: File(path.join(directory.path, 'layout.json')),
+    final worker = _loadReaderEpub(source, directory, initialChapterId);
+    return EpubReaderLoad._(
+      worker,
+      directory == null ? null : File(path.join(directory.path, 'layout.json')),
+      initialChapterId,
     );
+  }
+
+  /// Share a speculative parse with the reader opening this source. A new
+  /// reader can change the worker's target at its next chapter boundary.
+  static Future<void> prepareReaderCache(BookSourceRecord source) async {
+    if (_warmingReaderCache ||
+        source.format != 'epub' ||
+        source.fileSize > _maxCachedEpubBytes) {
+      return;
+    }
+    _warmingReaderCache = true;
+    try {
+      final directory = await _epubReaderCacheDirectory(source);
+      if (directory == null ||
+          await File(path.join(directory.path, 'document.json')).exists()) {
+        return;
+      }
+      await _loadReaderEpub(source, directory, null).done;
+    } on Object {
+      // The explicit open can retry and report the source error.
+    } finally {
+      _warmingReaderCache = false;
+    }
+  }
+
+  static _EpubReaderWorker _loadReaderEpub(
+    BookSourceRecord source,
+    Directory? directory,
+    String? target,
+  ) {
+    final cachePath = directory == null
+        ? null
+        : path.join(directory.path, 'document.json');
+    final key =
+        cachePath ??
+        jsonEncode([
+          source.filePath,
+          source.sourceVersionId,
+          source.contentHash,
+        ]);
+    final worker = _epubReaderLoads.putIfAbsent(key, () {
+      final worker = _EpubReaderWorker(source.filePath, cachePath, target);
+      unawaited(
+        worker.done.then((_) {
+          if (identical(_epubReaderLoads[key], worker)) {
+            _epubReaderLoads.remove(key);
+          }
+        }),
+      );
+      return worker;
+    });
+    if (target != null) worker.prioritize(target);
+    return worker;
   }
 
   static Future<Directory?> _epubReaderCacheDirectory(
@@ -92,10 +158,7 @@ class SourceDocumentLoader {
 
   static const _maxCachedEpubBytes = 48 * 1024 * 1024;
 
-  static Future<(XiaoqiDocument, List<int>?)> _loadCachedEpub(
-    (BookSourceRecord, String) request,
-  ) async {
-    final (source, filePath) = request;
+  static Future<XiaoqiDocument?> _readEpubCache(String filePath) async {
     final file = File(filePath);
     try {
       final stat = await file.stat();
@@ -105,13 +168,16 @@ class SourceDocumentLoader {
         if (restored.format == 'epub' &&
             restored.structureVersion == EpubDocumentService.structureVersion &&
             restored.chapters.isNotEmpty) {
-          return (restored, null);
+          return restored;
         }
       }
     } on Object {
       // A missing or damaged cache is recoverable from the original package.
     }
-    final document = await _parseBookSource(source);
+    return null;
+  }
+
+  static List<int>? _encodeEpubCache(XiaoqiDocument document) {
     // Bound the transient base64/JSON allocations for very large books.
     final estimatedBytes =
         document.assets.fold<int>(0, (sum, asset) => sum + asset.bytes.length) *
@@ -122,13 +188,13 @@ class SourceDocumentLoader {
               sum + 3 * (chapter.html.length + 2 * chapter.plainText.length),
         );
     if (document.chapters.isEmpty || estimatedBytes > _maxCachedEpubBytes) {
-      return (document, null);
+      return null;
     }
     try {
       final data = JsonUtf8Encoder().convert(document.toMap());
-      return (document, data.length <= _maxCachedEpubBytes ? data : null);
+      return data.length <= _maxCachedEpubBytes ? data : null;
     } on Object {
-      return (document, null);
+      return null;
     }
   }
 
@@ -196,5 +262,157 @@ class SourceDocumentLoader {
       throw const FormatException('网页需要完成验证，无法整理为正式资料');
     }
     return html.parse(source, sourceUrl: Uri.file(filePath).toString());
+  }
+}
+
+typedef _EpubWorkerInput = ({
+  SendPort output,
+  String path,
+  String? cachePath,
+  String? target,
+});
+
+class _EpubReaderWorker {
+  _EpubReaderWorker(String path, String? cachePath, this._initialTarget)
+    : _target = _initialTarget {
+    _port.listen(_receive);
+    unawaited(
+      Isolate.spawn(
+        _readEpubInIsolate,
+        (
+          output: _port.sendPort,
+          path: path,
+          cachePath: cachePath,
+          target: _initialTarget,
+        ),
+        onExit: _port.sendPort,
+        debugName: 'read EPUB chapters',
+      ).then<void>(
+        (_) {},
+        onError: (Object error, StackTrace trace) {
+          _fail(error.toString());
+          _finish();
+        },
+      ),
+    );
+  }
+
+  final _port = ReceivePort();
+  final _updates = StreamController<EpubReaderUpdate>.broadcast(sync: true);
+  final _finished = Completer<void>();
+  final String? _initialTarget;
+  SendPort? _requests;
+  EpubReaderUpdate? _latest;
+  String? _target;
+  String? _error;
+
+  Future<void> get done => _finished.future;
+
+  void prioritize(String chapterId) {
+    if (_target == chapterId) return;
+    _target = chapterId;
+    _requests?.send(chapterId);
+  }
+
+  Stream<EpubReaderUpdate> watch(String? target) => Stream.multi((controller) {
+    void forward(EpubReaderUpdate update) {
+      final preview = update.preview;
+      // A warmup may have published the first chapter before this reader
+      // requested a restored position. Wait for that target when known.
+      if (target != null &&
+          preview != null &&
+          preview.document.chapters.first.id != target &&
+          preview.spine.any((item) => item.chapterId == target)) {
+        return;
+      }
+      target = null;
+      controller.add(update);
+    }
+
+    final subscription = _updates.stream.listen(
+      forward,
+      onError: controller.addError,
+      onDone: controller.close,
+    );
+    controller.onCancel = subscription.cancel;
+    if (_latest case final update?) forward(update);
+    if (_error case final error?) controller.addError(StateError(error));
+  });
+
+  void _receive(Object? message) {
+    switch (message) {
+      case SendPort requests:
+        _requests = requests;
+        if (_target case final target? when target != _initialTarget) {
+          requests.send(target);
+        }
+      case EpubReaderPreview preview:
+        _publish((document: preview.document, preview: preview));
+      case XiaoqiDocument document:
+        _publish((document: document, preview: null));
+      case String error:
+        _fail(error);
+      case null:
+        if (_latest == null || _latest?.preview != null) {
+          _fail('EPUB 章节读取中断');
+        }
+        _finish();
+    }
+  }
+
+  void _publish(EpubReaderUpdate update) {
+    _latest = update;
+    _updates.add(update);
+  }
+
+  void _fail(String error) {
+    if (_error != null) return;
+    _error = error;
+    _updates.addError(StateError(error));
+  }
+
+  void _finish() {
+    _port.close();
+    unawaited(_updates.close());
+    _finished.complete();
+  }
+}
+
+Future<void> _readEpubInIsolate(_EpubWorkerInput input) async {
+  final requests = ReceivePort();
+  var target = input.target;
+  requests.listen((value) {
+    if (value is String) target = value;
+  });
+  input.output.send(requests.sendPort);
+  try {
+    final cachePath = input.cachePath;
+    final cached = cachePath == null
+        ? null
+        : await SourceDocumentLoader._readEpubCache(cachePath);
+    if (cached != null) {
+      input.output.send(cached);
+      return;
+    }
+    final document = await const EpubDocumentService().parseForReader(
+      input.path,
+      takeTarget: () {
+        final requested = target;
+        target = null;
+        return requested;
+      },
+      publish: input.output.send,
+    );
+    input.output.send(document);
+    if (cachePath != null) {
+      final data = SourceDocumentLoader._encodeEpubCache(document);
+      if (data != null) {
+        await SourceDocumentLoader._writeEpubCache(cachePath, data);
+      }
+    }
+  } on Object catch (error) {
+    input.output.send(error.toString());
+  } finally {
+    requests.close();
   }
 }

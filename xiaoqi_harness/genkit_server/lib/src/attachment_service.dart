@@ -51,6 +51,8 @@ class AttachmentService {
     Request request,
     String tenant, {
     bool annotationImage = false,
+    Future<Map<String, dynamic>> Function(File original, String format, String hash)?
+        registerReadingBook,
   }) => _respond(() async {
     await _initialization;
     _ensureOpen();
@@ -96,6 +98,13 @@ class AttachmentService {
       );
     }
     final readingBook = uploadProfile == readingBookMarkItDownProfile;
+    if (registerReadingBook != null && !readingBook) {
+      throw const AttachmentFailure(
+        '仅支持上传 PDF 或 EPUB 书籍',
+        code: 'invalid_attachment_profile',
+        statusCode: 400,
+      );
+    }
     final sourceFormat = uploadProfile == null
         ? null
         : _markItDownFormat(name, mime, readingBook: readingBook);
@@ -216,6 +225,12 @@ class AttachmentService {
         );
       }
       final resourceProfile = uploadProfile ?? parserProfile;
+      if (registerReadingBook != null) {
+        return _json(
+          await registerReadingBook(source, sourceFormat!, hash),
+          202,
+        );
+      }
       final identityProfile = sourceFormat == null
           ? resourceProfile
           : '$resourceProfile|$sourceFormat';

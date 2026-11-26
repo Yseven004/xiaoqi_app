@@ -57,6 +57,49 @@ Future<Map<String, dynamic>> _json(Response response) async =>
     (jsonDecode(await response.readAsString()) as Map).cast<String, dynamic>();
 
 void main() {
+  test(
+    'progressive SQLite search uses the real MarkItDown EPUB worker',
+    () async {
+      final temporary = await Directory.systemTemp.createTemp(
+        'reading-book-integration-',
+      );
+      final store = CloudStore(root: temporary.path);
+      final index = store.progressiveBooks;
+      addTearDown(() async {
+        await index.close();
+        store.close();
+        await temporary.delete(recursive: true);
+      });
+      final source = File('${temporary.path}/sample.epub');
+      await source.writeAsBytes(_sampleEpub());
+      final prepared = await index.ingest(
+        tenant: 'reader',
+        bookKey: 'sample_book',
+        version: 'sample_version',
+        format: 'epub',
+        original: source,
+      );
+      final id = prepared['id'] as String;
+      final deadline = DateTime.now().add(const Duration(seconds: 15));
+      var status = index.status('reader', id);
+      while (!const {'complete', 'failed'}.contains(status?['status']) &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+        status = index.status('reader', id);
+      }
+      expect(status?['status'], 'complete', reason: '$status');
+      final result = index.search('reader', id, query: _anchor)!;
+      expect(result['search_status'], 'matched');
+      final evidence = (result['matches'] as List).single;
+      expect(evidence['quote'], contains(_answer));
+      expect(evidence['chapter_id'], 'last');
+      expect(evidence['href'], 'Book/end.xhtml');
+    },
+    skip: Platform.environment['XIAOQI_BOOK_MARKITDOWN_PYTHON'] == null
+        ? 'Requires the pinned MarkItDown Python environment'
+        : false,
+  );
+
   for (final readingBook in [true, false]) {
     final profile = readingBook
         ? AttachmentService.readingBookMarkItDownProfile

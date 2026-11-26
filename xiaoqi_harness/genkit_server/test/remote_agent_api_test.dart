@@ -220,6 +220,7 @@ void main() {
   late Directory directory;
   late CloudStore store;
   late HttpServer server;
+  late XiaoqiApi api;
   late _StreamingRuntime runtime;
   late AgentApi<Map<String, dynamic>> ownerAgent;
   late AgentApi<Map<String, dynamic>> otherTenantAgent;
@@ -242,7 +243,7 @@ void main() {
     runtime = _StreamingRuntime();
     addDevice(ownerToken, 'personal', 'owner-device');
     addDevice(otherTenantToken, 'other-tenant', 'other-device');
-    final api = XiaoqiApi(store, runtime);
+    api = XiaoqiApi(store, runtime);
     server = await shelf_io.serve(api.handler, InternetAddress.loopbackIPv4, 0);
     ownerAgent = remoteAgent<Map<String, dynamic>>(
       url: 'http://127.0.0.1:${server.port}/v1/agent/chat',
@@ -264,8 +265,264 @@ void main() {
     await ownerAgent.close();
     await otherTenantAgent.close();
     await server.close(force: true);
+    await api.close();
     store.close();
     directory.deleteSync(recursive: true);
+  });
+
+  test(
+    'book revocation invalidates outstanding uploads before the first POST',
+    () async {
+      const header = 'x-xiaoqi-reading-authorization';
+      final book = 'a' * 64;
+      final bytes = utf8.encode('%PDF-1.4\n%%EOF\n');
+      final version = sha256.convert(bytes).toString();
+      final uri = Uri.parse(
+        'http://127.0.0.1:${server.port}/v1/reading-books/$book/$version',
+      );
+      final http = HttpClient();
+      addTearDown(() => http.close(force: true));
+      Future<HttpClientResponse> send(
+        String method, {
+        String token = ownerToken,
+        String? authorization,
+        String binding = 'reading-review-device',
+        String path = '',
+        List<int>? original,
+        Map<String, Object>? body,
+      }) async {
+        final request = await http.openUrl(method, Uri.parse('$uri$path'));
+        request.headers
+          ..set('authorization', 'Bearer $token')
+          ..set('x-xiaoqi-contract', apiContractVersion)
+          ..set('x-xiaoqi-reading-binding', binding);
+        if (authorization != null) request.headers.set(header, authorization);
+        if (original != null) {
+          request.headers
+            ..contentType = ContentType('application', 'pdf')
+            ..set('x-xiaoqi-filename', 'fixture.pdf')
+            ..set('x-xiaoqi-attachment-profile', 'reading-book-markitdown-v1');
+          request.add(original);
+        }
+        if (body != null) {
+          request.headers.contentType = ContentType.json;
+          request.write(jsonEncode(body));
+        }
+        final response = await request.close();
+        await response.drain<void>();
+        return response;
+      }
+
+      final first = await send('GET');
+      expect(first.statusCode, 404);
+      final before = first.headers.value(header);
+      expect(before, isNotNull);
+      expect((await send('DELETE')).statusCode, 200);
+      final second = await send('GET');
+      expect(second.statusCode, 404);
+      final after = second.headers.value(header);
+      expect(after, isNotNull);
+      expect(after, isNot(before));
+      expect((await send('POST', authorization: before)).statusCode, 409);
+      expect((await send('POST')).statusCode, 409);
+      expect((await send('POST', authorization: after)).statusCode, 400);
+      expect(
+        (await send('PUT', authorization: before, path: '/binding')).statusCode,
+        409,
+      );
+      expect(
+        (await send('PUT', authorization: after, path: '/binding')).statusCode,
+        404,
+      );
+      expect(
+        (await send('GET', binding: 'other-device')).headers.value(header),
+        before,
+      );
+      expect(
+        (await send('GET', token: otherTenantToken)).headers.value(header),
+        before,
+      );
+
+      expect(
+        (await send('POST', authorization: after, original: bytes)).statusCode,
+        202,
+      );
+      final firstBinding = await send('GET');
+      expect(firstBinding.statusCode, 200);
+      expect(
+        firstBinding.headers.value('x-xiaoqi-reading-binding-active'),
+        'true',
+      );
+      final secondBinding = await send('GET', binding: 'other-device');
+      expect(secondBinding.statusCode, 200);
+      expect(
+        secondBinding.headers.value('x-xiaoqi-reading-binding-active'),
+        'false',
+      );
+      const target = {'instance': 'reader', 'sequence': 1, 'page': 3};
+      expect(
+        (await send(
+          'PUT',
+          binding: 'other-device',
+          path: '/target',
+          body: target,
+        )).statusCode,
+        403,
+      );
+      expect(
+        (await send(
+          'PUT',
+          authorization: before,
+          binding: 'other-device',
+          path: '/binding',
+        )).statusCode,
+        200,
+      );
+      expect(
+        (await send(
+          'PUT',
+          binding: 'other-device',
+          path: '/target',
+          body: target,
+        )).statusCode,
+        200,
+      );
+      expect((await send('DELETE')).statusCode, 200);
+      expect(
+        (await send('POST', authorization: after, original: bytes)).statusCode,
+        409,
+      );
+      expect(
+        (await send('PUT', path: '/target', body: target)).statusCode,
+        403,
+      );
+      expect((await send('GET', binding: 'other-device')).statusCode, 200);
+      expect((await send('DELETE', binding: 'other-device')).statusCode, 200);
+      expect((await send('GET')).statusCode, 404);
+      expect(
+        (await send(
+          'PUT',
+          authorization: before,
+          binding: 'other-device',
+          path: '/binding',
+        )).statusCode,
+        409,
+      );
+    },
+  );
+
+  test('reading discussion has a private book-scoped agent route', () async {
+    const otherToken = 'reading-same-tenant-other-account';
+    addDevice(otherToken, 'personal', 'different-reader');
+    AgentApi<Map<String, dynamic>> discussion(String token) =>
+        remoteAgent<Map<String, dynamic>>(
+          url: 'http://127.0.0.1:${server.port}/v1/agent/reading-discussion',
+          headers: () async => {
+            'authorization': 'Bearer $token',
+            'x-xiaoqi-contract': apiContractVersion,
+          },
+        );
+    final reader = discussion(ownerToken);
+    final otherReader = discussion(otherToken);
+    addTearDown(reader.close);
+    addTearDown(otherReader.close);
+    final book = List.filled(64, 'a').join();
+    final wrongBook = List.filled(64, 'b').join();
+    Message request(String task, String bookKey) => Message(
+      role: Role.user,
+      content: [TextPart(text: '这一段怎么理解？')],
+      metadata: {
+        'xiaoqi_agent_turn': {
+          'task_id': task,
+          'workflow_id': 'private-reading-discussion',
+          'user_message_id': '$task-message',
+          'current_turn_text': '这一段怎么理解？',
+          'reading_companion_book': bookKey,
+          'materials': [
+            {'id': 'user-notes', 'kind': 'document', 'text': '我的本地读书笔记。'},
+          ],
+        },
+      },
+    );
+
+    final started = reader.chat().sendStream(
+      message: request('read-first', book),
+    );
+    await started.stream.drain<void>();
+    expect((await started.response).text, '你好');
+    expect(runtime.lastRequest?['_reading_discussion'], isTrue);
+    expect(
+      (runtime.lastRequest?['materials'] as List).single['id'],
+      'user-notes',
+    );
+    final checkpoint =
+        store.get('task/personal/read-first')?.value['agent_snapshot_id']
+            as String;
+    for (final (agent, task, scope) in [
+      (ownerAgent, 'read-on-main', book),
+      (otherReader, 'read-other-account', book),
+      (reader, 'read-other-book', wrongBook),
+    ]) {
+      final rejected = agent
+          .chat(snapshotId: checkpoint)
+          .sendStream(message: request(task, scope));
+      final drained = rejected.stream.drain<void>().catchError((Object _) {});
+      await expectLater(rejected.response, throwsA(isA<Object>()));
+      await drained;
+    }
+    expect(runtime.turnCount, 1);
+
+    const workflow = 'private-reading-discussion';
+    final http = HttpClient();
+    addTearDown(() => http.close(force: true));
+    Future<int> select({
+      String token = ownerToken,
+      String? scope,
+      String discussion = workflow,
+      String? snapshot,
+    }) async {
+      final request = await http.putUrl(
+        Uri.parse(
+          'http://127.0.0.1:${server.port}/v1/reading-discussions/'
+          '${scope ?? book}/$discussion/selection',
+        ),
+      );
+      request.headers
+        ..set('authorization', 'Bearer $token')
+        ..set('x-xiaoqi-contract', apiContractVersion)
+        ..contentType = ContentType.json;
+      request.write(jsonEncode({'snapshot_id': snapshot}));
+      final response = await request.close();
+      await response.drain<void>();
+      return response.statusCode;
+    }
+
+    expect(store.list('reading_discussion_summary/'), isEmpty);
+    expect(await select(token: otherToken, snapshot: checkpoint), 404);
+    expect(await select(scope: wrongBook, snapshot: checkpoint), 404);
+    expect(
+      await select(discussion: 'other-workflow', snapshot: checkpoint),
+      404,
+    );
+    expect(await select(snapshot: checkpoint), 200);
+    String? selectedSnapshot() =>
+        store.list('reading_discussion_summary/').single.$2.value['snapshot_id']
+            as String?;
+    expect(selectedSnapshot(), checkpoint);
+
+    final completed = reader
+        .chat(snapshotId: checkpoint)
+        .sendStream(message: request('read-next', book));
+    await completed.stream.drain<void>();
+    final next = (await completed.response).snapshotId;
+    expect(next, isNotNull);
+    expect(selectedSnapshot(), checkpoint);
+    expect(await select(snapshot: next), 200);
+    expect(selectedSnapshot(), next);
+    expect(await select(snapshot: checkpoint), 200);
+    expect(selectedSnapshot(), checkpoint);
+    expect(await select(), 200);
+    expect(selectedSnapshot(), isNull);
   });
 
   test(

@@ -3,10 +3,14 @@ part of 'epub_document_service.dart';
 /// Only declared, local assets are passed to a Flutter renderer. XHTML stored
 /// for derived revisions contains inert spans instead of live media elements.
 class _EpubMedia {
-  _EpubMedia(Map<String, _ManifestItem> manifest, this.entries)
-    : byPath = {for (final item in manifest.values) item.href: item};
+  _EpubMedia(
+    Map<String, _ManifestItem> manifest,
+    this.entries, {
+    this.inlinePrefix = 'epub-inline:',
+  }) : byPath = {for (final item in manifest.values) item.href: item};
   final Map<String, _ManifestItem> byPath;
   final Map<String, ArchiveFile> entries;
+  final String inlinePrefix;
   final assets = <String, XiaoqiDocumentAsset>{};
   final ratios = <String, double>{};
   int inlineCount = 0;
@@ -173,7 +177,7 @@ void _prepareLocalMarkup(
         id = media.load(chapter, href, alt);
       } else {
         id = media.svg(
-          'epub-inline:${media.inlineCount++}',
+          '${media.inlinePrefix}${media.inlineCount++}',
           e.outerHtml,
           alt,
           chapter,

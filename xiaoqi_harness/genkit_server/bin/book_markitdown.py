@@ -28,6 +28,8 @@ MAX_EPUB_EXPANDED_BYTES = 512 * MIB
 MAX_EPUB_ENTRY_BYTES = 32 * MIB
 MAX_PDF_PAGES = 2000
 MAX_UNIT_CHARS = 60_000
+MAX_BATCH_UNITS = 16
+MAX_COMMAND_BYTES = 4096
 EPUB_TEXT_TYPES = {"application/xhtml+xml", "text/html", "image/svg+xml"}
 EPUB_TEXT_EXTENSIONS = {".xhtml", ".html", ".htm", ".svg"}
 DOCUMENT_MIME_TYPES = {
@@ -84,14 +86,11 @@ class BoundedPdfPage(io.BytesIO):
         return super().write(data)
 
 
-def convert_pdf(input_path, output):
-    from markitdown import StreamInfo
-    from markitdown.converters import PdfConverter
-    from pypdf import PdfReader, PdfWriter
+@contextmanager
+def open_pdf(input_path):
+    from pypdf import PdfReader
     from pypdf.errors import PdfReadError
 
-    converter = PdfConverter()
-    stream_info = StreamInfo(extension=".pdf", mimetype="application/pdf")
     try:
         with input_path.open("rb") as original:
             if b"%PDF-" not in original.read(1024):
@@ -103,23 +102,43 @@ def convert_pdf(input_path, output):
             page_count = len(pdf.pages)
             if page_count > MAX_PDF_PAGES:
                 raise BookLimit()
-            skipped = 0
-            for page_number, page in enumerate(pdf.pages, 1):
-                with BoundedPdfPage() as page_file:
-                    writer = PdfWriter()
-                    writer.add_page(page, excluded_keys=("/Annots", "/B"))
-                    writer.write(page_file)
-                    page_file.seek(0)
-                    markdown = converter.convert(page_file, stream_info).markdown
-                markdown = markdown.replace("\x00", "").strip()
-                if not markdown:
-                    skipped += 1
-                    continue
-                locator = f"PDF 第 {page_number} 页"
-                output.add(locator, f"## {locator}\n\n{markdown}")
-            return page_count, skipped
+            yield pdf, page_count
     except PdfReadError as error:
         raise InvalidBook() from error
+
+
+def pdf_page_converter():
+    from markitdown import StreamInfo
+    from markitdown.converters import PdfConverter
+    from pypdf import PdfWriter
+
+    converter = PdfConverter()
+    stream_info = StreamInfo(extension=".pdf", mimetype="application/pdf")
+
+    def convert(page):
+        with BoundedPdfPage() as page_file:
+            writer = PdfWriter()
+            writer.add_page(page, excluded_keys=("/Annots", "/B"))
+            writer.write(page_file)
+            page_file.seek(0)
+            markdown = converter.convert(page_file, stream_info).markdown
+        return markdown.replace("\x00", "").strip()
+
+    return convert
+
+
+def convert_pdf(input_path, output):
+    convert_page = pdf_page_converter()
+    with open_pdf(input_path) as (pdf, page_count):
+        skipped = 0
+        for page_number, page in enumerate(pdf.pages, 1):
+            markdown = convert_page(page)
+            if not markdown:
+                skipped += 1
+                continue
+            locator = f"PDF 第 {page_number} 页"
+            output.add(locator, f"## {locator}\n\n{markdown}")
+        return page_count, skipped
 
 
 def open_epub_member(archive, name):
@@ -182,14 +201,12 @@ def epub_spine_document(manifest, item_id):
     return None
 
 
-def convert_epub(input_path, output):
+@contextmanager
+def open_epub(input_path):
     from defusedxml.ElementTree import parse
     from defusedxml.common import DefusedXmlException
-    from markitdown import StreamInfo
-    from markitdown.converters import HtmlConverter
     from xml.etree.ElementTree import ParseError
 
-    converter = HtmlConverter()
     try:
         with ZipFile(input_path) as archive:
             check_archive(archive, MAX_EPUB_EXPANDED_BYTES, MAX_EPUB_ENTRY_BYTES)
@@ -207,33 +224,64 @@ def convert_epub(input_path, output):
             spine = book.findall("{*}spine/{*}itemref")
             if not spine:
                 raise InvalidBook()
+            if len(spine) > MAX_ARCHIVE_ENTRIES:
+                raise BookLimit()
+            units = []
             for number, item in enumerate(spine, 1):
                 item_id = item.get("idref", "")
                 if item_id not in manifest:
                     raise InvalidBook()
-                href = epub_spine_document(manifest, item_id)
-                if href is None:
-                    continue
-                path = resolve_epub_member(archive, posixpath.dirname(package), href)
-                with open_epub_member(archive, path) as chapter:
-                    converted = converter.convert(
-                        chapter,
-                        StreamInfo(mimetype="application/xhtml+xml", extension=".xhtml"),
-                        strip=["img", "head", "style", "script"],
+                unit = {
+                    "id": number,
+                    "item_id": item_id,
+                    "locator": f"EPUB 第 {number} 节",
+                }
+                reference = epub_spine_document(manifest, item_id)
+                if reference is not None:
+                    unit["href"] = resolve_epub_member(
+                        archive, posixpath.dirname(package), reference
                     )
-                markdown = converted.markdown.replace("\x00", "").strip()
-                if not markdown:
-                    continue
-                locator = f"EPUB 第 {number} 节"
-                heading = re.match(r"^#{1,6}[ \t]+([^\r\n]+)", markdown)
-                title = heading[1] if heading else converted.title
-                if title:
-                    clean_title = " ".join(str(title).split())[:100]
-                    if clean_title:
-                        locator += f" · {clean_title}"
-                output.add(locator, markdown)
+                units.append(unit)
+            yield archive, units
     except (BadZipFile, DefusedXmlException, ParseError) as error:
         raise InvalidBook() from error
+
+
+def epub_unit_converter(archive):
+    from markitdown import StreamInfo
+    from markitdown.converters import HtmlConverter
+
+    converter = HtmlConverter()
+    stream_info = StreamInfo(mimetype="application/xhtml+xml", extension=".xhtml")
+
+    def convert(unit):
+        locator = unit["locator"]
+        if "href" not in unit:
+            return locator, ""
+        with open_epub_member(archive, unit["href"]) as chapter:
+            converted = converter.convert(
+                chapter, stream_info, strip=["img", "head", "style", "script"]
+            )
+        markdown = converted.markdown.replace("\x00", "").strip()
+        if markdown:
+            heading = re.match(r"^#{1,6}[ \t]+([^\r\n]+)", markdown)
+            title = heading[1] if heading else converted.title
+            if title:
+                clean_title = " ".join(str(title).split())[:100]
+                if clean_title:
+                    locator += f" · {clean_title}"
+        return locator, markdown
+
+    return convert
+
+
+def convert_epub(input_path, output):
+    with open_epub(input_path) as (archive, units):
+        convert_unit = epub_unit_converter(archive)
+        for unit in units:
+            locator, markdown = convert_unit(unit)
+            if markdown:
+                output.add(locator, markdown)
     return None, 0
 
 
@@ -315,8 +363,8 @@ def convert_plain_text(converter, source, stream_info):
         return converter.convert(source, stream_info)
 
 
-def convert_book(input_path, format, output_path):
-    if not input_path.is_file() or input_path.resolve() == output_path.resolve():
+def validate_input(input_path, format):
+    if not input_path.is_file():
         raise InvalidBook()
     size = input_path.stat().st_size
     if not size:
@@ -324,6 +372,12 @@ def convert_book(input_path, format, output_path):
     max_input = MAX_INPUT_BYTES if format in ("pdf", "epub") else MAX_DOCUMENT_BYTES
     if size > max_input:
         raise BookLimit()
+
+
+def convert_book(input_path, format, output_path):
+    validate_input(input_path, format)
+    if input_path.resolve() == output_path.resolve():
+        raise InvalidBook()
     # Publish the result only after all readable chapters or pages converted.
     descriptor, path = tempfile.mkstemp(prefix=".book-markitdown-", dir=output_path.parent)
     temporary = Path(path)
@@ -378,17 +432,141 @@ def silence_parser_output():
             os.close(original_stderr)
 
 
+def pdf_sections(pdf, page_count):
+    from pypdf.errors import PdfReadError
+
+    try:
+        # Nested entries belong to their top-level chapter. An ambiguous
+        # outline falls back to prioritizing the current physical page.
+        entries = [item for item in pdf.outline if not isinstance(item, list)]
+        starts = [pdf.get_destination_page_number(item) + 1 for item in entries]
+        if not starts or starts[0] < 1 or starts[-1] > page_count:
+            return []
+        if any(left >= right for left, right in zip(starts, starts[1:])):
+            return []
+        return [
+            {"title": entry.title[:100], "start": start, "end": end - 1}
+            for entry, start, end in zip(entries, starts, [*starts[1:], page_count + 1])
+        ]
+    except (AttributeError, KeyError, TypeError, ValueError, RecursionError, PdfReadError):
+        return []
+
+
+@contextmanager
+def open_interactive_book(input_path, format):
+    if format == "epub":
+        with open_epub(input_path) as (archive, units):
+            yield units, [], epub_unit_converter(archive)
+    elif format == "pdf":
+        with open_pdf(input_path) as (pdf, page_count):
+            convert_page = pdf_page_converter()
+            units = [
+                {"id": page, "page": page, "locator": f"PDF 第 {page} 页"}
+                for page in range(1, page_count + 1)
+            ]
+
+            def convert(unit):
+                return unit["locator"], convert_page(pdf.pages[unit["page"] - 1])
+
+            yield units, pdf_sections(pdf, page_count), convert
+    else:
+        raise InvalidBook()
+
+
+def read_batch(source, unit_count):
+    line = source.readline(MAX_COMMAND_BYTES + 1)
+    if not line:
+        return None
+    if len(line) > MAX_COMMAND_BYTES or not line.endswith(b"\n"):
+        raise InvalidBook()
+    try:
+        command = json.loads(line)
+    except (UnicodeError, ValueError, RecursionError) as error:
+        raise InvalidBook() from error
+    if not isinstance(command, dict) or command.keys() != {"ids"}:
+        raise InvalidBook()
+    ids = command["ids"]
+    if not isinstance(ids, list) or not 1 <= len(ids) <= MAX_BATCH_UNITS:
+        raise InvalidBook()
+    if any(type(value) is not int or not 1 <= value <= unit_count for value in ids):
+        raise InvalidBook()
+    if len(ids) != len(set(ids)):
+        raise InvalidBook()
+    return ids
+
+
+def run_interactive(input_path, format):
+    validate_input(input_path, format)
+    # Duplicate the protocol descriptor so native parser output can stay
+    # redirected even while results are streamed to the coordinator.
+    source = sys.stdin.buffer
+    with os.fdopen(os.dup(1), "wb") as response, silence_parser_output():
+        def emit(record):
+            line = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8", errors="replace"
+            )
+            if len(line) + 1 > MAX_OUTPUT_BYTES:
+                raise BookLimit()
+            response.write(line + b"\n")
+            response.flush()
+
+        with open_interactive_book(input_path, format) as (units, sections, convert):
+            emit({"type": "catalog", "units": units, "sections": sections})
+            sizes = {}
+            total_bytes = 0
+            while (ids := read_batch(source, len(units))) is not None:
+                for unit_id in ids:
+                    unit = units[unit_id - 1]
+                    try:
+                        locator, markdown = convert(unit)
+                    except (BookLimit, MemoryError):
+                        raise
+                    except Exception:
+                        # Keep diagnostics private and allow the remaining
+                        # units in this book to complete independently.
+                        emit(
+                            {
+                                "type": "unit",
+                                "id": unit_id,
+                                "locator": unit["locator"],
+                                "status": "failed",
+                            }
+                        )
+                        continue
+                    text_size = len(markdown.encode("utf-8", errors="replace"))
+                    total_bytes += text_size - sizes.get(unit_id, 0)
+                    if total_bytes > MAX_MARKDOWN_BYTES:
+                        raise BookLimit()
+                    sizes[unit_id] = text_size
+                    result = {
+                        "type": "unit",
+                        "id": unit_id,
+                        "locator": locator,
+                        "status": "ready" if markdown else "no_text",
+                    }
+                    if markdown:
+                        result["markdown"] = markdown
+                    emit(result)
+                emit({"type": "batch_done"})
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_path", type=Path)
     parser.add_argument("format", choices=("pdf", "epub", *DOCUMENT_MIME_TYPES))
-    parser.add_argument("output_path", type=Path)
+    parser.add_argument("output_path", type=Path, nargs="?")
+    parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
+    if args.interactive == (args.output_path is not None):
+        parser.error("provide exactly one of output_path and --interactive")
     # Word wrapping imports NumPy through optional upstream dependencies.
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     try:
         limit_worker_memory()
+        if args.interactive:
+            run_interactive(args.input_path, args.format)
+            return 0
         # PDF/HTML diagnostics may include book strings. Only publish our
         # fixed error categories outside the worker process.
         with silence_parser_output():

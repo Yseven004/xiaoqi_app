@@ -31,6 +31,8 @@ Future<void> main(List<String> args) async {
     return;
   }
   store.removeOrphanedTempFiles();
+  // Recover queued reading books before receiving the first client request.
+  store.progressiveBooks;
   final imageService = ImageService(store);
   final attachments = AttachmentService(store);
   final api = XiaoqiApi(

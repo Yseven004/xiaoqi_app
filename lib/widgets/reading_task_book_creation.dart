@@ -20,6 +20,7 @@ import 'book_pdf_import_sheet.dart';
 import 'book_source_import.dart';
 import 'app_toast.dart';
 import 'online_book_search_dialog.dart';
+import 'reading_book_cloud_choice.dart';
 
 Future<BookLibraryItem?> createBookForReadingTask(
   BuildContext context, {
@@ -111,6 +112,8 @@ Future<int?> _importBook(
     }
 
     try {
+      final cloudChoice = await showReadingBookCloudChoice(context);
+      if (!context.mounted || cloudChoice == null) return null;
       final sourcePath = await _ensurePickedFilePath(file);
       final format = inferBookSourceFormat(file.name);
       final newBook = selection.newBook;
@@ -127,6 +130,11 @@ Future<int?> _importBook(
               displayName: file.name,
               format: format,
             );
+      await saveReadingBookCloudChoice(
+        context.mounted ? context : null,
+        outcome.source,
+        cloudChoice,
+      );
       if (outcome.source.format == 'pdf' &&
           outcome.source.catalogStatus != 'processing' &&
           outcome.source.catalogStatus != 'confirmed' &&

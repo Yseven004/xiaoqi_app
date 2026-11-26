@@ -152,6 +152,8 @@ void main() {
   testWidgets('local picker cancel leaves the book ready for another import', (
     tester,
   ) async {
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
     final original = FilePickerPlatform.instance;
     final picker = _Picker();
     FilePickerPlatform.instance = picker;
@@ -176,6 +178,10 @@ void main() {
     picker.selection = _PickedSource(file);
     await _openChooser(tester);
     await tester.tap(find.text('本机导入'));
+    final localOnly = find.text('仅保存在本机');
+    await _awaitUi(tester, localOnly);
+    expect(library.importedBook, isNull);
+    await tester.tap(localOnly);
     await _awaitUi(tester, find.text('本机资料.epub'));
     expect(library.importedBook, 4);
     expect(library.importedPath, file.path);
@@ -228,6 +234,8 @@ void main() {
   testWidgets('Wechat captures only a book file during the scoped guide', (
     tester,
   ) async {
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
     final directory = Directory.systemTemp.createTempSync('book-share-');
     addTearDown(() => directory.deleteSync(recursive: true));
     final file = File('${directory.path}/shared.epub')
@@ -255,6 +263,10 @@ void main() {
     expect(find.text('选择已保存文件'), findsOneWidget);
     expect(routeExistingBookSharedMedia([other]), [other]);
     expect(routeExistingBookSharedMedia([other, epub]), [other]);
+    final localOnly = find.text('仅保存在本机');
+    await _awaitUi(tester, localOnly);
+    expect(library.importedBook, isNull);
+    await tester.tap(localOnly);
     await _awaitUi(tester, find.text('shared.epub'));
     expect(library.importedBook, 4);
     expect(library.importedPath, file.path);

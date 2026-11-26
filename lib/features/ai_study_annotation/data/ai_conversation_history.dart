@@ -8,6 +8,8 @@ import '../domain/ai_chat_web_source.dart';
 import '../domain/ai_chat_process.dart';
 import '../../../models/home_chat_attachment.dart';
 import '../../../models/chat_annotation.dart';
+import '../../../models/reading_companion_evidence.dart';
+import '../../../services/reading_book_preparation.dart';
 
 int _generatedMessageSequence = 0;
 const String _rootMessageKey = '__conversation_root__';
@@ -47,6 +49,7 @@ class AiConversationMessage {
     this.agentProcessStatus,
     this.agentProcessExpanded = false,
     this.agentWebSources = const [],
+    this.readingEvidence = const [],
     this.bookSearchId,
     Map<String, Object?>? agentClarification,
   }) : id = id ?? _newMessageId(),
@@ -88,6 +91,7 @@ class AiConversationMessage {
   final String? agentProcessStatus;
   final bool agentProcessExpanded;
   final List<AiChatWebSource> agentWebSources;
+  final List<ReadingCompanionEvidence> readingEvidence;
   final String? bookSearchId;
   final Map<String, Object?>? agentClarification;
 
@@ -135,6 +139,7 @@ class AiConversationMessage {
     String? agentProcessStatus,
     bool? agentProcessExpanded,
     List<AiChatWebSource>? agentWebSources,
+    List<ReadingCompanionEvidence>? readingEvidence,
     String? bookSearchId,
     Map<String, Object?>? agentClarification,
     bool clearAgentClarification = false,
@@ -181,6 +186,7 @@ class AiConversationMessage {
     agentProcessStatus: agentProcessStatus ?? this.agentProcessStatus,
     agentProcessExpanded: agentProcessExpanded ?? this.agentProcessExpanded,
     agentWebSources: agentWebSources ?? this.agentWebSources,
+    readingEvidence: readingEvidence ?? this.readingEvidence,
     bookSearchId: bookSearchId ?? this.bookSearchId,
     agentClarification: clearAgentClarification
         ? null
@@ -236,6 +242,8 @@ class AiConversationMessage {
       'agent_web_sources': agentWebSources
           .map((source) => source.toJson())
           .toList(),
+    if (readingEvidence.isNotEmpty)
+      'reading_evidence': readingEvidence.map((entry) => entry.toJson()).toList(),
     if (bookSearchId != null) 'book_search_id': bookSearchId,
     if (agentClarification != null) 'agent_clarification': agentClarification,
   };
@@ -313,6 +321,7 @@ class AiConversationMessage {
                 .map(AiChatWebSource.fromJson)
                 .toList(growable: false)
           : const [],
+      readingEvidence: ReadingCompanionEvidence.fromPayload(raw['reading_evidence']),
       bookSearchId: raw['book_search_id'] is String
           ? raw['book_search_id'] as String
           : null,
@@ -350,6 +359,7 @@ class AiConversationRecord {
     this.bookId,
     this.bookName = '',
     bool? readingCompanion,
+    this.usesDedicatedCompanion = false,
     this.companionSourceId,
     this.companionOpenedAt,
     this.pageLabel = '',
@@ -384,6 +394,7 @@ class AiConversationRecord {
   final int? bookId;
   final String bookName;
   final bool isReadingCompanion;
+  final bool usesDedicatedCompanion;
   final int? companionSourceId;
 
   /// Last opened from companion history. Stored independently of the chat tree.
@@ -819,6 +830,7 @@ class AiConversationRecord {
     int? bookId,
     String bookName = '',
     bool readingCompanion = false,
+    bool usesDedicatedCompanion = false,
     int? companionSourceId,
     String pageLabel = '',
     bool enableAutoTitle = false,
@@ -833,6 +845,7 @@ class AiConversationRecord {
       bookId: bookId,
       bookName: bookName,
       readingCompanion: readingCompanion,
+      usesDedicatedCompanion: usesDedicatedCompanion,
       companionSourceId: companionSourceId,
       pageLabel: pageLabel,
       webSources: const [],
@@ -882,6 +895,7 @@ class AiConversationRecord {
       bookName: raw['book_name']?.toString() ?? '',
       // Older companion conversations stored their origin only on user turns.
       readingCompanion: raw['reading_companion'] == true ? true : null,
+      usesDedicatedCompanion: raw['dedicated_reading_companion'] == true,
       companionSourceId: int.tryParse(
         raw['companion_source_id']?.toString() ?? '',
       ),
@@ -940,6 +954,7 @@ class AiConversationRecord {
       bookId: bookId,
       bookName: bookName,
       readingCompanion: isReadingCompanion,
+      usesDedicatedCompanion: usesDedicatedCompanion,
       companionSourceId: companionSourceId,
       companionOpenedAt: companionOpenedAt ?? this.companionOpenedAt,
       pageLabel: pageLabel ?? this.pageLabel,
@@ -963,6 +978,7 @@ class AiConversationRecord {
     'book_id': bookId,
     'book_name': bookName,
     if (isReadingCompanion) 'reading_companion': true,
+    if (usesDedicatedCompanion) 'dedicated_reading_companion': true,
     if (companionSourceId != null) 'companion_source_id': companionSourceId,
     'page_label': pageLabel,
     'is_pinned': isPinned,
@@ -1100,6 +1116,7 @@ class AiConversationHistoryService {
   final Map<String, _VersionSelectionSnapshot> _persistedVersionSelections = {};
   final Map<String, _VersionSelectionSnapshot> _versionSelectionFallbacks = {};
   final Map<String, int> _versionSelectionRevisions = {};
+  final _readingSelections = <String, ({int book, String snapshot})>{};
   final List<_PendingVersionSelectionWrite> _versionSelectionWaiters = [];
   bool _versionSelectionFlushScheduled = false;
   SharedPreferences? _preferences;
@@ -1520,6 +1537,12 @@ class AiConversationHistoryService {
     );
     final activeIds = _records.keys.toSet();
     snapshot.removeWhere((id, _) => !activeIds.contains(id));
+    final committedRecords = [
+      for (final entry in snapshot.entries)
+        if (_records[entry.key] case final record?)
+          if (record.usesDedicatedCompanion)
+            record.copyWith(selectedChildren: entry.value.selectedChildren),
+    ];
     final saved = await _preferences!.setString(
       _versionSelectionStorageKey,
       jsonEncode({
@@ -1531,6 +1554,7 @@ class AiConversationHistoryService {
       ..clear()
       ..addAll(snapshot);
     _versionSelections.removeWhere((id, _) => !activeIds.contains(id));
+    await _queueReadingSelections(committedRecords);
   }
 
   Future<void> setPinned(String id, bool pinned) async {
@@ -1572,6 +1596,7 @@ class AiConversationHistoryService {
           bookId: bookId,
           bookName: bookName,
           readingCompanion: record.isReadingCompanion,
+          usesDedicatedCompanion: record.usesDedicatedCompanion,
           companionSourceId: record.companionSourceId,
           companionOpenedAt: record.companionOpenedAt,
           pageLabel: record.pageLabel,
@@ -1616,6 +1641,7 @@ class AiConversationHistoryService {
           createdAt: record.createdAt,
           updatedAt: record.updatedAt,
           readingCompanion: record.isReadingCompanion,
+          usesDedicatedCompanion: record.usesDedicatedCompanion,
           companionSourceId: record.companionSourceId,
           companionOpenedAt: record.companionOpenedAt,
           pageLabel: record.pageLabel,
@@ -1687,6 +1713,15 @@ class AiConversationHistoryService {
       persist: () async {
         await _writeRecords();
         for (final record in previous.values) {
+          _readingSelections.remove(record.id);
+          final bookId = record.bookId;
+          if (record.usesDedicatedCompanion && bookId != null) {
+            try {
+              await ReadingBookPreparation.instance.deleteDiscussion(bookId, record.id);
+            } on Object {
+              // The local conversation is already deleted.
+            }
+          }
           if (record.companionOpenedAt != null) {
             // The history deletion is committed even if a visit marker cannot
             // be removed. A marker alone can never recreate a conversation.
@@ -1758,11 +1793,57 @@ class AiConversationHistoryService {
         _versionSelections[record.id] = persisted;
       }
     }
+    await _queueReadingSelections(currentRecords);
     // The full record write already committed these selections. The compact
     // index is a fast-path mirror, so its failure must not roll back that write.
     try {
       await _writeVersionSelections();
     } catch (_) {}
+  }
+
+  Future<void> _queueReadingSelections(
+    Iterable<AiConversationRecord> records,
+  ) async {
+    for (final record in records) {
+      if (!record.usesDedicatedCompanion) continue;
+      final previous = _readingSelections[record.id];
+      final next = _selectedReadingSnapshot(record);
+      if (previous == next) continue;
+      final book = next?.book ?? previous?.book;
+      if (book == null) continue;
+      try {
+        await ReadingBookPreparation.instance.queueDiscussionSelection(
+          book,
+          record.id,
+          next?.snapshot,
+        );
+        if (next == null) {
+          _readingSelections.remove(record.id);
+        } else {
+          _readingSelections[record.id] = next;
+        }
+      } on Object {
+        // Reading history is already durable. A later save can queue it again.
+      }
+    }
+  }
+
+  static ({int book, String snapshot})? _selectedReadingSnapshot(
+    AiConversationRecord record,
+  ) {
+    final book = record.bookId;
+    if (book == null) return null;
+    for (final message in record.messages.reversed) {
+      final snapshot = message.agentSnapshotId;
+      if (!message.isUser &&
+          !message.isIncomplete &&
+          message.hasAssistantContent &&
+          snapshot != null &&
+          snapshot.isNotEmpty) {
+        return (book: book, snapshot: snapshot);
+      }
+    }
+    return null;
   }
 
   Future<void> _ensureLoaded() async {
@@ -1846,6 +1927,11 @@ class AiConversationHistoryService {
       // History is an enhancement; a storage/plugin failure must not block
       // opening the editor or sending the current question.
     } finally {
+      for (final record in _records.values) {
+        if (!record.usesDedicatedCompanion) continue;
+        final selected = _selectedReadingSnapshot(record);
+        if (selected != null) _readingSelections[record.id] = selected;
+      }
       _loaded = true;
     }
   }

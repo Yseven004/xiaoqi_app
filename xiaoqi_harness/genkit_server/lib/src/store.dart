@@ -4,9 +4,11 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:genkit/experimental.dart'
     show SessionSnapshot, SessionStore, SnapshotMutator, generateUuidV4;
+import 'package:genkit/genkit.dart' show GenkitException, StatusCode;
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 import 'companion_annotation_repository.dart';
+import 'progressive_book_service.dart';
 
 class StoredDocument {
   const StoredDocument(this.value, this.revision);
@@ -53,6 +55,7 @@ class CloudStore {
   late final File database;
   late final Database _db;
   late final companionAnnotations = CompanionAnnotationRepository(_db);
+  late final progressiveBooks = ProgressiveBookService(this, _db);
 
   StoredDocument? get(String key) {
     final rows = _db.select(
@@ -300,6 +303,44 @@ class CloudSessionStore implements SessionStore {
 
   final CloudStore _store;
 
+  void claimReadingSession(
+    String tenant,
+    String sessionId,
+    String account,
+    String book,
+    String? sourceVersion,
+    String workflow,
+  ) {
+    final key = 'genkit/reading-owner/$tenant/$sessionId';
+    final existing = _store.get(key);
+    if (existing == null) {
+      _store.put(key, {
+        'account': account,
+        'book': book,
+        'source_version': sourceVersion,
+        'workflow': workflow,
+      }, null);
+    } else if (existing.value['account'] != account ||
+        existing.value['book'] != book ||
+        existing.value['source_version'] != sourceVersion ||
+        existing.value['workflow'] != workflow) {
+      throw GenkitException('伴读会话不属于这本书', status: StatusCode.notFound);
+    }
+  }
+
+  bool ownsReadingSession(
+    String tenant,
+    String sessionId,
+    String account,
+    String book,
+    String workflow,
+  ) {
+    final scope = _store.get('genkit/reading-owner/$tenant/$sessionId')?.value;
+    return scope?['account'] == account &&
+        scope?['book'] == book &&
+        scope?['workflow'] == workflow;
+  }
+
   String? annotationSessionOwner(String tenant, String sessionId) =>
       _store.get(_annotationOwnerKey(tenant, sessionId))?.value['account']
           as String?;
@@ -319,6 +360,12 @@ class CloudSessionStore implements SessionStore {
     String sessionId,
     Map<String, dynamic>? context,
   ) {
+    final reading = _store.get('genkit/reading-owner/$tenant/$sessionId')?.value;
+    final isReading = context?['_reading_discussion'] == true;
+    if (reading != null) {
+      return isReading && reading['account'] == context?['_annotation_account'];
+    }
+    if (isReading) return false;
     final owner = annotationSessionOwner(tenant, sessionId);
     return owner == null || owner == context?['_annotation_account'];
   }

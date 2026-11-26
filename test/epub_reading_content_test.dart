@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
-import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -13,6 +13,7 @@ import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/services/database_service.dart';
 import 'package:xiaoqi_app/models/xiaoqi_document.dart';
 import 'package:xiaoqi_app/services/epub_document_service.dart';
+import 'package:xiaoqi_app/services/source_document_loader.dart';
 import 'package:xiaoqi_app/widgets/xiaoqi_document_block_view.dart';
 
 List<int> sample() {
@@ -47,8 +48,190 @@ List<int> sample() {
   return ZipEncoder().encode(archive);
 }
 
+List<int> _lateChapterBook({bool missingLeading = false}) {
+  final files = {
+    'META-INF/container.xml':
+        '<container><rootfile full-path="book.opf"/></container>',
+    'book.opf': '''
+<package><metadata><title>Late chapter</title></metadata><manifest>
+<item id="early" href="early.xhtml" media-type="application/xhtml+xml"/>
+<item id="late" href="late.xhtml" media-type="application/xhtml+xml"/>
+<item id="nav" href="nav.xhtml" properties="nav" media-type="application/xhtml+xml"/>
+</manifest><spine><itemref idref="early"/><itemref idref="late"/></spine></package>
+''',
+    'nav.xhtml': '''
+<html><body><nav epub:type="toc"><ol>
+<li><a href="early.xhtml">Early</a></li>
+<li><a href="late.xhtml#section">Late</a></li>
+</ol></nav></body></html>
+''',
+    if (!missingLeading)
+      'early.xhtml': '''
+<html><body><span role="doc-pagebreak"></span><p>Earlier</p>
+<svg width="10" height="10"><rect width="10" height="10" fill="blue"/></svg>
+</body></html>
+''',
+    'late.xhtml': '''
+<html><body><h1>Late</h1><span role="doc-pagebreak"></span>
+<p id="section">读到这里时，正文应保持原样。</p>
+<svg width="10" height="10"><rect width="10" height="10" fill="red"/></svg>
+<span role="doc-pagebreak" aria-label="42"></span>
+</body></html>
+''',
+  };
+  final archive = Archive();
+  for (final entry in files.entries) {
+    archive.addFile(ArchiveFile.bytes(entry.key, utf8.encode(entry.value)));
+  }
+  return ZipEncoder().encode(archive);
+}
+
+BookSourceRecord _readerSource(File file) => BookSourceRecord(
+  id: 3,
+  bookId: 1,
+  kind: 'file',
+  displayName: 'Late chapter',
+  filePath: file.path,
+  fileSize: file.lengthSync(),
+  contentHash: 'test',
+  status: 'ready',
+  format: 'epub',
+  createdAt: '0',
+  updatedAt: '0',
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'cold reader exposes target before reading a missing earlier chapter',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('epub-target-');
+      addTearDown(() => directory.delete(recursive: true));
+      final file = await File(
+        '${directory.path}/book.epub',
+      ).writeAsBytes(_lateChapterBook(missingLeading: true));
+      final load = await SourceDocumentLoader.openEpubReader(
+        _readerSource(file),
+        initialChapterId: 'epub:late',
+      );
+      await expectLater(
+        load.updates,
+        emitsInOrder([
+          predicate<EpubReaderUpdate>((update) {
+            final preview = update.preview!;
+            final chapter = update.document.chapters.single;
+            expect(chapter.id, 'epub:late');
+            expect(chapter.plainText, contains('读到这里时，正文应保持原样。'));
+            expect(preview.spine.map((item) => item.chapterId), [
+              'epub:early',
+              'epub:late',
+            ]);
+            expect(preview.outline.last.fragment, 'section');
+            expect(
+              chapter.blocks
+                  .firstWhere((block) => block.kind == 'page_break')
+                  .originalPageLabel,
+              isNull,
+            );
+            return true;
+          }),
+          emitsError(isA<StateError>()),
+          emitsDone,
+        ]),
+      );
+    },
+  );
+
+  test(
+    'prioritized previews keep source anchors and canonical page numbering',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('epub-full-');
+      addTearDown(() => directory.delete(recursive: true));
+      final bytes = _lateChapterBook();
+      final file = await File(
+        '${directory.path}/book.epub',
+      ).writeAsBytes(bytes);
+      const service = EpubDocumentService();
+      var target = 'epub:late';
+      final previews = <EpubReaderPreview>[];
+      final complete = await service.parseForReader(
+        file.path,
+        takeTarget: () {
+          final next = target;
+          target = '';
+          return next.isEmpty ? null : next;
+        },
+        publish: (preview) {
+          previews.add(preview);
+          if (previews.length == 1) target = 'epub:early';
+        },
+      );
+      expect(previews.map((preview) => preview.document.chapters.single.id), [
+        'epub:late',
+        'epub:early',
+      ]);
+      final late = previews.first.document.chapters.single;
+      expect(
+        late.fragmentBlocks['section'],
+        complete.resolveReadingLink('late.xhtml#section')?.blockId,
+      );
+      expect(complete.toJson(), service.parseBytes(bytes).toJson());
+      expect(
+        complete.chapters.last.blocks
+            .where((block) => block.kind == 'page_break')
+            .map((block) => block.originalPageLabel),
+        ['3', '42'],
+      );
+      expect(
+        late.blocks
+            .where((block) => block.kind == 'page_break')
+            .map((block) => block.originalPageLabel),
+        [null, '42'],
+      );
+      final previewAsset = previews.first.document.assets.single;
+      final canonicalAsset = complete.assets.last;
+      expect(complete.assets.map((asset) => asset.id), [
+        'epub-inline:0',
+        'epub-inline:1',
+      ]);
+      expect(
+        previewAsset.id,
+        isNot(isIn(complete.assets.map((asset) => asset.id))),
+      );
+      expect(previewAsset.bytes, canonicalAsset.bytes);
+    },
+  );
+
+  test('warmed EPUB exposes only the complete persistent document', () async {
+    final directory = await Directory.systemTemp.createTemp('epub-cache-');
+    addTearDown(() => directory.delete(recursive: true));
+    const channel = MethodChannel('plugins.flutter.io/path_provider');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'getTemporaryDirectory') return directory.path;
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final file = await File(
+      '${directory.path}/book.epub',
+    ).writeAsBytes(_lateChapterBook());
+    final source = _readerSource(file);
+    await SourceDocumentLoader.prepareReaderCache(source);
+    final load = await SourceDocumentLoader.openEpubReader(
+      source,
+      initialChapterId: 'epub:late',
+    );
+    final cacheDir = load.layoutCache!.parent;
+    expect(await File('${cacheDir.path}/document.json').exists(), isTrue);
+    final update = await load.updates.single;
+    expect(update.preview, isNull);
+    expect(update.document.chapters.map((chapter) => chapter.id), [
+      'epub:early',
+      'epub:late',
+    ]);
+  });
+
   test(
     'an existing multi-megabyte SQLite revision reads across UTF-8 boundaries',
     () async {

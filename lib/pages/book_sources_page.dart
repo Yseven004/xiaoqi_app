@@ -6,15 +6,19 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import '../config/book_flow_theme.dart';
+import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../models/book_source.dart';
 import '../models/xiaoqi_document.dart';
 import '../services/book_library_service.dart';
+import '../services/reading_book_preparation.dart';
 import '../services/source_document_loader.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/book_editor_dialog.dart';
 import '../widgets/book_source_import.dart';
 
 enum _SourceAction { setPrimary, move, share, remove, deleteFile }
+
+typedef _CloudSourceStatus = ({String label, bool retry, bool active});
 
 class BookSourcesPage extends StatefulWidget {
   const BookSourcesPage({
@@ -30,8 +34,15 @@ class BookSourcesPage extends StatefulWidget {
   State<BookSourcesPage> createState() => _BookSourcesPageState();
 }
 
-class _BookSourcesPageState extends State<BookSourcesPage> {
+class _BookSourcesPageState extends State<BookSourcesPage>
+    with WidgetsBindingObserver {
   List<BookSourceRecord> _sources = const [];
+  Map<int, _CloudSourceStatus> _cloudStatus = const {};
+  Timer? _cloudRefresh;
+  int _cloudRequest = 0;
+  bool _routeVisible = false;
+  bool _foreground = true;
+  bool _retryingCloud = false;
   bool _loading = true;
   bool _importing = false;
   bool _choosingSource = false;
@@ -41,7 +52,95 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
   @override
   void initState() {
     super.initState();
-    _loadSources();
+    final binding = WidgetsBinding.instance;
+    final lifecycle = binding.lifecycleState;
+    _foreground = lifecycle == null || lifecycle == AppLifecycleState.resumed;
+    binding.addObserver(this);
+    CapabilityCloudSync.instance.emailSessionRevision.addListener(_onAccount);
+    unawaited(_loadSources());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final visible = ModalRoute.isCurrentOf(context) ?? true;
+    if (_routeVisible == visible) return;
+    _routeVisible = visible;
+    _requestCloudStatus();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    _requestCloudStatus();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    CapabilityCloudSync.instance.emailSessionRevision.removeListener(
+      _onAccount,
+    );
+    _cloudRefresh?.cancel();
+    super.dispose();
+  }
+
+  void _onAccount() {
+    setState(() => _cloudStatus = const {});
+    _requestCloudStatus();
+  }
+
+  void _requestCloudStatus() {
+    _cloudRefresh?.cancel();
+    final request = ++_cloudRequest;
+    if (!_routeVisible || !_foreground || _sources.isEmpty) return;
+    unawaited(_loadCloudStatus(request));
+  }
+
+  Future<void> _loadCloudStatus(int request) async {
+    final entries = await Future.wait([
+      for (final source in _sources.where(
+        (source) =>
+            source.status == 'ready' &&
+            const {
+              'epub',
+              'pdf',
+            }.contains(normalizeBookSourceFormat(source.format)),
+      ))
+        () async {
+          try {
+            final data = await ReadingBookPreparation.instance.cloudStatus(
+              source,
+            );
+            return (source.id, _describeCloudStatus(source, data));
+          } on Object {
+            return (
+              source.id,
+              (label: '伴读 · 暂时无法同步状态', retry: true, active: true),
+            );
+          }
+        }(),
+    ]);
+    if (!mounted || request != _cloudRequest) return;
+    final next = {for (final (id, status) in entries) id: ?status};
+    setState(() => _cloudStatus = next);
+    if (next.values.any((status) => status.active)) {
+      _cloudRefresh = Timer(const Duration(seconds: 4), _requestCloudStatus);
+    }
+  }
+
+  Future<void> _retryCloud() async {
+    if (_retryingCloud) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() => _retryingCloud = true);
+    try {
+      await ReadingBookPreparation.instance.resume(widget.bookLibraryService);
+    } finally {
+      if (mounted) {
+        setState(() => _retryingCloud = false);
+        _requestCloudStatus();
+      }
+    }
   }
 
   Future<void> _loadSources() async {
@@ -71,6 +170,7 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
         _loading = false;
         _error = null;
       });
+      _requestCloudStatus();
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -416,6 +516,8 @@ class _BookSourcesPageState extends State<BookSourcesPage> {
         return _SourceRow(
           key: ValueKey(source.id),
           source: source,
+          cloudStatus: _cloudStatus[source.id],
+          onRetryCloud: _retryingCloud ? null : _retryCloud,
           editing: _editingSourceId == source.id,
           onTap: () => _openSource(source),
           onEdit: () => setState(() => _editingSourceId = source.id),
@@ -436,6 +538,8 @@ class _SourceRow extends StatefulWidget {
   const _SourceRow({
     super.key,
     required this.source,
+    required this.cloudStatus,
+    required this.onRetryCloud,
     required this.editing,
     required this.onTap,
     required this.onEdit,
@@ -445,6 +549,8 @@ class _SourceRow extends StatefulWidget {
   });
 
   final BookSourceRecord source;
+  final _CloudSourceStatus? cloudStatus;
+  final VoidCallback? onRetryCloud;
   final bool editing;
   final VoidCallback onTap;
   final VoidCallback onEdit;
@@ -645,6 +751,19 @@ class _SourceRowState extends State<_SourceRow>
                               ),
                           ],
                         ),
+                        if (widget.cloudStatus case final cloud?)
+                          Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            spacing: 8,
+                            children: [
+                              Text(cloud.label, style: BookFlowTheme.caption),
+                              if (cloud.retry)
+                                TextButton(
+                                  onPressed: widget.onRetryCloud,
+                                  child: const Text('重试'),
+                                ),
+                            ],
+                          ),
                         if (source.originUri.trim().isNotEmpty)
                           Text(
                             source.originUri,
@@ -1172,6 +1291,45 @@ String _statusLabel(String status) {
     default:
       return '已导入';
   }
+}
+
+_CloudSourceStatus? _describeCloudStatus(
+  BookSourceRecord source,
+  Map<String, dynamic>? data,
+) {
+  if (data == null) return null;
+
+  _CloudSourceStatus display(
+    String label, {
+    bool retry = false,
+    bool active = false,
+  }) => (label: '伴读 · $label', retry: retry, active: active);
+
+  final completed = (data['completed_units'] as List?)?.length ?? 0;
+  final skipped = (data['skipped_units'] as List?)?.length ?? 0;
+  final total = data['total_units'] as int? ?? 0;
+  final unit = normalizeBookSourceFormat(source.format) == 'pdf' ? '页' : '章';
+  final progress = total > 0 ? '$completed/$total $unit' : '$completed $unit';
+  return switch (data['status']) {
+    'local_only' => display('原文件仅保存在本机'),
+    'waiting_for_login' => display('登录授权账号后继续准备'),
+    'pending' => display('待上传', retry: true, active: true),
+    'uploading' when data['error_code'] == 'upload_failed' => display(
+      '上传未完成',
+      retry: true,
+    ),
+    'uploading' => display('正在上传原文件', active: true),
+    'queued' when completed == 0 => display('已上传，等待解析', active: true),
+    'processing' when completed == 0 => display('正在解析正文', active: true),
+    'queued' || 'processing' => display('可查 $progress，继续准备中', active: true),
+    'complete' when completed == 0 => display('未找到可检索的文字'),
+    'complete' when skipped > 0 => display('可查 $progress，部分$unit缺少文字'),
+    'complete' => display('正文已可查'),
+    'complete_with_errors' ||
+    'failed' when completed > 0 => display('可查 $progress，部分处理失败', retry: true),
+    'complete_with_errors' || 'failed' => display('准备失败', retry: true),
+    _ => null,
+  };
 }
 
 String _formatBytes(int bytes) {

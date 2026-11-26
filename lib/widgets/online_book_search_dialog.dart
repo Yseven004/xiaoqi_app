@@ -21,6 +21,7 @@ import '../models/book_source.dart';
 import '../services/book_library_service.dart';
 import '../services/home_chat_model_preferences.dart';
 import '../services/online_book_import.dart';
+import 'reading_book_cloud_choice.dart';
 import '../services/online_book_search.dart';
 import '../services/online_book_search_suggestions.dart';
 import '../utils/isbn.dart';
@@ -940,7 +941,10 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
     }
     _importActivity.value = (widget.searchId, id);
     File? stagedFile;
+    ReadingBookCloudChoice? cloudChoice;
     try {
+      cloudChoice = await showReadingBookCloudChoice(context);
+      if (!_canCompleteImport || cloudChoice == null) return;
       widget.onImporting?.call();
       final file = await _search.resolve(
         widget.searchId,
@@ -964,11 +968,23 @@ class _OnlineBookSearchResultsState extends State<OnlineBookSearchResults> {
         bookId: widget.bookId,
         library: widget.library,
       );
+      await saveReadingBookCloudChoice(
+        mounted ? context : null,
+        result.source,
+        cloudChoice,
+      );
       if (!mounted) return;
       AppToast.show(context, '已保存到系统下载目录并导入书库');
       widget.onImported?.call(result);
     } on OnlineBookDownloadSaveException catch (error) {
-      if (_canCompleteImport) AppToast.show(context, error.message);
+      if (cloudChoice != null) {
+        await saveReadingBookCloudChoice(
+          mounted ? context : null,
+          error.result.source,
+          cloudChoice,
+        );
+      }
+      if (mounted && _canCompleteImport) AppToast.show(context, error.message);
     } on Object catch (error) {
       if (_canCompleteImport) AppToast.show(context, '导入失败：$error');
     } finally {

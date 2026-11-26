@@ -15,6 +15,7 @@ import '../services/pdf_catalog_service.dart';
 import 'app_toast.dart';
 import 'book_pdf_import_sheet.dart';
 import 'online_book_search_dialog.dart';
+import 'reading_book_cloud_choice.dart';
 
 /// Imports one source into a known book and returns its durable record.
 Future<BookSourceImportResult?> showExistingBookSourceImport(
@@ -65,6 +66,8 @@ Future<BookSourceImportResult?> showExistingBookSourceImport(
       AppToast.show(context, '请选择 PDF 或 EPUB 文件');
       return null;
     }
+    final cloudChoice = await showReadingBookCloudChoice(context);
+    if (!context.mounted || cloudChoice == null) return null;
     startImport();
     var path = file.xFile.path;
     if (path.isEmpty || !await File(path).exists()) {
@@ -83,6 +86,11 @@ Future<BookSourceImportResult?> showExistingBookSourceImport(
       format: format,
     );
     final source = result.source;
+    await saveReadingBookCloudChoice(
+      context.mounted ? context : null,
+      source,
+      cloudChoice,
+    );
     if (format == 'pdf' &&
         source.catalogStatus != 'processing' &&
         source.catalogStatus != 'confirmed' &&

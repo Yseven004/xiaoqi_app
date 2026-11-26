@@ -8,6 +8,7 @@ import '../models/book_source.dart';
 import '../models/home_chat_attachment.dart';
 import 'book_library_service.dart';
 import 'home_chat_attachment_preparer.dart';
+import 'reading_book_preparation.dart';
 
 class ReadingTaskMaterialIssue {
   const ReadingTaskMaterialIssue(this.sourceName, this.message);
@@ -107,6 +108,22 @@ class ReadingTaskMaterials {
         continue;
       }
       try {
+        final progressive = ReadingBookPreparation.instance;
+        final cloudChoice = await progressive.cloudChoice(source);
+        if (cloudChoice != null) {
+          if (cloudChoice) {
+            final material = await progressive.material(source, authorization);
+            if (material != null) {
+              materials.add(material);
+              continue;
+            }
+          }
+          issues.add(ReadingTaskMaterialIssue(
+            title,
+            cloudChoice ? '正在准备已授权的书籍正文' : '原文件仅保存在本机',
+          ));
+          continue;
+        }
         final stat = await File(source.filePath).stat();
         if (stat.type != FileSystemEntityType.file) {
           throw const _ReadingTaskMaterialFailure('找不到原文件，请重新导入');

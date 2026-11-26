@@ -5,10 +5,112 @@ import unittest
 import tarfile
 from pathlib import Path
 
-from verify_store import manifest, with_catalog_changes, recover_manifest_metadata, exclude_expired_attachments
+from verify_store import (
+    exclude_expired_attachments,
+    manifest,
+    matches_manifest,
+    recover_manifest_metadata,
+    with_catalog_changes,
+)
 
 
 class StoreVerificationTests(unittest.TestCase):
+    def _reading_book_fixture(self, root):
+        database = sqlite3.connect(root / 'xiaoqi.sqlite3')
+        self.addCleanup(database.close)
+        database.executescript(
+            """
+            CREATE TABLE documents(key TEXT PRIMARY KEY, document TEXT, revision INTEGER);
+            CREATE TABLE objects(key TEXT PRIMARY KEY);
+            CREATE TABLE reading_book_sources(
+              id TEXT PRIMARY KEY, tenant TEXT, book_key TEXT, version TEXT,
+              format TEXT, sha256 TEXT, original_key TEXT, generation TEXT,
+              status TEXT, catalog TEXT, lease TEXT
+            );
+            CREATE TABLE reading_book_units(
+              source TEXT, unit INTEGER, state TEXT, bytes INTEGER,
+              PRIMARY KEY(source, unit)
+            );
+            CREATE TABLE reading_book_bindings(
+              tenant TEXT, book_key TEXT, version TEXT, binding TEXT,
+              generation TEXT, active INTEGER
+            );
+            CREATE TABLE reading_book_passages(
+              id INTEGER PRIMARY KEY, source TEXT, unit INTEGER, part INTEGER,
+              quote TEXT, searchable TEXT, locator TEXT
+            );
+            CREATE VIRTUAL TABLE reading_book_fts USING fts5(
+              searchable, content='reading_book_passages',
+              content_rowid='id', tokenize='trigram'
+            );
+            CREATE TRIGGER reading_book_fts_insert AFTER INSERT ON reading_book_passages
+            BEGIN
+              INSERT INTO reading_book_fts(rowid, searchable) VALUES(new.id, new.searchable);
+            END;
+            """
+        )
+        key = 'reading_book_original/source/generation'
+        original = root / 'objects' / key
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b'book bytes')
+        database.execute('INSERT INTO objects VALUES(?)', (key,))
+        database.execute(
+            'INSERT INTO reading_book_sources VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                'source', 'private-account', 'book', 'v1', 'epub',
+                hashlib.sha256(b'book bytes').hexdigest(), key, 'generation',
+                'queued', '{"units":[1,2]}', None,
+            ),
+        )
+        database.execute("INSERT INTO reading_book_units VALUES('source',1,'ready',12)")
+        database.execute(
+            "INSERT INTO reading_book_bindings VALUES('private-account','book','v1','private-installation','0',1)"
+        )
+        database.execute(
+            "INSERT INTO reading_book_passages VALUES(1,'source',1,0,'中文正文','中文正文','第一章')"
+        )
+        database.commit()
+        return database, original
+
+    def test_book_manifest_allows_progress_and_preserves_committed_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database, _ = self._reading_book_fixture(root)
+            before = manifest(root)
+            self.assertNotIn('中文正文', str(before))
+            self.assertNotIn('private-account', str(before))
+            self.assertNotIn('private-installation', str(before))
+            database.executescript(
+                """
+                UPDATE reading_book_sources SET status='processing', lease='new lease';
+                INSERT INTO reading_book_units VALUES('source',2,'no_text',0);
+                """
+            )
+            self.assertTrue(matches_manifest(manifest(root), before))
+            database.execute("UPDATE reading_book_bindings SET generation='rotated', active=0")
+            database.commit()
+            self.assertFalse(matches_manifest(manifest(root), before))
+            database.execute("UPDATE reading_book_bindings SET generation='0', active=1")
+            database.execute("UPDATE reading_book_passages SET quote='已经变化'")
+            database.commit()
+            self.assertFalse(matches_manifest(manifest(root), before))
+            database.close()
+
+    def test_book_manifest_checks_original_and_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database, original = self._reading_book_fixture(root)
+            self.assertIn('reading_books', manifest(root))
+            original.write_bytes(b'other bytes')
+            with self.assertRaisesRegex(ValueError, 'differs from its hash'):
+                manifest(root)
+            original.write_bytes(b'book bytes')
+            database.execute("INSERT INTO reading_book_fts(reading_book_fts, rowid, searchable) VALUES('delete',1,'中文正文')")
+            database.commit()
+            with self.assertRaisesRegex(ValueError, 'index and passages'):
+                manifest(root)
+            database.close()
+
     def test_legacy_expiration_requires_matching_original_backup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

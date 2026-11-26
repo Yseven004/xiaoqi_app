@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -194,6 +195,8 @@ void main() {
   testWidgets(
     'actual import shows progress then selects the new row in place',
     (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      SharedPreferences.setMockInitialValues({});
       final scratch = Directory.systemTemp.createTempSync('reading-import-');
       addTearDown(() => scratch.deleteSync(recursive: true));
       final imported = _source(scratch, id: 2, name: '追加资料');
@@ -239,6 +242,10 @@ void main() {
         ]),
         isEmpty,
       );
+      await tester.pumpAndSettle();
+      expect(library.importStarted, isFalse);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      await tester.tap(find.widgetWithText(TextButton, '仅保存在本机'));
       for (var attempt = 0; attempt < 50 && !library.importStarted; attempt++) {
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 10)),

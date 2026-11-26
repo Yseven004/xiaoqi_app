@@ -31,6 +31,7 @@ import 'companion_annotation_sync.dart';
 import 'epub_document_service.dart';
 import 'pdf_catalog_service.dart';
 import 'source_document_loader.dart';
+import 'reading_book_preparation.dart';
 
 class RecoveredCaptureBatch {
   const RecoveredCaptureBatch({
@@ -247,6 +248,16 @@ class BookLibraryService {
       limit: 1,
     );
     return rows.isEmpty ? null : BookRecord.fromMap(rows.first);
+  }
+
+  /// Edition identities already frozen for annotation sync also identify
+  /// reading books across a user's devices.
+  Future<String?> readingEditionIdentity(int bookId) async {
+    final db = await _databaseService.database;
+    final identity = await db.transaction(
+      (txn) => CompanionAnnotationSync.instance.freezeBookIdentity(txn, bookId),
+    );
+    return identity == null || identity.needsHash ? null : identity.key;
   }
 
   Future<List<BookLibraryItem>> listBooks({
@@ -810,7 +821,7 @@ class BookLibraryService {
         format: format,
       ),
     );
-    _prepareCompanionPdf(result);
+    _prepareCompanionSource(result);
     return result;
   }
 
@@ -847,16 +858,22 @@ class BookLibraryService {
           format: format,
         );
       });
-      _prepareCompanionPdf(result);
+      _prepareCompanionSource(result);
       return result;
     } finally {
       await discardUnreferencedBookCover(prepared.createdPath);
     }
   }
 
-  void _prepareCompanionPdf(BookSourceImportResult result) {
-    if (result.source.format == 'pdf') {
-      CompanionPdfReflow.prepareInBackground(result.source);
+  void _prepareCompanionSource(
+    BookSourceImportResult result, {
+    bool warmEpub = true,
+  }) {
+    final source = result.source;
+    if (source.format == 'pdf') {
+      CompanionPdfReflow.prepareInBackground(source);
+    } else if (warmEpub && source.format == 'epub' && !result.reusedExisting) {
+      unawaited(SourceDocumentLoader.prepareReaderCache(source));
     }
   }
 
@@ -960,7 +977,8 @@ class BookLibraryService {
         }
         return result;
       });
-      _prepareCompanionPdf(result);
+      // The online import just parsed the EPUB to validate its contents.
+      _prepareCompanionSource(result, warmEpub: false);
       return result;
     } catch (_) {
       await discardUnreferencedBookCover(preparedCover?.createdPath);
@@ -1616,6 +1634,9 @@ class BookLibraryService {
         whereArgs: [sourceId, currentBookId],
       );
     });
+    unawaited(
+      ReadingBookPreparation.instance.resume(this, removedSourceIds: {sourceId}),
+    );
   }
 
   Future<void> shareBookSource({
@@ -1725,6 +1746,9 @@ class BookLibraryService {
         );
       }
     });
+    unawaited(
+      ReadingBookPreparation.instance.resume(this, removedSourceIds: {sourceId}),
+    );
   }
 
   Future<bool> deleteBookSourceFile({
@@ -1793,6 +1817,12 @@ class BookLibraryService {
         }
       }
     });
+    unawaited(
+      ReadingBookPreparation.instance.resume(
+        this,
+        removedSourceIds: sourceIds.map((row) => row['id'] as int).toSet(),
+      ),
+    );
     final deletedFiles = await _deleteBookFiles({
       filePath,
       if (manifestPath.trim().isNotEmpty) manifestPath,
@@ -1946,12 +1976,16 @@ class BookLibraryService {
       }
     });
     CompanionAnnotationSync.instance.schedule();
+    unawaited(ReadingBookPreparation.instance.resume(this));
   }
 
   Future<void> deleteBooks(Iterable<int> bookIds) async {
     final ids = bookIds.toSet().toList(growable: false);
     if (ids.isEmpty) return;
     await _softDeleteBooks(ids);
+    unawaited(
+      ReadingBookPreparation.instance.resume(this, removedBookIds: ids.toSet()),
+    );
   }
 
   Future<Set<String>> _deleteBookFiles(
