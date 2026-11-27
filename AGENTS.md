@@ -41,10 +41,6 @@
 - Agent 负责准备命令、检查版本、启动本地服务和分析证据；Agent 链路调试不要求用户先操作 App 或设备。指导用户查看仪表盘时一次给一个可执行步骤并说明当前进度。仅需正常运行客户端时，不强制启动本地后端或仪表盘。
 - 本地调试不替代既有发布流程；仅文档或诊断准备无需部署，涉及生产服务代码/API 行为修改时继续遵守下方部署规则。Trace 和凭据只保存在合适的本地私有位置；不把未经检查的原始 Trace 提交到仓库或公开分享。
 
-## ARTEMIS availability
-
-- If ARTEMIS tools are absent from the current tool list, ignore ARTEMIS-specific workflows and do not attempt to diagnose or install ARTEMIS. Continue with the tools that are available and state any device-level verification that could not be performed.
-
 ## Single-version development policy
 
 - During the solo-development stage, maintain one current product version. Treat the Flutter client, server code, API contract, and ECS deployment as one release rather than as independently managed versions.

@@ -7,10 +7,6 @@ globs:
 ---
 # Project agent instructions
 
-## ARTEMIS availability
-
-- If ARTEMIS tools are absent from the current tool list, ignore ARTEMIS-specific workflows and do not attempt to diagnose or install ARTEMIS. Continue with the tools that are available and state any device-level verification that could not be performed.
-
 ## Single-version development policy
 
 - During the solo-development stage, maintain one current product version. Treat the Flutter client, server code, API contract, and ECS deployment as one release rather than as independently managed versions.
