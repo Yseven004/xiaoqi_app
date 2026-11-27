@@ -5312,12 +5312,17 @@ class GenkitXiaoqiAgentRuntime
           final id = input['material_id']?.toString() ?? '';
           cancellation.throwIfCancelled();
           final requestedMode = input['mode']?.toString() ?? 'query';
+          final query = input['query']?.toString();
           final delegatedMaterial =
               context.context?[_delegatedReadingMaterial]
                   as Map<String, dynamic>?;
           if (delegatedMaterial != null &&
               (id != delegatedMaterial['id'] || requestedMode != 'query')) {
             return ToolResult.response('委派回合只能检索本次绑定的原文');
+          }
+          if (delegatedMaterial != null &&
+              (query == null || query.trim().isEmpty)) {
+            return ToolResult.response('请提供本次委派的简短原文检索词');
           }
           if (requestedMode == 'full' && attachmentMode != 'full') {
             return ToolResult.response(
@@ -5337,7 +5342,7 @@ class GenkitXiaoqiAgentRuntime
                 ? null
                 : readingBookOwner(tenantId, annotationAccount),
             mode: requestedMode,
-            query: input['query']?.toString() ?? latestUserText,
+            query: query ?? latestUserText,
             pages: (input['pages'] as List? ?? const [])
                 .whereType<num>()
                 .map((page) => page.toInt())
