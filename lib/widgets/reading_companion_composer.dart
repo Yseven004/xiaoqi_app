@@ -20,14 +20,15 @@ import 'home_chat_model_selector.dart';
 part 'reading_companion_composer_menus.dart';
 
 /// Composer and its menus within the reading discussion.
-/// The surrounding page owns the draft, model and attachment actions.
+/// The surrounding page owns the draft, reasoning preference and attachments.
 class ReadingCompanionComposer extends StatefulWidget {
   const ReadingCompanionComposer({
     super.key,
     required this.controller,
     required this.focusNode,
-    required this.modelSelection,
-    required this.onModelSelectionChanged,
+    required this.reasoningSelection,
+    required this.onReasoningChanged,
+    this.reasoningEnabled = true,
     required this.onSend,
     required this.onStop,
     required this.onAddAttachment,
@@ -63,8 +64,9 @@ class ReadingCompanionComposer extends StatefulWidget {
 
   final TextEditingController controller;
   final FocusNode focusNode;
-  final HomeChatModelSelection modelSelection;
-  final ValueChanged<HomeChatModelSelection> onModelSelectionChanged;
+  final HomeChatModelSelection reasoningSelection;
+  final ValueChanged<HomeChatReasoningLevel> onReasoningChanged;
+  final bool reasoningEnabled;
   final VoidCallback onSend;
   final VoidCallback onStop;
   final ValueChanged<int> onAddAttachment;
@@ -107,7 +109,7 @@ const _bodyInk = Color(0xFF262626);
 const _subtleInk = Color(0xFF686868);
 const _controlHeight = 48.0;
 
-enum _CompanionMenu { root, files, imageSource, skills, mcp, model }
+enum _CompanionMenu { root, files, imageSource, skills, mcp, reasoning }
 
 class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
   final _menuTapGroup = Object();
@@ -145,6 +147,15 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
   @override
   void didUpdateWidget(covariant ReadingCompanionComposer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!widget.reasoningEnabled && _menu == _CompanionMenu.reasoning) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            !widget.reasoningEnabled &&
+            _menu == _CompanionMenu.reasoning) {
+          _showMenu(null);
+        }
+      });
+    }
     if (oldWidget.signedIn != widget.signedIn) {
       _connectionRequest++;
       _connections = const [];
@@ -351,7 +362,7 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
             child: _toolbarButton(
               '添加内容',
               'assets/images/home_composer_add.svg',
-              expanded: _menu != null && _menu != _CompanionMenu.model,
+              expanded: _menu != null && _menu != _CompanionMenu.reasoning,
               onPressed: () => _showMenu(
                 _menu == _CompanionMenu.root ? null : _CompanionMenu.root,
               ),
@@ -391,15 +402,17 @@ class _ReadingCompanionComposerState extends State<ReadingCompanionComposer> {
                       TapRegion(
                         groupId: _menuTapGroup,
                         child: _toolbarButton(
-                          '模型 ${widget.modelSelection.model.name}',
-                          'assets/images/reading_companion_model_brain.svg',
+                          '思考强度 ${widget.reasoningSelection.reasoningLevel.label}',
+                          homeChatThinkingIconAsset,
                           size: 19,
-                          expanded: _menu == _CompanionMenu.model,
-                          onPressed: () => _showMenu(
-                            _menu == _CompanionMenu.model
-                                ? null
-                                : _CompanionMenu.model,
-                          ),
+                          expanded: _menu == _CompanionMenu.reasoning,
+                          onPressed: widget.reasoningEnabled
+                              ? () => _showMenu(
+                                  _menu == _CompanionMenu.reasoning
+                                      ? null
+                                      : _CompanionMenu.reasoning,
+                                )
+                              : null,
                         ),
                       ),
                       if (hasVoice) _voiceButton(),
@@ -599,13 +612,12 @@ class _CompanionComposerLayout extends MultiChildLayoutDelegate {
     final bottom = composerTop - 8;
     final panelWidth = switch (menu) {
       _CompanionMenu.root => math.min(176.0, size.width),
-      _CompanionMenu.model => math.min(320.0, size.width),
+      _CompanionMenu.reasoning => math.min(320.0, size.width),
       _ => size.width,
     };
     final panelLimit = switch (menu) {
       _CompanionMenu.skills => 360.0,
       _CompanionMenu.mcp => 280.0,
-      _CompanionMenu.model => 300.0,
       _ => 240.0,
     };
     final panelSize = layoutChild(
@@ -619,7 +631,7 @@ class _CompanionComposerLayout extends MultiChildLayoutDelegate {
     positionChild(
       _ComposerSlot.menu,
       Offset(
-        menu == _CompanionMenu.model ? size.width - panelWidth : 0.0,
+        menu == _CompanionMenu.reasoning ? size.width - panelWidth : 0.0,
         math.max(0.0, bottom - panelSize.height),
       ),
     );

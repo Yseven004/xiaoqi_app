@@ -1107,6 +1107,8 @@ void main() {
             'user_message_id': 'pause-question',
             'current_turn_text': 'explain and draw',
             'materials': bookMaterials,
+            'model_id': 'deepseek-flash',
+            'reasoning_level': 'max',
           },
         },
       ),
@@ -1161,21 +1163,57 @@ void main() {
           message: Message(
             role: Role.user,
             content: const [],
-            metadata: {'xiaoqi_agent_resume': const <String, dynamic>{}},
+            metadata: {
+              'xiaoqi_agent_resume': const <String, dynamic>{},
+              'xiaoqi_agent_turn': {
+                'task_id': taskId,
+                'workflow_id': 'pause-conversation',
+                'user_message_id': 'pause-question',
+                'current_turn_text': 'explain and draw',
+                'materials': bookMaterials,
+                'model_id': 'mimo-v2.6-flash',
+                'reasoning_level': 'none',
+              },
+            },
           ),
         );
     await restored.stream.drain<void>();
-    expect((await restored.response).text, '你好');
+    final restoredResponse = await restored.response;
+    expect(restoredResponse.text, '你好');
     expect(runtime.turnCount, 2);
     expect(runtime.lastRequest!['task_id'], taskId);
     expect(runtime.lastRequest!['user_message_id'], 'pause-question');
     expect(runtime.lastRequest!['materials'], bookMaterials);
+    expect(runtime.lastRequest!['model_id'], 'deepseek-flash');
+    expect(runtime.lastRequest!['reasoning_level'], 'max');
     expect(runtime.imageSubmissions, 1);
     final completedRetry = ownerAgent.chat(snapshotId: checkpoint).sendStream();
     await completedRetry.stream.drain<void>();
     expect((await completedRetry.response).text, '你好');
     expect(runtime.turnCount, 2);
     expect(runtime.imageSubmissions, 1);
+
+    final regenerated = ownerAgent
+        .chat(snapshotId: restoredResponse.snapshotId)
+        .sendStream(
+          message: Message(
+            role: Role.user,
+            content: [TextPart(text: 'explain again')],
+            metadata: {
+              'xiaoqi_agent_turn': {
+                'task_id': 'regenerated-reasoning-task',
+                'workflow_id': 'pause-conversation',
+                'user_message_id': 'regenerated-question',
+                'model_id': 'mimo-v2.6-flash',
+                'reasoning_level': 'none',
+              },
+            },
+          ),
+        );
+    await regenerated.stream.drain<void>();
+    expect((await regenerated.response).text, '你好');
+    expect(runtime.lastRequest!['model_id'], 'mimo-v2.6-flash');
+    expect(runtime.lastRequest!['reasoning_level'], 'none');
   });
 
   test(

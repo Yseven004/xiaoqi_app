@@ -118,6 +118,11 @@ Future<void> main() async {
           },
           'message': {'type': 'string'},
           'model_id': {'type': 'string'},
+          'reasoning_level': {
+            'type': 'string',
+            'description': '伴读讨论由 DeepSeek 处理，使用 low/high/max。',
+            'enum': ['low', 'high', 'max'],
+          },
         },
         'required': ['mode', 'message'],
         'additionalProperties': false,
@@ -215,7 +220,7 @@ Future<void> main() async {
                       'workflow_id': _uuid.v4(),
                       'user_message_id': _uuid.v4(),
                       'model_id': model,
-                      'reasoning_level': 'low',
+                      'reasoning_level': input['reasoning_level'] ?? 'low',
                       'reading_companion_book': book,
                       'reading_companion_version': version,
                       'materials': [
@@ -313,7 +318,8 @@ Future<void> main() async {
           },
           'reasoning_level': {
             'type': 'string',
-            'enum': ['low', 'medium', 'high'],
+            'description': 'DeepSeek：low/high/max。MiMo：none/enabled。',
+            'enum': ['low', 'high', 'max', 'none', 'enabled'],
           },
           'selected_capabilities': {
             'type': 'array',
@@ -422,9 +428,8 @@ Future<void> main() async {
                         true
                   ? Platform.environment['XIAOQI_DEFAULT_TEXT_MODEL']!.trim()
                   : 'deepseek-flash',
-              'reasoning_level': _nonEmpty(input['reasoning_level'])
-                  ? input['reasoning_level']
-                  : 'medium',
+              if (_nonEmpty(input['reasoning_level']))
+                'reasoning_level': input['reasoning_level'],
               'selected_capabilities': _asList(input['selected_capabilities']),
               'selected_mcp_connections': _asList(
                 input['selected_mcp_connections'],

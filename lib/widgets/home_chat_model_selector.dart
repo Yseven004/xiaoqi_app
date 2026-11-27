@@ -2,7 +2,6 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../services/home_chat_model_preferences.dart';
 
@@ -10,17 +9,28 @@ const _ink = Color(0xFF202124);
 const _mutedInk = Color(0xFF686D73);
 const _modelMenuMaxWidth = 320.0;
 const _modelMenuGap = 11.0;
+const _modelMenuHeight = 240.0;
+const _modelMenuRadius = BorderRadius.all(Radius.circular(20));
+const _modelMenuHeading = TextStyle(
+  color: Color(0xFF626D79),
+  fontSize: 17,
+  fontWeight: FontWeight.w600,
+);
+const homeChatThinkingIconAsset =
+    'assets/images/reading_companion_model_brain.svg';
 
 class HomeChatModelSelector extends StatefulWidget {
   const HomeChatModelSelector({
     super.key,
     required this.selection,
     required this.onChanged,
+    this.onOpen,
     this.enabled = true,
   });
 
   final HomeChatModelSelection selection;
   final ValueChanged<HomeChatModelSelection> onChanged;
+  final VoidCallback? onOpen;
   final bool enabled;
 
   @override
@@ -77,6 +87,7 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
       _closeMenu();
       return;
     }
+    widget.onOpen?.call();
     _entry = OverlayEntry(builder: _buildOverlay);
     Overlay.of(context, rootOverlay: true).insert(_entry!);
     setState(() {});
@@ -115,13 +126,12 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
       1.0,
       math.min(_modelMenuMaxWidth, viewport.width - 24),
     );
-    const preferredPanelHeight = 240.0;
     final safeTop = media.padding.top + 8;
     final availableHeight = math.max(
       0.0,
       anchorRect.top - safeTop - _modelMenuGap,
     );
-    final panelHeight = math.min(preferredPanelHeight, availableHeight);
+    final panelHeight = math.min(_modelMenuHeight, availableHeight);
     final left = (anchorRect.center.dx - width / 2)
         .clamp(12.0, viewport.width - width - 12)
         .toDouble();
@@ -154,35 +164,11 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
                   child: child,
                 ),
               ),
-              child: Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x1A65717E),
-                      blurRadius: 16,
-                      offset: Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(20),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      SvgPicture.asset(
-                        'assets/images/home_model_picker_panel.svg',
-                        fit: BoxFit.fill,
-                        excludeFromSemantics: true,
-                      ),
-                      SingleChildScrollView(
-                        child: HomeChatModelPickerPanel(
-                          selection: widget.selection,
-                          onChanged: widget.onChanged,
-                          isHomeOverlay: true,
-                        ),
-                      ),
-                    ],
+              child: HomeChatModelMenuSurface(
+                child: SingleChildScrollView(
+                  child: HomeChatModelPickerPanel(
+                    selection: widget.selection,
+                    onChanged: widget.onChanged,
                   ),
                 ),
               ),
@@ -206,7 +192,7 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
           enabled: widget.enabled,
           expanded: _isOpen,
           label:
-              '模型 ${widget.selection.model.name}，思考程度 ${widget.selection.reasoningLevel.label}',
+              '模型 ${widget.selection.model.name}，思考强度 ${widget.selection.reasoningLevel.label}',
           child: Material(
             type: MaterialType.transparency,
             child: InkWell(
@@ -223,7 +209,7 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
                 child: AnimatedOpacity(
                   opacity: widget.enabled ? 1 : .45,
                   duration: const Duration(milliseconds: 120),
-                  child: Container(
+                  child: SizedBox(
                     key: _anchorKey,
                     width: double.infinity,
                     height: 40,
@@ -231,62 +217,17 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
                       scale: _isPressed ? .985 : 1,
                       duration: const Duration(milliseconds: 140),
                       curve: Curves.easeOutCubic,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Positioned.fill(
-                            child: SvgPicture.asset(
-                              'assets/images/home_model_selector_button.svg',
-                              fit: BoxFit.fill,
-                              excludeFromSemantics: true,
-                            ),
+                      child: Center(
+                        child: SvgPicture.asset(
+                          homeChatThinkingIconAsset,
+                          width: 19,
+                          height: 19,
+                          colorFilter: ColorFilter.mode(
+                            Theme.of(context).colorScheme.onSurface,
+                            BlendMode.srcIn,
                           ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                            child: Row(
-                              children: [
-                                SvgPicture.asset(
-                                  widget.selection.model.iconAsset,
-                                  width: 22,
-                                  height: 22,
-                                  colorFilter:
-                                      widget.selection.model.id ==
-                                          HomeChatModelOption.mimo.id
-                                      ? const ColorFilter.mode(
-                                          Color(0xFFFF6900),
-                                          BlendMode.srcIn,
-                                        )
-                                      : null,
-                                  excludeFromSemantics: true,
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    widget.selection.model.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: _ink,
-                                      fontSize: 14.5,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 4),
-                                AnimatedRotation(
-                                  turns: _isOpen ? .5 : 0,
-                                  duration: const Duration(milliseconds: 160),
-                                  curve: Curves.easeInOut,
-                                  child: Icon(
-                                    PhosphorIconsRegular.caretDown,
-                                    size: 15,
-                                    color: _mutedInk,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+                          excludeFromSemantics: true,
+                        ),
                       ),
                     ),
                   ),
@@ -300,39 +241,70 @@ class _HomeChatModelSelectorState extends State<HomeChatModelSelector>
   }
 }
 
+class HomeChatModelMenuSurface extends StatelessWidget {
+  const HomeChatModelMenuSurface({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    decoration: const BoxDecoration(
+      borderRadius: _modelMenuRadius,
+      boxShadow: [
+        BoxShadow(
+          color: Color(0x1A65717E),
+          blurRadius: 16,
+          offset: Offset(0, 4),
+        ),
+      ],
+    ),
+    foregroundDecoration: const BoxDecoration(
+      borderRadius: _modelMenuRadius,
+      border: Border.fromBorderSide(BorderSide(color: Color(0xFFDCE2E8))),
+    ),
+    child: ClipRRect(
+      borderRadius: _modelMenuRadius,
+      child: Stack(
+        fit: StackFit.passthrough,
+        children: [
+          // Preserve the source highlight and corner proportions in short menus.
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: _modelMenuHeight,
+            child: SvgPicture.asset(
+              'assets/images/home_model_picker_panel.svg',
+              fit: BoxFit.fill,
+              excludeFromSemantics: true,
+            ),
+          ),
+          child,
+        ],
+      ),
+    ),
+  );
+}
+
 class HomeChatModelPickerPanel extends StatelessWidget {
   const HomeChatModelPickerPanel({
     super.key,
     required this.selection,
     required this.onChanged,
-    this.isHomeOverlay = false,
   });
 
   final HomeChatModelSelection selection;
   final ValueChanged<HomeChatModelSelection> onChanged;
-  final bool isHomeOverlay;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-        isHomeOverlay ? 16 : 18,
-        isHomeOverlay ? 12 : 16,
-        isHomeOverlay ? 16 : 18,
-        isHomeOverlay ? 12 : 16,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '模型',
-            style: TextStyle(
-              color: isHomeOverlay ? const Color(0xFF626D79) : _mutedInk,
-              fontSize: isHomeOverlay ? 17 : 14,
-              fontWeight: isHomeOverlay ? FontWeight.w600 : FontWeight.w500,
-            ),
-          ),
+          const Text('模型', style: _modelMenuHeading),
           const SizedBox(height: 4),
           for (
             var index = 0;
@@ -343,35 +315,19 @@ class HomeChatModelPickerPanel extends StatelessWidget {
               model: HomeChatModelOption.options[index],
               selected:
                   selection.model.id == HomeChatModelOption.options[index].id,
-              isHomeOverlay: isHomeOverlay,
               onTap: () => onChanged(
                 selection.withModel(HomeChatModelOption.options[index]),
               ),
             ),
           ],
-          Padding(
-            padding: EdgeInsets.only(top: isHomeOverlay ? 8 : 6),
-            child: Divider(
-              height: 1,
-              color: isHomeOverlay
-                  ? const Color(0xFFD6DDE5)
-                  : const Color(0xFFDADCE0),
-            ),
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Divider(height: 1, color: Color(0xFFD6DDE5)),
           ),
-          SizedBox(height: isHomeOverlay ? 8 : 10),
-          Text(
-            '思考程度',
-            style: TextStyle(
-              color: isHomeOverlay ? const Color(0xFF626D79) : _mutedInk,
-              fontSize: isHomeOverlay ? 17 : 15,
-              fontWeight: isHomeOverlay ? FontWeight.w600 : FontWeight.w500,
-            ),
-          ),
-          if (isHomeOverlay) const SizedBox(height: 4),
-          _ReasoningLevelControl(
+          const SizedBox(height: 8),
+          HomeChatReasoningPicker(
             selection: selection,
-            onChanged: onChanged,
-            isHomeOverlay: isHomeOverlay,
+            onChanged: (level) => onChanged(selection.withReasoning(level)),
           ),
         ],
       ),
@@ -379,32 +335,47 @@ class HomeChatModelPickerPanel extends StatelessWidget {
   }
 }
 
+class HomeChatReasoningPicker extends StatelessWidget {
+  const HomeChatReasoningPicker({
+    super.key,
+    required this.selection,
+    required this.onChanged,
+  });
+
+  final HomeChatModelSelection selection;
+  final ValueChanged<HomeChatReasoningLevel> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const Text('思考强度', style: _modelMenuHeading),
+      const SizedBox(height: 4),
+      _ReasoningLevelControl(selection: selection, onChanged: onChanged),
+    ],
+  );
+}
+
 class _ReasoningLevelControl extends StatelessWidget {
   const _ReasoningLevelControl({
     required this.selection,
     required this.onChanged,
-    required this.isHomeOverlay,
   });
 
   final HomeChatModelSelection selection;
-  final ValueChanged<HomeChatModelSelection> onChanged;
-  final bool isHomeOverlay;
+  final ValueChanged<HomeChatReasoningLevel> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    const low = HomeChatReasoningLevel.low;
-    const medium = HomeChatReasoningLevel.medium;
-    const high = HomeChatReasoningLevel.high;
-    final levels = selection.model.supportsMedium
-        ? const [low, medium, high]
-        : const [low, high];
-    final selectedLevelIndex = levels.indexOf(selection.reasoningLevel);
-    final selectedIndex = selectedLevelIndex < 0 ? 0 : selectedLevelIndex;
-    final trackAsset = isHomeOverlay
-        ? (selection.model.supportsMedium
-              ? 'assets/images/home_model_reasoning_track.svg'
-              : 'assets/images/home_model_reasoning_track_mimo.svg')
-        : 'assets/images/model_reasoning_track.svg';
+    final levels = selection.model.reasoningLevels;
+    final selectedIndex = levels.indexOf(
+      selection.model.normalize(selection.reasoningLevel),
+    );
+    final hasThreeLevels = levels.length == 3;
+    final trackAsset = hasThreeLevels
+        ? 'assets/images/home_model_reasoning_track.svg'
+        : 'assets/images/home_model_reasoning_track_mimo.svg';
 
     void selectAt(double x, double width) {
       final index = (x / (width / levels.length))
@@ -413,15 +384,15 @@ class _ReasoningLevelControl extends StatelessWidget {
           .toInt();
       final level = levels[index];
       if (level != selection.reasoningLevel) {
-        onChanged(selection.withReasoning(level));
+        onChanged(level);
       }
     }
 
     return SizedBox(
-      height: isHomeOverlay ? 48 : 44,
+      height: 48,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final width = selection.model.supportsMedium
+          final width = hasThreeLevels
               ? constraints.maxWidth
               : constraints.maxWidth * (2 / 3);
           final segmentWidth = width / levels.length;
@@ -429,12 +400,12 @@ class _ReasoningLevelControl extends StatelessWidget {
             alignment: Alignment.center,
             child: SizedBox(
               width: width,
-              height: isHomeOverlay ? 48 : 44,
+              height: 48,
               child: Semantics(
                 container: true,
                 slider: true,
-                label: '思考程度',
-                value: selection.reasoningLevel.label,
+                label: '思考强度',
+                value: levels[selectedIndex].label,
                 decreasedValue: selectedIndex > 0
                     ? levels[selectedIndex - 1].label
                     : null,
@@ -442,14 +413,10 @@ class _ReasoningLevelControl extends StatelessWidget {
                     ? levels[selectedIndex + 1].label
                     : null,
                 onDecrease: selectedIndex > 0
-                    ? () => onChanged(
-                        selection.withReasoning(levels[selectedIndex - 1]),
-                      )
+                    ? () => onChanged(levels[selectedIndex - 1])
                     : null,
                 onIncrease: selectedIndex < levels.length - 1
-                    ? () => onChanged(
-                        selection.withReasoning(levels[selectedIndex + 1]),
-                      )
+                    ? () => onChanged(levels[selectedIndex + 1])
                     : null,
                 child: ExcludeSemantics(
                   child: GestureDetector(
@@ -463,7 +430,7 @@ class _ReasoningLevelControl extends StatelessWidget {
                     child: SizedBox.expand(
                       child: Center(
                         child: SizedBox(
-                          height: isHomeOverlay ? 41 : 44,
+                          height: 41,
                           child: Stack(
                             alignment: Alignment.center,
                             children: [
@@ -474,22 +441,6 @@ class _ReasoningLevelControl extends StatelessWidget {
                                   excludeFromSemantics: true,
                                 ),
                               ),
-                              if (!isHomeOverlay)
-                                AnimatedPositioned(
-                                  left: 2,
-                                  top: 2,
-                                  bottom: 2,
-                                  width: segmentWidth * selectedIndex,
-                                  duration: const Duration(milliseconds: 190),
-                                  curve: Curves.easeInOutCubic,
-                                  child: IgnorePointer(
-                                    child: SvgPicture.asset(
-                                      'assets/images/model_reasoning_progress.svg',
-                                      fit: BoxFit.fill,
-                                      excludeFromSemantics: true,
-                                    ),
-                                  ),
-                                ),
                               AnimatedPositioned(
                                 left: segmentWidth * selectedIndex + 2,
                                 top: 2,
@@ -499,24 +450,20 @@ class _ReasoningLevelControl extends StatelessWidget {
                                 curve: Curves.easeInOutCubic,
                                 child: IgnorePointer(
                                   child: DecoratedBox(
-                                    decoration: isHomeOverlay
-                                        ? BoxDecoration(
-                                            borderRadius: BorderRadius.circular(
-                                              24,
-                                            ),
-                                            boxShadow: const [
-                                              BoxShadow(
-                                                color: Color(0x1465717E),
-                                                blurRadius: 4,
-                                                offset: Offset(0, 1),
-                                              ),
-                                            ],
-                                          )
-                                        : const BoxDecoration(),
+                                    decoration: const BoxDecoration(
+                                      borderRadius: BorderRadius.all(
+                                        Radius.circular(24),
+                                      ),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Color(0x1465717E),
+                                          blurRadius: 4,
+                                          offset: Offset(0, 1),
+                                        ),
+                                      ],
+                                    ),
                                     child: SvgPicture.asset(
-                                      isHomeOverlay
-                                          ? 'assets/images/home_model_reasoning_thumb.svg'
-                                          : 'assets/images/model_reasoning_thumb.svg',
+                                      'assets/images/home_model_reasoning_thumb.svg',
                                       fit: BoxFit.fill,
                                       excludeFromSemantics: true,
                                     ),
@@ -535,15 +482,11 @@ class _ReasoningLevelControl extends StatelessWidget {
                                         child: Text(
                                           levels[index].label,
                                           style: TextStyle(
-                                            color:
-                                                levels[index] ==
-                                                    selection.reasoningLevel
+                                            color: index == selectedIndex
                                                 ? _ink
                                                 : _mutedInk,
-                                            fontSize: isHomeOverlay ? 15 : 13,
-                                            fontWeight:
-                                                levels[index] ==
-                                                    selection.reasoningLevel
+                                            fontSize: 15,
+                                            fontWeight: index == selectedIndex
                                                 ? FontWeight.w500
                                                 : FontWeight.w400,
                                           ),
@@ -572,70 +515,56 @@ class _ModelOptionRow extends StatelessWidget {
   const _ModelOptionRow({
     required this.model,
     required this.selected,
-    required this.isHomeOverlay,
     required this.onTap,
   });
 
   final HomeChatModelOption model;
   final bool selected;
-  final bool isHomeOverlay;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: isHomeOverlay ? 48 : 42,
+      height: 48,
       child: Semantics(
         button: true,
         selected: selected,
         label: model.name,
         child: InkWell(
-          borderRadius: BorderRadius.circular(isHomeOverlay ? 13 : 11),
+          borderRadius: BorderRadius.circular(13),
           splashColor: Colors.transparent,
           highlightColor: Colors.transparent,
           onTap: onTap,
           child: Stack(
-            fit: isHomeOverlay ? StackFit.expand : StackFit.loose,
+            fit: StackFit.expand,
             children: [
               Positioned.fill(
                 child: AnimatedOpacity(
                   opacity: selected ? 1 : 0,
                   duration: const Duration(milliseconds: 150),
                   curve: Curves.easeOut,
-                  child: DecoratedBox(
-                    decoration: selected && isHomeOverlay
-                        ? BoxDecoration(borderRadius: BorderRadius.circular(13))
-                        : const BoxDecoration(),
-                    child: Align(
-                      alignment: Alignment.center,
-                      child: SizedBox(
-                        width: double.infinity,
-                        height: isHomeOverlay ? 46 : 42,
-                        child: SvgPicture.asset(
-                          isHomeOverlay
-                              ? 'assets/images/home_model_option_selected.svg'
-                              : 'assets/images/model_option_selected.svg',
-                          fit: BoxFit.fill,
-                          excludeFromSemantics: true,
-                        ),
+                  child: Align(
+                    alignment: Alignment.center,
+                    child: SizedBox(
+                      width: double.infinity,
+                      height: 46,
+                      child: SvgPicture.asset(
+                        'assets/images/home_model_option_selected.svg',
+                        fit: BoxFit.fill,
+                        excludeFromSemantics: true,
                       ),
                     ),
                   ),
                 ),
               ),
               Padding(
-                padding: EdgeInsets.fromLTRB(
-                  isHomeOverlay ? 12 : 9,
-                  0,
-                  isHomeOverlay ? 12 : 9,
-                  0,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 12),
                 child: Row(
                   children: [
                     SvgPicture.asset(
                       model.iconAsset,
-                      width: isHomeOverlay ? 27 : 19,
-                      height: isHomeOverlay ? 27 : 19,
+                      width: 27,
+                      height: 27,
                       colorFilter: model.id == HomeChatModelOption.mimo.id
                           ? const ColorFilter.mode(
                               Color(0xFFFF6900),
@@ -644,15 +573,15 @@ class _ModelOptionRow extends StatelessWidget {
                           : null,
                       excludeFromSemantics: true,
                     ),
-                    SizedBox(width: isHomeOverlay ? 10 : 9),
+                    const SizedBox(width: 10),
                     Expanded(
                       child: Text(
                         model.name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
+                        style: const TextStyle(
                           color: _ink,
-                          fontSize: isHomeOverlay ? 16 : 15,
+                          fontSize: 16,
                           fontWeight: FontWeight.w500,
                         ),
                       ),

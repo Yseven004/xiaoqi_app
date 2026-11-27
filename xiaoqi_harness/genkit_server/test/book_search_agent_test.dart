@@ -455,39 +455,79 @@ void main() {
     timeout: const Timeout(Duration(minutes: 2)),
   );
 
-  test('ordinary chat keeps its requested provider', () async {
-    final model = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    addTearDown(() => model.close(force: true));
-    final requests = <Map>[];
-    model.listen((request) async {
-      requests.add(jsonDecode(await utf8.decoder.bind(request).join()) as Map);
-      request.response.headers.contentType = ContentType(
-        'text',
-        'event-stream',
-        charset: 'utf-8',
+  test(
+    'ordinary chat and reading discussion send native thinking requests',
+    () async {
+      final model = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => model.close(force: true));
+      final requests = <Map>[];
+      model.listen((request) async {
+        requests.add(
+          jsonDecode(await utf8.decoder.bind(request).join()) as Map,
+        );
+        request.response.headers.contentType = ContentType(
+          'text',
+          'event-stream',
+          charset: 'utf-8',
+        );
+        request.response.write(
+          'data: ${jsonEncode({
+            'id': 'ordinary-fixture',
+            'choices': [
+              {
+                'index': 0,
+                'delta': {'content': '普通聊天回复。'},
+                'finish_reason': 'stop',
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n',
+        );
+        await request.response.close();
+      });
+      const deepseek = 'deepseek-flash';
+      const mimo = 'mimo-v2.6-flash';
+      const cases = [
+        (mimo, 'enabled', false, mimo, 'enabled', null),
+        (mimo, 'none', false, mimo, 'disabled', null),
+        (mimo, 'low', false, mimo, 'enabled', null),
+        (deepseek, 'low', false, deepseek, 'enabled', 'low'),
+        (deepseek, 'high', false, deepseek, 'enabled', 'high'),
+        (deepseek, 'medium', false, deepseek, 'enabled', 'high'),
+        (deepseek, 'max', false, deepseek, 'enabled', 'max'),
+        (mimo, 'max', true, deepseek, 'enabled', 'max'),
+      ];
+      final output = await runFixture(
+        model.port,
+        args: [
+          'reasoning',
+          jsonEncode([
+            for (final (model, level, reading, _, _, _) in cases)
+              {
+                'model_id': model,
+                'reasoning_level': level,
+                if (reading) '_reading_discussion': true,
+              },
+          ]),
+        ],
       );
-      request.response.write(
-        'data: ${jsonEncode({
-          'id': 'ordinary-fixture',
-          'choices': [
-            {
-              'index': 0,
-              'delta': {'content': '普通聊天回复。'},
-              'finish_reason': 'stop',
-            },
-          ],
-        })}\n\ndata: [DONE]\n\n',
-      );
-      await request.response.close();
-    });
-    final output = await runFixture(model.port, args: ['ordinary']);
-    expect(output['text'], '普通聊天回复。');
-    expect(requests, isNotEmpty);
-    for (final request in requests) {
-      expect(request['model'], 'mimo-v2.6-flash');
-      expect(request['enable_thinking'], isNull);
-    }
-  }, timeout: const Timeout(Duration(minutes: 2)));
+      expect(output['answers'], List.filled(cases.length, '普通聊天回复。'));
+      expect(requests, hasLength(cases.length));
+      for (final (index, (_, _, _, providerModel, thinking, wireEffort))
+          in cases.indexed) {
+        final request = requests[index];
+        expect(request['model'], providerModel);
+        expect(request['thinking'], {'type': thinking});
+        expect(request['reasoning_effort'], wireEffort);
+        expect(request['enable_thinking'], isNull);
+        if (providerModel == mimo) {
+          expect(request['max_completion_tokens'], 131072);
+          expect(request.containsKey('max_tokens'), isFalse);
+          expect(request.containsKey('reasoning_effort'), isFalse);
+        }
+      }
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
   test(
     'missing SiliconFlow key never falls back to the main chat provider',
     () async {
@@ -527,6 +567,8 @@ Future<Map> runFixture(int port, {List<String> args = const []}) async {
     environment: {
       'MIMO_API_KEY': 'fixture-only',
       'MIMO_BASE_URL': 'http://127.0.0.1:$port/v1',
+      'DEEPSEEK_API_KEY': 'fixture-only',
+      'DEEPSEEK_BASE_URL': 'http://127.0.0.1:$port/v1',
       'SILICONFLOW_API_KEY': 'fixture-only',
       'SILICONFLOW_BASE_URL': 'http://127.0.0.1:$port/v1',
       'XIAOQI_CAPTURE_TRACES': '0',

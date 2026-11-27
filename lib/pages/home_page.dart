@@ -2737,6 +2737,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   HomeChatModelSelection _selectionFor(AiConversationRecord? conversation) {
     final modelId = conversation?.modelId;
+    if (conversation?.usesDedicatedCompanion == true) {
+      const model = HomeChatModelOption.deepSeek;
+      final storedLevel = HomeChatReasoningLevelLabel.parse(
+        conversation?.reasoningLevel,
+      );
+      return HomeChatModelSelection(
+        model: model,
+        reasoningLevel: model.normalize(
+          storedLevel ?? model.defaultReasoningLevel,
+        ),
+      );
+    }
     if (modelId == null) return _modelPreferences.defaultSelection.value;
     final model = HomeChatModelOption.fromId(modelId);
     final level =
@@ -2752,9 +2764,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (mounted && _conversation?.modelId == null) setState(() {});
   }
 
+  bool get _canChangeModelSelection =>
+      _space == _HomeSpace.reading &&
+      !_isPreparingToSend &&
+      !_isDeletingReply &&
+      !_savingMessageEdit;
+
   void _setSelectedModel(HomeChatModelSelection selection) {
-    if (_space != _HomeSpace.reading) return;
-    if (_isDeletingReply || _savingMessageEdit) return;
+    if (!_canChangeModelSelection) return;
     final current =
         _conversation ?? AiConversationRecord.empty(enableAutoTitle: true);
     final previous = _selectionFor(current);
@@ -9755,8 +9772,10 @@ $text''';
               hintText: hasPassage ? '继续问这段…' : '问问这本书…',
               controller: _composerController,
               focusNode: _companionFocusNode,
-              modelSelection: _selectedModel,
-              onModelSelectionChanged: _setSelectedModel,
+              reasoningSelection: _selectedModel,
+              reasoningEnabled: _canChangeModelSelection,
+              onReasoningChanged: (level) =>
+                  _setSelectedModel(_selectedModel.withReasoning(level)),
               onSend: () => unawaited(_sendMessage()),
               onStop: _stopReply,
               sendingEnabled: !_isPreparingToSend && !_preparingAttachments,
@@ -10898,6 +10917,8 @@ $text''';
                                               controller: _composerController,
                                               focusNode: _composerFocusNode,
                                               modelSelection: _selectedModel,
+                                              modelSelectionEnabled:
+                                                  _canChangeModelSelection,
                                               onDrawingSelected: () =>
                                                   unawaited(
                                                     _openDrawingBoard(),
@@ -11763,6 +11784,7 @@ class _HomeComposer extends StatefulWidget {
     required this.controller,
     required this.focusNode,
     required this.modelSelection,
+    required this.modelSelectionEnabled,
     required this.onCapabilitySelected,
     required this.onOpenExtensionMarket,
     required this.onDrawingSelected,
@@ -11824,6 +11846,7 @@ class _HomeComposer extends StatefulWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final HomeChatModelSelection modelSelection;
+  final bool modelSelectionEnabled;
   final ValueChanged<Map<String, Object?>> onCapabilitySelected;
   final VoidCallback onOpenExtensionMarket;
   final VoidCallback onDrawingSelected;
@@ -12305,95 +12328,89 @@ class _HomeComposerState extends State<_HomeComposer> {
                           ),
                           SizedBox(
                             height: _homeComposerTapTargetSize,
-                            child: LayoutBuilder(
-                              builder: (context, constraints) {
-                                final pillWidth = (constraints.maxWidth - 152)
-                                    .clamp(56.0, 224.0)
-                                    .toDouble();
-                                return Row(
-                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                  children: [
-                                    KeyedSubtree(
-                                      key: _composerAddButtonKey,
-                                      child: _EmptyIconButton(
-                                        label: '添加内容',
-                                        asset:
-                                            'assets/images/home_composer_add.svg',
-                                        enabled: widget.showReadingTasks,
-                                        onTap: widget.showReadingTasks
-                                            ? widget.onToggleAttachmentPanel
-                                            : null,
-                                      ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                KeyedSubtree(
+                                  key: _composerAddButtonKey,
+                                  child: _EmptyIconButton(
+                                    label: '添加内容',
+                                    asset:
+                                        'assets/images/home_composer_add.svg',
+                                    enabled: widget.showReadingTasks,
+                                    onTap: widget.showReadingTasks
+                                        ? widget.onToggleAttachmentPanel
+                                        : null,
+                                  ),
+                                ),
+                                const Spacer(),
+                                SizedBox(
+                                  key: _composerModelButtonKey,
+                                  width: _homeComposerTapTargetSize,
+                                  height: _homeComposerTapTargetSize,
+                                  child: HomeChatModelSelector(
+                                    selection: widget.modelSelection,
+                                    enabled: widget.modelSelectionEnabled,
+                                    onOpen: widget.focusNode.unfocus,
+                                    onChanged:
+                                        widget.onModelSelectionChanged,
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                if (!widget.isEditingMessage)
+                                  KeyedSubtree(
+                                    key: _composerVoiceButtonKey,
+                                    child: _EmptyIconButton(
+                                      label: '语音输入',
+                                      asset:
+                                          'assets/images/home_composer_microphone.svg',
+                                      enabled: widget.showReadingTasks,
                                     ),
-                                    const Spacer(),
-                                    SizedBox(
-                                      key: _composerModelButtonKey,
-                                      width: pillWidth,
-                                      height: _homeComposerTapTargetSize,
-                                      child: HomeChatModelSelector(
-                                        selection: widget.modelSelection,
-                                        enabled: widget.showReadingTasks,
-                                        onChanged:
-                                            widget.onModelSelectionChanged,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    if (!widget.isEditingMessage)
-                                      KeyedSubtree(
-                                        key: _composerVoiceButtonKey,
-                                        child: _EmptyIconButton(
-                                          label: '语音输入',
-                                          asset:
-                                              'assets/images/home_composer_microphone.svg',
-                                          enabled: widget.showReadingTasks,
-                                        ),
-                                      ),
-                                    const SizedBox(width: 4),
-                                    KeyedSubtree(
-                                      key: _composerSendButtonKey,
-                                      child:
-                                          ValueListenableBuilder<
-                                            TextEditingValue
-                                          >(
-                                            valueListenable: widget.controller,
-                                            builder: (context, value, _) =>
-                                                widget.showReadingTasks &&
-                                                    widget.isGenerating &&
-                                                    widget.canSteerActiveTask
-                                                ? _AgentTaskComposerButtons(
-                                                    canSend: value.text
-                                                        .trim()
-                                                        .isNotEmpty,
-                                                    onSend: widget.onSteer,
-                                                    onStop: widget.onStop,
-                                                  )
-                                                : _SendButton(
-                                                    canSend:
+                                  ),
+                                const SizedBox(width: 4),
+                                KeyedSubtree(
+                                  key: _composerSendButtonKey,
+                                  child:
+                                      ValueListenableBuilder<
+                                        TextEditingValue
+                                      >(
+                                        valueListenable: widget.controller,
+                                        builder: (context, value, _) =>
+                                            widget.showReadingTasks &&
+                                                widget.isGenerating &&
+                                                widget.canSteerActiveTask
+                                            ? _AgentTaskComposerButtons(
+                                                canSend: value.text
+                                                    .trim()
+                                                    .isNotEmpty,
+                                                onSend: widget.onSteer,
+                                                onStop: widget.onStop,
+                                              )
+                                            : _SendButton(
+                                                canSend:
+                                                    widget
+                                                        .showReadingTasks &&
+                                                    (value.text
+                                                            .trim()
+                                                            .isNotEmpty ||
                                                         widget
-                                                            .showReadingTasks &&
-                                                        (value.text
-                                                                .trim()
-                                                                .isNotEmpty ||
-                                                            widget
-                                                                .attachments
-                                                                .isNotEmpty ||
-                                                            widget
-                                                                .annotations
-                                                                .isNotEmpty) &&
-                                                        !widget
-                                                            .isSavingMessageEdit,
-                                                    isGenerating:
+                                                            .attachments
+                                                            .isNotEmpty ||
                                                         widget
-                                                            .showReadingTasks &&
-                                                        widget.isGenerating,
-                                                    onSend: widget.onSend,
-                                                    onStop: widget.onStop,
-                                                  ),
-                                          ),
-                                    ),
-                                  ],
-                                );
-                              },
+                                                            .annotations
+                                                            .isNotEmpty) &&
+                                                    !widget
+                                                        .isSavingMessageEdit,
+                                                isGenerating:
+                                                    widget
+                                                        .showReadingTasks &&
+                                                    widget.isGenerating,
+                                                onSend: widget.onSend,
+                                                onStop: widget.onStop,
+                                              ),
+                                      ),
+                                ),
+                              ],
                             ),
                           ),
                         ],

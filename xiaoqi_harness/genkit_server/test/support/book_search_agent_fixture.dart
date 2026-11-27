@@ -88,6 +88,36 @@ Future<void> main(List<String> args) async {
   );
   final events = <Map<String, Object?>>[];
   try {
+    if (args.firstOrNull == 'reasoning') {
+      final turns = (jsonDecode(args[1]) as List).cast<Map>();
+      final answers = <String>[];
+      for (final (index, turn) in turns.indexed) {
+        final taskId = 'reasoning-$index';
+        const prompt = '请解释一句话。';
+        store.put('task/personal/$taskId', {'status': 'running'}, null);
+        final result = await runtime.runAgentTurn(
+          tenantId: 'personal',
+          taskId: taskId,
+          request: {
+            '_authenticated_device_key': owner,
+            'current_turn_text': prompt,
+            ...turn.cast<String, Object?>(),
+          },
+          messages: [
+            Message(
+              role: Role.user,
+              content: [TextPart(text: prompt)],
+            ),
+          ],
+          onChunk: (_) {},
+          onProcessEvent: (_) {},
+          cancellation: CancellationController().token,
+        );
+        answers.add(result.text);
+      }
+      stdout.writeln('RESULT:${jsonEncode({'answers': answers})}');
+      return;
+    }
     final result = await runtime.runAgentTurn(
       tenantId: 'personal',
       taskId: task,

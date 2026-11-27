@@ -1714,6 +1714,18 @@ class XiaoqiApi {
           throw const FormatException('恢复快照缺少原始用户消息');
         }
         currentUser = messages[currentUserIndex];
+        final originalTurn = currentUser.metadata?[_remoteAgentTurnMetadataKey];
+        if (originalTurn is Map) {
+          // This is the same request, with provider-specific settings and
+          // tool history tied to its original model.
+          for (final key in ['model_id', 'reasoning_level']) {
+            if (originalTurn.containsKey(key)) {
+              config[key] = originalTurn[key];
+            } else {
+              config.remove(key);
+            }
+          }
+        }
       }
       final taskId = _safeId(config['task_id'], '任务 ID');
       final annotationGroups = parseAnnotationGroups(

@@ -1,19 +1,23 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-enum HomeChatReasoningLevel { low, medium, high }
+enum HomeChatReasoningLevel { low, high, max, none, enabled }
 
 extension HomeChatReasoningLevelLabel on HomeChatReasoningLevel {
   String get label => switch (this) {
     HomeChatReasoningLevel.low => '低',
-    HomeChatReasoningLevel.medium => '中',
     HomeChatReasoningLevel.high => '高',
+    HomeChatReasoningLevel.max => '最高',
+    HomeChatReasoningLevel.none => '关闭',
+    HomeChatReasoningLevel.enabled => '开启',
   };
 
   static HomeChatReasoningLevel? parse(String? value) => switch (value) {
     'low' => HomeChatReasoningLevel.low,
-    'medium' => HomeChatReasoningLevel.medium,
-    'high' => HomeChatReasoningLevel.high,
+    'medium' || 'high' => HomeChatReasoningLevel.high,
+    'max' => HomeChatReasoningLevel.max,
+    'none' => HomeChatReasoningLevel.none,
+    'enabled' => HomeChatReasoningLevel.enabled,
     _ => null,
   };
 }
@@ -25,7 +29,7 @@ class HomeChatModelOption {
     required this.provider,
     required this.iconAsset,
     required this.defaultReasoningLevel,
-    this.supportsMedium = true,
+    required this.reasoningLevels,
   });
 
   final String id;
@@ -33,20 +37,22 @@ class HomeChatModelOption {
   final String provider;
   final String iconAsset;
   final HomeChatReasoningLevel defaultReasoningLevel;
-  final bool supportsMedium;
-
-  bool supports(HomeChatReasoningLevel level) =>
-      supportsMedium || level != HomeChatReasoningLevel.medium;
+  final List<HomeChatReasoningLevel> reasoningLevels;
 
   HomeChatReasoningLevel normalize(HomeChatReasoningLevel level) =>
-      supports(level) ? level : defaultReasoningLevel;
+      reasoningLevels.contains(level) ? level : defaultReasoningLevel;
 
   static const deepSeek = HomeChatModelOption(
     id: 'deepseek-flash',
     name: 'DeepSeek-V4.1-Flash',
     provider: 'DeepSeek',
     iconAsset: 'assets/images/model_provider_deepseek.svg',
-    defaultReasoningLevel: HomeChatReasoningLevel.medium,
+    defaultReasoningLevel: HomeChatReasoningLevel.high,
+    reasoningLevels: [
+      HomeChatReasoningLevel.low,
+      HomeChatReasoningLevel.high,
+      HomeChatReasoningLevel.max,
+    ],
   );
 
   static const mimo = HomeChatModelOption(
@@ -54,16 +60,17 @@ class HomeChatModelOption {
     name: 'MiMo-V2.6-Flash',
     provider: 'Xiaomi',
     iconAsset: 'assets/images/model_provider_xiaomi.svg',
-    defaultReasoningLevel: HomeChatReasoningLevel.high,
-    supportsMedium: false,
+    defaultReasoningLevel: HomeChatReasoningLevel.enabled,
+    reasoningLevels: [
+      HomeChatReasoningLevel.none,
+      HomeChatReasoningLevel.enabled,
+    ],
   );
 
   static const options = <HomeChatModelOption>[deepSeek, mimo];
 
-  static HomeChatModelOption fromId(String? id) => options.firstWhere(
-    (option) => option.id == id,
-    orElse: () => deepSeek,
-  );
+  static HomeChatModelOption fromId(String? id) =>
+      options.firstWhere((option) => option.id == id, orElse: () => deepSeek);
 }
 
 class HomeChatModelSelection {
@@ -74,7 +81,7 @@ class HomeChatModelSelection {
 
   static const initial = HomeChatModelSelection(
     model: HomeChatModelOption.deepSeek,
-    reasoningLevel: HomeChatReasoningLevel.medium,
+    reasoningLevel: HomeChatReasoningLevel.high,
   );
 
   final HomeChatModelOption model;
@@ -100,8 +107,9 @@ class HomeChatModelPreferences {
   static const _modelKey = 'home_chat.default_model.v1';
   static const _reasoningKey = 'home_chat.default_reasoning.v1';
 
-  final ValueNotifier<HomeChatModelSelection> defaultSelection =
-      ValueNotifier(HomeChatModelSelection.initial);
+  final ValueNotifier<HomeChatModelSelection> defaultSelection = ValueNotifier(
+    HomeChatModelSelection.initial,
+  );
   Future<void>? _loading;
   bool _loaded = false;
 
@@ -112,9 +120,7 @@ class HomeChatModelPreferences {
 
   Future<void> _load() async {
     final preferences = await SharedPreferences.getInstance();
-    final model = HomeChatModelOption.fromId(
-      preferences.getString(_modelKey),
-    );
+    final model = HomeChatModelOption.fromId(preferences.getString(_modelKey));
     final level = HomeChatReasoningLevelLabel.parse(
       preferences.getString(_reasoningKey),
     );
@@ -130,10 +136,7 @@ class HomeChatModelPreferences {
     final normalized = selection.withReasoning(selection.reasoningLevel);
     final preferences = await SharedPreferences.getInstance();
     await preferences.setString(_modelKey, normalized.model.id);
-    await preferences.setString(
-      _reasoningKey,
-      normalized.reasoningLevel.name,
-    );
+    await preferences.setString(_reasoningKey, normalized.reasoningLevel.name);
     defaultSelection.value = normalized;
   }
 }

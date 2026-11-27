@@ -112,8 +112,8 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
           ..style = PaintingStyle.stroke
           ..strokeWidth = 6,
       ),
-      // The board is a fixed paper surface. Zooming belongs to the explicit
-      // expand action, not to an infinite/pannable canvas.
+      // The board and reader overlays use fixed coordinates. Enabling painter
+      // scaling would defer pen updates until the pointer passes touch slop.
       scale: const ScaleSettings(enabled: false, minScale: 1, maxScale: 1),
     ),
     background: const ColorBackgroundDrawable(color: _paper),
@@ -208,11 +208,6 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       // A ColorBackgroundDrawable uses BlendMode.src, even at zero alpha:
       // it would clear the page already painted beneath this overlay.
       _controller.background = null;
-      _controller.scaleSettings = const ScaleSettings(
-        enabled: true,
-        minScale: 1,
-        maxScale: 1,
-      );
       layer._attachments++;
       widget.annotationTools?._attach(this);
       _restoreFuture = _restoreAnnotation(layer);
@@ -1558,7 +1553,10 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
       if (_ready)
         Positioned.fill(
           child: Listener(
-            onPointerDown: (event) => _updateEraserCursor(event.localPosition),
+            onPointerDown: (event) {
+              if (_eraserPopoverOpen) _dismissPopovers();
+              _updateEraserCursor(event.localPosition);
+            },
             onPointerMove: (event) => _updateEraserCursor(event.localPosition),
             onPointerUp: (_) => _hideEraserCursor(),
             onPointerCancel: (_) => _hideEraserCursor(),
@@ -1630,7 +1628,7 @@ class _DrawingBoardPageState extends State<DrawingBoardPage>
   );
 
   List<Widget> _drawingPopovers(Size size) => [
-    if (_colorPopoverOpen || _imagePopoverOpen || _eraserPopoverOpen)
+    if (_colorPopoverOpen || _imagePopoverOpen)
       Positioned.fill(
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,

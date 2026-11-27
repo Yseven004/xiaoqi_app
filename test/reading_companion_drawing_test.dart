@@ -6,6 +6,62 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:xiaoqi_app/pages/drawing_board_page.dart';
 
 void main() {
+  testWidgets('reader inks short pen strokes and erases on the first drag', (
+    tester,
+  ) async {
+    final tools = DrawingAnnotationTools();
+    final layer = DrawingAnnotationLayer(size: const Size(640, 480));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            fit: StackFit.expand,
+            children: [
+              DrawingBoardPage.annotation(layer: layer, annotationTools: tools),
+              tools.controls(onFinish: () {}),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final pen = await tester.startGesture(
+      const Offset(72, 230),
+      kind: ui.PointerDeviceKind.stylus,
+    );
+    await pen.moveBy(const Offset(4, 0));
+    final shortStroke = (await layer.encode())['drawables'] as List;
+    expect(shortStroke.single['data']['path'], hasLength(2));
+
+    final secondPointer = await tester.startGesture(const Offset(300, 300));
+    await pen.moveBy(const Offset(64, 0));
+    await secondPointer.up();
+    await pen.up();
+    await tester.pumpAndSettle();
+    final completedStroke = (await layer.encode())['drawables'] as List;
+    expect(completedStroke.single['type'], 'freeStyle');
+    expect(completedStroke.single['data']['path'], hasLength(3));
+
+    final eraserPopover = find.byKey(const ValueKey('drawing-eraser-popover'));
+    await tester.tap(find.byTooltip('橡皮'));
+    await tester.pumpAndSettle();
+    expect(eraserPopover, findsOneWidget);
+
+    final eraser = await tester.startGesture(const Offset(100, 220));
+    await eraser.moveBy(const Offset(0, 20));
+    await eraser.up();
+    await tester.pumpAndSettle();
+    expect(eraserPopover, findsNothing);
+    final erased = (await layer.encode())['drawables'] as List;
+    final eraseStroke = erased.singleWhere((item) => item['type'] == 'erase');
+    expect(eraseStroke['data']['path'], hasLength(2));
+    expect(eraseStroke['data']['strokeWidth'], 30);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    tools.dispose();
+  });
+
   testWidgets(
     'reader capsule edits the active anchored drawing and restores it',
     (tester) async {

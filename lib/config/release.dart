@@ -1,2 +1,2 @@
-const releaseId = '2026-11-26-reading-companion';
-const apiContractVersion = '45';
+const releaseId = '2026-11-27-reading-ink-reasoning';
+const apiContractVersion = '46';

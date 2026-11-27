@@ -30,12 +30,13 @@ extension _CompanionMenus on _ReadingCompanionComposerState {
       _CompanionMenu.imageSource => _imageSourceMenu(),
       _CompanionMenu.skills => _skillsMenu(),
       _CompanionMenu.mcp => _connectorsMenu(),
-      _CompanionMenu.model => _menuSurface(
+      _CompanionMenu.reasoning => HomeChatModelMenuSurface(
         child: SingleChildScrollView(
           primary: false,
-          child: HomeChatModelPickerPanel(
-            selection: widget.modelSelection,
-            onChanged: widget.onModelSelectionChanged,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: HomeChatReasoningPicker(
+            selection: widget.reasoningSelection,
+            onChanged: widget.onReasoningChanged,
           ),
         ),
       ),

@@ -5,18 +5,25 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:test/test.dart';
 import 'package:xiaoqi_genkit_server/src/agent_presentation_middleware.dart';
+import 'package:xiaoqi_genkit_server/src/mimo_model_client.dart';
 
 void main() {
-  for (final effort in ['low', 'medium', 'high']) {
+  for (final (model, effort) in [
+    ('deepseek-flash', 'low'),
+    ('deepseek-flash', 'high'),
+    ('deepseek-flash', 'max'),
+    ('mimo-v2.6-flash', 'high'),
+  ]) {
+    final isMimo = model == 'mimo-v2.6-flash';
     test(
-      'DeepSeek $effort enables thinking and replays private tool reasoning',
+      '$model $effort enables thinking and replays private tool reasoning',
       () async {
         var calls = 0;
         final events = <Map<String, Object?>>[];
         final client = MockClient((request) async {
           final body = jsonDecode(request.body) as Map;
           expect(body['thinking'], {'type': 'enabled'});
-          expect(body['reasoning_effort'], effort);
+          expect(body['reasoning_effort'], isMimo ? isNull : effort);
           calls++;
           if (calls == 2) {
             final history = (body['messages'] as List).whereType<Map>();
@@ -30,7 +37,7 @@ void main() {
               'id': 'native-test',
               'object': 'chat.completion',
               'created': 1,
-              'model': 'deepseek-flash',
+              'model': model,
               'choices': [
                 {
                   'index': 0,
@@ -59,13 +66,16 @@ void main() {
           plugins: [
             deepSeek(
               apiKey: 'test-only',
-              httpClient: client,
-              models: [CustomModelDefinition(name: 'deepseek-flash')],
+              httpClient: isMimo ? MimoModelClient(client) : client,
+              models: [CustomModelDefinition(name: model)],
             ),
           ],
         );
-        ai.defineTool(name: 'calculate', description: 'Compute one plus one.',
-          fn: (_, _) async => ToolResult.response(2));
+        ai.defineTool(
+          name: 'calculate',
+          description: 'Compute one plus one.',
+          fn: (_, _) async => ToolResult.response(2),
+        );
         final presentation = ai.defineGenerateMiddleware<void>(
           name: 'native-presentation',
           create: (_, _) => AgentPresentationMiddleware(
@@ -74,7 +84,7 @@ void main() {
           ),
         );
         final response = await ai.generate(
-          model: deepSeek.model('deepseek-flash'),
+          model: deepSeek.model(model),
           prompt: '计算一加一。',
           toolNames: ['calculate'],
           config: OpenAIChatOptions(reasoningEffort: effort),

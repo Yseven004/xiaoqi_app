@@ -72,9 +72,9 @@
 
 - 顶栏「阅读空间」保持可见，伴读按钮在笔记左侧。选文上方的黑色胶囊从左到右为「复制」「注释」「AI」。
 - 在 900 × 1350 的参考画布中，问答卡尺寸为 540 × 720，宽高比 3:4。卡片位于选文下方，顶部直接显示引文，右上是收起和关闭。卡片无标题、无指向尖角。
-- 卡内使用黑白灰对话排版，用户消息靠右，回答靠左。底部双层输入栏在参考画布中高 84，首行用于输入，次行左侧为「＋」，右侧依次为脑形模型按钮、语音和发送。收起状态的模型按钮仅显示脑形图标。
+- 卡内使用黑白灰对话排版，用户消息靠右，回答靠左。底部双层输入栏在参考画布中高 84，首行用于输入，次行左侧为「＋」，右侧依次为脑形思考强度按钮、语音和发送。
 
-该图是平板问答窗收起菜单时的视觉定稿。2026-11-20 同步确认了「＋」菜单的切换方式、空状态与安装入口。[查看确认的四种子卡状态](reading-companion/confirmed/tablet-companion-menu-states-2026-11-20.png)。模型面板沿用主界面的模型和思考程度控件，入口仅显示脑形图标。
+该图是平板问答窗收起菜单时的视觉定稿。2026-11-20 同步确认了「＋」菜单的切换方式、空状态与安装入口。[查看确认的四种子卡状态](reading-companion/confirmed/tablet-companion-menu-states-2026-11-20.png)。
 
 ## 「＋」展开后的交互要求
 
@@ -106,7 +106,6 @@
 
 | 用途 | 路径及来源 | viewBox / 显示尺寸 | 状态 |
 | --- | --- | --- | --- |
-| 模型按钮 | `assets/images/reading_companion_model_brain.svg`，Lucide 0.468.0（ISC） | 0 0 24 24 / 19 dp | 收起和展开均显示脑形。确认稿上的脑形来自位图参考，Lucide 版的内部线条略有差异。 |
 | 添加、语音、发送 | `assets/images/home_composer_add.svg`、`home_composer_microphone.svg`、`home_send_idle.svg`、`home_send_active.svg`、`home_send_stop.svg`，沿用首页资产 | 0 0 40 40 / 28 dp | 发送根据输入和生成状态选用闲置、可发送或停止图标。 |
 | 文件、技能 / 插件、MCP 连接器 | `assets/icons/extension_market/detail/paperclip.svg`、`assets/icons/capabilities/skill_plugin_capsule.svg`、`assets/icons/capabilities/mcp_connector.svg`，沿用市场和首页资产 | 见独立 SVG / 17 dp | 图标常驻，点击整行切换面板。 |
 | 附件来源和常驻操作 | `assets/images/home_attachment_*.svg`、`assets/icons/capabilities/image.svg`、`assets/icons/capabilities/brush.svg`，沿用首页资产 | 见独立 SVG / 17 dp | 每行点按；创建图像、绘图始终可用。 |
@@ -194,3 +193,8 @@ Flutter 回归覆盖沉浸和工具栏切换、原页回切、PDF 文字选区�
 - 首屏和翻页优先绘制正在看的 PDF。原页稳定后合并当前页文本探查和后台电子书位置更新。PDFium 的渐进页面准备分成更短的工作批次，拖动或跳转时延后启动下一次提取、渲染或 OCR。已经开始的单页原生调用仍需完成。
 - 阅读器确认原文件的页数和复制权限后，完整的 PDF 重排缓存直接在后台解码、校验和组装。缺页或损坏时回原文件修复。仍须完成整本准备和目标排版后，由用户点击切换。依赖沿用 [pdfrx 2.4.8](https://pub.dev/packages/pdfrx/versions/2.4.8) 和 [pdfrx_engine 0.4.7](https://pub.dev/packages/pdfrx_engine/versions/0.4.7)。
 - 真机验收测四个场景：缓存已存在的 PDF 冷启动、未准备完时连续翻页、目录远跳、回切后继续阅读。优先在文字 PDF 和含扫描图页的 PDF 各抽一本，对照首次出页耗时和跳到目标页的耗时。
+
+### 2026-11-27 输入区修订
+
+- 图一为 1080 × 1728 的竖屏首页截图，图二为同分辨率的伴读问答截图。逻辑视口和 DPR 未提供。复用图二脑形入口，主界面打开模型与思考强度，伴读问答仅打开思考强度。按 [全局设计规则](../../DESIGN.md) 处理输入焦点。
+- `assets/images/reading_companion_model_brain.svg` 来自项目原有 Lucide 0.468.0 脑形资产（ISC）。viewBox 为 `0 0 24 24`，显示为 19 dp，点击区域为 48 × 48 dp。展开与收起使用同一轮廓，亮色和暗色由消费者着色。消费组件为 `HomeChatModelSelector` 和 `ReadingCompanionComposer`。已核对独立 96 × 96 SVG 渲染，以及伴读问答的 1080 × 1728 本地展开态渲染。待用户确认面板与真机验收。
