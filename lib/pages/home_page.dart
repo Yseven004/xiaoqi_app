@@ -4896,7 +4896,13 @@ $materialIndex
             final backgroundTask = await CapabilityCloudSync.instance
                 .getTask(taskId)
                 .catchError((Object _) => <String, dynamic>{});
-            if ((backgroundText.isNotEmpty || bookSearchId != null) &&
+            final readingEvidence = ReadingCompanionEvidence.fromPayload(
+              response.state?['reading_evidence'] ??
+                  backgroundTask['reading_evidence'],
+            );
+            if ((backgroundText.isNotEmpty ||
+                    bookSearchId != null ||
+                    readingEvidence.any((source) => source.showsAsA2ui)) &&
                 response.interrupts.isEmpty &&
                 const {
                   'succeeded',
@@ -4936,10 +4942,7 @@ $materialIndex
                       .inMilliseconds,
                   agentProcessStatus: 'completed',
                   agentWebSources: finalBackgroundSources,
-                  readingEvidence: ReadingCompanionEvidence.fromPayload(
-                    response.state?['reading_evidence'] ??
-                        backgroundTask['reading_evidence'],
-                  ),
+                  readingEvidence: readingEvidence,
                   bookSearchId: bookSearchId,
                 );
                 final completed = answerAlreadySaved
@@ -5264,7 +5267,12 @@ $materialIndex
         // the completed surface has a stable parent in the conversation.
         reply = '已生成交互界面。';
       }
-      if (reply.trim().isEmpty && bookSearchId == null) {
+      final readingEvidence = ReadingCompanionEvidence.fromPayload(
+        response.state?['reading_evidence'],
+      );
+      if (reply.trim().isEmpty &&
+          bookSearchId == null &&
+          !readingEvidence.any((source) => source.showsAsA2ui)) {
         throw const AiException('AI没有返回可用内容，请重试');
       }
       final artifacts = <Map<String, Object?>>[];
@@ -5306,9 +5314,7 @@ $materialIndex
         processSummary: processSummary,
         processStatus: processStatus,
         webSources: List<AiChatWebSource>.unmodifiable(_agentWebSources),
-        readingEvidence: ReadingCompanionEvidence.fromPayload(
-          response.state?['reading_evidence'],
-        ),
+        readingEvidence: readingEvidence,
         bookSearchId: bookSearchId,
       );
     } catch (error) {
@@ -6183,8 +6189,10 @@ $text''';
       if (custom['reading_evidence'] case final List references) {
         final evidence = ReadingCompanionEvidence.fromPayload(references);
         if (!listEquals(
-          evidence.map((item) => item.identity).toList(),
-          _streamingReadingEvidence.value.map((item) => item.identity).toList(),
+          evidence.map((item) => (item.identity, item.showsAsA2ui)).toList(),
+          _streamingReadingEvidence.value
+              .map((item) => (item.identity, item.showsAsA2ui))
+              .toList(),
         )) {
           _streamingReadingEvidence.value = evidence;
         }
@@ -6943,7 +6951,7 @@ $text''';
             node.isUser ||
             node.isDeletedMarker ||
             node.isIncomplete ||
-            node.text.trim().isEmpty) {
+            (node.text.trim().isEmpty && !node.hasA2uiReadingSources)) {
           return false;
         }
         return message.agentTaskPending
@@ -7107,6 +7115,7 @@ $text''';
             readingEvidence = ReadingCompanionEvidence.fromPayload(
               event['references'],
             );
+            _streamingReadingEvidence.value = readingEvidence;
             break;
           case 'web_sources':
             _agentWebSources = (event['sources'] as List? ?? const [])
@@ -7189,7 +7198,8 @@ $text''';
         expectedScope: await LearningNotesService.instance.accountScope(),
       );
       if (result.trim().isEmpty &&
-          _agentStreamPresentation.value.bookSearchId == null) {
+          _agentStreamPresentation.value.bookSearchId == null &&
+          !readingEvidence.any((source) => source.showsAsA2ui)) {
         throw const AiException('任务已结束，但没有返回可恢复的结果');
       }
       _streamingReplyBuffer
@@ -7346,7 +7356,10 @@ $text''';
         activeProcess.currentStep.isNotEmpty ||
         durationMs > 0;
     final current = _conversation;
-    if ((content.isEmpty && !hasProcess && searchId == null) ||
+    if ((content.isEmpty &&
+            !hasProcess &&
+            searchId == null &&
+            !readingEvidence.any((source) => source.showsAsA2ui)) ||
         current == null) {
       _clearStreamingReply();
       return false;
@@ -7507,7 +7520,10 @@ $text''';
         !answer.isIncomplete ||
         (content.trim().isEmpty &&
             processDetails.isEmpty &&
-            searchId == null)) {
+            searchId == null &&
+            !(readingEvidence ?? answer.readingEvidence).any(
+              (source) => source.showsAsA2ui,
+            ))) {
       return false;
     }
     final replyTaskId = clearAgentTaskId
@@ -9574,7 +9590,7 @@ $text''';
     );
   }
 
-  Stream<ReadingCompanionExplanationChunk> _explainReadingPassage(
+  Stream<String> _explainReadingPassage(
     ReadingCompanionPassage passage,
     genkit.CancellationToken cancellation,
   ) async* {
@@ -9616,33 +9632,15 @@ $text''';
     );
     try {
       var emitted = false;
-      var referencesSent = false;
       await for (final chunk in turn.stream) {
-        final references = ReadingCompanionEvidence.fromPayload(
-          chunk.custom?['reading_evidence'],
-        );
-        if (chunk.text.isEmpty && references.isEmpty) continue;
-        emitted |= chunk.text.isNotEmpty;
-        referencesSent |= references.isNotEmpty;
-        yield ReadingCompanionExplanationChunk(
-          text: chunk.text,
-          evidence: references,
-        );
+        if (chunk.text.isEmpty) continue;
+        emitted = true;
+        yield chunk.text;
       }
       final result = await turn.response;
       cancellation.throwIfCancelled();
       result.assertValid();
-      final references = referencesSent
-          ? const <ReadingCompanionEvidence>[]
-          : ReadingCompanionEvidence.fromPayload(
-              result.state?['reading_evidence'],
-            );
-      if ((!emitted && result.text.isNotEmpty) || references.isNotEmpty) {
-        yield ReadingCompanionExplanationChunk(
-          text: emitted ? '' : result.text,
-          evidence: references,
-        );
-      }
+      if (!emitted && result.text.isNotEmpty) yield result.text;
     } finally {
       await agent.close();
     }
@@ -10378,7 +10376,7 @@ $text''';
                 node.isUser ||
                 node.isDeletedMarker ||
                 node.isIncomplete ||
-                node.text.trim().isEmpty) {
+                (node.text.trim().isEmpty && !node.hasA2uiReadingSources)) {
               return false;
             }
             return message.agentTaskPending

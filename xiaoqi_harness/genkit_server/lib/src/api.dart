@@ -1421,11 +1421,6 @@ class XiaoqiApi {
         input: Map<String, dynamic>.from(metadata),
         cancel: options.cancel,
         onChunk: options.sendChunk,
-        onEvidence: (references) {
-          if (references.isNotEmpty) {
-            session.updateCustom((_) => {'reading_evidence': references});
-          }
-        },
       );
       if (output.message case final response?) session.addMessages([response]);
       return TurnResult(finishReason: output.finishReason);

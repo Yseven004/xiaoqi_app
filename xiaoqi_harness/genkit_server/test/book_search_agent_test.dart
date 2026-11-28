@@ -529,7 +529,7 @@ void main() {
     timeout: const Timeout(Duration(minutes: 2)),
   );
   test(
-    'reading discussion retrieves and publishes book sources only on lookup',
+    'reading discussion publishes book sources only for an explicit request',
     () async {
       final model = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() => model.close(force: true));
@@ -563,14 +563,15 @@ void main() {
           return;
         }
         requests.add(body);
-        final lookup = requests.length == 2;
+        final call = requests.length;
+        final lookup = call == 2 || call == 4;
         final delta = lookup
             ? {
                 'reasoning_content': '需要核对书中的出处。',
                 'tool_calls': [
                   {
                     'index': 0,
-                    'id': 'lookup-1',
+                    'id': 'lookup-$call',
                     'type': 'function',
                     'function': {
                       'name': 'read_task_material',
@@ -578,12 +579,19 @@ void main() {
                         'material_id': 'fixture-material',
                         'mode': 'query',
                         'query': '花园小径',
+                        'show_sources': true,
                       }),
                     },
                   },
                 ],
               }
-            : {'content': requests.length == 1 ? 'Garden path.' : '见第 21 页。'};
+            : {
+                'content': switch (call) {
+                  1 => 'Garden path.',
+                  3 => '小径是花园里供步行的小路。',
+                  _ => '',
+                },
+              };
         request.response.headers.contentType = ContentType(
           'text',
           'event-stream',
@@ -605,10 +613,11 @@ void main() {
       });
 
       final output = await runFixture(model.port, args: ['reading-citations']);
-      expect(requests.length, 3, reason: jsonEncode(output));
+      expect(requests.length, 5, reason: jsonEncode(output));
       expect(jsonEncode(requests.first['tools']), contains('read_task_material'));
       final initialMessages = jsonEncode(requests.first['messages']);
       expect(initialMessages, contains('先回答读者当前的问题'));
+      expect(initialMessages, contains('核实的出处由 A2UI 展示'));
       expect(initialMessages, isNot(contains('回答必须说明实际阅读范围')));
       expect(initialMessages, isNot(contains('沿着花园小径走到了门口')));
 
@@ -625,8 +634,19 @@ void main() {
         ),
         isEmpty,
       );
+      final checked = turns[1];
+      final checkedEvents = (checked['events'] as List).cast<Map>();
+      expect(checked['text'], '小径是花园里供步行的小路。');
+      expect(
+        checkedEvents.any((event) => event['tool'] == 'read_task_material'),
+        isTrue,
+      );
+      expect(
+        checkedEvents.any((event) => event['type'] == 'reading_evidence'),
+        isFalse,
+      );
       final cited = turns.last;
-      expect(cited['text'], '见第 21 页。');
+      expect(cited['text'], isEmpty);
       final evidence = (cited['events'] as List).cast<Map>().singleWhere(
         (event) => event['type'] == 'reading_evidence',
       );
@@ -634,6 +654,7 @@ void main() {
       expect(reference['page'], 21);
       expect(reference['quote'], '沿着花园小径走到了门口。');
       expect(reference['source_version'], 'b' * 64);
+      expect(reference['presentation'], 'a2ui');
     },
     timeout: const Timeout(Duration(minutes: 2)),
   );

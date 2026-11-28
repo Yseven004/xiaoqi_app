@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path_parsing/path_parsing.dart';
 
-import '../models/reading_companion_evidence.dart';
 import 'app_toast.dart';
 
 enum _CloudSide { above, left, right, below }
@@ -128,8 +127,6 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     required this.onContinue,
     this.onSwitchAnswer,
     this.showingPrevious = false,
-    this.evidence = const [],
-    this.onOpenEvidence,
   });
 
   final Rect viewport;
@@ -146,8 +143,6 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
   final VoidCallback? onContinue;
   final VoidCallback? onSwitchAnswer;
   final bool showingPrevious;
-  final List<ReadingCompanionEvidence> evidence;
-  final ValueChanged<ReadingCompanionEvidence>? onOpenEvidence;
 
   @override
   Widget build(BuildContext context) {
@@ -746,11 +741,6 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
                                                     )
                                                   : bodyText,
                                             ),
-                                            if (onOpenEvidence != null)
-                                              ReadingCompanionEvidenceLinks(
-                                                evidence: evidence,
-                                                onOpen: onOpenEvidence!,
-                                              ),
                                           ],
                                         ),
                                       ),
@@ -937,75 +927,6 @@ class _CloudRegenerationPlaceholderState
           ),
         ),
       ),
-    );
-  }
-}
-
-class ReadingCompanionEvidenceLinks extends StatefulWidget {
-  const ReadingCompanionEvidenceLinks({
-    super.key,
-    required this.evidence,
-    required this.onOpen,
-  });
-
-  final List<ReadingCompanionEvidence> evidence;
-  final ValueChanged<ReadingCompanionEvidence> onOpen;
-
-  @override
-  State<ReadingCompanionEvidenceLinks> createState() =>
-      _ReadingCompanionEvidenceLinksState();
-}
-
-class _ReadingCompanionEvidenceLinksState
-    extends State<ReadingCompanionEvidenceLinks> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    if (widget.evidence.isEmpty) return const SizedBox.shrink();
-    final scheme = Theme.of(context).colorScheme;
-    final style = ButtonStyle(
-      overlayColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.pressed)) return Colors.transparent;
-        if (states.contains(WidgetState.focused)) {
-          return scheme.primary.withValues(alpha: 0.12);
-        }
-        return Colors.transparent;
-      }),
-      splashFactory: NoSplash.splashFactory,
-    );
-    final shownPages = <(String, int)>{};
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Semantics(
-          expanded: _expanded,
-          child: TextButton.icon(
-            onPressed: () => setState(() => _expanded = !_expanded),
-            style: style,
-            icon: Icon(
-              _expanded ? Icons.expand_less : Icons.expand_more,
-              size: 18,
-            ),
-            label: const Text('原文出处'),
-          ),
-        ),
-        if (_expanded)
-          Wrap(
-            spacing: 4,
-            children: [
-              for (final entry in widget.evidence)
-                if (entry.page == null ||
-                    shownPages.add((entry.sourceVersion, entry.page!)))
-                  TextButton(
-                    key: ValueKey(entry.identity),
-                    onPressed: () => widget.onOpen(entry),
-                    style: style,
-                    child: Text('查看原文 · ${entry.label}'),
-                  ),
-            ],
-          ),
-      ],
     );
   }
 }

@@ -94,7 +94,11 @@ Future<void> main(List<String> args) async {
       const bookId = 'ready-book';
       _seedReadyBook(store, readingBookOwner('personal', account), bookId);
       final captured = <Map<String, Object?>>[];
-      const questions = ['把“花园小径”翻成英文。', '请核对“花园小径”的原文出处。'];
+      const questions = [
+        '把“花园小径”翻成英文。',
+        '请按书里情节解释“花园小径”。',
+        '请核对“花园小径”的原文出处。',
+      ];
       for (final (index, question) in questions.indexed) {
         final taskId = 'citation-$index';
         store.put('task/personal/$taskId', {

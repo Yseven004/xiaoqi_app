@@ -8,6 +8,7 @@ final class ReadingCompanionEvidence {
     required this.sourceVersion,
     required this.locator,
     required this.quote,
+    required this.showsAsA2ui,
     this.page,
     this.chapterId,
     this.href,
@@ -16,6 +17,7 @@ final class ReadingCompanionEvidence {
   final String sourceVersion;
   final String locator;
   final String quote;
+  final bool showsAsA2ui;
   final int? page;
   final String? chapterId;
   final String? href;
@@ -38,6 +40,7 @@ final class ReadingCompanionEvidence {
     'source_version': sourceVersion,
     'locator': locator,
     'quote': quote,
+    if (showsAsA2ui) 'presentation': 'a2ui',
     if (page != null) 'page': page,
     if (chapterId != null) 'chapter_id': chapterId,
     if (href != null) 'href': href,
@@ -73,6 +76,7 @@ final class ReadingCompanionEvidence {
       sourceVersion: version,
       locator: read('locator', 300) ?? '',
       quote: read('quote', 4000) ?? '',
+      showsAsA2ui: data['presentation'] == 'a2ui',
       page: page as int?,
       chapterId: chapter,
       href: href,
@@ -89,8 +93,14 @@ final class ReadingCompanionEvidence {
   ) {
     final distinct = <String, ReadingCompanionEvidence>{};
     for (final item in evidence) {
-      distinct.putIfAbsent(item.identity, () => item);
-      if (distinct.length == 8) break;
+      final existing = distinct[item.identity];
+      if (existing != null) {
+        if (item.showsAsA2ui && !existing.showsAsA2ui) {
+          distinct[item.identity] = item;
+        }
+      } else if (distinct.length < 8) {
+        distinct[item.identity] = item;
+      }
     }
     return List.unmodifiable(distinct.values);
   }

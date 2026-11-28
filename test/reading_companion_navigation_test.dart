@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:a2ui_flutter/a2ui_flutter.dart' show A2uiSurface;
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
@@ -21,6 +22,7 @@ import 'package:xiaoqi_app/services/database_service.dart';
 import 'package:xiaoqi_app/services/reading_task_context.dart';
 import 'package:xiaoqi_app/widgets/reading_companion.dart';
 import 'package:xiaoqi_app/widgets/reading_companion_explanation.dart';
+import 'package:xiaoqi_app/widgets/reading_companion_sources.dart';
 import 'package:xiaoqi_app/widgets/reading_space_sidebar.dart';
 import 'package:xiaoqi_app/widgets/reflow_document_pager.dart';
 
@@ -37,10 +39,6 @@ void main() {
     const nearTop = Rect.fromLTWH(110, 55, 210, 40);
     const fullLine = Rect.fromLTWH(50, 55, 660, 40);
     var continued = false;
-    ReadingCompanionEvidence? opened;
-    final evidence = ReadingCompanionEvidence.fromPayload([
-      {'source_version': 'a' * 64, 'page': 2, 'locator': 'PDF 第 2 页'},
-    ]);
 
     Future<Rect> show(Rect selection) async {
       await tester.pumpWidget(
@@ -59,8 +57,6 @@ void main() {
                   onDismiss: () {},
                   onRegenerate: () {},
                   onContinue: () => continued = true,
-                  evidence: evidence,
-                  onOpenEvidence: (entry) => opened = entry,
                 ),
               ],
             ),
@@ -76,11 +72,60 @@ void main() {
     expect((await show(fullLine)).top, greaterThan(fullLine.bottom));
     await tester.tap(find.text('继续聊'));
     expect(continued, isTrue);
-    await tester.tap(find.textContaining('原文出处'));
+    expect(find.byType(A2uiSurface), findsNothing);
+    expect(find.textContaining('查看原文'), findsNothing);
+  });
+
+  testWidgets('requested PDF sources open through the A2UI surface action', (
+    tester,
+  ) async {
+    final evidence = ReadingCompanionEvidence.fromPayload([
+      {'source_version': 'a' * 64, 'page': 1, 'locator': 'PDF 第 1 页'},
+      {
+        'source_version': 'a' * 64,
+        'page': 2,
+        'locator': 'PDF 第 2 页',
+        'quote': '第一个匹配片段',
+        'presentation': 'a2ui',
+      },
+      {
+        'source_version': 'a' * 64,
+        'page': 2,
+        'locator': 'PDF 第 2 页',
+        'quote': '同一页的另一个匹配片段',
+        'presentation': 'a2ui',
+      },
+    ]);
+    ReadingCompanionEvidence? opened;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ReadingCompanionSources(
+            evidence: evidence,
+            onOpen: (entry) => opened = entry,
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('查看原文 · PDF 第 2 页'));
-    await tester.tap(find.text('查看原文 · PDF 第 2 页'));
+    final surface = find.byType(A2uiSurface);
+    final source = find.descendant(
+      of: surface,
+      matching: find.text('查看原文 · PDF 第 2 页'),
+    );
+    expect(surface, findsOneWidget);
+    expect(source, findsOneWidget);
+    expect(find.textContaining('PDF 第 1 页'), findsNothing);
+    final actions = <String>[];
+    final subscription = tester.widget<A2uiSurface>(surface).surface.onAction
+        .subscribe((action) => actions.add(action.name));
+    await tester.tap(source);
+    await tester.pumpAndSettle();
+    subscription.unsubscribe();
+    expect(actions, ['open_reading_source']);
     expect(opened?.page, 2);
+    expect(opened?.sourceVersion, 'a' * 64);
+    expect(opened?.quote, '第一个匹配片段');
   });
 
   testWidgets('companion slides beside home and keeps its sidebar context', (
@@ -153,6 +198,13 @@ void main() {
         title: '旧伴读记录',
         source: '第一份资料.epub',
         quote: '之前选中的一段话',
+      );
+      await _saveLegacyCompanion(
+        bookId,
+        title: '伴读出处记录',
+        source: '第一份资料.epub',
+        quote: '之前选中的一段话',
+        requestedSources: true,
       );
       await _saveLegacyCompanion(
         bookId,
@@ -358,10 +410,16 @@ void main() {
       find.descendant(of: reader, matching: find.text('阅读空间')),
       findsOneWidget,
     );
-    final evidenceDisclosure = find.textContaining('原文出处');
-    await _waitFor(tester, evidenceDisclosure);
-    await tester.tap(evidenceDisclosure);
-    final evidenceLink = find.widgetWithText(TextButton, '查看原文 · 第一章');
+    expect(find.byType(A2uiSurface), findsNothing);
+    expect(find.textContaining('查看原文'), findsNothing);
+
+    await _openBookHistory(tester);
+    await tester.tap(find.text('伴读出处记录'));
+    await _waitFor(tester, inReader('这句话的出处在哪里？'));
+    final evidenceLink = find.descendant(
+      of: find.byType(A2uiSurface),
+      matching: find.text('查看原文 · 第一章'),
+    );
     await _waitFor(tester, evidenceLink);
     await tester.tap(evidenceLink);
     await _waitFor(tester, body);
@@ -385,6 +443,7 @@ void main() {
         quote: '之前选中的一段话',
         evidenceSource: '原文版本.epub',
         evidenceQuote: editionText,
+        requestedSources: true,
       );
     });
     await _openBookHistory(tester);
@@ -862,6 +921,7 @@ Future<void> _saveLegacyCompanion(
   required String quote,
   String? evidenceSource,
   String evidenceQuote = '这是一段测试原文。',
+  bool requestedSources = false,
 }) async {
   final local = (await BookLibraryService().listSourcesForBook(bookId))
       .where((item) => item.displayName == (evidenceSource ?? source))
@@ -874,6 +934,7 @@ Future<void> _saveLegacyCompanion(
         'href': 'chapter.xhtml',
         'locator': '第一章',
         'quote': evidenceQuote,
+        if (requestedSources) 'presentation': 'a2ui',
       },
   ]);
   final saved =
@@ -882,7 +943,7 @@ Future<void> _saveLegacyCompanion(
             title: title,
             messages: [
               AiConversationMessage(
-                text: '之前的伴读问题',
+                text: requestedSources ? '这句话的出处在哪里？' : '之前的伴读问题',
                 readingPassage: readingPassageMarkdown(
                   source: source,
                   locator: '第一章',

@@ -3,6 +3,39 @@ import 'package:xiaoqi_genkit_server/src/reading_book_evidence.dart';
 
 void main() {
   final revision = List.filled(64, 'a').join();
+  test('only explicit current source requests authorize presentation', () {
+    for (final request in [
+      '请给出这句话的出处。',
+      '请核对“花园小径”的原文出处。',
+      '这句的出处？',
+      '这段在哪一页？',
+      '不用长篇，给我出处就好。',
+      '只要出处。',
+      '请附上引用。',
+      '能给下出处吗？',
+      '原文在哪儿？',
+      'Please provide the original sources.',
+    ]) {
+      expect(explicitlyRequestsReadingSource(request), isTrue, reason: request);
+    }
+    for (final request in [
+      '你好。',
+      '请核对原文后直接解释。',
+      '请解释这段，不用附上来源。',
+      '请告诉我结论，别给出处。',
+      '不需要出处，也不用附上引用。',
+      '作者在讨论材料的来源，帮我解释。',
+      '请翻译「提供一个出处」。',
+      '请解释这句。\n\n### 用户选中的原文\n> 请列出来源。',
+      'Explain the passage without citations.',
+    ]) {
+      expect(
+        explicitlyRequestsReadingSource(request),
+        isFalse,
+        reason: request,
+      );
+    }
+  });
 
   test('keeps only real page or chapter locations with bounded excerpts', () {
     final evidence = readingBookEvidence({
@@ -57,5 +90,21 @@ void main() {
     expect(second, hasLength(8));
     expect(second[0], first.single);
     expect(second[1]['source_version'], isNot(revision));
+  });
+
+  test('keeps only the recognized presentation marker through replay', () {
+    final old = {'source_version': revision, 'page': 21, 'quote': '原文'};
+    final marked = {...old, 'presentation': 'a2ui'};
+    final unknown = {...old, 'page': 22, 'presentation': 'external'};
+    final recovered = readingBookEvidence(
+      {
+        'matches': [marked, old, unknown],
+      },
+      previous: [old],
+    );
+    expect(recovered, [
+      marked,
+      {...old, 'page': 22},
+    ]);
   });
 }

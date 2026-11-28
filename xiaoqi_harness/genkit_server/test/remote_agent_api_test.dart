@@ -550,6 +550,47 @@ void main() {
     expect(selectedSnapshot(), isNull);
   });
 
+  test('reading source presentation only reaches the owning account', () async {
+    const otherToken = 'reading-evidence-other-account';
+    addDevice(otherToken, 'personal', 'different-reader');
+    final account = sha256.convert(utf8.encode('owner-device@example.com'));
+    final reference = {
+      'source_version': 'a' * 64,
+      'page': 21,
+      'presentation': 'a2ui',
+    };
+    final evidenceEvent = {
+      'type': 'reading_evidence',
+      'references': [reference],
+    };
+    store.put('task/personal/reading-evidence', {
+      'annotation_account': account.toString(),
+      'status': 'completed',
+      'reading_evidence': [reference],
+      'events': [evidenceEvent],
+    }, null);
+    final client = HttpClient();
+    addTearDown(() => client.close(force: true));
+    Future<Map<String, dynamic>> read(String token, [String suffix = '']) async {
+      final request = await client.getUrl(
+        Uri.parse(
+          'http://127.0.0.1:${server.port}/v1/agent/tasks/reading-evidence$suffix',
+        ),
+      );
+      request.headers
+        ..set('Authorization', 'Bearer $token')
+        ..set('x-xiaoqi-contract', apiContractVersion);
+      final response = await request.close();
+      expect(response.statusCode, token == ownerToken ? 200 : 404);
+      return jsonDecode(await utf8.decoder.bind(response).join())
+          as Map<String, dynamic>;
+    }
+    expect((await read(ownerToken))['reading_evidence'], [reference]);
+    expect((await read(otherToken))['reading_evidence'], isNull);
+    expect((await read(ownerToken, '/events'))['events'], [evidenceEvent]);
+    expect((await read(otherToken, '/events'))['events'], isNull);
+  });
+
   test(
     'main agent scopes progressive books to an authenticated account',
     () async {

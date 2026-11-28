@@ -102,7 +102,13 @@ class AiConversationMessage {
       agentProcessStatus != null;
 
   bool get hasAssistantContent =>
-      text.trim().isNotEmpty || hasAgentProcess || bookSearchId != null;
+      text.trim().isNotEmpty ||
+      hasAgentProcess ||
+      bookSearchId != null ||
+      hasA2uiReadingSources;
+
+  bool get hasA2uiReadingSources =>
+      readingEvidence.any((source) => source.showsAsA2ui);
 
   AiConversationMessage copyWith({
     String? id,
@@ -869,6 +875,7 @@ class AiConversationRecord {
                 (message) =>
                     message.isDeletedMarker ||
                     message.hasAgentProcess ||
+                    message.hasA2uiReadingSources ||
                     message.text.trim().isNotEmpty ||
                     message.capabilityMetadata != null ||
                     message.agentTaskId != null ||

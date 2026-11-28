@@ -53,6 +53,28 @@ void main() {
     expect(evidence.first.matchesSource(source(version, 'epub')), isFalse);
   });
 
+  test('only explicit A2UI source presentation survives as visible', () {
+    final legacy = ReadingCompanionEvidence.fromJson(pdf)!;
+    expect(legacy.showsAsA2ui, isFalse);
+    expect(legacy.toJson().containsKey('presentation'), isFalse);
+
+    final sources = ReadingCompanionEvidence.fromPayload([
+      legacy.toJson(),
+      {...pdf, 'presentation': 'a2ui'},
+    ]);
+    expect(sources, hasLength(1));
+    expect(sources.single.showsAsA2ui, isTrue);
+    final message = AiConversationMessage(
+      text: '',
+      isUser: false,
+      createdAt: DateTime(2026),
+      readingEvidence: sources,
+    );
+    final restored = AiConversationMessage.fromJson(message.toJson());
+    expect(restored.readingEvidence.single.showsAsA2ui, isTrue);
+    expect(restored.hasAssistantContent, isTrue);
+  });
+
   test(
     'EPUB match requires agreement and a unique local quote to highlight',
     () {

@@ -57,6 +57,7 @@ import 'pdf_page_canvas.dart'
     show horizontalPdfPageTarget, verticalPdfPageTarget, viewportPdfPageLayout;
 import 'reflow_document_pager.dart';
 import 'reading_companion_explanation.dart';
+import 'reading_companion_sources.dart';
 import 'xiaoqi_document_block_view.dart';
 
 ColorScheme _companionMonochromeScheme(bool dark) => ColorScheme.fromSeed(
@@ -164,22 +165,10 @@ class ReadingCompanionExplanation {
   const ReadingCompanionExplanation({
     required this.passage,
     required this.text,
-    this.evidence = const [],
   });
 
   final ReadingCompanionPassage passage;
   final String text;
-  final List<ReadingCompanionEvidence> evidence;
-}
-
-class ReadingCompanionExplanationChunk {
-  const ReadingCompanionExplanationChunk({
-    this.text = '',
-    this.evidence = const [],
-  });
-
-  final String text;
-  final List<ReadingCompanionEvidence> evidence;
 }
 
 typedef _ReaderSelection = ({
@@ -364,7 +353,7 @@ class ReadingCompanion extends StatefulWidget {
   final ValueChanged<bool>? onDarkChanged;
   final ReadingCompanionToolbarBuilder? toolbarBuilder;
   final CompanionAnnotationSelection? initialAnnotationSelection;
-  final Stream<ReadingCompanionExplanationChunk> Function(
+  final Stream<String> Function(
     ReadingCompanionPassage passage,
     CancellationToken cancellation,
   )?
@@ -395,14 +384,12 @@ class ReadingCompanionState extends State<ReadingCompanion>
   bool _dark = false;
   _ReaderSelection? _explaining;
   CancellationController? _explanationCancellation;
-  final _explanationAnswers =
-      <({String text, List<ReadingCompanionEvidence> evidence})>[];
+  final _explanationAnswers = <String>[];
   bool _explanationFailed = false;
   String _explanationDraft = '';
   int _shownAnswer = 0;
   int _explanationAnswerVersion = 0;
   String? _discussionSeed;
-  List<ReadingCompanionEvidence> _discussionSeedEvidence = const [];
   ({int sourceId, ReadingCompanionEvidence evidence})? _pendingReadingEvidence;
   int _readingEvidenceRequest = 0;
   BookSourceRecord? _prioritySource;
@@ -457,7 +444,6 @@ class ReadingCompanionState extends State<ReadingCompanion>
       _messageKeys.clear();
       _sourceId = null;
       _discussionSeed = null;
-      _discussionSeedEvidence = const [];
       final pending = _pendingReadingEvidence;
       final targetSource = widget.target?.source;
       if (oldWidget.bookId != widget.bookId ||
@@ -505,7 +491,6 @@ class ReadingCompanionState extends State<ReadingCompanion>
       _clearExplanation();
       _selection = null;
       _discussionSeed = null;
-      _discussionSeedEvidence = const [];
       _chatOpen = false;
       _historyRequest++;
       _messageKeys.clear();
@@ -602,7 +587,6 @@ class ReadingCompanionState extends State<ReadingCompanion>
       _chatOpen = true;
       if (!preserveSeed) {
         _discussionSeed = null;
-        _discussionSeedEvidence = const [];
       }
       _clearExplanation();
       _messageKeys.clear();
@@ -632,7 +616,6 @@ class ReadingCompanionState extends State<ReadingCompanion>
   void _openChat(
     _ReaderSelection selection, {
     String? explanation,
-    List<ReadingCompanionEvidence> evidence = const [],
   }) {
     _cancelReadingEvidence();
     final previous = _selection;
@@ -641,7 +624,6 @@ class ReadingCompanionState extends State<ReadingCompanion>
         ReadingCompanionExplanation(
           passage: selection.passage,
           text: explanation,
-          evidence: evidence,
         ),
       );
     } else if (previous == null ||
@@ -654,7 +636,6 @@ class ReadingCompanionState extends State<ReadingCompanion>
       _clearExplanation();
       _selection = selection;
       _discussionSeed = explanation;
-      _discussionSeedEvidence = evidence;
       _chatOpen = true;
       _historyRequest++;
     });
@@ -693,20 +674,13 @@ class ReadingCompanionState extends State<ReadingCompanion>
     });
     try {
       final answer = StringBuffer();
-      var evidence = const <ReadingCompanionEvidence>[];
       await for (final chunk in explain(
         selection.passage,
         cancellation.token,
       )) {
         if (!mounted || _explanationCancellation != cancellation) return;
-        answer.write(chunk.text);
-        if (chunk.evidence.isNotEmpty) {
-          evidence = ReadingCompanionEvidence.merge([
-            ...evidence,
-            ...chunk.evidence,
-          ]);
-        }
-        if (chunk.text.isNotEmpty) {
+        if (chunk.isNotEmpty) {
+          answer.write(chunk);
           setState(() => _explanationDraft = answer.toString());
         }
       }
@@ -717,7 +691,7 @@ class ReadingCompanionState extends State<ReadingCompanion>
           _explanationFailed = true;
         } else {
           if (_explanationAnswers.length == 2) _explanationAnswers.removeAt(0);
-          _explanationAnswers.add((text: text, evidence: evidence));
+          _explanationAnswers.add(text);
           _shownAnswer = _explanationAnswers.length - 1;
           _explanationAnswerVersion++;
         }
@@ -1525,9 +1499,7 @@ class ReadingCompanionState extends State<ReadingCompanion>
         selectionRects: rects,
         answerVersion: (_explanationAnswerVersion, _shownAnswer),
         dark: _dark,
-        text: answer?.text ?? (pending ? _explanationDraft : ''),
-        evidence: answer?.evidence ?? const [],
-        onOpenEvidence: _openReadingEvidence,
+        text: answer ?? (pending ? _explanationDraft : ''),
         pending: pending,
         regenerating: pending && answer != null,
         failed: _explanationFailed,
@@ -1538,11 +1510,7 @@ class ReadingCompanionState extends State<ReadingCompanion>
         onRegenerate: () => unawaited(_explain(selection, regenerate: true)),
         onContinue: answer == null
             ? null
-            : () => _openChat(
-                selection,
-                explanation: answer.text,
-                evidence: answer.evidence,
-              ),
+            : () => _openChat(selection, explanation: answer),
         onSwitchAnswer: _explanationAnswers.length == 2
             ? () => setState(() => _shownAnswer = 1 - _shownAnswer)
             : null,
@@ -1710,7 +1678,6 @@ class ReadingCompanionState extends State<ReadingCompanion>
                       streamingReply: widget.streamingReply,
                       messageKeys: _messageKeys,
                       seed: _discussionSeed,
-                      seedEvidence: _discussionSeedEvidence,
                       streamingEvidence: widget.streamingEvidence,
                       liveAgentProcess: widget.liveAgentProcess,
                       continuingReplyId: widget.continuingReplyId,
@@ -8655,7 +8622,6 @@ class _CompanionHistory extends StatelessWidget {
     required this.streamingReply,
     required this.messageKeys,
     this.seed,
-    required this.seedEvidence,
     required this.streamingEvidence,
     required this.liveAgentProcess,
     required this.continuingReplyId,
@@ -8668,7 +8634,6 @@ class _CompanionHistory extends StatelessWidget {
   final ValueListenable<String> streamingReply;
   final Map<String, GlobalKey> messageKeys;
   final String? seed;
-  final List<ReadingCompanionEvidence> seedEvidence;
   final ValueListenable<List<ReadingCompanionEvidence>>? streamingEvidence;
   final Widget? liveAgentProcess;
   final String? continuingReplyId;
@@ -8708,7 +8673,7 @@ class _CompanionHistory extends StatelessWidget {
                   );
                 }
                 if (showSeed) {
-                  return _answerWithEvidence(context, seed!, seedEvidence);
+                  return _answer(context, seed!);
                 }
                 final reverseIndex = index - (showLiveTurn ? 1 : 0);
                 final turn = turns[turns.length - 1 - reverseIndex];
@@ -8821,7 +8786,6 @@ class _CompanionHistory extends StatelessWidget {
     String text, {
     List<ReadingCompanionEvidence> savedEvidence = const [],
   }) {
-    if (text.trim().isEmpty) return const SizedBox.shrink();
     final live = streamingEvidence;
     if (live == null) return _answerWithEvidence(context, text, savedEvidence);
     return ValueListenableBuilder(
@@ -8829,7 +8793,9 @@ class _CompanionHistory extends StatelessWidget {
       builder: (context, evidence, _) => _answerWithEvidence(
         context,
         text,
-        ReadingCompanionEvidence.merge([...savedEvidence, ...evidence]),
+        ReadingCompanionEvidence.merge(
+          [...savedEvidence, ...evidence].where((entry) => entry.showsAsA2ui),
+        ),
       ),
     );
   }
@@ -8839,12 +8805,14 @@ class _CompanionHistory extends StatelessWidget {
     String text,
     List<ReadingCompanionEvidence> evidence,
   ) {
-    if (evidence.isEmpty) return _answer(context, text);
+    if (!evidence.any((entry) => entry.showsAsA2ui)) {
+      return _answer(context, text);
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _answer(context, text),
-        ReadingCompanionEvidenceLinks(
+        ReadingCompanionSources(
           evidence: evidence,
           onOpen: onOpenEvidence,
         ),

@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:xiaoqi_app/models/reading_companion_evidence.dart';
 import 'package:xiaoqi_app/widgets/reading_companion_explanation.dart';
 
 const _canvasSize = Size(800, 1280);
@@ -343,36 +342,17 @@ void main() {
   );
 
   testWidgets(
-    'regeneration keeps the cloud in place and restores prior evidence',
+    'regeneration keeps the cloud in place and restores the previous answer',
     (tester) async {
-      final evidence = ReadingCompanionEvidence.fromPayload([
-        {'source_version': 'a' * 64, 'page': 2, 'locator': 'PDF 第 2 页'},
-        {
-          'source_version': 'a' * 64,
-          'page': 2,
-          'locator': 'PDF 第 2 页',
-          'quote': '同一页的另一段',
-        },
-      ]);
-      await _showCloud(tester, _approvedAnswer, evidence: evidence);
+      await _showCloud(tester, _approvedAnswer);
       await tester.pumpAndSettle();
       final cloud = find.byKey(_cloudKey);
       final position = tester.getRect(cloud);
-      final sources = find.text('原文出处');
-      expect(find.text('查看原文 · PDF 第 2 页'), findsNothing);
-      await tester.ensureVisible(sources);
-      await tester.tap(sources);
-      await tester.pumpAndSettle();
-      expect(find.text('查看原文 · PDF 第 2 页'), findsOneWidget);
-      await tester.ensureVisible(sources);
-      await tester.tap(sources);
-      await tester.pumpAndSettle();
       await _showCloud(
         tester,
         _approvedAnswer,
         pending: true,
         regenerating: true,
-        evidence: evidence,
       );
       expect(
         find.byKey(const ValueKey('cloud-regeneration-placeholder')),
@@ -381,21 +361,14 @@ void main() {
       expect(find.text(_approvedAnswer), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(tester.getRect(cloud), position);
-      await _showCloud(
-        tester,
-        _approvedAnswer,
-        failed: true,
-        evidence: evidence,
-      );
+      await _showCloud(tester, _approvedAnswer, failed: true);
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('cloud-regeneration-placeholder')),
         findsNothing,
       );
-      await tester.ensureVisible(sources);
-      await tester.tap(sources);
-      await tester.pumpAndSettle();
-      expect(find.text('查看原文 · PDF 第 2 页'), findsOneWidget);
+      expect(find.text(_approvedAnswer), findsOneWidget);
+      expect(find.text('原文出处'), findsNothing);
     },
   );
 
@@ -579,7 +552,6 @@ Future<void> _showCloud(
   List<Rect> selectionRects = const [],
   Object? answerVersion,
   TextScaler textScaler = TextScaler.noScaling,
-  List<ReadingCompanionEvidence> evidence = const [],
   VoidCallback? onContinueAction,
 }) async {
   final highlightedRects = selectionRects.isEmpty
@@ -637,8 +609,6 @@ Future<void> _showCloud(
                     onContinue: onContinueAction ?? () {},
                     onSwitchAnswer: showSwitch ? () {} : null,
                     showingPrevious: showSwitch,
-                    evidence: evidence,
-                    onOpenEvidence: evidence.isEmpty ? null : (_) {},
                   ),
                 ],
               ),
