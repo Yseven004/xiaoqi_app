@@ -2001,6 +2001,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     final staged = <HomeChatAttachment>[];
     var retained = const <HomeChatAttachment>[];
+    bool isCurrentEditor() =>
+        mounted &&
+        epoch == _annotationCommentEpoch &&
+        _conversation?.id == conversationId &&
+        sessionRevision.value == revision;
     try {
       final imageLimit = min(
         ChatAnnotation.maxExplanationImages,
@@ -2019,15 +2024,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         imageLimit: imageLimit,
         guardContent: (child) => guardPrivateAnnotationContent(revision, child),
         onDismissReady: (dismiss) => _dismissAnnotationComment = dismiss,
-        onPickImages: (limit) async {
+        onImportImages: (files, limit) async {
           final selected = <HomeChatAttachment>[];
           try {
-            final files = await ImagePicker().pickMultiImage();
-            if (!mounted || epoch != _annotationCommentEpoch ||
-                _conversation?.id != conversationId ||
-                await _currentDrawingAccountScope() != scope ||
-                sessionRevision.value != revision) return selected;
+            if (!isCurrentEditor() || await _currentDrawingAccountScope() != scope) {
+              return selected;
+            }
             for (final file in files.take(limit)) {
+              if (!isCurrentEditor()) break;
               final mime = _attachmentMime(file.name.split('.').last.toLowerCase());
               if (mime == null || !mime.startsWith('image/')) {
                 _showReplyError('所选图片格式不受支持');
@@ -2047,23 +2051,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   scope == 'local' ? photo : photo.bindExplanationOwner(scope),
                   conversationId: conversationId,
                 );
-                if (!mounted || epoch != _annotationCommentEpoch ||
-                    _conversation?.id != conversationId ||
-                    sessionRevision.value != revision) {
+                if (!isCurrentEditor()) {
                   await File(stable.path).delete();
                   return selected;
                 }
                 staged.add(stable);
                 selected.add(stable);
               } on Object {
-                if (mounted) _showReplyError('有一张解释图无法读取，请重新选择');
+                if (isCurrentEditor()) _showReplyError('有一张解释图无法读取，请重新选择');
               }
             }
-            if (files.length > limit && mounted) {
+            if (files.length > limit && isCurrentEditor()) {
               _showReplyError('本条最多添加三张解释图，当前发送最多九个附件');
             }
           } on Object {
-            if (mounted) _showReplyError('无法打开相册，请重试');
+            if (isCurrentEditor()) _showReplyError('图片添加失败，请重试');
           }
           return selected;
         },
@@ -9894,9 +9896,15 @@ $text''';
     ExtensionKind kind = ExtensionKind.plugin,
     NavigatorState? replacingSidebarOn,
   }) async {
-    final route = MaterialPageRoute<ExtensionChatRequest>(
-      builder: (_) => ExtensionMarketPage(initialKind: kind),
-    );
+    final route = replacingSidebarOn == null
+        ? MaterialPageRoute<ExtensionChatRequest>(
+            builder: (_) => ExtensionMarketPage(initialKind: kind),
+          )
+        : PageRouteBuilder<ExtensionChatRequest>(
+            transitionDuration: Duration.zero,
+            reverseTransitionDuration: Duration.zero,
+            pageBuilder: (_, _, _) => ExtensionMarketPage(initialKind: kind),
+          );
     final request = replacingSidebarOn == null
         ? await Navigator.of(context).push(route)
         : await replacingSidebarOn.pushReplacement<ExtensionChatRequest, void>(
@@ -10760,13 +10768,8 @@ $text''';
                                               onSendMcpAppMessage:
                                                   _sendMcpAppMessage,
                                               annotations: _annotations,
-                                              annotationBottomPadding:
-                                                  _textAnnotationEditorVisible
-                                                  ? MediaQuery.viewInsetsOf(
-                                                          context,
-                                                        ).bottom +
-                                                        160
-                                                  : 0,
+                                              annotationEditorVisible:
+                                                  _textAnnotationEditorVisible,
                                               onAnnotate: _annotateText,
                                               onAnnotationNavigation: () {
                                                 _latestScrollEpoch++;
@@ -14028,7 +14031,7 @@ class _ConversationMessages extends StatefulWidget {
     required this.onSelectQuestionVersion,
     required this.onOpenDraftReview,
     this.annotations = const [],
-    this.annotationBottomPadding = 0,
+    this.annotationEditorVisible = false,
     required this.onAnnotate,
     required this.onAnnotationNavigation,
     required this.onPreviewImages,
@@ -14072,7 +14075,7 @@ class _ConversationMessages extends StatefulWidget {
   final Future<bool> Function(String) onSelectQuestionVersion;
   final ValueChanged<String> onOpenDraftReview;
   final List<ChatAnnotation> annotations;
-  final double annotationBottomPadding;
+  final bool annotationEditorVisible;
   final Future<void> Function(
     ChatAnnotation,
     Offset, {
@@ -14083,6 +14086,27 @@ class _ConversationMessages extends StatefulWidget {
 
   @override
   State<_ConversationMessages> createState() => _ConversationMessagesState();
+}
+
+class _ConversationMessagePadding extends StatelessWidget {
+  const _ConversationMessagePadding({
+    required this.annotationEditorVisible,
+    required this.sliver,
+  });
+
+  final bool annotationEditorVisible;
+  final Widget sliver;
+
+  @override
+  Widget build(BuildContext context) {
+    final annotationPadding = annotationEditorVisible
+        ? 160 + MediaQuery.viewInsetsOf(context).bottom
+        : 0.0;
+    return SliverPadding(
+      padding: EdgeInsets.only(top: 24, bottom: 20 + annotationPadding),
+      sliver: sliver,
+    );
+  }
 }
 
 class _ConversationMessagesState extends State<_ConversationMessages> {
@@ -14933,11 +14957,8 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                   key: _messageViewportKey,
                   controller: widget.scrollController,
                   slivers: [
-                    SliverPadding(
-                      padding: EdgeInsets.only(
-                        top: 24,
-                        bottom: 20 + widget.annotationBottomPadding,
-                      ),
+                    _ConversationMessagePadding(
+                      annotationEditorVisible: widget.annotationEditorVisible,
                       sliver: SliverList(
                         delegate: SliverChildBuilderDelegate(
                           (context, reverseIndex) {

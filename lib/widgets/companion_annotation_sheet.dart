@@ -7,13 +7,13 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart';
 
 import '../features/capabilities/data/capability_cloud_sync.dart';
 import '../services/companion_annotation_library.dart';
 import '../services/companion_annotation_store.dart';
 import '../services/companion_annotation_sync.dart';
 import '../services/speech_recognition_service.dart';
+import 'annotation_editor_back.dart';
 import 'annotation_sheet.dart';
 import 'app_toast.dart';
 
@@ -497,7 +497,6 @@ class _CompanionAnnotationEditor extends StatefulWidget {
 class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
     with WidgetsBindingObserver {
   static const _store = CompanionAnnotationStore();
-  static const _runtimeConfig = MethodChannel('xiaoqi_app/runtime_config');
   final _speech = SpeechRecognitionService.instance;
   final _recordingOwner = Object();
   final _textFieldKey = GlobalKey();
@@ -513,10 +512,13 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   Timer? _recordingTicker;
   String? _recording;
   bool _busy = false;
+  bool _importingPhotos = false;
+  int _photoImportRevision = 0;
   bool _committing = false;
-  bool _handlesAndroidBack = false;
   bool _copyingToLibrary = false;
   Future<CompanionAnnotation>? _pendingSave;
+
+  bool get _actionsBusy => _busy || _importingPhotos;
 
   bool get _compactNew =>
       widget.initial == null &&
@@ -539,31 +541,6 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _setAndroidBackEnabled(ModalRoute.isCurrentOf(context) == true);
-  }
-
-  void _setAndroidBackEnabled(bool enabled) {
-    if (!Platform.isAndroid || enabled == _handlesAndroidBack) return;
-    _handlesAndroidBack = enabled;
-    unawaited(_sendAndroidBackState(enabled));
-  }
-
-  Future<void> _sendAndroidBackState(bool enabled) async {
-    try {
-      await _runtimeConfig.invokeMethod<void>(
-        'setAnnotationEditorBackEnabled',
-        {'enabled': enabled},
-      );
-    } on MissingPluginException {
-      // The regular Flutter back handler remains available.
-    } on PlatformException catch (error) {
-      debugPrint('Unable to update annotation back handling: ${error.code}');
-    }
   }
 
   @override
@@ -597,20 +574,28 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   }
 
   Future<void> _runMediaAction(Future<void> Function() action) async {
-    if (_busy) return;
+    if (_actionsBusy) return;
     setState(() => _busy = true);
     try {
-      await withAnnotationKeyboard(_textFieldKey, action);
+      await action();
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   Future<void> _pickImages() async {
+    if (_actionsBusy || _recording != null) return;
+    final revision = ++_photoImportRevision;
+    bool acceptsPhotos() =>
+        mounted &&
+        revision == _photoImportRevision &&
+        ModalRoute.of(context)?.isActive == true;
+    final imported = <String>[];
+    setState(() => _importingPhotos = true);
     try {
-      final files = await ImagePicker().pickMultiImage();
+      final files = await pickAnnotationImages(_textFieldKey);
       for (final file in files) {
-        if (!mounted) break;
+        if (!acceptsPhotos()) break;
         final extension = file.name.split('.').last.toLowerCase();
         if (!const {
               'png',
@@ -623,26 +608,35 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
             }.contains(extension) ||
             await file.length() > 50 * 1024 * 1024 ||
             await file.length() == 0) {
-          if (mounted) AppToast.show(context, '这张图片的格式或大小暂不支持');
+          if (acceptsPhotos()) AppToast.show(context, '这张图片的格式或大小暂不支持');
           continue;
         }
         final path = await _store.allocateMediaPath(widget.scope, extension);
+        if (!acceptsPhotos()) break;
         _newPaths.add(path);
         try {
           await file.saveTo(path);
           await _validateImage(path);
-          if (!mounted) {
-            await _discard(path);
-            return;
-          }
-          setState(() => _images.add(path));
+          imported.add(path);
         } catch (_) {
           await _discard(path);
-          if (mounted) AppToast.show(context, '图片保存失败，请重试');
+          if (acceptsPhotos()) AppToast.show(context, '图片保存失败，请重试');
         }
       }
     } catch (_) {
-      if (mounted) AppToast.show(context, '无法打开图片，请重试');
+      if (acceptsPhotos()) AppToast.show(context, '无法打开图片，请重试');
+    } finally {
+      if (acceptsPhotos()) {
+        setState(() {
+          _images.addAll(imported);
+          _importingPhotos = false;
+        });
+      } else {
+        for (final path in imported) {
+          await _discard(path);
+        }
+        if (mounted) setState(() => _importingPhotos = false);
+      }
     }
   }
 
@@ -667,6 +661,10 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
       buffer.dispose();
     }
   }
+
+  Future<void> _runRecordingAction() => _runMediaAction(
+    () => withAnnotationKeyboard(_textFieldKey, _toggleRecording),
+  );
 
   Future<void> _toggleRecording() async {
     var path = _recording;
@@ -792,6 +790,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
 
   Future<void> _exitEditor() async {
     if (!mounted || _busy || _recording != null) return;
+    _photoImportRevision++;
     final text = _controller.text;
     if (_committed == null || !_hasChanges(text)) {
       _closeEditor();
@@ -853,7 +852,6 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
 
   @override
   void dispose() {
-    _setAndroidBackEnabled(false);
     WidgetsBinding.instance.removeObserver(this);
     _stopRecordingClock();
     _controller.dispose();
@@ -961,7 +959,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
                   context,
                 ).textTheme.labelLarge?.copyWith(fontSize: 14),
               ),
-              onPressed: _busy || _recording != null || !canCommit
+              onPressed: _actionsBusy || _recording != null || !canCommit
                   ? null
                   : deleting
                   ? _deleteCurrentAnnotation
@@ -976,7 +974,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
       ValueListenableBuilder<TextEditingValue>(
         valueListenable: _controller,
         builder: (context, value, _) => TextButton(
-          onPressed: _busy || _hasChanges(value.text)
+          onPressed: _actionsBusy || _hasChanges(value.text)
               ? null
               : () => _copyToLibrary(annotation),
           style: TextButton.styleFrom(
@@ -988,7 +986,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
       );
 
   Widget _plusButton() {
-    final enabled = !_busy && _recording == null;
+    final enabled = !_actionsBusy && _recording == null;
     return TextFieldTapRegion(
       child: IconButton(
         tooltip: '添加图片',
@@ -998,7 +996,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
         ),
         style: annotationComposerActionStyle,
         padding: EdgeInsets.zero,
-        onPressed: enabled ? () => _runMediaAction(_pickImages) : null,
+        onPressed: enabled ? _pickImages : null,
         icon: annotationAsset(
           _plusAsset,
           size: _companionAnnotationPlusSize,
@@ -1011,7 +1009,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   Widget _micButton() => TextFieldTapRegion(
     child: IconButton(
       tooltip: '开始录音',
-      onPressed: _busy ? null : () => _runMediaAction(_toggleRecording),
+      onPressed: _actionsBusy ? null : _runRecordingAction,
       icon: annotationAsset(_micAsset, color: _quiet),
     ),
   );
@@ -1065,9 +1063,7 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
                 ),
                 style: annotationComposerActionStyle,
                 padding: EdgeInsets.zero,
-                onPressed: _busy
-                    ? null
-                    : () => _runMediaAction(_toggleRecording),
+                onPressed: _busy ? null : _runRecordingAction,
                 icon: annotationAsset(
                   'assets/icons/note_format/stop.svg',
                   size: 20,
@@ -1133,72 +1129,76 @@ class _CompanionAnnotationEditorState extends State<_CompanionAnnotationEditor>
   }
 
   @override
-  Widget build(BuildContext context) => PopScope<CompanionAnnotation>(
-    canPop: false,
-    onPopInvokedWithResult: (didPop, _) {
-      if (!didPop) unawaited(_exitEditor());
-    },
-    child: SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        annotationComposerInset,
-        5,
-        annotationComposerInset,
-        1,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (_compactNew)
-            _compactComposer()
-          else ...[
-            Padding(
-              padding: const EdgeInsetsDirectional.only(
-                start: annotationQuoteInset,
-              ),
-              child: _editableBody(),
-            ),
-            if (_images.isNotEmpty)
-              Padding(
-                padding: const EdgeInsetsDirectional.only(
-                  start: annotationQuoteInset,
-                  top: 9,
-                  bottom: 4,
-                ),
-                child: AnnotationThumbnails(
-                  paths: _images,
-                  guardContent: widget.guardContent,
-                  mediaChanges: CompanionAnnotationSync.instance.changes,
-                  onMissing: (path) =>
-                      unawaited(_fetchMissingAnnotationMedia(context, path)),
-                  onRemove: _busy
-                      ? null
-                      : (index) => setState(() => _images.removeAt(index)),
-                ),
-              ),
-            _editorActions(),
-          ],
+  Widget build(BuildContext context) => AnnotationEditorBack(
+    child: PopScope<CompanionAnnotation>(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_exitEditor());
+      },
+      child: _composer(),
+    ),
+  );
+
+  Widget _composer() => SingleChildScrollView(
+    padding: const EdgeInsets.fromLTRB(
+      annotationComposerInset,
+      5,
+      annotationComposerInset,
+      1,
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_compactNew)
+          _compactComposer()
+        else ...[
           Padding(
             padding: const EdgeInsetsDirectional.only(
               start: annotationQuoteInset,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: AnnotationQuoteLine(
-                    widget.selection.quote,
-                    guardContent: widget.guardContent,
-                  ),
-                ),
-                if (_compactNew) ...[
-                  const SizedBox(width: 8),
-                  const _AnnotationPrivacy(),
-                ],
-              ],
-            ),
+            child: _editableBody(),
           ),
+          if (_images.isNotEmpty)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(
+                start: annotationQuoteInset,
+                top: 9,
+                bottom: 4,
+              ),
+              child: AnnotationThumbnails(
+                paths: _images,
+                guardContent: widget.guardContent,
+                mediaChanges: CompanionAnnotationSync.instance.changes,
+                onMissing: (path) =>
+                    unawaited(_fetchMissingAnnotationMedia(context, path)),
+                onRemove: _actionsBusy
+                    ? null
+                    : (index) => setState(() => _images.removeAt(index)),
+              ),
+            ),
+          _editorActions(),
         ],
-      ),
+        Padding(
+          padding: const EdgeInsetsDirectional.only(
+            start: annotationQuoteInset,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: AnnotationQuoteLine(
+                  widget.selection.quote,
+                  guardContent: widget.guardContent,
+                ),
+              ),
+              if (_compactNew) ...[
+                const SizedBox(width: 8),
+                const _AnnotationPrivacy(),
+              ],
+            ],
+          ),
+        ),
+      ],
     ),
   );
 }

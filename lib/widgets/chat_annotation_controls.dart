@@ -5,10 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../models/chat_annotation.dart';
 import '../models/home_chat_attachment.dart';
+import 'annotation_editor_back.dart';
 import 'annotation_sheet.dart';
+import 'app_toast.dart';
 import 'chat_annotated_markdown.dart';
 
 /// Keep source links selectable, with an explicit blue independent of theme.
@@ -250,13 +253,16 @@ Future<ChatAnnotationComposerResult?> showChatAnnotationComposer(
   required String quote,
   List<HomeChatAttachment> initialImages = const [],
   int imageLimit = ChatAnnotation.maxExplanationImages,
-  Future<List<HomeChatAttachment>> Function(int limit)? onPickImages,
+  Future<List<HomeChatAttachment>> Function(List<XFile> files, int limit)?
+  onImportImages,
   ValueChanged<VoidCallback>? onDismissReady,
   Widget Function(Widget)? guardContent,
   Rect? Function()? resolveAnchor,
   ScrollPosition? scrollPosition,
 }) => showAnnotationSheet<ChatAnnotationComposerResult>(
   context,
+  editing: true,
+  barrierDismissible: true,
   matchReferenceProportions: true,
   sheetAnimationStyle: AnimationStyle.noAnimation,
   resolveAnchor: resolveAnchor,
@@ -267,7 +273,7 @@ Future<ChatAnnotationComposerResult?> showChatAnnotationComposer(
       quote: quote,
       initialImages: initialImages,
       imageLimit: imageLimit,
-      onPickImages: onPickImages,
+      onImportImages: onImportImages,
       onDismissReady: onDismissReady,
       guardContent: guardContent,
     );
@@ -281,7 +287,7 @@ class _TextAnnotationComposer extends StatefulWidget {
     required this.quote,
     required this.initialImages,
     required this.imageLimit,
-    this.onPickImages,
+    this.onImportImages,
     required this.onDismissReady,
     this.guardContent,
   });
@@ -290,7 +296,8 @@ class _TextAnnotationComposer extends StatefulWidget {
   final String quote;
   final List<HomeChatAttachment> initialImages;
   final int imageLimit;
-  final Future<List<HomeChatAttachment>> Function(int limit)? onPickImages;
+  final Future<List<HomeChatAttachment>> Function(List<XFile> files, int limit)?
+  onImportImages;
   final ValueChanged<VoidCallback>? onDismissReady;
   final Widget Function(Widget)? guardContent;
 
@@ -303,23 +310,29 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
   final _textFieldKey = GlobalKey();
   late final _controller = TextEditingController(text: widget.initialText);
   late final _images = List<HomeChatAttachment>.of(widget.initialImages);
-  bool _picking = false;
-  bool _hasEditorFocus = false;
+  bool _importingPhotos = false;
+
+  int get _availableImages => widget.imageLimit - _images.length;
 
   Future<void> _pickImages() async {
-    if (_picking) return;
-    final pickImages = widget.onPickImages;
-    final available = widget.imageLimit - _images.length;
-    if (pickImages == null || available <= 0) return;
-    setState(() => _picking = true);
+    if (_importingPhotos) return;
+    final importImages = widget.onImportImages;
+    final available = _availableImages;
+    if (importImages == null || available <= 0) return;
+    setState(() => _importingPhotos = true);
     try {
-      final picked = await withAnnotationKeyboard(
-        _textFieldKey,
-        () => pickImages(available),
-      );
+      final files = await pickAnnotationImages(_textFieldKey);
+      if (!mounted ||
+          files.isEmpty ||
+          ModalRoute.isCurrentOf(context) != true) {
+        return;
+      }
+      final picked = await importImages(files, available);
       if (mounted) setState(() => _images.addAll(picked.take(available)));
+    } catch (_) {
+      if (mounted) AppToast.show(context, '图片添加失败，请重试');
     } finally {
-      if (mounted) setState(() => _picking = false);
+      if (mounted) setState(() => _importingPhotos = false);
     }
   }
 
@@ -340,15 +353,8 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
   }
 
   @override
-  Widget build(BuildContext context) => PopScope<ChatAnnotationComposerResult>(
-    canPop: !_hasEditorFocus,
-    onPopInvokedWithResult: (didPop, _) {
-      if (!didPop && _hasEditorFocus) {
-        FocusManager.instance.primaryFocus?.unfocus();
-      }
-    },
-    child: _composer(),
-  );
+  Widget build(BuildContext context) =>
+      AnnotationEditorBack(child: _composer());
 
   Widget _composer() => ColoredBox(
     color: _images.isEmpty ? Colors.white : const Color(0xFFF4F4F5),
@@ -368,7 +374,7 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                 ? CrossAxisAlignment.center
                 : CrossAxisAlignment.end,
             children: [
-              if (widget.onPickImages != null)
+              if (widget.onImportImages != null)
                 TextFieldTapRegion(
                   child: IconButton(
                     tooltip: '添加解释图',
@@ -378,13 +384,13 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                     ),
                     style: annotationComposerActionStyle,
                     padding: EdgeInsets.zero,
-                    onPressed: _picking || _images.length >= widget.imageLimit
+                    onPressed: _importingPhotos || _availableImages <= 0
                         ? null
                         : _pickImages,
                     icon: annotationAsset(
                       'assets/images/reading_task_plus.svg',
                       size: annotationPlusSize,
-                      color: _picking || _images.length >= widget.imageLimit
+                      color: _importingPhotos || _availableImages <= 0
                           ? const Color(0xFF9B9DA1)
                           : const Color(0xFF252932),
                     ),
@@ -407,8 +413,6 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                         AnnotationTextField(
                           key: _textFieldKey,
                           controller: _controller,
-                          onFocusChange: (focused) =>
-                              setState(() => _hasEditorFocus = focused),
                         ),
                         if (_images.isNotEmpty)
                           Padding(
@@ -418,7 +422,7 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                                   .map((image) => image.path)
                                   .toList(),
                               guardContent: widget.guardContent,
-                              onRemove: _picking
+                              onRemove: _importingPhotos
                                   ? null
                                   : (index) =>
                                         setState(() => _images.removeAt(index)),
@@ -434,7 +438,8 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
                 builder: (context, value, _) {
                   final comment = value.text.trim();
                   final canSubmit =
-                      !_picking && (comment.isNotEmpty || _images.isNotEmpty);
+                      !_importingPhotos &&
+                      (comment.isNotEmpty || _images.isNotEmpty);
                   return IconButton(
                     tooltip: '加入待发送注释',
                     constraints: const BoxConstraints.tightFor(
@@ -472,7 +477,7 @@ class _TextAnnotationComposerState extends State<_TextAnnotationComposer> {
           ),
           Padding(
             padding: EdgeInsetsDirectional.only(
-              start: widget.onPickImages == null ? 0 : annotationQuoteInset,
+              start: widget.onImportImages == null ? 0 : annotationQuoteInset,
             ),
             child: AnnotationQuoteLine(
               widget.quote,

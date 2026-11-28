@@ -509,11 +509,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '这段还要补充');
       await tester.pumpAndSettle();
-      await tester.tapAt(const Offset(6, 6));
-      await tester.pumpAndSettle();
       final field = tester.widget<TextField>(find.byType(TextField));
       expect(field.controller?.text, '这段还要补充');
-      expect(field.focusNode?.hasFocus, isFalse);
+      expect(field.focusNode?.hasFocus, isTrue);
       await tester.tapAt(const Offset(6, 6));
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsNothing);
@@ -540,6 +538,13 @@ void main() {
             source: HomeChatAttachment.annotationExplanationSource,
           ),
       ];
+      const picker = MethodChannel('plugins.flutter.io/image_picker');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(picker, (call) async {
+        expect(call.method, 'pickMultiImage');
+        return images.map((image) => image.path).toList();
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(picker, null));
       ChatAnnotationComposerResult? result;
       var remaining = -1;
       await tester.pumpWidget(
@@ -552,8 +557,12 @@ void main() {
                       context,
                       initialText: '',
                       quote: '选中文本',
-                      onPickImages: (limit) async {
+                      onImportImages: (files, limit) async {
                         remaining = limit;
+                        expect(
+                          files.map((file) => file.path),
+                          images.map((image) => image.path),
+                        );
                         return images;
                       },
                     ),

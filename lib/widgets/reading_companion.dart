@@ -1833,7 +1833,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
   int? _lastReportedPdfPage;
   List<Rect> _annotationSelectionRects = const [];
   bool _annotationEditorActive = false;
-  double _annotationShift = 0;
+  final _annotationShift = ValueNotifier<double>(0);
   EditableTextState? _annotationTextEditor;
 
   void _reportReadingTarget(ReaderAnchor anchor) {
@@ -1976,8 +1976,8 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       requested,
       math.min(0.0, availableTop - selected.top),
     );
-    if ((shift - _annotationShift).abs() > .5) {
-      setState(() => _annotationShift = shift);
+    if ((shift - _annotationShift.value).abs() > .5) {
+      _annotationShift.value = shift;
     }
   }
 
@@ -1994,10 +1994,10 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
     if (_pdf.isReady) {
       unawaited(_pdf.textSelectionDelegate.clearTextSelection());
     }
+    _annotationShift.value = 0;
     setState(() {
       _annotationEditorActive = false;
       _annotationSelectionRects = const [];
-      _annotationShift = 0;
     });
     _reportSelection(false);
   }
@@ -3629,6 +3629,7 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
       );
     }
     _drawingTools.dispose();
+    _annotationShift.dispose();
     _returnPreview?.dispose();
     _nightShader?.dispose();
     _progressPreview.dispose();
@@ -7393,8 +7394,12 @@ class _CompanionDocumentState extends State<_CompanionDocument> {
                         widget.onToggleImmersive != null
                     ? _toggleReaderChrome
                     : null,
-                child: Transform.translate(
-                  offset: Offset(0, _annotationShift),
+                child: ValueListenableBuilder<double>(
+                  valueListenable: _annotationShift,
+                  builder: (context, shift, child) => Transform.translate(
+                    offset: Offset(0, shift),
+                    child: child,
+                  ),
                   child: Stack(
                     fit: StackFit.expand,
                     children: [

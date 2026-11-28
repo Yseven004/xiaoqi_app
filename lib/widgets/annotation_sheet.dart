@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:image_picker/image_picker.dart';
 
 Future<T?> showAnnotationSheet<T>(
   BuildContext context, {
@@ -55,6 +56,14 @@ Future<T> withAnnotationKeyboard<T>(
   return editor is _AnnotationTextFieldState
       ? editor._withKeyboard(action)
       : action();
+}
+
+Future<List<XFile>> pickAnnotationImages(GlobalKey editorKey) {
+  final editor = editorKey.currentState;
+  Future<List<XFile>> pick() => ImagePicker().pickMultiImage();
+  return editor is _AnnotationTextFieldState
+      ? editor._withKeyboard(pick, restoreOnWindowFocus: true)
+      : pick();
 }
 
 class _AnnotationSheetSurface extends StatefulWidget {
@@ -458,7 +467,6 @@ class AnnotationTextField extends StatefulWidget {
     this.style,
     this.autofocus = true,
     this.readOnly = false,
-    this.onFocusChange,
     this.inputFormatters,
     super.key,
   });
@@ -467,7 +475,6 @@ class AnnotationTextField extends StatefulWidget {
   final TextStyle? style;
   final bool autofocus;
   final bool readOnly;
-  final ValueChanged<bool>? onFocusChange;
   final List<TextInputFormatter>? inputFormatters;
 
   @override
@@ -479,64 +486,96 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
   final _focus = FocusNode();
   double _lastInset = 0;
   bool _preservingKeyboard = false;
+  ValueChanged<AppLifecycleState>? _mediaWindowChanged;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _focus.addListener(_reportFocus);
   }
 
-  void _reportFocus() => widget.onFocusChange?.call(_focus.hasFocus);
+  bool get _ownsKeyboard =>
+      mounted &&
+      _focus.hasPrimaryFocus &&
+      ModalRoute.isCurrentOf(context) == true;
 
-  Future<T> _withKeyboard<T>(Future<T> Function() action) async {
+  bool get _windowFocused {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null || state == AppLifecycleState.resumed;
+  }
+
+  Future<T> _withKeyboard<T>(
+    Future<T> Function() action, {
+    bool restoreOnWindowFocus = false,
+  }) async {
     final view = View.of(context);
-    final originalInset = view.viewInsets.bottom;
-    if (originalInset == 0 || !_focus.hasPrimaryFocus) return action();
+    double inset() => view.viewInsets.bottom;
+    if (inset() == 0 || !_ownsKeyboard) return action();
     _preservingKeyboard = true;
-    try {
-      return await action();
-    } finally {
+    Future<void>? restoration;
+    Future<void> restore({bool windowReturned = false}) async {
       try {
-        await _restoreKeyboard(() => view.viewInsets.bottom, originalInset);
+        await _restoreKeyboard(inset, windowReturned: windowReturned);
       } finally {
         _preservingKeyboard = false;
       }
     }
+
+    if (restoreOnWindowFocus) {
+      var leftForeground = false;
+      _mediaWindowChanged = (state) {
+        if (state != AppLifecycleState.resumed) {
+          leftForeground = true;
+        } else if (leftForeground) {
+          // The picker may still be copying selected files at this point.
+          restoration ??= restore(windowReturned: true);
+        }
+      };
+    }
+    try {
+      return await action();
+    } finally {
+      _mediaWindowChanged = null;
+      await (restoration ?? restore());
+    }
+  }
+
+  Future<bool> _waitForKeyboard(
+    bool Function() condition, {
+    int polls = 25,
+  }) async {
+    for (var poll = 0; _ownsKeyboard; poll++) {
+      if (condition()) return true;
+      if (poll == polls) break;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    return false;
   }
 
   Future<void> _restoreKeyboard(
-    double Function() keyboardInset,
-    double originalInset,
-  ) async {
-    bool stillEditing() =>
-        mounted &&
-        _focus.hasPrimaryFocus &&
-        ModalRoute.isCurrentOf(context) == true;
-    if (!stillEditing() || keyboardInset() >= originalInset) return;
-
-    final deadline = DateTime.now().add(const Duration(milliseconds: 500));
-    final binding = WidgetsBinding.instance;
-    const interval = Duration(milliseconds: 20);
-    while (stillEditing() &&
-        binding.lifecycleState != null &&
-        binding.lifecycleState != AppLifecycleState.resumed &&
-        DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(interval);
+    double Function() inset, {
+    required bool windowReturned,
+  }) async {
+    final windowFocused = await _waitForKeyboard(() => _windowFocused);
+    if (windowFocused && _ownsKeyboard && (windowReturned || inset() == 0)) {
+      _findEditableText(context)?.requestKeyboard();
+      // A native window can regain focus before its input connection is ready.
+      if (!await _waitForKeyboard(() => inset() > 0, polls: 8) &&
+          _ownsKeyboard &&
+          _windowFocused &&
+          inset() == 0) {
+        _findEditableText(context)?.requestKeyboard();
+        await _waitForKeyboard(() => inset() > 0);
+      }
     }
-    if (!stillEditing()) return;
-    if (keyboardInset() == 0) _findEditableText(context)?.requestKeyboard();
-
-    while (stillEditing() &&
-        keyboardInset() < originalInset &&
-        DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(interval);
-    }
-    if (stillEditing() &&
-        keyboardInset() == 0 &&
-        widget.controller.text.isEmpty) {
+    if (_ownsKeyboard && inset() == 0 && widget.controller.text.isEmpty) {
       _focus.unfocus();
     }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _mediaWindowChanged?.call(state);
   }
 
   EditableTextState? _findEditableText(BuildContext context) {
@@ -566,7 +605,6 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _focus.removeListener(_reportFocus);
     _focus.dispose();
     super.dispose();
   }

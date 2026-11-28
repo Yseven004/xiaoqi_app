@@ -256,9 +256,14 @@ class _MarketEntry {
   bool get installed => record != null || connection != null;
   // Capability records currently come from manual import/creation. Market
   // installations are catalog-backed MCP connections, not package imports.
+  static bool isPersonalRecord(CapabilityRecord record) =>
+      record.origin != 'market';
+  static bool isPersonalConnection(McpConnectionRecord connection) =>
+      connection.catalogId == null;
+
   bool get personal =>
-      record != null && record!.origin != 'market' ||
-      (connection != null && connection!.catalogId == null);
+      (record != null && isPersonalRecord(record!)) ||
+      (connection != null && isPersonalConnection(connection!));
   bool get editable => publication == null && record?.origin == 'local';
   String get developer => author.isEmpty ? '未提供' : author;
   String get version =>
@@ -483,7 +488,6 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
   @override
   void initState() {
     super.initState();
-    unawaited(_companionPreferences.load());
     _kind = !widget.mcpCatalogOnly && widget.initialKind == ExtensionKind.skill
         ? ExtensionKind.skill
         : ExtensionKind.plugin;
@@ -494,18 +498,23 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     _draftChanges = CapabilityStore.instance.draftChanges.listen((_) {
       unawaited(_reloadDrafts());
     });
-    unawaited(_reload());
-    if (_kind == ExtensionKind.plugin) {
-      unawaited(_reloadMcp());
-      unawaited(_reloadCatalog());
-    }
-    if (!widget.mcpCatalogOnly) unawaited(_reloadSkills());
     _links = AppLinks().uriLinkStream.listen((uri) {
       if (uri.toString().contains('mcp') && uri.toString().contains('oauth')) {
         _cloud.invalidateMarketCache('connections');
         unawaited(_reloadMcp());
       }
     }, onError: (_) {});
+    // Submit the market's loading frame before starting storage and sync work.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_companionPreferences.load());
+      unawaited(_reload());
+      if (_kind == ExtensionKind.plugin) {
+        if (_mcpRequest == 0) unawaited(_reloadMcp());
+        unawaited(_reloadCatalog());
+      }
+      if (!widget.mcpCatalogOnly) unawaited(_reloadSkills());
+    });
   }
 
   void _searchChanged() {
@@ -645,22 +654,28 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
     }
   }
 
-  List<_MarketEntry> get _entries =>
-      [
-            ..._records.where((r) => !r.isDeleted).map(_MarketEntry.fromRecord),
-            ..._connections.map(
-              (c) => _MarketEntry.fromMcp(
-                _catalog.where((entry) => entry.id == c.catalogId).firstOrNull,
-                c,
-              ),
-            ),
-          ]
-          .where(
-            (e) => _kind == ExtensionKind.skill
-                ? e.kind == ExtensionKind.skill
-                : e.kind != ExtensionKind.skill,
-          )
-          .toList();
+  Iterable<CapabilityRecord> get _recordsForKind => _records.where(
+    (record) =>
+        !record.isDeleted &&
+        (record.kind == CapabilityKind.skill) == (_kind == ExtensionKind.skill),
+  );
+  Iterable<McpConnectionRecord> get _connectionsForKind =>
+      _kind == ExtensionKind.skill ? const [] : _connections;
+
+  List<_MarketEntry> get _entries => [
+    ..._recordsForKind.map(_MarketEntry.fromRecord),
+    ..._connectionsForKind.map(
+      (c) => _MarketEntry.fromMcp(
+        _catalog.where((entry) => entry.id == c.catalogId).firstOrNull,
+        c,
+      ),
+    ),
+  ];
+  int get _installedCount =>
+      _recordsForKind.where((r) => !_MarketEntry.isPersonalRecord(r)).length +
+      _connectionsForKind
+          .where((c) => !_MarketEntry.isPersonalConnection(c))
+          .length;
   List<_MarketEntry> get _installed =>
       _entries.where((entry) => !entry.personal).toList();
   List<_MarketEntry> get _personalEntries =>
@@ -1886,7 +1901,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
   Widget _scopeTab(int index, String label) {
     final selected = _tab == index;
-    final count = index == 1 ? _installed.length : 0;
+    final count = index == 1 ? _installedCount : 0;
     return Semantics(
       selected: selected,
       button: true,
