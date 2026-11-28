@@ -26,8 +26,20 @@ if ($server -match '(?:^|;)https=([^;]+)') {
 }
 
 if ($server -match '^(?:http://)?(?<host>127\.0\.0\.1|localhost):(?<port>[0-9]{1,5})$') {
+    $proxyHost = $Matches.host
     $port = [int]$Matches.port
     if ($port -ge 1 -and $port -le 65535) {
-        '{0} {1}' -f $Matches.host, $port
+        $client = [System.Net.Sockets.TcpClient]::new()
+        try {
+            $connection = $client.ConnectAsync($proxyHost, $port)
+            if ($connection.Wait(500) -and $client.Connected) {
+                '{0} {1}' -f $proxyHost, $port
+            }
+        } catch {
+            # An enabled Windows proxy can outlive the app listening on it.
+            # Leave Flutter's proxy variables unset when that local port is down.
+        } finally {
+            $client.Dispose()
+        }
     }
 }
