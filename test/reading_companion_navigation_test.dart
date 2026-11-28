@@ -76,6 +76,8 @@ void main() {
     expect((await show(fullLine)).top, greaterThan(fullLine.bottom));
     await tester.tap(find.text('继续聊'));
     expect(continued, isTrue);
+    await tester.tap(find.textContaining('原文出处'));
+    await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('查看原文 · PDF 第 2 页'));
     await tester.tap(find.text('查看原文 · PDF 第 2 页'));
     expect(opened?.page, 2);
@@ -356,6 +358,9 @@ void main() {
       find.descendant(of: reader, matching: find.text('阅读空间')),
       findsOneWidget,
     );
+    final evidenceDisclosure = find.textContaining('原文出处');
+    await _waitFor(tester, evidenceDisclosure);
+    await tester.tap(evidenceDisclosure);
     final evidenceLink = find.widgetWithText(TextButton, '查看原文 · 第一章');
     await _waitFor(tester, evidenceLink);
     await tester.tap(evidenceLink);
@@ -720,6 +725,17 @@ Future<void> _exerciseCompanionHistory(
   await tester.pumpAndSettle();
   expect(markedPassage, findsNothing);
 
+  await tester.tap(find.byTooltip('AI 问答'));
+  await _waitFor(
+    tester,
+    find.descendant(of: chatPage, matching: find.text('我的选段问题')),
+  );
+  expect(
+    find.byKey(const ValueKey('companion-discussion-quote')),
+    findsOneWidget,
+  );
+  expect((await records()).length, originalIds.length + 1);
+
   await newFreeChat();
   expect(
     find.descendant(of: reader, matching: find.text('我的选段问题')),
@@ -731,10 +747,14 @@ Future<void> _exerciseCompanionHistory(
   expect(free.messages.where((m) => m.isUser).single.readingPassage, isNull);
   expect((await records()).length, originalIds.length + 2);
 
-  await _openBookHistory(tester);
+  await tester.tap(
+    find.descendant(of: chatPage, matching: find.bySemanticsLabel('打开侧边栏')),
+  );
   final sidebar = find.byType(ReadingSpaceSidebar);
   Finder row(String label) =>
       find.descendant(of: sidebar, matching: find.text(label));
+  await _waitFor(tester, row(free.displayTitle));
+  expect(chatPage, findsOneWidget);
   expect(
     tester.getCenter(row(free.displayTitle)).dy,
     lessThan(tester.getCenter(row(selected.displayTitle)).dy),

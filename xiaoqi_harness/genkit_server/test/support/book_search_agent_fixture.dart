@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:genkit/genkit.dart';
+import 'package:sqlite3/sqlite3.dart';
 import 'package:xiaoqi_genkit_server/src/agent_runtime.dart';
 import 'package:xiaoqi_genkit_server/src/book_search_plugin.dart';
 import 'package:xiaoqi_genkit_server/src/book_search_service.dart';
@@ -88,6 +89,48 @@ Future<void> main(List<String> args) async {
   );
   final events = <Map<String, Object?>>[];
   try {
+    if (args.firstOrNull == 'reading-citations') {
+      const account = 'fixture-account';
+      const bookId = 'ready-book';
+      _seedReadyBook(store, readingBookOwner('personal', account), bookId);
+      final captured = <Map<String, Object?>>[];
+      const questions = ['把“花园小径”翻成英文。', '请核对“花园小径”的原文出处。'];
+      for (final (index, question) in questions.indexed) {
+        final taskId = 'citation-$index';
+        store.put('task/personal/$taskId', {
+          'status': 'running',
+          'annotation_account': account,
+        }, null);
+        final turnEvents = <Map<String, Object?>>[];
+        final result = await runtime.runAgentTurn(
+          tenantId: 'personal',
+          taskId: taskId,
+          request: {
+            '_authenticated_device_key': owner,
+            '_reading_discussion': true,
+            'reasoning_level': 'low',
+            'current_turn_text': question,
+            'materials': [
+              {
+                'id': 'fixture-material',
+                'reading_book_id': bookId,
+                'kind': 'document',
+                'name': '测试用书',
+              },
+            ],
+          },
+          messages: [
+            Message(role: Role.user, content: [TextPart(text: question)]),
+          ],
+          onChunk: (_) {},
+          onProcessEvent: turnEvents.add,
+          cancellation: CancellationController().token,
+        );
+        captured.add({'text': result.text, 'events': turnEvents});
+      }
+      stdout.writeln('RESULT:${jsonEncode({'turns': captured})}');
+      return;
+    }
     if (args.firstOrNull == 'reasoning') {
       final turns = (jsonDecode(args[1]) as List).cast<Map>();
       final answers = <String>[];
@@ -146,5 +189,36 @@ Future<void> main(List<String> args) async {
   } finally {
     store.close();
     await temp.delete(recursive: true);
+  }
+}
+
+void _seedReadyBook(CloudStore store, String tenant, String bookId) {
+  // Stay independent of the optional Python worker while exercising the real
+  // SQLite search, authorization and evidence projection on the runtime path.
+  store.progressiveBooks.status(tenant, bookId);
+  final db = sqlite3.open(store.database.path);
+  try {
+    final catalog = jsonEncode({
+      'units': [
+        {'id': 21, 'page': 21, 'locator': 'PDF 第 21 页'},
+      ],
+    });
+    final version = 'b' * 64;
+    db.execute('''
+      INSERT INTO reading_book_sources
+        (id, tenant, book_key, version, format, sha256, original_key,
+         generation, status, catalog, updated)
+      VALUES (?, ?, ?, ?, 'pdf', ?, 'fixture.pdf', 'test', 'complete', ?, 0)
+    ''', [bookId, tenant, 'a' * 64, version, version, catalog]);
+    db.execute('''
+      INSERT INTO reading_book_units (source, unit, state, bytes)
+      VALUES (?, 21, 'ready', 100)
+    ''', [bookId]);
+    db.execute('''
+      INSERT INTO reading_book_passages (source, unit, part, locator, quote, searchable)
+      VALUES (?, 21, 0, 'PDF 第 21 页', '沿着花园小径走到了门口。', '沿着花园小径走到了门口。')
+    ''', [bookId]);
+  } finally {
+    db.close();
   }
 }

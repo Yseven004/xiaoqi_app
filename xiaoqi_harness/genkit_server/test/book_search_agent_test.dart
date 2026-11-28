@@ -529,6 +529,115 @@ void main() {
     timeout: const Timeout(Duration(minutes: 2)),
   );
   test(
+    'reading discussion retrieves and publishes book sources only on lookup',
+    () async {
+      final model = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => model.close(force: true));
+      final requests = <Map>[];
+      model.listen((request) async {
+        final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+        if (jsonEncode(body['messages']).contains('XIAOQI_TURN_INTENT_V1')) {
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(jsonEncode({
+            'id': 'reading-intent-fixture',
+            'choices': [
+              {
+                'index': 0,
+                'message': {
+                  'role': 'assistant',
+                  'content': jsonEncode({
+                    'mode': 'answer',
+                    'image_count': 0,
+                    'answer_required': true,
+                    'skill_ids': [],
+                    'connection_ids': [],
+                    'target_artifact_id': null,
+                    'clarification': null,
+                  }),
+                },
+                'finish_reason': 'stop',
+              },
+            ],
+          }));
+          await request.response.close();
+          return;
+        }
+        requests.add(body);
+        final lookup = requests.length == 2;
+        final delta = lookup
+            ? {
+                'reasoning_content': '需要核对书中的出处。',
+                'tool_calls': [
+                  {
+                    'index': 0,
+                    'id': 'lookup-1',
+                    'type': 'function',
+                    'function': {
+                      'name': 'read_task_material',
+                      'arguments': jsonEncode({
+                        'material_id': 'fixture-material',
+                        'mode': 'query',
+                        'query': '花园小径',
+                      }),
+                    },
+                  },
+                ],
+              }
+            : {'content': requests.length == 1 ? 'Garden path.' : '见第 21 页。'};
+        request.response.headers.contentType = ContentType(
+          'text',
+          'event-stream',
+          charset: 'utf-8',
+        );
+        request.response.write(
+          'data: ${jsonEncode({
+            'id': 'reading-citations-fixture',
+            'choices': [
+              {
+                'index': 0,
+                'delta': delta,
+                'finish_reason': lookup ? 'tool_calls' : 'stop',
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n',
+        );
+        await request.response.close();
+      });
+
+      final output = await runFixture(model.port, args: ['reading-citations']);
+      expect(requests.length, 3, reason: jsonEncode(output));
+      expect(jsonEncode(requests.first['tools']), contains('read_task_material'));
+      final initialMessages = jsonEncode(requests.first['messages']);
+      expect(initialMessages, contains('先回答读者当前的问题'));
+      expect(initialMessages, isNot(contains('回答必须说明实际阅读范围')));
+      expect(initialMessages, isNot(contains('沿着花园小径走到了门口')));
+
+      final turns = (output['turns'] as List).cast<Map>();
+      final direct = turns.first;
+      expect(direct['text'], 'Garden path.');
+      final directEvents = (direct['events'] as List).cast<Map>();
+      expect(
+        directEvents.where(
+          (event) =>
+              event['type'] == 'reading_evidence' ||
+              event['type'] == 'reading_material' ||
+              event['tool'] == 'read_task_material',
+        ),
+        isEmpty,
+      );
+      final cited = turns.last;
+      expect(cited['text'], '见第 21 页。');
+      final evidence = (cited['events'] as List).cast<Map>().singleWhere(
+        (event) => event['type'] == 'reading_evidence',
+      );
+      final reference = (evidence['references'] as List).single as Map;
+      expect(reference['page'], 21);
+      expect(reference['quote'], '沿着花园小径走到了门口。');
+      expect(reference['source_version'], 'b' * 64);
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
+  test(
     'missing SiliconFlow key never falls back to the main chat provider',
     () async {
       final result = await Process.run(

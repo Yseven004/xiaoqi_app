@@ -137,6 +137,12 @@ class _AgentStreamPresentation {
   final bool answerStarted;
   final String? bookSearchId;
 
+  bool get hasProcess =>
+      currentStep.isNotEmpty ||
+      reasoning.isNotEmpty ||
+      events.isNotEmpty ||
+      details.isNotEmpty;
+
   _AgentStreamPresentation copyWith({
     String? currentStep,
     String? reasoning,
@@ -273,17 +279,6 @@ bool _a2uiEnvelopeHasInteractiveComponent(Map<String, dynamic> envelope) {
       'CheckBox',
     }.contains(component['component']?.toString()),
   );
-}
-
-String _mergeAssistantContinuation(String savedText, String newText) {
-  if (newText.startsWith(savedText)) return newText;
-  final maxOverlap = min(savedText.length, newText.length);
-  for (var length = maxOverlap; length > 0; length--) {
-    if (savedText.endsWith(newText.substring(0, length))) {
-      return '$savedText${newText.substring(length)}';
-    }
-  }
-  return '$savedText$newText';
 }
 
 String _agentTaskFailureMessage(
@@ -4457,10 +4452,11 @@ $materialIndex
       if (!isCurrent()) return null;
       materials.addAll(prepared.materials);
       if (prepared.materials.isNotEmpty) {
-        readingMaterialGuide =
-            '关联书籍的可读正文已登记为 Markdown 资料。'
-            '请在 read_task_material 中按确切主题、章名或“PDF 第 N 页”检索原文。'
-            '引用时使用 Markdown 中的章名或原 PDF 页码，资料工具的分段编号仅用于翻阅。';
+        readingMaterialGuide = readingDiscussion
+            ? '已登记本书可检索的正文。需要核对时可通过 read_task_material 按主题、章名或原 PDF 页码查找。'
+            : '关联书籍的可读正文已登记为 Markdown 资料。'
+                  '请在 read_task_material 中按确切主题、章名或“PDF 第 N 页”检索原文。'
+                  '引用时使用 Markdown 中的章名或原 PDF 页码，资料工具的分段编号仅用于翻阅。';
       }
       if (prepared.issues.isNotEmpty) {
         readingStatus = [
@@ -7213,7 +7209,7 @@ $text''';
           incompleteAnswer?.parentMessageId == messageId) {
         await _updateIncompleteReply(
           incompleteAnswer!.id,
-          _mergeAssistantContinuation(incompleteAnswer.text, result),
+          mergeChatAssistantContinuation(incompleteAnswer.text, result),
           isIncomplete: false,
           clearAgentTaskId: true,
           outputArtifacts: artifacts,
@@ -7853,7 +7849,7 @@ $text''';
       if (answer != null && (partialReply.trim().isNotEmpty || hasProgress)) {
         answerWasSaved = await _updateIncompleteReply(
           continuationMessageId,
-          _mergeAssistantContinuation(answer.text, partialReply),
+          mergeChatAssistantContinuation(answer.text, partialReply),
           isIncomplete: true,
           clearAgentTaskId: true,
           agentProcessSummary: _agentProcessSummary(),
@@ -9056,7 +9052,7 @@ $text''';
       if (answer != null) {
         return _updateIncompleteReply(
           answer.id,
-          _mergeAssistantContinuation(answer.text, addedText),
+          mergeChatAssistantContinuation(answer.text, addedText),
           isIncomplete: true,
           clearAgentTaskId: true,
           agentProcessSummary: _agentProcessSummary(),
@@ -9117,7 +9113,7 @@ $text''';
       if (answer != null) {
         await _updateIncompleteReply(
           answer.id,
-          _mergeAssistantContinuation(answer.text, taskReply.reply),
+          mergeChatAssistantContinuation(answer.text, taskReply.reply),
           isIncomplete: false,
           clearAgentTaskId: true,
           outputArtifacts: taskReply.artifacts,
@@ -9408,6 +9404,41 @@ $text''';
     unawaited(_startNewConversation(bookId: bookId, bookName: bookName));
   }
 
+  Future<void> _openCurrentCompanionChat() async {
+    final target = _companionTarget;
+    if (!_readingCompanionOpen || target == null) return;
+    final generation = ++_readingTaskGeneration;
+    final current = _conversation;
+    if (current != null && current.id == _companionConversationId) {
+      _readingCompanionKey.currentState?.openHistoryChat(preserveSeed: true);
+      if (current.hasCompanionQuestion) {
+        unawaited(_markCompanionOpened(current.id));
+      }
+      return;
+    }
+    try {
+      final history = await _historyService.list(
+        bookId: target.source.bookId,
+        bookName: target.title,
+        companionMode: true,
+      );
+      if (!mounted || generation != _readingTaskGeneration) return;
+      final latest = history
+          .where((record) => record.companionSourceId == target.source.id)
+          .firstOrNull;
+      if (latest != null) {
+        await _selectSidebarConversation(latest);
+      } else {
+        _startCompanionChat(target);
+        _showCompanionChatAfterBuild();
+      }
+    } catch (_) {
+      if (mounted && generation == _readingTaskGeneration) {
+        _showReplyError('打开伴读记录失败，请重试');
+      }
+    }
+  }
+
   void _startIndependentConversation() {
     if (_space != _HomeSpace.reading) return;
     unawaited(_startNewConversation());
@@ -9637,6 +9668,7 @@ $text''';
       _companionDark = false;
       _companionMenuOpen = false;
       _readingPassage = null;
+      _companionExplanationSeed = null;
       _companionConversationId = null;
       _conversationBeforeCompanion = null;
       _companionHistoryNotice = null;
@@ -9722,6 +9754,17 @@ $text''';
           : null,
       streamingReply: _streamingReply,
       streamingEvidence: _streamingReadingEvidence,
+      liveAgentProcess: chat != null && _isGenerating
+          ? _liveAgentProcess(
+              presentation: _agentStreamPresentation,
+              onToggle: _toggleAgentProcessExpansion,
+              showWaitingStatus: _continuingReplyId == null,
+            )
+          : null,
+      continuingReplyId: chat != null && _isGenerating
+          ? _continuingReplyId
+          : null,
+      savedAgentProcessBuilder: _savedAgentProcess,
       onPassageOpened: _openReadingPassage,
       onExplainPassage: _explainReadingPassage,
       onContinueExplanation: _continueReadingExplanation,
@@ -9747,7 +9790,8 @@ $text''';
           setState(() => _companionImmersive = true);
         }
       },
-      onFreeChat: _startNewConversationForCurrentBookContext,
+      onFreeChat: () => unawaited(_openCurrentCompanionChat()),
+      onOpenSidebar: () => unawaited(_openReadingSidebar()),
       onChatVisibilityChanged: (visible) {
         if (!_readingCompanionOpen) return;
         final keyboardClosing = !visible && _currentKeyboardInset > 0;
@@ -10210,6 +10254,10 @@ $text''';
             width: drawerWidth,
             child: ReadingSpaceSidebar(
               companionMode: _readingCompanionOpen,
+              initiallyExpandedHistoryBookId: _companionChatOpen
+                  ? (_companionTarget?.source.bookId ??
+                        _selectedReadingTaskBookId)
+                  : null,
               onNewConversation: () {
                 _startNewConversationForCurrentBookContext();
                 Navigator.of(dialogContext).pop();
@@ -10551,6 +10599,7 @@ $text''';
       _selectedReadingTaskBookName = target?.title ?? title ?? task.bookName;
       _companionHistoryNotice = null;
       _readingPassage = null;
+      _companionExplanationSeed = null;
       _companionConversationId = history?.id;
       _companionMenuOpen = false;
     });
@@ -10603,6 +10652,7 @@ $text''';
         setState(() {
           _companionHistoryNotice = '无法定位这段对话的原资料，可查看已保存的记录';
           _readingPassage = null;
+          _companionExplanationSeed = null;
           _companionConversationId = record.id;
         });
       }
@@ -11230,16 +11280,9 @@ $text''';
       unawaited(_openReadingSidebar());
     }
 
-    final sidebar = Semantics(
-      label: '打开侧边栏',
-      button: true,
-      onTap: openSidebar,
-      excludeSemantics: true,
-      child: action(
-        '打开侧边栏',
-        'assets/images/home_sidebar_icon.svg',
-        openSidebar,
-      ),
+    final sidebar = ReadingCompanionSidebarButton(
+      onPressed: openSidebar,
+      color: ink,
     );
     final trailing = Row(
       mainAxisSize: MainAxisSize.min,
@@ -13781,6 +13824,39 @@ class _AgentClarificationCard extends StatelessWidget {
   }
 }
 
+Widget _liveAgentProcess({
+  required ValueListenable<_AgentStreamPresentation> presentation,
+  required VoidCallback onToggle,
+  bool showWaitingStatus = false,
+}) => ValueListenableBuilder<_AgentStreamPresentation>(
+  valueListenable: presentation,
+  builder: (context, process, _) {
+    if (process.hasProcess) {
+      return _AgentProcessPanel(presentation: process, onToggle: onToggle);
+    }
+    return showWaitingStatus
+        ? const _AgentStatusHeader(text: '正在思考', animated: true)
+        : const SizedBox.shrink();
+  },
+);
+
+Widget? _savedAgentProcess(AiConversationMessage message) {
+  if (message.hasAgentProcess) {
+    return _SavedAgentProcessSummary(
+      key: ValueKey('process:${message.id}'),
+      summary: message.agentProcessSummary ?? '思考过程',
+      details: message.agentProcessDetails,
+      durationMs: message.agentProcessDurationMs,
+      status: savedChatProcessStatus(
+        message.agentProcessStatus,
+        isIncomplete: message.isIncomplete,
+      ),
+      initialExpanded: message.agentProcessExpanded,
+    );
+  }
+  return message.isIncomplete ? const _AgentStatusHeader(text: '已停止') : null;
+}
+
 class _SavedAgentProcessSummary extends StatefulWidget {
   const _SavedAgentProcessSummary({
     super.key,
@@ -15010,14 +15086,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                                                       rawClarification,
                                                     );
                                                 final hasProcess =
-                                                    process
-                                                        .currentStep
-                                                        .isNotEmpty ||
-                                                    process
-                                                        .reasoning
-                                                        .isNotEmpty ||
-                                                    process.events.isNotEmpty ||
-                                                    process.details.isNotEmpty;
+                                                    process.hasProcess;
                                                 if (reply.isNotEmpty ||
                                                     imageInProgress ||
                                                     hasProcess ||
@@ -15120,7 +15189,7 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                                       _scheduleReplyBodyMeasurement();
                                       return _assistantStreamingText(
                                         context,
-                                        _mergeAssistantContinuation(
+                                        mergeChatAssistantContinuation(
                                           row.message.text,
                                           addition,
                                         ),
@@ -15172,44 +15241,14 @@ class _ConversationMessagesState extends State<_ConversationMessages> {
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       if (isContinuing)
-                                        ValueListenableBuilder<
-                                          _AgentStreamPresentation
-                                        >(
-                                          valueListenable:
+                                        _liveAgentProcess(
+                                          presentation:
                                               widget.agentStreamPresentation,
-                                          builder: (context, process, _) =>
-                                              process.currentStep.isEmpty &&
-                                                  process.reasoning.isEmpty &&
-                                                  process.events.isEmpty
-                                              ? const SizedBox.shrink()
-                                              : _AgentProcessPanel(
-                                                  presentation: process,
-                                                  onToggle: widget
-                                                      .onToggleAgentProcess,
-                                                ),
+                                          onToggle: widget.onToggleAgentProcess,
                                         )
-                                      else if (row.message.hasAgentProcess)
-                                        _SavedAgentProcessSummary(
-                                          key: ValueKey(
-                                            'process:${row.message.id}',
-                                          ),
-                                          summary:
-                                              row.message.agentProcessSummary ??
-                                              '思考过程',
-                                          details:
-                                              row.message.agentProcessDetails,
-                                          durationMs: row
-                                              .message
-                                              .agentProcessDurationMs,
-                                          status: savedChatProcessStatus(
-                                            row.message.agentProcessStatus,
-                                            isIncomplete: isStopped,
-                                          ),
-                                          initialExpanded:
-                                              row.message.agentProcessExpanded,
-                                        )
-                                      else if (isStopped)
-                                        const _AgentStatusHeader(text: '已停止'),
+                                      else if (_savedAgentProcess(row.message)
+                                          case final process?)
+                                        process,
                                       _messageSelection(
                                         row.message,
                                         'assistant:${row.message.id}:${row.message.text.hashCode}',

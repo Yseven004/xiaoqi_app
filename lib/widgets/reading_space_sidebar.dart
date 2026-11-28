@@ -55,6 +55,7 @@ class ReadingSpaceSidebar extends StatefulWidget {
     this.bookLibraryService,
     this.historyService,
     this.companionMode = false,
+    this.initiallyExpandedHistoryBookId,
   });
 
   final VoidCallback onNewConversation;
@@ -71,6 +72,7 @@ class ReadingSpaceSidebar extends StatefulWidget {
   final BookLibraryService? bookLibraryService;
   final AiConversationHistoryService? historyService;
   final bool companionMode;
+  final int? initiallyExpandedHistoryBookId;
 
   @override
   State<ReadingSpaceSidebar> createState() => _ReadingSpaceSidebarState();
@@ -112,6 +114,8 @@ class _ReadingSpaceSidebarState extends State<ReadingSpaceSidebar> {
   @override
   void initState() {
     super.initState();
+    _expandedBookId = widget.initiallyExpandedHistoryBookId;
+    _conversationsExpanded = _expandedBookId != null;
     unawaited(_load());
   }
 

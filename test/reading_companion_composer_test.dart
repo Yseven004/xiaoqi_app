@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xiaoqi_app/features/ai_study_annotation/data/ai_conversation_history.dart';
 import 'package:xiaoqi_app/features/capabilities/presentation/capability_tag_text_controller.dart';
+import 'package:xiaoqi_app/services/book_library_service.dart';
 import 'package:xiaoqi_app/services/home_chat_model_preferences.dart';
 import 'package:xiaoqi_app/widgets/home_chat_model_selector.dart';
+import 'package:xiaoqi_app/widgets/reading_companion.dart';
 import 'package:xiaoqi_app/widgets/reading_companion_composer.dart';
 
 void main() {
@@ -124,6 +127,64 @@ void main() {
     expect(selection.model, HomeChatModelOption.deepSeek);
     expect(selection.reasoningLevel, HomeChatReasoningLevel.max);
     expect(find.byTooltip('思考强度 最高'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('companion places live and saved processes with their answers', (
+    tester,
+  ) async {
+    final library = BookLibraryService();
+    final companion = GlobalKey<ReadingCompanionState>();
+    final streamingReply = ValueNotifier('');
+    addTearDown(streamingReply.dispose);
+    final question = AiConversationMessage(
+      text: '读到哪里了？',
+      isUser: true,
+      createdAt: DateTime(2026),
+    );
+    final answer = AiConversationMessage(
+      text: '读到第三章',
+      isUser: false,
+      createdAt: DateTime(2026),
+      isIncomplete: true,
+      agentProcessSummary: '上次阅读已停止',
+    );
+
+    Future<void> showDiscussion({bool active = false, String? continuingId}) =>
+        tester.pumpWidget(
+          MaterialApp(
+            home: ReadingCompanion(
+              key: companion,
+              bookId: null,
+              library: library,
+              messages: [question, answer],
+              streamingReply: streamingReply,
+              liveAgentProcess: active ? const Text('正在阅读') : null,
+              continuingReplyId: continuingId,
+              savedAgentProcessBuilder: (message) =>
+                  Text(message.agentProcessSummary!),
+              composerBuilder: (history) => history,
+              onPassageOpened: (_) {},
+            ),
+          ),
+        );
+
+    await showDiscussion();
+    companion.currentState!.openHistoryChat();
+    await tester.pumpAndSettle();
+    expect(find.text('上次阅读已停止'), findsOneWidget);
+
+    await showDiscussion(active: true);
+    expect(find.text('正在阅读'), findsOneWidget);
+    expect(find.text('上次阅读已停止'), findsOneWidget);
+
+    await showDiscussion(active: true, continuingId: answer.id);
+    expect(find.text('正在阅读'), findsOneWidget);
+    expect(find.text('上次阅读已停止'), findsNothing);
+    streamingReply.value = '第三章，接着是第四章。';
+    await tester.pump();
+    expect(find.text('读到第三章，接着是第四章。', findRichText: true), findsOneWidget);
+    expect(find.text('第三章，接着是第四章。', findRichText: true), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

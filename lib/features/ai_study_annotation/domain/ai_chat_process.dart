@@ -1,3 +1,5 @@
+import 'dart:math' show min;
+
 final _savedToolProtocol = RegExp(
   r'<[｜|]DSML[｜|]\s*(?:calls|tool_calls)\b[\s\S]*?</[｜|]DSML[｜|]\s*(?:calls|tool_calls)\s*>',
 );
@@ -19,6 +21,17 @@ String visibleChatAssistantText(String text) {
     }
   }
   return visible;
+}
+
+String mergeChatAssistantContinuation(String savedText, String newText) {
+  if (newText.startsWith(savedText)) return newText;
+  final maxOverlap = min(savedText.length, newText.length);
+  for (var length = maxOverlap; length > 0; length--) {
+    if (savedText.endsWith(newText.substring(0, length))) {
+      return '$savedText${newText.substring(length)}';
+    }
+  }
+  return '$savedText$newText';
 }
 
 String savedChatProcessStatus(String? status, {required bool isIncomplete}) =>

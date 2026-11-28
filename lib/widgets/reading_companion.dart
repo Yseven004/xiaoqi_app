@@ -264,6 +264,38 @@ double readingCompanionToolbarHeight(BuildContext context) =>
 typedef ReadingCompanionToolbarBuilder =
     Widget Function(BuildContext context, Widget tools);
 
+class ReadingCompanionSidebarButton extends StatelessWidget {
+  const ReadingCompanionSidebarButton({
+    super.key,
+    required this.onPressed,
+    required this.color,
+  });
+
+  final VoidCallback onPressed;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context).width >= 600 ? 25.5 : 22.0;
+    return Semantics(
+      label: '打开侧边栏',
+      button: true,
+      onTap: onPressed,
+      excludeSemantics: true,
+      child: IconButton(
+        tooltip: '打开侧边栏',
+        onPressed: onPressed,
+        icon: SvgPicture.asset(
+          'assets/images/home_sidebar_icon.svg',
+          width: size,
+          height: size,
+          colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+        ),
+      ),
+    );
+  }
+}
+
 /// Book source reader embedded in the reading space.
 ///
 /// The host owns the actual Agent conversation and composer. The reader only
@@ -283,6 +315,7 @@ class ReadingCompanion extends StatefulWidget {
     this.onAnnotationEditingChanged,
     this.onChooseBook,
     this.onOpenLibrary,
+    this.onOpenSidebar,
     this.loadPreferredSourceId,
     this.target,
     this.onSourceChanged,
@@ -300,6 +333,9 @@ class ReadingCompanion extends StatefulWidget {
     this.onContinueExplanation,
     this.onReadingTargetChanged,
     this.streamingEvidence,
+    this.liveAgentProcess,
+    this.continuingReplyId,
+    this.savedAgentProcessBuilder,
   });
 
   final int? bookId;
@@ -317,6 +353,7 @@ class ReadingCompanion extends StatefulWidget {
   final ValueChanged<bool>? onAnnotationEditingChanged;
   final AsyncCallback? onChooseBook;
   final AsyncCallback? onOpenLibrary;
+  final VoidCallback? onOpenSidebar;
   final Future<int?> Function(int bookId)? loadPreferredSourceId;
   final ReadingCompanionTarget? target;
   final Future<void> Function(BookSourceRecord source)? onSourceChanged;
@@ -334,6 +371,9 @@ class ReadingCompanion extends StatefulWidget {
   onExplainPassage;
   final ValueChanged<ReadingCompanionExplanation>? onContinueExplanation;
   final ValueListenable<List<ReadingCompanionEvidence>>? streamingEvidence;
+  final Widget? liveAgentProcess;
+  final String? continuingReplyId;
+  final Widget? Function(AiConversationMessage)? savedAgentProcessBuilder;
   final void Function(BookSourceRecord source, ReaderAnchor? anchor)?
   onReadingTargetChanged;
 
@@ -545,8 +585,6 @@ class ReadingCompanionState extends State<ReadingCompanion>
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       _selection = null;
-      _discussionSeed = null;
-      _discussionSeedEvidence = const [];
       _chatOpen = false;
       _historyRequest++;
       _messageKeys.clear();
@@ -555,15 +593,17 @@ class ReadingCompanionState extends State<ReadingCompanion>
     widget.onPassageClosed?.call();
   }
 
-  /// Opens the saved conversation without manufacturing a passage or a new turn.
-  void openHistoryChat({String? messageId}) {
+  /// Opens the host's current conversation, with an optional saved message anchor.
+  void openHistoryChat({String? messageId, bool preserveSeed = false}) {
     _cancelReadingEvidence();
     final request = ++_historyRequest;
     setState(() {
       _selection = null;
       _chatOpen = true;
-      _discussionSeed = null;
-      _discussionSeedEvidence = const [];
+      if (!preserveSeed) {
+        _discussionSeed = null;
+        _discussionSeedEvidence = const [];
+      }
       _clearExplanation();
       _messageKeys.clear();
     });
@@ -1598,6 +1638,14 @@ class ReadingCompanionState extends State<ReadingCompanion>
                           label: const Text('原文'),
                         ),
                       ),
+                      if (widget.onOpenSidebar case final openSidebar?)
+                        Align(
+                          alignment: AlignmentDirectional.centerEnd,
+                          child: ReadingCompanionSidebarButton(
+                            onPressed: openSidebar,
+                            color: scheme.onSurface,
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -1664,6 +1712,9 @@ class ReadingCompanionState extends State<ReadingCompanion>
                       seed: _discussionSeed,
                       seedEvidence: _discussionSeedEvidence,
                       streamingEvidence: widget.streamingEvidence,
+                      liveAgentProcess: widget.liveAgentProcess,
+                      continuingReplyId: widget.continuingReplyId,
+                      savedAgentProcessBuilder: widget.savedAgentProcessBuilder,
                       onOpenEvidence: _openReadingEvidence,
                     ),
                   ),
@@ -8606,6 +8657,9 @@ class _CompanionHistory extends StatelessWidget {
     this.seed,
     required this.seedEvidence,
     required this.streamingEvidence,
+    required this.liveAgentProcess,
+    required this.continuingReplyId,
+    required this.savedAgentProcessBuilder,
     required this.onOpenEvidence,
   });
 
@@ -8616,6 +8670,9 @@ class _CompanionHistory extends StatelessWidget {
   final String? seed;
   final List<ReadingCompanionEvidence> seedEvidence;
   final ValueListenable<List<ReadingCompanionEvidence>>? streamingEvidence;
+  final Widget? liveAgentProcess;
+  final String? continuingReplyId;
+  final Widget? Function(AiConversationMessage)? savedAgentProcessBuilder;
   final ValueChanged<ReadingCompanionEvidence> onOpenEvidence;
 
   @override
@@ -8626,6 +8683,12 @@ class _CompanionHistory extends StatelessWidget {
           .where((message) => !message.isDeletedMarker)
           .toList();
       final showSeed = turns.isEmpty && seed != null;
+      final hasContinuingReply =
+          continuingReplyId != null &&
+          turns.any((turn) => !turn.isUser && turn.id == continuingReplyId);
+      final showLiveTurn =
+          !hasContinuingReply &&
+          (liveAgentProcess != null || streamed.isNotEmpty);
       return ChatMessageScrollView(
         controller: controller,
         slivers: [
@@ -8633,31 +8696,35 @@ class _CompanionHistory extends StatelessWidget {
             padding: const EdgeInsets.only(top: 16, bottom: 12),
             sliver: SliverList.builder(
               itemCount:
-                  turns.length +
-                  (streamed.isEmpty ? 0 : 1) +
-                  (showSeed ? 1 : 0),
+                  turns.length + (showLiveTurn ? 1 : 0) + (showSeed ? 1 : 0),
               itemBuilder: (context, index) {
-                if (streamed.isNotEmpty && index == 0) {
-                  final live = streamingEvidence;
-                  return live == null
-                      ? _answer(context, streamed)
-                      : ValueListenableBuilder(
-                          valueListenable: live,
-                          builder: (context, evidence, _) =>
-                              _answerWithEvidence(context, streamed, evidence),
-                        );
+                if (showLiveTurn && index == 0) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (liveAgentProcess case final process?) process,
+                      _streamingAnswer(context, streamed),
+                    ],
+                  );
                 }
                 if (showSeed) {
                   return _answerWithEvidence(context, seed!, seedEvidence);
                 }
-                final reverseIndex = index - (streamed.isEmpty ? 0 : 1);
+                final reverseIndex = index - (showLiveTurn ? 1 : 0);
                 final turn = turns[turns.length - 1 - reverseIndex];
                 final text = turn.displayText ?? turn.text;
                 return KeyedSubtree(
                   key: messageKeys.putIfAbsent(turn.id, () => GlobalKey()),
                   child: turn.isUser
                       ? _question(context, turn, text)
-                      : _assistantTurn(context, turn, text),
+                      : _assistantTurn(
+                          context,
+                          turn,
+                          text,
+                          continuation: turn.id == continuingReplyId
+                              ? streamed
+                              : null,
+                        ),
                 );
               },
             ),
@@ -8711,27 +8778,61 @@ class _CompanionHistory extends StatelessWidget {
   Widget _assistantTurn(
     BuildContext context,
     AiConversationMessage message,
-    String text,
-  ) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      _answerWithEvidence(
-        context,
-        visibleChatAssistantText(text),
-        message.readingEvidence,
-      ),
-      for (final artifact in message.outputArtifacts)
-        if (artifact['media_type']?.toString().startsWith('image/') == true &&
-            (artifact['task_id']?.toString() ?? '').isNotEmpty &&
-            (artifact['id']?.toString() ?? '').isNotEmpty)
-          _CompanionImageArtifact(
-            key: ValueKey((artifact['task_id'], artifact['id'])),
-            taskId: artifact['task_id'].toString(),
-            artifactId: artifact['id'].toString(),
-            name: artifact['name']?.toString() ?? '创建的图像',
+    String text, {
+    String? continuation,
+  }) {
+    final process = continuation == null
+        ? savedAgentProcessBuilder?.call(message)
+        : liveAgentProcess;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (process != null) process,
+        if (continuation == null)
+          _answerWithEvidence(
+            context,
+            visibleChatAssistantText(text),
+            message.readingEvidence,
+          )
+        else
+          _streamingAnswer(
+            context,
+            visibleChatAssistantText(
+              mergeChatAssistantContinuation(message.text, continuation),
+            ),
+            savedEvidence: message.readingEvidence,
           ),
-    ],
-  );
+        for (final artifact in message.outputArtifacts)
+          if (artifact['media_type']?.toString().startsWith('image/') == true &&
+              (artifact['task_id']?.toString() ?? '').isNotEmpty &&
+              (artifact['id']?.toString() ?? '').isNotEmpty)
+            _CompanionImageArtifact(
+              key: ValueKey((artifact['task_id'], artifact['id'])),
+              taskId: artifact['task_id'].toString(),
+              artifactId: artifact['id'].toString(),
+              name: artifact['name']?.toString() ?? '创建的图像',
+            ),
+      ],
+    );
+  }
+
+  Widget _streamingAnswer(
+    BuildContext context,
+    String text, {
+    List<ReadingCompanionEvidence> savedEvidence = const [],
+  }) {
+    if (text.trim().isEmpty) return const SizedBox.shrink();
+    final live = streamingEvidence;
+    if (live == null) return _answerWithEvidence(context, text, savedEvidence);
+    return ValueListenableBuilder(
+      valueListenable: live,
+      builder: (context, evidence, _) => _answerWithEvidence(
+        context,
+        text,
+        ReadingCompanionEvidence.merge([...savedEvidence, ...evidence]),
+      ),
+    );
+  }
 
   Widget _answerWithEvidence(
     BuildContext context,

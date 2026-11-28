@@ -309,16 +309,64 @@ void main() {
   });
 
   testWidgets(
+    'the cloud can copy the current explanation or a long-pressed selection',
+    (tester) async {
+      final messenger = tester.binding.defaultBinaryMessenger;
+      String? copied;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      await _showCloud(tester, _approvedAnswer, answerVersion: 1);
+      await tester.pumpAndSettle();
+      const visibleAnswer = 'First second';
+      await _showCloud(tester, visibleAnswer, answerVersion: 2);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('cloud-copy-action')));
+      await tester.pump();
+      expect(copied, visibleAnswer);
+      await tester.pumpAndSettle(const Duration(seconds: 2));
+
+      final body = find.text(visibleAnswer);
+      await tester.longPressAt(tester.getTopLeft(body) + const Offset(12, 10));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy'));
+      await tester.pumpAndSettle();
+      expect(copied, 'First');
+    },
+  );
+
+  testWidgets(
     'regeneration keeps the cloud in place and restores prior evidence',
     (tester) async {
       final evidence = ReadingCompanionEvidence.fromPayload([
         {'source_version': 'a' * 64, 'page': 2, 'locator': 'PDF 第 2 页'},
+        {
+          'source_version': 'a' * 64,
+          'page': 2,
+          'locator': 'PDF 第 2 页',
+          'quote': '同一页的另一段',
+        },
       ]);
       await _showCloud(tester, _approvedAnswer, evidence: evidence);
       await tester.pumpAndSettle();
       final cloud = find.byKey(_cloudKey);
       final position = tester.getRect(cloud);
+      final sources = find.text('原文出处');
+      expect(find.text('查看原文 · PDF 第 2 页'), findsNothing);
+      await tester.ensureVisible(sources);
+      await tester.tap(sources);
+      await tester.pumpAndSettle();
       expect(find.text('查看原文 · PDF 第 2 页'), findsOneWidget);
+      await tester.ensureVisible(sources);
+      await tester.tap(sources);
+      await tester.pumpAndSettle();
       await _showCloud(
         tester,
         _approvedAnswer,
@@ -344,6 +392,9 @@ void main() {
         find.byKey(const ValueKey('cloud-regeneration-placeholder')),
         findsNothing,
       );
+      await tester.ensureVisible(sources);
+      await tester.tap(sources);
+      await tester.pumpAndSettle();
       expect(find.text('查看原文 · PDF 第 2 页'), findsOneWidget);
     },
   );

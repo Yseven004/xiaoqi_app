@@ -2,6 +2,20 @@
 
 日期为 2026-11-26，代码基线为 `aef5d1a`，双端使用发布标识 `2026-11-26-reading-companion` 和 API 契约 `45`。本文记录已确认的开发和验收范围。发布、设备和效果证据独立记录。
 
+## 2026-11-28 · 伴读显示、历史入口和原文出处
+
+用户确认直接复用主界面的实时思考及运行步骤、历史回复过程，以及伴读现有侧栏和按钮样式。问答顶栏可直接打开伴读侧栏，保留「原文」返回动作。点阅读器 AI 恢复当前书的讨论，明确选择「新建会话」或换选段时开启独立讨论。仅在首次主动发出问题后进入历史。云朵正文可长按选字并复制选区，沿用回复的复制图形和现有反馈复制当前解释全文。问候、简单追问和可从选段直接答的问题先直答。需要补充原文才能回答或读者要求出处时才查书，真实出处集中为一处可展开入口。选段和阅读位置继续可查看。
+
+双端锁定的 Genkit 1.0.2 已从 `package_config.json` 核对到同一安装目录。Pub 的 API Reference 入口指向新版本，本次以锁定源码为准。外部资料只用于核对已有交互与 API，不引入代码或依赖。[Genkit Dart 1.0.2，Apache-2.0](https://pub.dev/packages/genkit/versions/1.0.2) · [DeepSeek Chat Demo，MIT，项目参考提交 5d5dd75](https://github.com/deepseek-ai/chat-demo/tree/5d5dd754ebc1948e977ddb880a9eb5aa25f37b4c) · [Flutter 抽屉交互，BSD-3-Clause](https://docs.flutter.dev/cookbook/design/drawer)
+
+| 需求 | 锁定版官方能力 | 现有接入及调整 | 缺口和状态所有者 |
+| --- | --- | --- | --- |
+| 实时及历史过程 | `genkit/lib/src/ai/agents/agent.dart` 的 `SessionRunner`，`experimental_client.dart` 和 `agent_core.dart` 的 `remoteAgent`、`AgentChat.sendStream` | 复用 Home 对事件的投影、展开状态和持久化，并让伴读使用同一 Flutter 过程组件 | 缺口在伴读消息视图。Genkit 持有执行状态，Flutter 持有呈现和展开状态。 |
+| 回到已发送会话 | `agent.dart` 的官方 `SessionRunner`、`SessionStore`、`snapshotId` | 复用现有 `AiConversationHistoryService` 和伴读历史打开路径。已有会话以原 ID 和已提交快照继续 | 缺口在阅读器入口。Flutter 持有本书选择和本地显示记录，Genkit 持有会话及分支。部分流式文本只作显示。 |
+| 按需查书和集中出处 | `lib/src/experimental/agent_veneer.dart` 的 `defineAgent`、标准工具循环、已有 `defineTool` | 对正式伴读取消已索引正文的无条件预读。保留选段、通用附件和原有查书工具。补查结果仍用现有出处事件，客户端合并重复显示 | 查证时机由伴读 Agent 按问题选择。服务端持有授权资料及定位依据，Flutter 持有出处展开状态。 |
+
+验收覆盖复制当前解释、处理过程在首字前出现且可回看、侧栏在问答页可直达、返回同书恢复原问答及新建独立会话。原文出处验证问候和直接解释不触发自动查书，查证时保留可定位出处。同一任务的停止、切换和再次打开沿用现有取消与快照链。回滚沿用客户端版本和服务端既有恢复点。全局输入焦点规则仍适用。
+
 ## 实现与验证记录
 
 1. EPUB 冷开先显示目标章。目录可继续使用，新的跳转可以调整正在运行的解析任务。后台补齐正文和分页时保留阅读锚点。导入预热和阅读器共用同一版本的解析任务。在桌面用 96 章、每章 160 段的合成中文 EPUB 测了三次。目标第 82 章解析耗时 8–9 ms，旧路径全量解析耗时 422–438 ms。计时含读取文件和正文解析，不含实际设备冷磁盘、分页和绘制。

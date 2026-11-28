@@ -1,10 +1,12 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path_parsing/path_parsing.dart';
 
 import '../models/reading_companion_evidence.dart';
+import 'app_toast.dart';
 
 enum _CloudSide { above, left, right, below }
 
@@ -342,9 +344,40 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
       minimumSize: const WidgetStatePropertyAll(Size(44, 44)),
       maximumSize: const WidgetStatePropertyAll(Size(44, 44)),
     );
+    final canCopy = !pending && text.trim().isNotEmpty;
+    final bodyText = Text(
+      text.isNotEmpty
+          ? text
+          : failed
+          ? '暂时无法解释这段'
+          : '正在解释…',
+      textAlign: TextAlign.start,
+      style: TextStyle(color: scheme.onSurface, fontSize: 16, height: 1.45),
+    );
+    final copy = IconButton(
+      key: const ValueKey('cloud-copy-action'),
+      tooltip: '复制',
+      style: closeStyle,
+      icon: SvgPicture.asset(
+        'assets/images/home_reply_copy.svg',
+        width: 22,
+        height: 22,
+        colorFilter: ColorFilter.mode(scheme.onSurface, BlendMode.srcIn),
+      ),
+      onPressed: !canCopy
+          ? null
+          : () async {
+              try {
+                await Clipboard.setData(ClipboardData(text: text));
+                if (context.mounted) AppToast.show(context, '已复制解释');
+              } on PlatformException {
+                if (context.mounted) AppToast.show(context, '复制失败');
+              }
+            },
+    );
 
     if (rect == null || width < 210) {
-      final compactActions = <Widget>[];
+      final compactActions = <Widget>[if (canCopy) copy];
       if (pending) {
         compactActions.add(
           TextButton(
@@ -641,10 +674,13 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     ];
     Widget footerActions() => LayoutBuilder(
       builder: (context, constraints) {
+        const copyWidth = 44.0;
         final minimumWidth =
+            copyWidth +
             math.max(44.0, 22 + 63 * textScale) * actionWidgets.length;
         final actions = Row(
           children: [
+            SizedBox(width: copyWidth, child: canCopy ? copy : null),
             for (final action in actionWidgets)
               Expanded(child: Center(child: action)),
           ],
@@ -704,19 +740,11 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
                                           children: [
                                             Semantics(
                                               liveRegion: !pending,
-                                              child: Text(
-                                                text.isNotEmpty
-                                                    ? text
-                                                    : failed
-                                                    ? '暂时无法解释这段'
-                                                    : '正在解释…',
-                                                textAlign: TextAlign.start,
-                                                style: TextStyle(
-                                                  color: scheme.onSurface,
-                                                  fontSize: 16,
-                                                  height: 1.45,
-                                                ),
-                                              ),
+                                              child: canCopy
+                                                  ? SelectionArea(
+                                                      child: bodyText,
+                                                    )
+                                                  : bodyText,
                                             ),
                                             if (onOpenEvidence != null)
                                               ReadingCompanionEvidenceLinks(
@@ -913,7 +941,7 @@ class _CloudRegenerationPlaceholderState
   }
 }
 
-class ReadingCompanionEvidenceLinks extends StatelessWidget {
+class ReadingCompanionEvidenceLinks extends StatefulWidget {
   const ReadingCompanionEvidenceLinks({
     super.key,
     required this.evidence,
@@ -924,30 +952,58 @@ class ReadingCompanionEvidenceLinks extends StatelessWidget {
   final ValueChanged<ReadingCompanionEvidence> onOpen;
 
   @override
+  State<ReadingCompanionEvidenceLinks> createState() =>
+      _ReadingCompanionEvidenceLinksState();
+}
+
+class _ReadingCompanionEvidenceLinksState
+    extends State<ReadingCompanionEvidenceLinks> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
-    if (evidence.isEmpty) return const SizedBox.shrink();
-    return Wrap(
-      spacing: 4,
+    if (widget.evidence.isEmpty) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    final style = ButtonStyle(
+      overlayColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.pressed)) return Colors.transparent;
+        if (states.contains(WidgetState.focused)) {
+          return scheme.primary.withValues(alpha: 0.12);
+        }
+        return Colors.transparent;
+      }),
+      splashFactory: NoSplash.splashFactory,
+    );
+    final shownPages = <(String, int)>{};
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final entry in evidence)
-          TextButton(
-            key: ValueKey(entry.identity),
-            onPressed: () => onOpen(entry),
-            style: ButtonStyle(
-              overlayColor: WidgetStateProperty.resolveWith((states) {
-                if (states.contains(WidgetState.pressed)) {
-                  return Colors.transparent;
-                }
-                if (states.contains(WidgetState.focused)) {
-                  return Theme.of(
-                    context,
-                  ).colorScheme.primary.withValues(alpha: 0.12);
-                }
-                return Colors.transparent;
-              }),
-              splashFactory: NoSplash.splashFactory,
+        Semantics(
+          expanded: _expanded,
+          child: TextButton.icon(
+            onPressed: () => setState(() => _expanded = !_expanded),
+            style: style,
+            icon: Icon(
+              _expanded ? Icons.expand_less : Icons.expand_more,
+              size: 18,
             ),
-            child: Text('查看原文 · ${entry.label}'),
+            label: const Text('原文出处'),
+          ),
+        ),
+        if (_expanded)
+          Wrap(
+            spacing: 4,
+            children: [
+              for (final entry in widget.evidence)
+                if (entry.page == null ||
+                    shownPages.add((entry.sourceVersion, entry.page!)))
+                  TextButton(
+                    key: ValueKey(entry.identity),
+                    onPressed: () => widget.onOpen(entry),
+                    style: style,
+                    child: Text('查看原文 · ${entry.label}'),
+                  ),
+            ],
           ),
       ],
     );
