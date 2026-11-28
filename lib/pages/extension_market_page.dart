@@ -1886,9 +1886,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
 
   Widget _scopeTab(int index, String label) {
     final selected = _tab == index;
-    final count = index == 1 && _installed.isNotEmpty
-        ? _installed.length
-        : null;
+    final count = index == 1 ? _installed.length : 0;
     return Semantics(
       selected: selected,
       button: true,
@@ -1921,7 +1919,7 @@ class _ExtensionMarketPageState extends State<ExtensionMarketPage> {
                         color: selected ? marketInk : marketMuted,
                       ),
                     ),
-                    if (count != null) ...[
+                    if (count > 0) ...[
                       const SizedBox(width: 6),
                       Container(
                         padding: const EdgeInsets.symmetric(

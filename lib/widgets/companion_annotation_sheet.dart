@@ -57,7 +57,7 @@ Future<CompanionAnnotation?> editCompanionAnnotation(
     editing: true,
     barrierDismissible: true,
     matchReferenceProportions: true,
-    sheetAnimationStyle: const AnimationStyle(reverseDuration: Duration.zero),
+    sheetAnimationStyle: AnimationStyle.noAnimation,
     barrierColor: initial == null
         ? const Color(0x38000000)
         : Colors.transparent,

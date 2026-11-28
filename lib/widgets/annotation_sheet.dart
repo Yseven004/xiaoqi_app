@@ -36,12 +36,17 @@ Future<T?> showAnnotationSheet<T>(
       scrollPosition: scrollPosition,
       onViewportChanged: onViewportChanged,
       matchReferenceProportions: matchReferenceProportions,
-      builder: builder,
+      child: Builder(
+        builder: (context) => Theme(
+          data: annotationPanelTheme(context),
+          child: Builder(builder: builder),
+        ),
+      ),
     ),
   ).whenComplete(() => onViewportChanged?.call(double.infinity));
 }
 
-/// Preserves the editor's keyboard while a native media window has focus.
+/// Restores an open keyboard after a native media window returns.
 Future<T> withAnnotationKeyboard<T>(
   GlobalKey editorKey,
   Future<T> Function() action,
@@ -54,13 +59,13 @@ Future<T> withAnnotationKeyboard<T>(
 
 class _AnnotationSheetSurface extends StatefulWidget {
   const _AnnotationSheetSurface({
-    required this.builder,
+    required this.child,
     required this.matchReferenceProportions,
     this.resolveAnchor,
     this.scrollPosition,
     this.onViewportChanged,
   });
-  final WidgetBuilder builder;
+  final Widget child;
   final bool matchReferenceProportions;
   final Rect? Function()? resolveAnchor;
   final ScrollPosition? scrollPosition;
@@ -74,17 +79,7 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
   final _surfaceKey = GlobalKey();
   bool _scheduled = false;
   double? _lastTop;
-  double _heldKeyboardInset = 0;
   Animation<double>? _routeAnimation;
-
-  VoidCallback _holdKeyboard() {
-    final inset = MediaQuery.viewInsetsOf(context).bottom;
-    if (inset == 0) return () {};
-    setState(() => _heldKeyboardInset = inset);
-    return () {
-      if (mounted) setState(() => _heldKeyboardInset = 0);
-    };
-  }
 
   @override
   void didChangeDependencies() {
@@ -136,7 +131,7 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
   @override
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
-    final keyboard = math.max(media.viewInsets.bottom, _heldKeyboardInset);
+    final keyboard = media.viewInsets.bottom;
     final availableHeight = math.max(
       0.0,
       media.size.height - media.padding.top - keyboard - media.padding.bottom,
@@ -171,10 +166,7 @@ class _AnnotationSheetSurfaceState extends State<_AnnotationSheetSurface> {
                         ),
                         side: const BorderSide(color: Color(0xFFE6E7E9)),
                       ),
-                      child: Theme(
-                        data: annotationPanelTheme(context),
-                        child: Builder(builder: widget.builder),
-                      ),
+                      child: widget.child,
                     ),
                   ),
                 ),
@@ -486,6 +478,7 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
     with WidgetsBindingObserver {
   final _focus = FocusNode();
   double _lastInset = 0;
+  bool _preservingKeyboard = false;
 
   @override
   void initState() {
@@ -500,16 +493,14 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
     final view = View.of(context);
     final originalInset = view.viewInsets.bottom;
     if (originalInset == 0 || !_focus.hasPrimaryFocus) return action();
-    final release = context
-        .findAncestorStateOfType<_AnnotationSheetSurfaceState>()
-        ?._holdKeyboard();
+    _preservingKeyboard = true;
     try {
       return await action();
     } finally {
       try {
         await _restoreKeyboard(() => view.viewInsets.bottom, originalInset);
       } finally {
-        release?.call();
+        _preservingKeyboard = false;
       }
     }
   }
@@ -566,11 +557,7 @@ class _AnnotationTextFieldState extends State<AnnotationTextField>
     if (_lastInset > 0 &&
         inset == 0 &&
         widget.controller.text.isEmpty &&
-        (context
-                    .findAncestorStateOfType<_AnnotationSheetSurfaceState>()
-                    ?._heldKeyboardInset ??
-                0) ==
-            0) {
+        !_preservingKeyboard) {
       _focus.unfocus();
     }
     _lastInset = inset;

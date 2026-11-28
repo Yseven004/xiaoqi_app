@@ -15,6 +15,7 @@ import 'package:xiaoqi_app/models/reader_pagination.dart';
 import 'package:xiaoqi_app/services/companion_annotation_store.dart';
 import 'package:xiaoqi_app/services/database_service.dart';
 import 'package:xiaoqi_app/widgets/annotation_sheet.dart';
+import 'package:xiaoqi_app/widgets/chat_annotation_controls.dart';
 import 'package:xiaoqi_app/widgets/companion_annotation_sheet.dart';
 
 const _shortText = '这一段留给第二遍。';
@@ -115,8 +116,9 @@ Future<void> _capture(WidgetTester tester, String name) async {
 Future<void> _host(
   WidgetTester tester,
   Size size,
-  void Function(BuildContext) open,
-) async {
+  void Function(BuildContext) open, {
+  bool settleOnOpen = true,
+}) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -164,7 +166,7 @@ Future<void> _host(
     ),
   );
   await tester.tap(find.text('打开注释'));
-  await _settle(tester);
+  if (settleOnOpen) await _settle(tester);
 }
 
 void _expectSingleLineQuote(WidgetTester tester, [String quote = _quote]) {
@@ -274,6 +276,118 @@ void main() {
     await _settle(tester);
     expect(tester.getSize(content).width, 844);
     expect(tester.getBottomLeft(content).dy, 210);
+  });
+
+  testWidgets('companion editor follows keyboard frames through photo picker', (
+    tester,
+  ) async {
+    const size = Size(390, 844);
+    const channel = MethodChannel('plugins.flutter.io/image_picker');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final picker = Completer<List<String>>();
+    var picking = false;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'pickMultiImage');
+      picking = true;
+      return picker.future;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    await _host(tester, size, (context) {
+      unawaited(
+        editCompanionAnnotation(context, scope: 'local', selection: selection),
+      );
+    }, settleOnOpen: false);
+
+    final quote = find.byType(AnnotationQuoteLine);
+    Future<void> checkInset(double inset) async {
+      tester.view.viewInsets = FakeViewPadding(bottom: inset);
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(
+        tester.getBottomLeft(quote).dy,
+        closeTo(size.height - inset - 1, .5),
+      );
+    }
+
+    for (final inset in [0.0, 100.0, 200.0, 300.0]) {
+      await checkInset(inset);
+    }
+    final focus = tester.widget<TextField>(find.byType(TextField)).focusNode!;
+    expect(focus.hasPrimaryFocus, isTrue);
+
+    await tester.tap(find.byTooltip('添加图片'));
+    await tester.pump();
+    expect(picking, isTrue);
+    for (final inset in [200.0, 100.0, 0.0]) {
+      await checkInset(inset);
+    }
+    expect(focus.hasPrimaryFocus, isTrue);
+
+    tester.testTextInput.log.clear();
+    picker.complete([]);
+    await tester.pump();
+    expect(
+      tester.testTextInput.log.map((call) => call.method),
+      contains('TextInput.show'),
+    );
+    for (final inset in [100.0, 200.0, 300.0]) {
+      await checkInset(inset);
+    }
+    await tester.pump(const Duration(milliseconds: 20));
+
+    for (final inset in [200.0, 100.0, 0.0]) {
+      await checkInset(inset);
+    }
+    expect(focus.hasFocus, isFalse);
+  });
+
+  testWidgets('home annotation keeps its draft and follows keyboard frames', (
+    tester,
+  ) async {
+    const size = Size(390, 844);
+    final picker = Completer<void>();
+    var picking = false;
+    await _host(tester, size, (context) {
+      unawaited(
+        showChatAnnotationComposer(
+          context,
+          initialText: _shortText,
+          quote: _quote,
+          onPickImages: (_) async {
+            picking = true;
+            await picker.future;
+            return [];
+          },
+        ),
+      );
+    }, settleOnOpen: false);
+
+    Future<void> checkInset(double inset) async {
+      tester.view.viewInsets = FakeViewPadding(bottom: inset);
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(
+        tester.getBottomLeft(find.byType(AnnotationQuoteLine)).dy,
+        closeTo(size.height - inset, .5),
+      );
+    }
+
+    await checkInset(140);
+    await checkInset(300);
+    await tester.tap(find.byTooltip('添加解释图'));
+    await tester.pump();
+    expect(picking, isTrue);
+    await checkInset(180);
+    await checkInset(0);
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.focusNode!.hasPrimaryFocus, isTrue);
+    expect(field.controller!.text, _shortText);
+
+    picker.complete();
+    await tester.pump();
+    await checkInset(180);
+    await checkInset(300);
+    await tester.pump(const Duration(milliseconds: 20));
   });
 
   for (final size in [const Size(390, 844), const Size(800, 1280)]) {

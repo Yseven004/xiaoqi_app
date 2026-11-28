@@ -9892,10 +9892,16 @@ $text''';
 
   Future<void> _openExtensionMarket({
     ExtensionKind kind = ExtensionKind.plugin,
+    NavigatorState? replacingSidebarOn,
   }) async {
-    final request = await Navigator.of(context).push<ExtensionChatRequest>(
-      MaterialPageRoute(builder: (_) => ExtensionMarketPage(initialKind: kind)),
+    final route = MaterialPageRoute<ExtensionChatRequest>(
+      builder: (_) => ExtensionMarketPage(initialKind: kind),
     );
+    final request = replacingSidebarOn == null
+        ? await Navigator.of(context).push(route)
+        : await replacingSidebarOn.pushReplacement<ExtensionChatRequest, void>(
+            route,
+          );
     if (request == null || !mounted) return;
     if (_space != _HomeSpace.reading) {
       setState(() => _space = _HomeSpace.reading);
@@ -10231,8 +10237,13 @@ $text''';
                 Navigator.of(dialogContext).pop();
               },
               onOpenExtensionMarket: () {
-                actionAfterClose = _openExtensionMarket;
-                Navigator.of(dialogContext).pop();
+                if (ModalRoute.isCurrentOf(dialogContext) != true) return;
+                // Keep a single transition from the sidebar into the market.
+                unawaited(
+                  _openExtensionMarket(
+                    replacingSidebarOn: Navigator.of(dialogContext),
+                  ),
+                );
               },
             ),
           ),

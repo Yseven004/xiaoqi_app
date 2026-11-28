@@ -258,6 +258,7 @@ Future<ChatAnnotationComposerResult?> showChatAnnotationComposer(
 }) => showAnnotationSheet<ChatAnnotationComposerResult>(
   context,
   matchReferenceProportions: true,
+  sheetAnimationStyle: AnimationStyle.noAnimation,
   resolveAnchor: resolveAnchor,
   scrollPosition: scrollPosition,
   builder: (context) {
