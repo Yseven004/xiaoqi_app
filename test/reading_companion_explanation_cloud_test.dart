@@ -308,7 +308,7 @@ void main() {
   });
 
   testWidgets(
-    'the cloud can copy the current explanation or a long-pressed selection',
+    'the cloud keeps long-press copy without a copy button',
     (tester) async {
       final messenger = tester.binding.defaultBinaryMessenger;
       String? copied;
@@ -327,10 +327,8 @@ void main() {
       await _showCloud(tester, visibleAnswer, answerVersion: 2);
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byKey(const ValueKey('cloud-copy-action')));
-      await tester.pump();
-      expect(copied, visibleAnswer);
-      await tester.pumpAndSettle(const Duration(seconds: 2));
+      expect(find.byKey(const ValueKey('cloud-copy-action')), findsNothing);
+      expect(find.byType(SelectionArea), findsOneWidget);
 
       final body = find.text(visibleAnswer);
       await tester.longPressAt(tester.getTopLeft(body) + const Offset(12, 10));

@@ -1,11 +1,8 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path_parsing/path_parsing.dart';
-
-import 'app_toast.dart';
 
 enum _CloudSide { above, left, right, below }
 
@@ -339,7 +336,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
       minimumSize: const WidgetStatePropertyAll(Size(44, 44)),
       maximumSize: const WidgetStatePropertyAll(Size(44, 44)),
     );
-    final canCopy = !pending && text.trim().isNotEmpty;
+    final canSelectText = !pending && text.trim().isNotEmpty;
     final bodyText = Text(
       text.isNotEmpty
           ? text
@@ -349,30 +346,9 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
       textAlign: TextAlign.start,
       style: TextStyle(color: scheme.onSurface, fontSize: 16, height: 1.45),
     );
-    final copy = IconButton(
-      key: const ValueKey('cloud-copy-action'),
-      tooltip: '复制',
-      style: closeStyle,
-      icon: SvgPicture.asset(
-        'assets/images/home_reply_copy.svg',
-        width: 22,
-        height: 22,
-        colorFilter: ColorFilter.mode(scheme.onSurface, BlendMode.srcIn),
-      ),
-      onPressed: !canCopy
-          ? null
-          : () async {
-              try {
-                await Clipboard.setData(ClipboardData(text: text));
-                if (context.mounted) AppToast.show(context, '已复制解释');
-              } on PlatformException {
-                if (context.mounted) AppToast.show(context, '复制失败');
-              }
-            },
-    );
 
     if (rect == null || width < 210) {
-      final compactActions = <Widget>[if (canCopy) copy];
+      final compactActions = <Widget>[];
       if (pending) {
         compactActions.add(
           TextButton(
@@ -669,13 +645,10 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
     ];
     Widget footerActions() => LayoutBuilder(
       builder: (context, constraints) {
-        const copyWidth = 44.0;
         final minimumWidth =
-            copyWidth +
             math.max(44.0, 22 + 63 * textScale) * actionWidgets.length;
         final actions = Row(
           children: [
-            SizedBox(width: copyWidth, child: canCopy ? copy : null),
             for (final action in actionWidgets)
               Expanded(child: Center(child: action)),
           ],
@@ -735,7 +708,7 @@ class ReadingCompanionExplanationCloud extends StatelessWidget {
                                           children: [
                                             Semantics(
                                               liveRegion: !pending,
-                                              child: canCopy
+                                              child: canSelectText
                                                   ? SelectionArea(
                                                       child: bodyText,
                                                     )
